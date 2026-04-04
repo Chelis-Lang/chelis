@@ -1,0 +1,9 @@
+[package]
+name = "chelis-backend-c"
+description = "C code generation backend for the Chelis language"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
