@@ -1,0 +1,8 @@
+(type Option (params a) (variants (Some a) (None)))
+
+(def unwrap_or
+  (sig (-> (adt Option f32) f32 f32))
+  (fn (opt default)
+    (match opt
+      (case (Some x) x)
+      (case None default))))

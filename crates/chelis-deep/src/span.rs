@@ -1,0 +1,26 @@
+/// A byte-offset range in source text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Byte offset of the start of this span in the source.
+    pub offset: usize,
+    /// Byte length of this span.
+    pub len: usize,
+}
+
+impl Span {
+    pub fn new(offset: usize, len: usize) -> Self {
+        Self { offset, len }
+    }
+
+    /// The exclusive end byte offset.
+    pub fn end(&self) -> usize {
+        self.offset + self.len
+    }
+
+    /// Create a span covering from `self` through `other`.
+    pub fn merge(self, other: Span) -> Span {
+        let start = self.offset.min(other.offset);
+        let end = self.end().max(other.end());
+        Span::new(start, end - start)
+    }
+}

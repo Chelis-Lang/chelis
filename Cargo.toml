@@ -21,3 +21,6 @@ chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }
 chelis-ir = { path = "crates/chelis-ir" }
 chelis-backend-c = { path = "crates/chelis-backend-c" }
+
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }

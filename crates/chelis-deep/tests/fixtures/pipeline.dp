@@ -1,0 +1,4 @@
+(def process
+  (sig (-> (tensor (features) f32) (tensor (features) f32)))
+  (fn (x)
+    (pipe x normalize relu softmax)))

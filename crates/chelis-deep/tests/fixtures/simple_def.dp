@@ -1,0 +1,1 @@
+(def square (sig (-> f32 f32)) (fn (x) (apply mul x x)))

@@ -60,7 +60,7 @@ tensor[3, 3, f64]                    -- 2D, 3x3 matrix, f64
 tensor[f32]                          -- 0D scalar tensor, f32
 ```
 
-**Internal representation.** A tensor type is a triple:
+**Internal representation.** A tensor type is a pair:
 
 ```
 TensorType = (DimList, Precision)
@@ -238,6 +238,19 @@ Here `..d` matches any prefix of dimensions. Calling `add_bias` with a `tensor[b
 
 Rest-dimension variables must appear at most once per tensor type parameter. They can appear at the beginning or end of a dimension list, but not in the middle between concrete named dimensions.
 
+**Rest-dimension unification.** When `..d` appears in one type and a concrete dimension list appears in the other, the rest-dimension absorbs the extra dimensions:
+
+```
+unify_dims([..d, features], [batch, seq_len, features])
+    -> {..d := [batch, seq_len]}
+
+unify_dims([..d, k, n], [batch, k, n])
+    -> {..d := [batch]}
+
+unify_dims([..d, k, n], [k, n])
+    -> {..d := []}
+```
+
 ### 2.5 Dimension Constraints
 
 Functions can require that two arguments share a dimension name. This is expressed implicitly: if the same dimension name appears in two different parameter types, they must agree.
@@ -298,6 +311,18 @@ This applies to all operations, including:
 - Comparison: `<`, `>`, `==`
 - Reduction: `reduce_sum`, `reduce_max`
 - Any function that takes multiple tensor arguments
+
+Further examples of rejected expressions:
+
+```
+let x: f32 = 1.0
+let y: f64 = 2.0
+let z = x + y                -- TYPE ERROR: precision_mismatch, f32 != f64
+
+let a: tensor[n, f32] = ...
+let b: tensor[n, bf16] = ...
+let c = a + b                -- TYPE ERROR: precision_mismatch, f32 != bf16
+```
 
 ### 3.2 Precision as Part of the Type
 
@@ -425,12 +450,14 @@ unify(tensor[D1, P1], tensor[D2, P2]) =
 ```
 
 Dimension list unification (`unify_dims`) proceeds as follows:
+
 1. Both lists must have the same length (after expanding rest-dimension variables), or unification fails with `dimension_mismatch`.
-2. For each pair of corresponding dimensions (matched by name when both are named, or by position when one or both are variables):
+2. Dimensions are matched by **name** when both are named, not by position. The algorithm collects all named dimensions from both lists into sets, then verifies that the sets are equal.
+3. For each pair of matching dimensions:
    - `Named(x)` unifies with `Named(x)` (same name) -> success
-   - `Named(x)` unifies with `Named(y)` (different name) -> FAIL (dimension_mismatch)
+   - `Named(x)` unifies with `Named(y)` (different name) -> FAIL (`dimension_mismatch`)
    - `Concrete(n)` unifies with `Concrete(n)` (same size) -> success
-   - `Concrete(n)` unifies with `Concrete(m)` (different size) -> FAIL (dimension_mismatch)
+   - `Concrete(n)` unifies with `Concrete(m)` (different size) -> FAIL (`dimension_mismatch`)
    - `Var(a)` unifies with any dimension `d` -> `{a := d}`
    - `Named(x)` unifies with `Concrete(n)` -> binds the name to the concrete size (recorded for code generation)
 
@@ -441,7 +468,21 @@ When a rest-dimension `..d` appears in one type and a concrete dimension list ap
 ```
 unify_dims([..d, features], [batch, seq_len, features])
     -> {..d := [batch, seq_len]}
+
+unify_dims([..d, m, n], [batch, m, n])
+    -> {..d := [batch]}
+
+unify_dims([..d, m, n], [m, n])
+    -> {..d := []}
 ```
+
+The algorithm for rest-dimension matching:
+1. Identify the non-rest dimensions in the pattern (those after `..d`).
+2. Match those against the tail of the concrete list (by name).
+3. Bind `..d` to whatever prefix remains.
+4. If the tail does not match, unification fails.
+
+**Occurs check.** Before binding `a := tau`, check that `a` does not appear in `ftv(tau)`. If it does, unification fails with `occurs_check`. This prevents infinite types.
 
 ### 4.5 Let-Polymorphism
 
@@ -541,45 +582,49 @@ The `chelis check --json` command produces the following structure:
 ```json
 {
   "score": 0.75,
-  "typed_nodes": 3,
-  "total_nodes": 4,
+  "typed_nodes": 42,
+  "total_nodes": 50,
   "errors": [
     {
       "span": {
-        "file": "example.ch",
-        "line": 1,
-        "col": 9,
-        "end_line": 1,
-        "end_col": 25
+        "file": "model.ch",
+        "line": 10,
+        "col": 5,
+        "end_line": 10,
+        "end_col": 30
       },
-      "kind": "unbound_variable",
-      "message": "unknown_function is not defined",
+      "kind": "dimension_mismatch",
+      "expected": "tensor[batch, hidden, f32]",
+      "actual": "tensor[batch, seq_len, f32]",
+      "message": "dimension mismatch: expected 'hidden', found 'seq_len'",
       "context": {
-        "name": "unknown_function"
+        "operation": "Add",
+        "left_type": "tensor[batch, hidden, f32]",
+        "right_type": "tensor[batch, seq_len, f32]"
       },
       "repairs": [
         {
-          "description": "Did you mean 'known_function'?",
+          "description": "Did you mean to use 'hidden' instead of 'seq_len'?",
           "action": "replace",
-          "span": { "line": 1, "col": 9, "end_line": 1, "end_col": 25 },
-          "replacement": "known_function",
-          "confidence": 0.7
+          "span": { "line": 10, "col": 20, "end_line": 10, "end_col": 27 },
+          "replacement": "hidden",
+          "confidence": 0.8
         }
       ]
     }
   ],
   "partial_types": {
-    "a": "?",
-    "b": "i64",
-    "c": "?",
-    "d": "i64"
+    "x": "tensor[?, hidden, f32]",
+    "y": "? -> f32"
   },
   "inferred_types": {
-    "b": "i64",
-    "d": "i64"
+    "add_bias": "tensor[batch, hidden, f32] -> tensor[hidden, f32] -> tensor[batch, hidden, f32]",
+    "scale": "tensor[d, f32] -> f32 -> tensor[d, f32]"
   }
 }
 ```
+
+The `partial_types` map uses `?` to indicate type positions that could not be resolved due to errors. The `inferred_types` map contains the final types of all successfully typed top-level definitions.
 
 ### 5.4 Score Properties
 
@@ -589,6 +634,16 @@ The fitness score has the following design properties:
 2. **Local sensitivity.** A small code change produces a small score change. This makes the score useful as a gradient signal for AI agents performing hill-climbing.
 3. **Decomposable.** The score for a module is the weighted average of scores for its definitions, weighted by AST node count. An agent can focus on the lowest-scoring definition.
 4. **Deterministic.** The same source code always produces the same score.
+
+### 5.5 Fitness Score for Parse Errors
+
+When the parser fails, the fitness score is:
+
+```
+parse_score = (successfully_parsed_bytes / total_bytes) * 0.3
+```
+
+The 0.3 multiplier reflects the fact that a file that doesn't parse is far from correct. Within the parsed portion, the type checker runs normally and contributes to the score as described above.
 
 ---
 
@@ -731,6 +786,15 @@ Tensor operations follow the typing rules of the RISC primitives (see spec/05-ri
 
 Both operands must have the same dimensions (by name) and the same precision.
 
+**Elementwise (unary):**
+```
+      G |- x : tensor[D, P] ~> S1
+      ------------------------------------------
+      G |- neg(x) : tensor[D, P] ~> S1
+```
+
+The result has the same dimensions and precision as the input.
+
 **Reduction:**
 ```
       G |- x : tensor[D, P] ~> S1
@@ -758,6 +822,25 @@ The reduction removes the specified dimension from the type.
       G |- expand(x, new_dim) : tensor[D + {new_dim}, P] ~> S1
 ```
 
+**Permute:**
+```
+      G |- x : tensor[D, P] ~> S1
+      D' is a permutation of D   -- same set of dimension names, different order
+      -------------------------------------------
+      G |- permute(x, D') : tensor[D', P] ~> S1
+```
+
+**Matmul:**
+```
+      G |- a : tensor[..d, m, k, P] ~> S1
+      G |- b : tensor[..d, k, n, P] ~> S2
+      S3 = unify_dims(..d_a, ..d_b)
+      S4 = unify(k_a, k_b)               -- contraction dimension must match by name
+      S5 = unify(P_a, P_b)
+      -------------------------------------------
+      G |- matmul(a, b) : tensor[..d, m, n, P] ~> S5.S4.S3.S2.S1
+```
+
 ### 6.10 grad
 
 ```
@@ -772,8 +855,17 @@ The precise return type of `grad(f)` depends on the arity:
 
 - If `f : A -> scalar`, then `grad(f) : A -> (scalar, A)` -- returns (value, gradient).
 - If `f : (A, B) -> scalar`, then `grad(f) : (A, B) -> (scalar, (A, B))` -- returns (value, (grad_A, grad_B)).
+- If `f : A -> tensor[D, P]` (non-scalar output), then `grad(f) : A -> (tensor[D, P], A)` -- returns (value, gradient), where the gradient is the Jacobian-vector product with an implicit identity cotangent. In practice, `grad` is most commonly used with scalar-output functions.
 
 The input types `A`, `B` must be tensor types or tuples of tensor types. Non-tensor types (bool, ADTs) cannot be differentiated; applying `grad` to a function with non-differentiable inputs produces a `non_differentiable` error.
+
+**`grad` with `wrt` (with-respect-to).** An optional second argument specifies which parameters to differentiate with respect to:
+
+```
+grad(f, wrt=[param1, param2])
+```
+
+If `wrt` is omitted, the default is all tensor-typed parameters. Non-tensor parameters are skipped and receive unit `()` in the gradient tuple.
 
 ### 6.11 cast
 
@@ -791,6 +883,30 @@ Cast preserves dimensions and changes precision. Casting a non-tensor scalar is 
       -------------------------------------------
       G |- cast(x, P2) : P2 ~> S1
 ```
+
+### 6.12 Tuple Construction and Access
+
+```
+      G |- e1 : tau1 ~> S1
+      ...
+      G |- en : taun ~> Sn
+      -------------------------------------------
+      G |- (e1, ..., en) : (tau1, ..., taun) ~> Sn . ... . S1
+```
+
+Tuple element access is done via pattern matching, not via positional indexing.
+
+### 6.13 Constructor Application
+
+```
+      Con : forall a1...an. tau1 -> ... -> tauk -> T a1...an   in  G
+      G |- e1 : tau1' ~> S1, ..., G |- ek : tauk' ~> Sk
+      Si = unify(taui', taui[ai := fresh_i])
+      -------------------------------------------
+      G |- Con(e1, ..., ek) : T tau1'...taun' ~> Sk . ... . S1
+```
+
+Data constructors are treated as regular functions and unified accordingly.
 
 ---
 
