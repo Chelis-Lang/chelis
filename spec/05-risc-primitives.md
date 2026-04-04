@@ -111,7 +111,7 @@ These are convenience functions emitted by the desugarer. The compiler lowers th
 | `sub(a, b)` | `add(a, neg(b))` |
 | `div(a, b)` | `mul(a, recip(b))` where `recip(x) = exp(neg(log(x)))` or specialized |
 
-Note: `neg` is a Tier 1 RISC primitive (see §2). `recip` is a lowering-only helper — it is NOT a RISC primitive or a Tier 2 built-in. It decomposes to `exp(neg(log(x)))` or is pattern-matched by backends for efficiency.
+Note: `neg` is a Tier 1 RISC primitive (see §2), not listed here. `recip` is a lowering-only helper (see §3.5).
 
 ### 3.2 Comparison
 
@@ -147,14 +147,14 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 
 The following names appear in lowering narratives (§4) as pseudocode or pattern-matched operations. They are NOT RISC primitives and NOT Tier 2 built-ins. They decompose into Tier 1 primitives:
 
-| Helper | Status | Decomposes to |
-|---|---|---|
-| `recip(x)` | Lowering helper | `exp(neg(log(x)))` or backend-optimized |
-| `cos(x)` | Lowering helper | `sin(add(x, const(π/2)))` |
-| `argmax(x, axis)` | Lowering helper | comparison chain via `cmplt` + `max_elem` |
-| `gather(x, idx, axis)` | Lowering helper | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
-| `im2col(x, kh, kw, ...)` | Lowering helper | `stride`, `pad`, `reshape`, `permute` |
-| `where(cond, a, b)` | Lowering helper | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
+| Helper | Decomposes to |
+|---|---|
+| `recip(x)` | `exp(neg(log(x)))` or backend-optimized |
+| `cos(x)` | `sin(add(x, const(π/2)))` |
+| `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
+| `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
+| `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
+| `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
 
 ---
 

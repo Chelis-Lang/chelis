@@ -317,12 +317,13 @@ The Deep parser can parse the MNIST example in `.dp` format and round-trip it pe
 
 3. **Parser:** PEG or recursive descent. Produces Surf AST. Consider using `pest` or `chumsky` crate for parser combinators.
 
-4. **Desugarer** (`desugar.rs`): Surf AST → Deep AST. Mechanical, deterministic. Key transformations:
-   - Pipes: `x |> f |> g` → `(pipe x f g)` or `(g (f x))`
-   - Pattern matching: Surf `match`/`with` → Deep `(match ...)`
-   - Type annotations: Surf `x: tensor[...]` → Deep `(: x (tensor ...))`
-   - Function defs: Surf `def f(x: T): U = body` → Deep `(def f (sig (-> T U)) (fn (x) body))`
-   - Let bindings: Surf `let x = e` → Deep `(let ((x e)) ...)`
+4. **Desugarer** (`desugar.rs`): Surf AST → Deep AST. Mechanical, deterministic. Post-sprint 3-tuple format. Key transformations:
+   - Pipes: `x |> f |> g` → `(pipe {} (var {} x) (var {} f) (var {} g))` (pipe is first-class, not sugar)
+   - Operators: `a + b` → `(app {} (var {} add) (var {} a) (var {} b))`
+   - Type annotations: pushed into metadata `{type: ...}` on the annotated node
+   - Function defs: `def f(x: T): U = body` → `(defsig {} f (t-fn {} T' U'))` then `(def {} f (fn {} (params {} x) body'))`
+   - Let bindings: `let x = e in body` → `(let {} (bind {} x e') body')`
+   - Variables: `x` → `(var {} x)`, literals: `42` → `(lit {type: (t-prim {} int64)} 42)`
 
 ### Test Strategy
 - **Parse tests:** Each Surf construct parses to the expected Surf AST.

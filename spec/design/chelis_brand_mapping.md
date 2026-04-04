@@ -24,8 +24,8 @@ Fallback: `.che` if `.ch` proves contested.
 chelis build          # compile a project
 chelis run            # compile and execute
 chelis test           # run test suite
-chelis repl           # interactive REPL (or just `chelis` with no args)
-chelis --show-core    # emit the s-expression AST
+chelis tide           # interactive mode (Tide)
+chelis deep           # emit Deep s-expression AST
 chelis fmt            # format source code
 chelis check          # type-check without compiling
 chelis bench          # benchmark suite
@@ -35,13 +35,13 @@ chelis publish        # publish to registry
 
 The binary is `chelis`. Typed once, tab-completed forever. No ambiguity with any existing CLI tool.
 
-Build file: `chelis.toml` (Cargo-style for v1, aspire to self-hosted build files later).
+Build file: `reef.toml` (the project's place in the Reef).
 
 ---
 
 ## Package Ecosystem
 
-**Registry:** `reef.chelis.dev` — where turtles gather. Or just `packages.chelis.dev` if you want boring-reliable.
+**Registry:** `reef.chelis.ch` — where turtles gather. The Reef.
 
 **Packages** are called **shells** (turtle shells, also: self-contained units). `chelis add shell-name`. A shell contains modules. This gives the ecosystem a natural vocabulary:
 
@@ -56,7 +56,7 @@ If "shells" feels too cute, just call them packages. The vocabulary can evolve.
 ## Standard Library Naming
 
 ```
-chelis.core           # fundamental types, traits, pattern matching
+chelis.prelude        # fundamental types, traits, pattern matching
 chelis.tensor         # tensor types, named dimensions, precision
 chelis.ad             # automatic differentiation (Diff effect)
 chelis.random         # stochastic computations (Random effect)
@@ -64,7 +64,7 @@ chelis.device         # GPU resource management (Resource effect)
 chelis.io             # file I/O, data loading
 chelis.nn             # neural network primitives
 chelis.optim          # optimizers
-chelis.par            # concurrency primitives (par, stream, scatter)
+chelis.par            # concurrency primitives (par only in v1)
 chelis.ffi            # Python interop (DLPack, PyO3)
 ```
 
@@ -76,7 +76,7 @@ chelis.ffi            # Python interop (DLPack, PyO3)
 "The programming language designed as a substrate for machine intelligence."
 
 ### Elevator pitch
-"Chelis is a functional programming language where AI writes the programs, the programs are themselves AI, and those AIs write more programs. Named for the Greek word for turtle — because it's turtles all the way down. Humans see Scala-like syntax; machines see a homoiconic s-expression core they can read, mutate, type-check, and evolve. The type system tracks tensor shapes, numeric precision, differentiability, and memory ownership at compile time. The compiler targets StableHLO and owns the GPU."
+"Chelis is a functional programming language where AI writes the programs, the programs are themselves AI, and those AIs write more programs. Named for the Greek word for turtle — because it's turtles all the way down. Humans see Scala-like syntax; machines see a homoiconic s-expression core they can read, mutate, type-check, and evolve. The type system tracks tensor shapes, numeric precision, differentiability, and memory ownership at compile time. Phase 0 targets C + BLAS on CPU; Phase 1 is Futhark-style GPU compilation (own the compilation); StableHLO/FX are additive later."
 
 ### Visual identity direction
 Turtle iconography. Clean, geometric, not cartoonish. A turtle shell viewed from above is a hexagonal tessellation — good geometry for a logo. Colors: deep ocean tones (the chelys is a sea creature). The icon should work at 16x16 favicon size.

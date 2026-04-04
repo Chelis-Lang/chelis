@@ -133,12 +133,7 @@ The biggest impact is the `app`/`var`/`lit` change. Here's what needs to happen:
    - Old: `f(x, y) → (f x y)`
    - New: `f(x, y) → (app {} (var {} f) (var {} x) (var {} y))`
    - Old: `a + b → (add a b)`
-   - New: `a + b → (app {} (var {} sub) (var {} a) (var {} b))` [via derived built-in, not RISC decomposition]
-
-   Wait — for `a + b` it should be:
    - New: `a + b → (app {} (var {} add) (var {} a) (var {} b))`
-   
-   And for `a - b`:
    - New: `a - b → (app {} (var {} sub) (var {} a) (var {} b))` [sub is a derived built-in]
 
 4. **Update the Deep parser (Phase 0b)** to expect the 3-tuple format `(tag {} children...)`. The parser currently doesn't require metadata in every node. It needs to at minimum accept `{}` as a valid second element and preserve it.

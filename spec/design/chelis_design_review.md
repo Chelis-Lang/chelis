@@ -50,12 +50,7 @@ Currently missing from the spec:
 
 The spec identifies evolutionary program synthesis and NAS as the strongest use case, but the language doesn't include primitives for it. If programs-as-data is the thesis, the language should have:
 
-- **`mutate(ast, strategy)`** — Apply a mutation strategy to an AST node. Return a new AST. Type-check the result. Built into the language, not a library.
-- **`crossover(ast1, ast2, alignment)`** — Combine two programs by exchanging subtrees at type-compatible points.
-- **`population(programs, fitness)`** — A typed collection of programs with associated fitness scores. Built-in support for selection, tournament, elitism.
-- **`evolve(population, generations, strategy)`** — Run an evolutionary loop. The compiler is the fitness function.
-
-These are NOT library functions — they're core to what makes Chelis different from every other language. They operate on the homoiconic AST and use the type checker as their validity constraint.
+**Post-steering resolution:** Programs-as-data is enabled via `quote`/`unquote` + the type checker as a library call. No built-in `mutate`, `crossover`, `evolve`, or `population` primitives. These are user-space concerns — different teams will want different mutation strategies, selection mechanisms, and fitness functions. The compiler's graded fitness feedback is the key enabler; methodology is yours.
 
 ### 4. The Backend Strategy
 
@@ -63,7 +58,7 @@ The spec says "dual primary backends: PyTorch FX and StableHLO." But the earlier
 
 **Unresolved tension:** If Chelis owns its compilation (Futhark-style), the RISC primitives lower directly to GPU kernels via the Chelis compiler. If it delegates to FX/XLA, the RISC primitives lower to an intermediate representation that those systems compile. These are very different implementation paths.
 
-**Recommendation:** Bootstrap with C backend (CPU), then do a Phase 1 spike comparing: (a) direct StableHLO emission (following your EXLA experience), (b) FX graph emission. Pick the one that produces better results on 5 real architectures. Don't try to maintain both from day one.
+**Post-steering resolution:** Phase 0 = C + BLAS (CPU, test oracle). Phase 1 = Futhark-style own-the-compilation (C host + embedded CUDA/OpenCL kernel strings). StableHLO and FX are additive Phase 2+ integration layers, not replacements. Compiler language: Rust (settled).
 
 ### 5. What's Over-Specified for v1
 
@@ -140,7 +135,7 @@ Ranked by impact on the AI-writes-AI thesis:
 
 4. **Backend strategy.** Own-the-compilation (Futhark-style) vs delegate (FX/XLA). Determines the entire compiler architecture. Needs a spike, not a design discussion.
 
-5. **Compiler implementation language.** Rust is the pragmatic choice. Gets the compiler built fastest with the best tooling for PL work. OCaml is the purist choice. Either works; pick one and move.
+5. **Compiler implementation language.** Settled: Rust. Workspace crate structure already established.
 
 ---
 

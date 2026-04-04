@@ -126,18 +126,18 @@ Metadata is a property list carrying: source location (for decompilation to Surf
              (t-adt {} BlockParams)
              (t-tensor {} (d-name {} batch) (d-name {} seq) (d-name {} dim_) (t-prim {} bf16))))
   (def {} transformer_block
-    (fn {} (params x params)
-      (let {} (bind residual (var {} x))
+    (fn {} (params {} x params)
+      (let {} (bind {} residual (var {} x))
         (pipe {} (var {} x)
-          (fn {} (params v) (app {} (var {} layer_norm) (var {} v) (access {} (var {} params) norm1)))
-          (fn {} (params v) (app {} (var {} multi_head_attention) (var {} v) (access {} (var {} params) attn)))
-          (fn {} (params v) (app {} (var {} add) (var {} v) (var {} residual)))
-          (fn {} (params v) (app {} (var {} feed_forward) (var {} v) (access {} (var {} params) ff)))))))
+          (fn {} (params {} v) (app {} (var {} layer_norm) (var {} v) (access {} (var {} params) norm1)))
+          (fn {} (params {} v) (app {} (var {} multi_head_attention) (var {} v) (access {} (var {} params) attn)))
+          (fn {} (params {} v) (app {} (var {} add) (var {} v) (var {} residual)))
+          (fn {} (params {} v) (app {} (var {} feed_forward) (var {} v) (access {} (var {} params) ff)))))))
 
   ;; Pattern match
   (defsig {} step (t-fn {} (t-adt {} Optimizer) (t-adt {} Gradients) (t-adt {} Params)))
   (def {} step
-    (fn {} (params opt grads)
+    (fn {} (params {} opt grads)
       (match {} (var {} opt)
         (arm {} (pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} betas (pat-var {} betas)) (kv {} eps (pat-var {} eps)))
           ()
@@ -151,11 +151,11 @@ Metadata is a property list carrying: source location (for decompilation to Surf
 
 **Types in Deep.** Types are explicit s-expressions. `(tensor (dim batch) (dim seq) f32)` not inferred shorthand. The Deep form is fully annotated after type checking — every subexpression carries its type in metadata.
 
-**Effects in Deep (Phase 2).** Reserved metadata key `eff`. Not implemented in Phase 0 — all functions are pure. Phase 2 will add effect annotations.
+**Effects in Deep (Phase 2).** Reserved metadata key `eff`. Not implemented in Phase 0 — all functions are pure.
 
-**Linear types in Deep (Phase 2).** Reserved metadata key `lin`. Not implemented in Phase 0 — all values are freely copyable. Phase 2 will add linearity tracking.
+**Linear types in Deep (Phase 2).** Reserved metadata key `lin`. Not implemented in Phase 0 — all values are freely copyable.
 
-**Pipe is first-class.** `(pipe {} x f g h)` is a structural Deep node, NOT sugar. It is preserved in the DAG and optimized by the compiler. Pipelines are the primary composition mechanism for tensor operations.
+**Pipe is first-class.** `(pipe {} x f g h)` is a structural Deep node, NOT sugar. It is preserved in the DAG and optimized by the compiler.
 
 **No ambiguity.** Every Deep program has exactly one parse. No operator precedence, no implicit conversions, no syntactic shortcuts. This is what makes Deep a low-entropy generation target for AI.
 
@@ -303,7 +303,7 @@ These are additive — the C/GPU backend remains the primary path. StableHLO and
 ```
 POST /compile
 {
-  "source": "(def {} f (fn {} (params x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
+  "source": "(def {} f (fn {} (params {} x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
   "format": "deep",
   "return": ["typed_ast", "fitness_score", "suggestions"]
 }
@@ -311,7 +311,7 @@ POST /compile
 → {
   "valid": true,
   "score": 1.0,
-  "typed_ast": "(def {type: (t-fn {} (t-prim {} int64) (t-prim {} int64))} f (fn {} (params x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
+  "typed_ast": "(def {type: (t-fn {} (t-prim {} int64) (t-prim {} int64))} f (fn {} (params {} x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
   "effects": [],
   "suggestions": []
 }
