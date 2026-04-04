@@ -6,4 +6,8 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "chelis"
+path = "src/main.rs"
+
 [dependencies]
