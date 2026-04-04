@@ -196,7 +196,10 @@ fn spec_colon_as_list_head_parser_leniency() {
     }
     // Bare list — no Map at [1], so validator skips it (not a tagged node)
     let warnings = validate(&exprs);
-    assert!(warnings.is_empty(), "bare list should not trigger validation");
+    assert!(
+        warnings.is_empty(),
+        "bare list should not trigger validation"
+    );
     roundtrip("(: 42 i32)");
 }
 

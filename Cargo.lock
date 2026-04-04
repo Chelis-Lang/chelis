@@ -114,6 +114,10 @@ dependencies = [
 [[package]]
 name = "chelis-types"
 version = "0.1.0"
+dependencies = [
+ "chelis-deep",
+ "thiserror",
+]
 
 [[package]]
 name = "equivalent"
