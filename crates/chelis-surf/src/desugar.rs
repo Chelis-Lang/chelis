@@ -13,7 +13,7 @@ use crate::ast::*;
 // ---------------------------------------------------------------------------
 
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
-    decls.iter().map(desugar_decl).collect()
+    decls.iter().flat_map(desugar_decl).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +65,35 @@ fn bare_list(elements: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::List(deep::List { elements }, sp())
 }
 
+/// Inject a type annotation into the metadata of a desugared expression.
+fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
+    match expr {
+        deep::Expr::List(list, span) => {
+            let mut elements = list.elements;
+            if elements.len() >= 2 {
+                // Replace the metadata map (element[1]) with one containing the type
+                elements[1] = meta_with_type(ty);
+            }
+            deep::Expr::List(deep::List { elements }, span)
+        }
+        // For atoms, wrap in an annotated var node
+        other => node_meta("var", meta_with_type(ty), vec![other]),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Primitive type names
+// ---------------------------------------------------------------------------
+
+const PRIMITIVES: &[&str] = &[
+    "f32", "f64", "f16", "bf16", "f8e4m3", "int8", "int32", "int64", "bool", "string", "unit",
+];
+
 // ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
-fn desugar_decl(decl: &Decl) -> deep::Expr {
+fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
     match decl {
         Decl::FunDef {
             name,
@@ -79,9 +103,25 @@ fn desugar_decl(decl: &Decl) -> deep::Expr {
             ..
         } => desugar_fun_def(name, params, ret_ty, body),
 
-        Decl::LetDef { name, value, .. } => {
-            // Top-level let: (def {} name value')
-            node("def", vec![sym(name), desugar_expr(value)])
+        Decl::LetDef {
+            name,
+            ty: Some(t),
+            value,
+            ..
+        } => {
+            vec![
+                node("defsig", vec![sym(name), desugar_type(t)]),
+                node("def", vec![sym(name), desugar_expr(value)]),
+            ]
+        }
+
+        Decl::LetDef {
+            name,
+            ty: None,
+            value,
+            ..
+        } => {
+            vec![node("def", vec![sym(name), desugar_expr(value)])]
         }
 
         Decl::TypeDef {
@@ -89,23 +129,31 @@ fn desugar_decl(decl: &Decl) -> deep::Expr {
             params,
             variants,
             ..
-        } => desugar_type_def(name, params, variants),
+        } => vec![desugar_type_def(name, params, variants)],
 
         Decl::Module { name, decls, .. } => {
             let mut children = vec![sym(name)];
             for d in decls {
-                children.push(desugar_decl(d));
+                children.extend(desugar_decl(d));
             }
-            node("module", children)
+            vec![node("module", children)]
         }
 
         Decl::Import { module, names, .. } => match names {
             Some(ns) => {
                 let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
-                node("import", vec![sym(module), name_list])
+                vec![node("import", vec![sym(module), name_list])]
             }
-            None => node("import-all", vec![sym(module)]),
+            None => vec![node("import-all", vec![sym(module)])],
         },
+
+        Decl::Export { names, .. } => {
+            let mut children = Vec::new();
+            for n in names {
+                children.push(sym(n));
+            }
+            vec![node("export", children)]
+        }
     }
 }
 
@@ -114,15 +162,13 @@ fn desugar_fun_def(
     params: &[Param],
     ret_ty: &Option<TypeExpr>,
     body: &Expr,
-) -> deep::Expr {
-    // If type annotations exist, emit defsig first then def
-    // For Phase 0, combine into single def with fn
-
+) -> Vec<deep::Expr> {
     // Build params node (3-tuple: params {} name1 name2 ...)
     let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
     let params_node = node("params", param_names);
 
     let fn_node = node("fn", vec![params_node, desugar_expr(body)]);
+    let def_node = node("def", vec![sym(name), fn_node]);
 
     // If we have type annotations, also emit defsig
     if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
@@ -137,11 +183,11 @@ fn desugar_fun_def(
             Some(ty) => desugar_type(ty),
             None => node("t-var", vec![sym("_")]),
         });
-        let _sig = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
-        // For now, just emit the def (defsig handling is for later)
+        let sig = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
+        vec![sig, def_node]
+    } else {
+        vec![def_node]
     }
-
-    node("def", vec![sym(name), fn_node])
 }
 
 fn desugar_type_def(name: &str, params: &[String], variants: &[Variant]) -> deep::Expr {
@@ -186,7 +232,7 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
 
         Expr::Binary(op, lhs, rhs, _) => {
             let op_name = binop_name(*op);
-            // a > b → (app {} (var {} cmplt) b' a') — swap operands
+            // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
             match op {
                 BinOp::Gt => node(
                     "app",
@@ -274,14 +320,14 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
 
         Expr::Jit(f, _) => node("jit", vec![desugar_expr(f)]),
 
-        Expr::Annotate(e, _ty, _) => {
+        Expr::Annotate(e, ty, _) => {
             // Type annotation pushed into metadata of the desugared expression
-            // For now, just desugar the inner expression
-            desugar_expr(e)
+            let desugared = desugar_expr(e);
+            inject_type_metadata(desugared, desugar_type(ty))
         }
 
         Expr::Block(decls, final_expr, _) => {
-            let mut children: Vec<deep::Expr> = decls.iter().map(desugar_decl).collect();
+            let mut children: Vec<deep::Expr> = decls.iter().flat_map(desugar_decl).collect();
             children.push(desugar_expr(final_expr));
             node("block", children)
         }
@@ -362,7 +408,14 @@ fn binop_name(op: BinOp) -> &'static str {
 
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
     match ty {
-        TypeExpr::Named(name, _) => node("t-prim", vec![sym(name)]),
+        TypeExpr::Named(name, _) => {
+            if PRIMITIVES.contains(&name.as_str()) {
+                node("t-prim", vec![sym(name)])
+            } else {
+                // Not a known primitive -> type variable
+                node("t-var", vec![sym(name)])
+            }
+        }
 
         TypeExpr::Tensor(dims, precision, _) => {
             let mut children: Vec<deep::Expr> = dims
@@ -402,13 +455,22 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
     match pat {
         Pattern::Wildcard(_) => node("pat-wild", vec![]),
         Pattern::Var(name, _) => node("pat-var", vec![sym(name)]),
-        Pattern::Lit(lit, _) => node("pat-lit", vec![desugar_literal(lit)]),
+        Pattern::Lit(lit, _) => {
+            // pat-lit contains the raw literal value, NOT a typed (lit ...) node
+            let val = match lit {
+                Literal::Int(n) => deep::Expr::Atom(deep::Atom::Int(*n), sp()),
+                Literal::Float(f) => deep::Expr::Atom(deep::Atom::Float(*f), sp()),
+                Literal::Bool(b) => deep::Expr::Atom(deep::Atom::Bool(*b), sp()),
+                Literal::Str(s) => deep::Expr::Atom(deep::Atom::Str(s.clone()), sp()),
+            };
+            node("pat-lit", vec![val])
+        }
         Pattern::Constructor(name, sub_pats, _) => {
             let mut children = vec![sym(name)];
             children.extend(sub_pats.iter().map(desugar_pattern));
             node("pat-ctor", children)
         }
-        Pattern::Tuple(pats, _) => node("t-tuple", pats.iter().map(desugar_pattern).collect()),
+        Pattern::Tuple(pats, _) => node("pat-tuple", pats.iter().map(desugar_pattern).collect()),
     }
 }
 
@@ -447,6 +509,11 @@ mod tests {
 
     fn named_ty(name: &str) -> TypeExpr {
         TypeExpr::Named(name.to_string(), s())
+    }
+
+    /// Helper: desugar a decl and print all resulting nodes.
+    fn desugar_decl_strs(decl: &Decl) -> Vec<String> {
+        desugar_decl(decl).iter().map(print_expr).collect()
     }
 
     // --- Literals ---
@@ -609,10 +676,10 @@ mod tests {
             s(),
         );
         let result = print_expr(&desugar_expr(&expr));
-        assert!(result.contains("(match {}"));
-        assert!(result.contains("(arm {}"));
-        assert!(result.contains("(pat-ctor {} Some"));
-        assert!(result.contains("(pat-var {} y)"));
+        assert_eq!(
+            result,
+            "(match {}\n  (var {} x)\n  (arm {} (pat-ctor {} Some (pat-var {} y)) () (var {} y))\n  (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int64)} 0)))"
+        );
     }
 
     // --- Let ---
@@ -629,9 +696,10 @@ mod tests {
             s(),
         );
         let result = print_expr(&desugar_expr(&expr));
-        assert!(result.contains("(let {}"));
-        assert!(result.contains("(bind {} x"));
-        assert!(result.contains("(var {} x)"));
+        assert_eq!(
+            result,
+            "(let {} (bind {} x (lit {type: (t-prim {} int64)} 1)) (var {} x))"
+        );
     }
 
     // --- Lambda ---
@@ -645,7 +713,7 @@ mod tests {
         );
     }
 
-    // --- Fun def ---
+    // --- Fun def (no types) ---
 
     #[test]
     fn test_fun_def() {
@@ -656,16 +724,82 @@ mod tests {
             body: tvar("x"),
             span: s(),
         };
-        let result = print_expr(&desugar_decl(&decl));
-        assert_eq!(result, "(def {} f (fn {} (params {} x) (var {} x)))");
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0], "(def {} f (fn {} (params {} x) (var {} x)))");
+    }
+
+    // --- Fun def (with types) produces defsig + def ---
+
+    #[test]
+    fn test_fun_def_typed() {
+        // def f(x: f32): f32 = x
+        let decl = Decl::FunDef {
+            name: "f".to_string(),
+            params: vec![param("x", Some(named_ty("f32")))],
+            ret_ty: Some(named_ty("f32")),
+            body: tvar("x"),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            nodes[0],
+            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))"
+        );
+        assert_eq!(nodes[1], "(def {} f (fn {} (params {} x) (var {} x)))");
+    }
+
+    // --- Let def (with type) produces defsig + def ---
+
+    #[test]
+    fn test_let_def_typed() {
+        // let x: f32 = 1.0
+        let decl = Decl::LetDef {
+            name: "x".to_string(),
+            ty: Some(named_ty("f32")),
+            value: float_lit(1.0),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0], "(defsig {} x (t-prim {} f32))");
+        assert_eq!(nodes[1], "(def {} x (lit {type: (t-prim {} f64)} 1.0))");
+    }
+
+    // --- Let def (no type) produces just def ---
+
+    #[test]
+    fn test_let_def_untyped() {
+        let decl = Decl::LetDef {
+            name: "x".to_string(),
+            ty: None,
+            value: int_lit(42),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0], "(def {} x (lit {type: (t-prim {} int64)} 42))");
+    }
+
+    // --- Annotate preserves type in metadata ---
+
+    #[test]
+    fn test_annotate_var() {
+        // x : f32
+        let expr = Expr::Annotate(Box::new(tvar("x")), named_ty("f32"), s());
+        assert_eq!(
+            print_expr(&desugar_expr(&expr)),
+            "(var {type: (t-prim {} f32)} x)"
+        );
     }
 
     // --- Transforms (tags, not app) ---
 
     #[test]
     fn test_grad() {
-        let expr = Expr::Grad(Box::new(tvar("loss")), s());
-        assert_eq!(print_expr(&desugar_expr(&expr)), "(grad {} (var {} loss))");
+        let expr = Expr::Grad(Box::new(tvar("f")), s());
+        assert_eq!(print_expr(&desugar_expr(&expr)), "(grad {} (var {} f))");
     }
 
     #[test]
@@ -691,6 +825,12 @@ mod tests {
             print_expr(&desugar_type(&named_ty("f32"))),
             "(t-prim {} f32)"
         );
+    }
+
+    #[test]
+    fn test_type_var() {
+        // 'a' is not a primitive -> t-var
+        assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-var {} a)");
     }
 
     #[test]
@@ -728,7 +868,7 @@ mod tests {
         );
     }
 
-    // --- Type def ---
+    // --- Type def with type variable ---
 
     #[test]
     fn test_type_def() {
@@ -749,10 +889,12 @@ mod tests {
             ],
             span: s(),
         };
-        let result = print_expr(&desugar_decl(&decl));
-        assert!(result.contains("(deftype {}"));
-        assert!(result.contains("(variant {} Some"));
-        assert!(result.contains("(variant {} None)"));
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0],
+            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))"
+        );
     }
 
     #[test]
@@ -767,8 +909,12 @@ mod tests {
             }],
             span: s(),
         };
-        let result = print_expr(&desugar_decl(&decl));
-        assert!(result.contains("(field {} x (t-prim {} f32))"));
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0],
+            "(deftype {} T () (variant {} V (field {} x (t-prim {} f32))))"
+        );
     }
 
     // --- Tuple ---
@@ -782,6 +928,29 @@ mod tests {
         );
     }
 
+    // --- Patterns ---
+
+    #[test]
+    fn test_pat_lit_int() {
+        let pat = Pattern::Lit(Literal::Int(42), s());
+        assert_eq!(print_expr(&desugar_pattern(&pat)), "(pat-lit {} 42)");
+    }
+
+    #[test]
+    fn test_pat_tuple() {
+        let pat = Pattern::Tuple(
+            vec![
+                Pattern::Var("a".to_string(), s()),
+                Pattern::Var("b".to_string(), s()),
+            ],
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_pattern(&pat)),
+            "(pat-tuple {} (pat-var {} a) (pat-var {} b))"
+        );
+    }
+
     // --- Import ---
 
     #[test]
@@ -791,7 +960,9 @@ mod tests {
             names: None,
             span: s(),
         };
-        assert_eq!(print_expr(&desugar_decl(&decl)), "(import-all {} Foo)");
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0], "(import-all {} Foo)");
     }
 
     #[test]
@@ -801,6 +972,8 @@ mod tests {
             names: Some(vec!["a".to_string(), "b".to_string()]),
             span: s(),
         };
-        assert_eq!(print_expr(&desugar_decl(&decl)), "(import {} Foo (a b))");
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0], "(import {} Foo (a b))");
     }
 }

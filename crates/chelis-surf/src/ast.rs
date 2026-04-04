@@ -33,6 +33,10 @@ pub enum Decl {
         value: Expr,
         span: Span,
     },
+    Export {
+        names: Vec<String>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -26,6 +26,7 @@ pub enum TokenKind {
     Jit,
     Tensor,
     Cast,
+    Export,
 
     // Punctuation & Delimiters
     LParen,     // (
@@ -40,6 +41,7 @@ pub enum TokenKind {
     Pipe,       // |>
     Bar,        // |
     Eq,         // =
+    Dot,        // .
     Underscore, // _
 
     // Arithmetic operators

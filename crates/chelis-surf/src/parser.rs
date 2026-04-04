@@ -137,8 +137,9 @@ impl Parser {
             TokenKind::Type => self.parse_type_def(),
             TokenKind::Module => self.parse_module(),
             TokenKind::Import => self.parse_import(),
+            TokenKind::Export => self.parse_export(),
             _ => Err(ParseError::Expected {
-                expected: "declaration (def, let, type, module, import)".into(),
+                expected: "declaration (def, let, type, module, import, export)".into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -305,25 +306,51 @@ impl Parser {
     fn parse_module(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Module
         let (name, _) = self.expect_type_ident()?;
-        self.expect(&TokenKind::LBrace)?;
-        let mut decls = Vec::new();
-        while *self.peek() != TokenKind::RBrace {
-            if self.at_eof() {
-                return Err(ParseError::UnexpectedEof);
+
+        if *self.peek() == TokenKind::LBrace {
+            // Braced module: module Foo { ... }
+            self.advance();
+            let mut decls = Vec::new();
+            while *self.peek() != TokenKind::RBrace {
+                if self.at_eof() {
+                    return Err(ParseError::UnexpectedEof);
+                }
+                decls.push(self.parse_decl()?);
             }
-            decls.push(self.parse_decl()?);
+            let end = self.expect(&TokenKind::RBrace)?;
+            Ok(Decl::Module {
+                name,
+                decls,
+                span: start.merge(end.span),
+            })
+        } else {
+            // Braceless module: rest of file belongs to this module
+            let mut decls = Vec::new();
+            while !self.at_eof() {
+                decls.push(self.parse_decl()?);
+            }
+            let end = decls.last().map(decl_span).unwrap_or(start);
+            Ok(Decl::Module {
+                name,
+                decls,
+                span: start.merge(end),
+            })
         }
-        let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Decl::Module {
-            name,
-            decls,
-            span: start.merge(end.span),
-        })
     }
 
     fn parse_import(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Import
-        let (module, mod_span) = self.expect_type_ident()?;
+        let (first_seg, mut mod_span) = self.expect_type_ident()?;
+        let mut module = first_seg;
+
+        // Parse dotted path: Foo.Bar.Baz
+        while *self.peek() == TokenKind::Dot {
+            self.advance(); // consume Dot
+            let (seg, seg_span) = self.expect_type_ident()?;
+            module.push('.');
+            module.push_str(&seg);
+            mod_span = mod_span.merge(seg_span);
+        }
 
         let (names, end) = if *self.peek() == TokenKind::LParen {
             self.advance();
@@ -345,6 +372,24 @@ impl Parser {
 
         Ok(Decl::Import {
             module,
+            names,
+            span: start.merge(end),
+        })
+    }
+
+    fn parse_export(&mut self) -> Result<Decl, ParseError> {
+        let start = self.advance().span; // consume Export
+        let mut names = Vec::new();
+        let (first_name, first_span) = self.expect_ident()?;
+        names.push(first_name);
+        let mut end = first_span;
+        while *self.peek() == TokenKind::Comma {
+            self.advance();
+            let (n, s) = self.expect_ident()?;
+            names.push(n);
+            end = s;
+        }
+        Ok(Decl::Export {
             names,
             span: start.merge(end),
         })
@@ -487,11 +532,16 @@ impl Parser {
                     let span = tok.span.merge(end.span);
                     expr = Expr::Apply(Box::new(expr), args, span);
                 }
+                // Juxtaposition application: f x y
+                expr = self.parse_juxtaposition_args(expr)?;
                 Ok(expr)
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
-                Ok(Expr::Constructor(name, tok.span))
+                let mut expr = Expr::Constructor(name, tok.span);
+                // Juxtaposition application: Foo x y
+                expr = self.parse_juxtaposition_args(expr)?;
+                Ok(expr)
             }
             TokenKind::Minus => {
                 let tok = self.advance();
@@ -541,6 +591,109 @@ impl Parser {
             TokenKind::LBrace => self.parse_block(),
             _ => Err(ParseError::Expected {
                 expected: "expression".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            }),
+        }
+    }
+
+    fn can_start_juxtaposition_arg(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::Ident(_)
+                | TokenKind::TypeIdent(_)
+                | TokenKind::Int(_)
+                | TokenKind::Float(_)
+                | TokenKind::Str(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::LParen
+                | TokenKind::Fn
+                | TokenKind::If
+        )
+    }
+
+    fn parse_juxtaposition_args(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        while self.can_start_juxtaposition_arg()
+            && self.infix_bp().is_none()
+            && *self.peek() != TokenKind::Pipe
+        {
+            let arg = self.parse_primary_atom()?;
+            let start = expr_span(&expr);
+            let end = expr_span(&arg);
+            expr = Expr::Apply(Box::new(expr), vec![arg], start.merge(end));
+        }
+        Ok(expr)
+    }
+
+    /// Parse a single primary expression without juxtaposition chaining.
+    /// Used for juxtaposition arguments to avoid infinite recursion.
+    fn parse_primary_atom(&mut self) -> Result<Expr, ParseError> {
+        match self.peek().clone() {
+            TokenKind::Int(n) => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::Int(n), tok.span))
+            }
+            TokenKind::Float(f) => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::Float(f), tok.span))
+            }
+            TokenKind::Str(s) => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::Str(s), tok.span))
+            }
+            TokenKind::True => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::Bool(true), tok.span))
+            }
+            TokenKind::False => {
+                let tok = self.advance();
+                Ok(Expr::Lit(Literal::Bool(false), tok.span))
+            }
+            TokenKind::Ident(name) => {
+                let tok = self.advance();
+                let mut expr = Expr::Var(name, tok.span);
+                // Allow parenthesized call as postfix
+                if *self.peek() == TokenKind::LParen {
+                    self.advance();
+                    let args = self.parse_expr_list(TokenKind::RParen)?;
+                    let end = self.expect(&TokenKind::RParen)?;
+                    let span = tok.span.merge(end.span);
+                    expr = Expr::Apply(Box::new(expr), args, span);
+                }
+                Ok(expr)
+            }
+            TokenKind::TypeIdent(name) => {
+                let tok = self.advance();
+                Ok(Expr::Constructor(name, tok.span))
+            }
+            TokenKind::LParen => {
+                let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(Expr::Tuple(Vec::new(), start.merge(end)));
+                }
+                let first = self.parse_expr(0)?;
+                if *self.peek() == TokenKind::Comma {
+                    let mut elems = vec![first];
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        if *self.peek() == TokenKind::RParen {
+                            break;
+                        }
+                        elems.push(self.parse_expr(0)?);
+                    }
+                    let end = self.expect(&TokenKind::RParen)?;
+                    Ok(Expr::Tuple(elems, start.merge(end.span)))
+                } else {
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(first)
+                }
+            }
+            TokenKind::If => self.parse_if(),
+            TokenKind::Fn => self.parse_lambda(),
+            _ => Err(ParseError::Expected {
+                expected: "expression atom".into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -1039,6 +1192,17 @@ fn pattern_span(p: &Pattern) -> Span {
         Pattern::Lit(_, s) => *s,
         Pattern::Constructor(_, _, s) => *s,
         Pattern::Tuple(_, s) => *s,
+    }
+}
+
+fn decl_span(d: &Decl) -> Span {
+    match d {
+        Decl::Module { span, .. } => *span,
+        Decl::Import { span, .. } => *span,
+        Decl::TypeDef { span, .. } => *span,
+        Decl::FunDef { span, .. } => *span,
+        Decl::LetDef { span, .. } => *span,
+        Decl::Export { span, .. } => *span,
     }
 }
 
@@ -1627,5 +1791,159 @@ mod tests {
     fn unary_not() {
         let e = body("let x = !a");
         assert!(matches!(e, Expr::Unary(UnaryOp::Not, _, _)));
+    }
+
+    // ===== Juxtaposition application tests =====
+
+    #[test]
+    fn juxtaposition_single_arg() {
+        let e = body("let x = f x");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expr::Var(n, _) if n == "x"));
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn juxtaposition_two_args() {
+        // f x y → Apply(Apply(f, [x]), [y])
+        let e = body("let x = f x y");
+        match &e {
+            Expr::Apply(inner, args2, _) => {
+                assert_eq!(args2.len(), 1);
+                assert!(matches!(&args2[0], Expr::Var(n, _) if n == "y"));
+                match inner.as_ref() {
+                    Expr::Apply(func, args1, _) => {
+                        assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                        assert_eq!(args1.len(), 1);
+                        assert!(matches!(&args1[0], Expr::Var(n, _) if n == "x"));
+                    }
+                    _ => panic!("expected inner Apply"),
+                }
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn juxtaposition_with_infix() {
+        // f x + g y → Binary(Add, Apply(f, [x]), Apply(g, [y]))
+        let e = body("let x = f x + g y");
+        match &e {
+            Expr::Binary(BinOp::Add, lhs, rhs, _) => {
+                match lhs.as_ref() {
+                    Expr::Apply(func, args, _) => {
+                        assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(&args[0], Expr::Var(n, _) if n == "x"));
+                    }
+                    _ => panic!("expected Apply on lhs"),
+                }
+                match rhs.as_ref() {
+                    Expr::Apply(func, args, _) => {
+                        assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "g"));
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(&args[0], Expr::Var(n, _) if n == "y"));
+                    }
+                    _ => panic!("expected Apply on rhs"),
+                }
+            }
+            _ => panic!("expected Binary Add, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn juxtaposition_grouped_arg() {
+        // f (x + y) → Apply(f, [Binary(Add, x, y)])
+        let e = body("let x = f (x + y)");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expr::Binary(BinOp::Add, _, _, _)));
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn constructor_juxtaposition() {
+        // Some x → Apply(Constructor("Some"), [Var("x")])
+        let e = body("let x = Some x");
+        match &e {
+            Expr::Apply(func, args, _) => {
+                assert!(matches!(func.as_ref(), Expr::Constructor(n, _) if n == "Some"));
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    // ===== Dotted import path tests =====
+
+    #[test]
+    fn import_dotted_path() {
+        let decls = p("import Foo.Bar.Baz(baz)");
+        match &decls[0] {
+            Decl::Import { module, names, .. } => {
+                assert_eq!(module, "Foo.Bar.Baz");
+                assert_eq!(names.as_ref().unwrap(), &["baz"]);
+            }
+            _ => panic!("expected Import"),
+        }
+    }
+
+    #[test]
+    fn import_dotted_no_names() {
+        let decls = p("import Foo.Bar");
+        match &decls[0] {
+            Decl::Import { module, names, .. } => {
+                assert_eq!(module, "Foo.Bar");
+                assert!(names.is_none());
+            }
+            _ => panic!("expected Import"),
+        }
+    }
+
+    // ===== Module without braces =====
+
+    #[test]
+    fn module_braceless() {
+        let decls = p("module Foo def f(x) = x def g(y) = y");
+        match &decls[0] {
+            Decl::Module { name, decls, .. } => {
+                assert_eq!(name, "Foo");
+                assert_eq!(decls.len(), 2);
+            }
+            _ => panic!("expected Module"),
+        }
+    }
+
+    // ===== Export declaration =====
+
+    #[test]
+    fn export_decl() {
+        let decls = p("export foo, bar, baz");
+        match &decls[0] {
+            Decl::Export { names, .. } => {
+                assert_eq!(names, &["foo", "bar", "baz"]);
+            }
+            _ => panic!("expected Export"),
+        }
+    }
+
+    #[test]
+    fn export_single() {
+        let decls = p("export foo");
+        match &decls[0] {
+            Decl::Export { names, .. } => {
+                assert_eq!(names, &["foo"]);
+            }
+            _ => panic!("expected Export"),
+        }
     }
 }

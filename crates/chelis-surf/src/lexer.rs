@@ -260,6 +260,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     return Err(LexError::UnexpectedChar { ch, offset: i });
                 }
             }
+            b'.' => {
+                tokens.push(Token {
+                    kind: TokenKind::Dot,
+                    span: Span::new(start, 1),
+                });
+                i += 1;
+            }
             b'"' => {
                 let tok = lex_string(source, &mut i)?;
                 tokens.push(tok);
@@ -333,6 +340,7 @@ fn classify_ident(text: &str) -> TokenKind {
         "jit" => TokenKind::Jit,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
+        "export" => TokenKind::Export,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         _ => {
@@ -506,7 +514,7 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def let in type match with fn module import if then else grad vmap jit tensor cast"
+                "def let in type match with fn module import if then else grad vmap jit tensor cast export"
             ),
             vec![
                 TokenKind::Def,
@@ -526,6 +534,7 @@ mod tests {
                 TokenKind::Jit,
                 TokenKind::Tensor,
                 TokenKind::Cast,
+                TokenKind::Export,
             ]
         );
     }
@@ -875,6 +884,37 @@ mod tests {
                 TokenKind::Ident("x".into()),
                 TokenKind::Plus,
                 TokenKind::Ident("y".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dot_token() {
+        assert_eq!(
+            lex_kinds("Foo.Bar"),
+            vec![
+                TokenKind::TypeIdent("Foo".into()),
+                TokenKind::Dot,
+                TokenKind::TypeIdent("Bar".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dot_does_not_break_floats() {
+        // 3.14 should still lex as a single float, not Int Dot Int
+        assert_eq!(lex_kinds("3.125"), vec![TokenKind::Float(3.125)]);
+    }
+
+    #[test]
+    fn dot_after_int_without_digit() {
+        // "3." followed by a non-digit should be Int Dot (not a float)
+        assert_eq!(
+            lex_kinds("3.foo"),
+            vec![
+                TokenKind::Int(3),
+                TokenKind::Dot,
+                TokenKind::Ident("foo".into()),
             ]
         );
     }
