@@ -135,6 +135,8 @@ pub enum Pattern {
     Lit(Literal, Span),
     Constructor(String, Vec<Pattern>, Span), // Some x, None, Pair a b
     Tuple(Vec<Pattern>, Span),
+    Record(String, Vec<(String, Pattern)>, Span), // Ctor { field1, field2 }
+    As(String, Box<Pattern>, Span),               // x @ Pattern
 }
 
 // ===== Type Expressions =====

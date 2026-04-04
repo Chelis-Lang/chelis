@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod parser;
 pub mod printer;
 pub mod span;
+pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
 pub use span::Span;

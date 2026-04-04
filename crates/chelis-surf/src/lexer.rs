@@ -267,6 +267,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 });
                 i += 1;
             }
+            b'@' => {
+                tokens.push(Token {
+                    kind: TokenKind::At,
+                    span: Span::new(start, 1),
+                });
+                i += 1;
+            }
             b'"' => {
                 let tok = lex_string(source, &mut i)?;
                 tokens.push(tok);
@@ -780,7 +787,12 @@ mod tests {
 
     #[test]
     fn unexpected_char() {
-        assert!(matches!(lex("@"), Err(LexError::UnexpectedChar { .. })));
+        assert!(matches!(lex("~"), Err(LexError::UnexpectedChar { .. })));
+    }
+
+    #[test]
+    fn at_sign() {
+        assert_eq!(lex_kinds("@"), vec![TokenKind::At]);
     }
 
     #[test]

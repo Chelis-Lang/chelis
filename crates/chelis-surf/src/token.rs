@@ -42,6 +42,7 @@ pub enum TokenKind {
     Bar,        // |
     Eq,         // =
     Dot,        // .
+    At,         // @
     Underscore, // _
 
     // Arithmetic operators

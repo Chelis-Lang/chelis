@@ -1,5 +1,6 @@
 use chelis_deep::parser::parse_str;
 use chelis_deep::printer::print_canonical;
+use chelis_deep::validate::validate;
 use chelis_deep::{Atom, Expr};
 
 fn roundtrip(source: &str) {
@@ -82,15 +83,15 @@ fn post_sprint_def_ast_structure() {
 
 #[test]
 fn multiple_top_level_exprs() {
-    let source = "(type Foo) (def bar (fn (params) (nop)))";
+    let source = "(deftype {} Foo) (def {} bar (fn {} (params {}) (var {} nop)))";
     let exprs = parse_str(source).expect("parse failed");
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
         Expr::List(list, _) => match &list.elements[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "type"),
-            other => panic!("expected Symbol(type), got {:?}", other),
+            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
+            other => panic!("expected Symbol(deftype), got {:?}", other),
         },
-        other => panic!("expected List(type), got {:?}", other),
+        other => panic!("expected List(deftype), got {:?}", other),
     }
     match &exprs[1] {
         Expr::List(list, _) => match &list.elements[0] {
@@ -177,8 +178,9 @@ fn parse_node_with_typed_metadata() {
 // ── Spec conformance tests ───────────────────────────────────────
 
 #[test]
-fn spec_colon_as_list_head() {
-    // (: 42 i32) — colon as list head element
+fn spec_colon_as_list_head_parser_leniency() {
+    // Parser accepts (: 42 i32) even though ":" is not in the 53-tag vocabulary.
+    // This tests parser leniency — the validator should flag it.
     let exprs = parse_str("(: 42 i32)").expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
@@ -188,59 +190,41 @@ fn spec_colon_as_list_head() {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, ":"),
                 other => panic!("expected Symbol(:), got {:?}", other),
             }
-            match &list.elements[1] {
-                Expr::Atom(Atom::Int(42), _) => {}
-                other => panic!("expected Int(42), got {:?}", other),
-            }
-            match &list.elements[2] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "i32"),
-                other => panic!("expected Symbol(i32), got {:?}", other),
-            }
         }
         other => panic!("expected List, got {:?}", other),
     }
+    // Validator should produce warnings for the unknown ":" tag and missing metadata
+    let warnings = validate(&exprs);
+    assert!(
+        !warnings.is_empty(),
+        "expected validation warnings for ':' tag, got none"
+    );
+    assert!(warnings[0].message.contains(":"));
     roundtrip("(: 42 i32)");
 }
 
 #[test]
-fn spec_nested_lists_as_elements() {
-    // (type Option (a) ((Some a) (None))) — nested lists as elements
-    let exprs = parse_str("(type Option (a) ((Some a) (None)))").expect("parse failed");
+fn spec_nested_lists_post_sprint() {
+    // Post-sprint form: (deftype {} Option (t-var {} a) (variant {} Some (t-var {} a)) (variant {} None))
+    let src = "(deftype {} Option (t-var {} a) (variant {} Some (t-var {} a)) (variant {} None))";
+    let exprs = parse_str(src).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::List(list, _) => {
-            assert_eq!(list.elements.len(), 4);
-            // element 3 is a list whose elements are themselves lists
-            match &list.elements[3] {
-                Expr::List(variants, _) => {
-                    assert_eq!(variants.elements.len(), 2);
-                    match &variants.elements[0] {
-                        Expr::List(some, _) => {
-                            assert_eq!(some.elements.len(), 2);
-                            match &some.elements[0] {
-                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "Some"),
-                                other => panic!("expected Symbol(Some), got {:?}", other),
-                            }
-                        }
-                        other => panic!("expected List(Some ...), got {:?}", other),
-                    }
-                    match &variants.elements[1] {
-                        Expr::List(none, _) => {
-                            assert_eq!(none.elements.len(), 1);
-                            match &none.elements[0] {
-                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "None"),
-                                other => panic!("expected Symbol(None), got {:?}", other),
-                            }
-                        }
-                        other => panic!("expected List(None), got {:?}", other),
-                    }
-                }
-                other => panic!("expected variants list, got {:?}", other),
+            // tag = deftype, meta = {}, name = Option, then type-var and variants
+            match &list.elements[0] {
+                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
+                other => panic!("expected Symbol(deftype), got {:?}", other),
             }
         }
         other => panic!("expected List, got {:?}", other),
     }
-    roundtrip("(type Option (a) ((Some a) (None)))");
+    let warnings = validate(&exprs);
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings, got: {warnings:?}"
+    );
+    roundtrip(src);
 }
 
 #[test]
@@ -295,4 +279,27 @@ fn spec_float_exponent_only() {
         Expr::Atom(Atom::Float(f), _) => assert!((f - 5e3).abs() < 1e-10),
         other => panic!("expected Float(5E3), got {:?}", other),
     }
+}
+
+// ── Fixture validation tests ─────────────────────────────────────
+
+fn assert_fixture_valid(name: &str, source: &str) {
+    let exprs = parse_str(source).unwrap_or_else(|e| panic!("fixture {name} failed to parse: {e}"));
+    let warnings = validate(&exprs);
+    assert!(
+        warnings.is_empty(),
+        "fixture {name} has validation warnings: {warnings:?}"
+    );
+}
+
+#[test]
+fn all_fixtures_pass_tag_validator() {
+    assert_fixture_valid("hello_tensor.dp", include_str!("fixtures/hello_tensor.dp"));
+    assert_fixture_valid("simple_def.dp", include_str!("fixtures/simple_def.dp"));
+    assert_fixture_valid(
+        "pattern_match.dp",
+        include_str!("fixtures/pattern_match.dp"),
+    );
+    assert_fixture_valid("metadata.dp", include_str!("fixtures/metadata.dp"));
+    assert_fixture_valid("pipeline.dp", include_str!("fixtures/pipeline.dp"));
 }

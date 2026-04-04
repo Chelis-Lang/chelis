@@ -1016,7 +1016,15 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
-                Ok(Pattern::Var(name, tok.span))
+                // Check for as-pattern: x @ Pattern
+                if *self.peek() == TokenKind::At {
+                    self.advance(); // consume @
+                    let inner = self.parse_pattern()?;
+                    let end = pattern_span(&inner);
+                    Ok(Pattern::As(name, Box::new(inner), tok.span.merge(end)))
+                } else {
+                    Ok(Pattern::Var(name, tok.span))
+                }
             }
             TokenKind::Int(n) => {
                 let tok = self.advance();
@@ -1040,15 +1048,45 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
-                let mut sub_pats = Vec::new();
-                while self.is_pattern_arg_start() {
-                    sub_pats.push(self.parse_pattern_atom()?);
-                }
-                if sub_pats.is_empty() {
-                    Ok(Pattern::Constructor(name, vec![], tok.span))
+                // Check for record pattern: Ctor { field1, field2 }
+                if *self.peek() == TokenKind::LBrace {
+                    self.advance(); // consume {
+                    let mut fields = Vec::new();
+                    while *self.peek() != TokenKind::RBrace {
+                        let (field_name, field_span) = match self.peek().clone() {
+                            TokenKind::Ident(n) => {
+                                let t = self.advance();
+                                (n, t.span)
+                            }
+                            _ => {
+                                return Err(ParseError::Expected {
+                                    expected: "field name".into(),
+                                    found: format!("{:?}", self.peek()),
+                                    offset: self.current_offset(),
+                                });
+                            }
+                        };
+                        let field_pat = Pattern::Var(field_name.clone(), field_span);
+                        fields.push((field_name, field_pat));
+                        if *self.peek() == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    let end = self.expect(&TokenKind::RBrace)?;
+                    Ok(Pattern::Record(name, fields, tok.span.merge(end.span)))
                 } else {
-                    let end = pattern_span(sub_pats.last().unwrap());
-                    Ok(Pattern::Constructor(name, sub_pats, tok.span.merge(end)))
+                    let mut sub_pats = Vec::new();
+                    while self.is_pattern_arg_start() {
+                        sub_pats.push(self.parse_pattern_atom()?);
+                    }
+                    if sub_pats.is_empty() {
+                        Ok(Pattern::Constructor(name, vec![], tok.span))
+                    } else {
+                        let end = pattern_span(sub_pats.last().unwrap());
+                        Ok(Pattern::Constructor(name, sub_pats, tok.span.merge(end)))
+                    }
                 }
             }
             TokenKind::LParen => {
@@ -1196,6 +1234,8 @@ fn pattern_span(p: &Pattern) -> Span {
         Pattern::Lit(_, s) => *s,
         Pattern::Constructor(_, _, s) => *s,
         Pattern::Tuple(_, s) => *s,
+        Pattern::Record(_, _, s) => *s,
+        Pattern::As(_, _, s) => *s,
     }
 }
 
@@ -1948,6 +1988,57 @@ mod tests {
                 assert_eq!(names, &["foo"]);
             }
             _ => panic!("expected Export"),
+        }
+    }
+
+    // ===== Record pattern =====
+
+    #[test]
+    fn record_pattern() {
+        let e = body("let x = match x with { | Adam { lr, eps } -> lr }");
+        match e {
+            Expr::Match(_, arms, _) => {
+                assert_eq!(arms.len(), 1);
+                match &arms[0].pattern {
+                    Pattern::Record(name, fields, _) => {
+                        assert_eq!(name, "Adam");
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].0, "lr");
+                        assert_eq!(fields[1].0, "eps");
+                        assert!(matches!(&fields[0].1, Pattern::Var(n, _) if n == "lr"));
+                        assert!(matches!(&fields[1].1, Pattern::Var(n, _) if n == "eps"));
+                    }
+                    other => panic!("expected Record pattern, got {other:?}"),
+                }
+            }
+            _ => panic!("expected Match, got {e:?}"),
+        }
+    }
+
+    // ===== As pattern =====
+
+    #[test]
+    fn as_pattern() {
+        let e = body("let x = match x with { | y @ Some z -> y }");
+        match e {
+            Expr::Match(_, arms, _) => {
+                assert_eq!(arms.len(), 1);
+                match &arms[0].pattern {
+                    Pattern::As(name, inner, _) => {
+                        assert_eq!(name, "y");
+                        match inner.as_ref() {
+                            Pattern::Constructor(ctor, pats, _) => {
+                                assert_eq!(ctor, "Some");
+                                assert_eq!(pats.len(), 1);
+                                assert!(matches!(&pats[0], Pattern::Var(n, _) if n == "z"));
+                            }
+                            other => panic!("expected Constructor inside As, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected As pattern, got {other:?}"),
+                }
+            }
+            _ => panic!("expected Match, got {e:?}"),
         }
     }
 }

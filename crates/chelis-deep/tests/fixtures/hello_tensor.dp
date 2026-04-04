@@ -1,5 +1,5 @@
 (module {} HelloTensor
   (def {} main
     (fn {} (params {})
-      (let {} (bind {} a (lit {} 1.0 2.0 3.0) b (lit {} 4.0 5.0 6.0))
+      (let {} (bind {} a (tuple {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0)) b (tuple {} (lit {} 4.0) (lit {} 5.0) (lit {} 6.0)))
         (app {} (var {} add) (var {} a) (var {} b))))))

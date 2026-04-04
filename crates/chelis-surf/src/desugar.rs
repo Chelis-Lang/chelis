@@ -411,8 +411,11 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
         TypeExpr::Named(name, _) => {
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
+            } else if name.starts_with(|c: char| c.is_uppercase()) {
+                // Uppercase → concrete ADT with zero type args
+                node("t-adt", vec![sym(name)])
             } else {
-                // Not a known primitive -> type variable
+                // Lowercase → type variable
                 node("t-var", vec![sym(name)])
             }
         }
@@ -470,7 +473,24 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
             children.extend(sub_pats.iter().map(desugar_pattern));
             node("pat-ctor", children)
         }
-        Pattern::Tuple(pats, _) => node("pat-tuple", pats.iter().map(desugar_pattern).collect()),
+        Pattern::Tuple(pats, _) => {
+            // Tuple patterns use pat-ctor with synthetic Tuple constructor
+            // (pat-tuple is NOT in the 53-tag vocabulary)
+            let mut children = vec![sym("Tuple")];
+            children.extend(pats.iter().map(desugar_pattern));
+            node("pat-ctor", children)
+        }
+        Pattern::Record(name, fields, _) => {
+            let mut children = vec![sym(name)];
+            for (field_name, field_pat) in fields {
+                children.push(node(
+                    "kv",
+                    vec![sym(field_name), desugar_pattern(field_pat)],
+                ));
+            }
+            node("pat-record", children)
+        }
+        Pattern::As(name, inner, _) => node("pat-as", vec![sym(name), desugar_pattern(inner)]),
     }
 }
 
@@ -829,8 +849,21 @@ mod tests {
 
     #[test]
     fn test_type_var() {
-        // 'a' is not a primitive -> t-var
+        // Lowercase non-primitive → t-var
         assert_eq!(print_expr(&desugar_type(&named_ty("a"))), "(t-var {} a)");
+    }
+
+    #[test]
+    fn test_uppercase_named_is_adt() {
+        // Uppercase non-primitive → t-adt (concrete ADT, zero args)
+        assert_eq!(
+            print_expr(&desugar_type(&named_ty("Activation"))),
+            "(t-adt {} Activation)"
+        );
+        assert_eq!(
+            print_expr(&desugar_type(&named_ty("MyType"))),
+            "(t-adt {} MyType)"
+        );
     }
 
     #[test]
@@ -947,7 +980,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_pattern(&pat)),
-            "(pat-tuple {} (pat-var {} a) (pat-var {} b))"
+            "(pat-ctor {} Tuple (pat-var {} a) (pat-var {} b))"
         );
     }
 
@@ -975,5 +1008,42 @@ mod tests {
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0], "(import {} Foo (a b))");
+    }
+
+    // --- Record pattern ---
+
+    #[test]
+    fn test_pat_record() {
+        let pat = Pattern::Record(
+            "Adam".to_string(),
+            vec![
+                ("lr".to_string(), Pattern::Var("lr".to_string(), s())),
+                ("eps".to_string(), Pattern::Var("eps".to_string(), s())),
+            ],
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_pattern(&pat)),
+            "(pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} eps (pat-var {} eps)))"
+        );
+    }
+
+    // --- As pattern ---
+
+    #[test]
+    fn test_pat_as() {
+        let pat = Pattern::As(
+            "y".to_string(),
+            Box::new(Pattern::Constructor(
+                "Some".to_string(),
+                vec![Pattern::Var("z".to_string(), s())],
+                s(),
+            )),
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_pattern(&pat)),
+            "(pat-as {} y (pat-ctor {} Some (pat-var {} z)))"
+        );
     }
 }
