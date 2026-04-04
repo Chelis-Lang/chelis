@@ -96,6 +96,44 @@ fn roundtrip_example_pipeline() {
     roundtrip(include_str!("../../../examples/pipeline.ch"));
 }
 
+#[test]
+fn roundtrip_example_hello_tensor() {
+    roundtrip(include_str!("../../../examples/hello_tensor.ch"));
+}
+
+#[test]
+fn roundtrip_example_linear_regression() {
+    roundtrip(include_str!("../../../examples/linear_regression.ch"));
+}
+
+#[test]
+fn roundtrip_example_mlp() {
+    roundtrip(include_str!("../../../examples/mlp.ch"));
+}
+
+// === Dim param desugaring ===
+
+#[test]
+fn dim_params_produce_d_var() {
+    let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]): tensor[hidden, batch, f32] = x").unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    // batch and hidden are declared dim params → must be d-var, not d-name
+    assert!(
+        text.contains("(d-var {} batch)"),
+        "expected d-var for 'batch', got:\n{text}"
+    );
+    assert!(
+        text.contains("(d-var {} hidden)"),
+        "expected d-var for 'hidden', got:\n{text}"
+    );
+    // No defdim — function dim params are polymorphic, not module-level
+    assert!(
+        !text.contains("defdim"),
+        "function dim params should not emit defdim:\n{text}"
+    );
+}
+
 // === Specific output shape checks ===
 
 #[test]

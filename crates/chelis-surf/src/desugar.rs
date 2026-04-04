@@ -3,6 +3,8 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
+use std::collections::HashSet;
+
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 
@@ -165,42 +167,31 @@ fn desugar_fun_def(
     ret_ty: &Option<TypeExpr>,
     body: &Expr,
 ) -> Vec<deep::Expr> {
-    // Build params node (3-tuple: params {} name1 name2 ...)
+    // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
+    // Build a set so desugar_type_with_dims treats them as d-var.
+    let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+
     let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
     let params_node = node("params", param_names);
-
     let fn_node = node("fn", vec![params_node, desugar_expr(body)]);
     let def_node = node("def", vec![sym(name), fn_node]);
 
-    // If we have type annotations, also emit defsig
     if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
         let mut type_parts: Vec<deep::Expr> = params
             .iter()
             .map(|p| match &p.ty {
-                Some(ty) => desugar_type(ty),
+                Some(ty) => desugar_type_with_dims(ty, &dim_set),
                 None => node("t-var", vec![sym("_")]),
             })
             .collect();
         type_parts.push(match ret_ty {
-            Some(ty) => desugar_type(ty),
+            Some(ty) => desugar_type_with_dims(ty, &dim_set),
             None => node("t-var", vec![sym("_")]),
         });
         let sig = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
-        let mut result = Vec::new();
-        // Emit defdim for each dimension parameter
-        for dp in dim_params {
-            result.push(node("defdim", vec![sym(dp)]));
-        }
-        result.push(sig);
-        result.push(def_node);
-        result
+        vec![sig, def_node]
     } else {
-        let mut result = Vec::new();
-        for dp in dim_params {
-            result.push(node("defdim", vec![sym(dp)]));
-        }
-        result.push(def_node);
-        result
+        vec![def_node]
     }
 }
 
@@ -420,16 +411,21 @@ fn binop_name(op: BinOp) -> &'static str {
 // Type Expressions
 // ---------------------------------------------------------------------------
 
+/// Desugar a type with no declared dim params (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
+    desugar_type_with_dims(ty, &HashSet::new())
+}
+
+/// Desugar a type with declared dimension parameters.
+/// Names in `dim_vars` become d-var regardless of length.
+fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
     match ty {
         TypeExpr::Named(name, _) => {
             if PRIMITIVES.contains(&name.as_str()) {
                 node("t-prim", vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
-                // Uppercase → concrete ADT with zero type args
                 node("t-adt", vec![sym(name)])
             } else {
-                // Lowercase → type variable
                 node("t-var", vec![sym(name)])
             }
         }
@@ -438,17 +434,20 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
             let mut children: Vec<deep::Expr> = dims
                 .iter()
                 .map(|d| match d {
-                    // * → wildcard dimension (d-name {} *)
                     TypeExpr::Named(n, _) if n == "*" => node("d-name", vec![sym("*")]),
-                    // Single lowercase letter → d-var (polymorphic dimension)
-                    // Multi-char names → d-name (concrete dimension)
+                    // Declared dim param → always d-var (polymorphic)
+                    TypeExpr::Named(n, _) if dim_vars.contains(n.as_str()) => {
+                        node("d-var", vec![sym(n)])
+                    }
+                    // Single lowercase letter → d-var (heuristic fallback)
                     TypeExpr::Named(n, _)
                         if n.len() == 1 && n.starts_with(|c: char| c.is_lowercase()) =>
                     {
                         node("d-var", vec![sym(n)])
                     }
+                    // Everything else → d-name (concrete)
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
-                    _ => node("d-var", vec![desugar_type(d)]),
+                    _ => node("d-var", vec![desugar_type_with_dims(d, dim_vars)]),
                 })
                 .collect();
             children.push(node("t-prim", vec![sym(precision)]));
@@ -456,18 +455,27 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
         }
 
         TypeExpr::Arrow(params, ret, _) => {
-            let mut children: Vec<deep::Expr> = params.iter().map(desugar_type).collect();
-            children.push(desugar_type(ret));
+            let mut children: Vec<deep::Expr> = params
+                .iter()
+                .map(|p| desugar_type_with_dims(p, dim_vars))
+                .collect();
+            children.push(desugar_type_with_dims(ret, dim_vars));
             node("t-fn", children)
         }
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
-            children.extend(args.iter().map(desugar_type));
+            children.extend(args.iter().map(|a| desugar_type_with_dims(a, dim_vars)));
             node("t-adt", children)
         }
 
-        TypeExpr::Tuple(elems, _) => node("t-tuple", elems.iter().map(desugar_type).collect()),
+        TypeExpr::Tuple(elems, _) => node(
+            "t-tuple",
+            elems
+                .iter()
+                .map(|e| desugar_type_with_dims(e, dim_vars))
+                .collect(),
+        ),
 
         TypeExpr::Infer(_) => node("t-var", vec![sym("_")]),
     }
@@ -793,6 +801,53 @@ mod tests {
             "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))"
         );
         assert_eq!(nodes[1], "(def {} f (fn {} (params {} x) (var {} x)))");
+    }
+
+    // --- Fun def with dim params ---
+
+    #[test]
+    fn test_fun_def_with_dim_params() {
+        // def transpose[batch, hidden](x: tensor[batch, hidden, f32]): tensor[hidden, batch, f32] = x
+        // batch and hidden should be d-var (polymorphic), NOT d-name
+        let decl = Decl::FunDef {
+            name: "transpose".to_string(),
+            dim_params: vec!["batch".to_string(), "hidden".to_string()],
+            params: vec![param(
+                "x",
+                Some(TypeExpr::Tensor(
+                    vec![named_ty("batch"), named_ty("hidden")],
+                    "f32".to_string(),
+                    s(),
+                )),
+            )],
+            ret_ty: Some(TypeExpr::Tensor(
+                vec![named_ty("hidden"), named_ty("batch")],
+                "f32".to_string(),
+                s(),
+            )),
+            body: tvar("x"),
+            span: s(),
+        };
+        let nodes = desugar_decl_strs(&decl);
+        assert_eq!(nodes.len(), 2); // defsig + def, NO defdim
+        // defsig must use d-var for batch and hidden (declared dim params)
+        assert!(
+            nodes[0].contains("(d-var {} batch)"),
+            "expected d-var for 'batch' (declared dim param), got:\n{}",
+            nodes[0]
+        );
+        assert!(
+            nodes[0].contains("(d-var {} hidden)"),
+            "expected d-var for 'hidden' (declared dim param), got:\n{}",
+            nodes[0]
+        );
+        // Must NOT contain defdim (those are module-level)
+        for n in &nodes {
+            assert!(
+                !n.contains("defdim"),
+                "function dim params should NOT emit defdim, got:\n{n}"
+            );
+        }
     }
 
     // --- Let def (with type) produces defsig + def ---

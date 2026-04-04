@@ -15,6 +15,6 @@ def mlp(w1: tensor[hidden, input, f32], b1: tensor[hidden, f32],
         w2: tensor[output, hidden, f32], b2: tensor[output, f32],
         act: Activation, x: tensor[input, f32]): tensor[output, f32] =
   x
-  |> fn v -> linear(w1, b1, v)
-  |> fn v -> activate(act, v)
-  |> fn v -> linear(w2, b2, v)
+  |> fn (v) -> linear(w1, b1, v)
+  |> fn (v) -> activate(act, v)
+  |> fn (v) -> linear(w2, b2, v)
