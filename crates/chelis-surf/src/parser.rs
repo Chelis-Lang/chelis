@@ -241,8 +241,12 @@ impl Parser {
 
         self.expect(&TokenKind::Eq)?;
 
-        // Parse variants separated by |
+        // Parse variants separated by |, with optional leading |
         let mut variants = Vec::new();
+        // Skip optional leading | (allows `type T = | V1 | V2` style)
+        if *self.peek() == TokenKind::Bar {
+            self.advance();
+        }
         variants.push(self.parse_variant()?);
         while *self.peek() == TokenKind::Bar {
             self.advance();

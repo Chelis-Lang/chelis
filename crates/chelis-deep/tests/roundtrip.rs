@@ -43,87 +43,41 @@ fn roundtrip_pipeline() {
 // ── AST structure tests ───────────────────────────────────────────
 
 #[test]
-fn simple_def_ast_structure() {
-    let exprs = parse_str("(def square (sig (-> f32 f32)) (fn (x) (apply mul x x)))")
-        .expect("parse failed");
+fn post_sprint_def_ast_structure() {
+    // Post-sprint 3-tuple: (def {} square (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))
+    let src = "(def {} square (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))";
+    let exprs = parse_str(src).expect("parse failed");
     assert_eq!(exprs.len(), 1);
 
-    // Top level is a list with tag "def"
-    let top = &exprs[0];
-    match top {
+    match &exprs[0] {
         Expr::List(list, _) => {
-            assert_eq!(list.elements.len(), 4);
-
-            // element 0: the tag "def"
+            // element 0: tag "def"
             match &list.elements[0] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
                 other => panic!("expected Symbol(def), got {:?}", other),
             }
-
-            // element 1: the name symbol
+            // element 1: metadata map {}
             match &list.elements[1] {
+                Expr::Map(m, _) => assert!(m.entries.is_empty()),
+                other => panic!("expected empty Map, got {:?}", other),
+            }
+            // element 2: name "square"
+            match &list.elements[2] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "square"),
                 other => panic!("expected Symbol(square), got {:?}", other),
             }
-
-            // element 2: the sig
-            match &list.elements[2] {
-                Expr::List(sig, _) => {
-                    assert_eq!(sig.elements.len(), 2);
-                    match &sig.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "sig"),
-                        other => panic!("expected Symbol(sig), got {:?}", other),
-                    }
-                    match &sig.elements[1] {
-                        Expr::List(arrow, _) => {
-                            assert_eq!(arrow.elements.len(), 3);
-                            match &arrow.elements[0] {
-                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "->"),
-                                other => panic!("expected Symbol(->), got {:?}", other),
-                            }
-                        }
-                        other => panic!("expected arrow list, got {:?}", other),
-                    }
-                }
-                other => panic!("expected sig list, got {:?}", other),
-            }
-
-            // element 3: the fn body
+            // element 3: fn node
             match &list.elements[3] {
-                Expr::List(func, _) => {
-                    assert_eq!(func.elements.len(), 3);
-                    match &func.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
-                        other => panic!("expected Symbol(fn), got {:?}", other),
-                    }
-                    // params list
-                    match &func.elements[1] {
-                        Expr::List(params, _) => {
-                            assert_eq!(params.elements.len(), 1);
-                            match &params.elements[0] {
-                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
-                                other => panic!("expected Symbol(x), got {:?}", other),
-                            }
-                        }
-                        other => panic!("expected params list, got {:?}", other),
-                    }
-                    // body: (apply mul x x)
-                    match &func.elements[2] {
-                        Expr::List(apply, _) => {
-                            assert_eq!(apply.elements.len(), 4);
-                            match &apply.elements[0] {
-                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "apply"),
-                                other => panic!("expected Symbol(apply), got {:?}", other),
-                            }
-                        }
-                        other => panic!("expected apply list, got {:?}", other),
-                    }
-                }
+                Expr::List(func, _) => match &func.elements[0] {
+                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                    other => panic!("expected Symbol(fn), got {:?}", other),
+                },
                 other => panic!("expected fn list, got {:?}", other),
             }
         }
         other => panic!("expected top-level List, got {:?}", other),
     }
+    roundtrip(src);
 }
 
 #[test]
@@ -179,6 +133,45 @@ fn empty_list_now_valid() {
 fn error_incomplete_metadata() {
     let result = parse_str("^{:type}");
     assert!(result.is_err(), "incomplete metadata should fail to parse");
+}
+
+// ── Map parsing tests ────────────────────────────────────────────
+
+#[test]
+fn parse_empty_map() {
+    let exprs = parse_str("{}").unwrap();
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::Map(m, _) => assert!(m.entries.is_empty()),
+        other => panic!("expected empty Map, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_map_with_entries() {
+    let exprs = parse_str("{type: f32}").unwrap();
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::Map(m, _) => {
+            assert_eq!(m.entries.len(), 1);
+            assert_eq!(m.entries[0].0, "type");
+        }
+        other => panic!("expected Map with entries, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_3tuple_node() {
+    let exprs = parse_str("(app {} (var {} f) (var {} x))").unwrap();
+    assert_eq!(exprs.len(), 1);
+    roundtrip("(app {} (var {} f) (var {} x))");
+}
+
+#[test]
+fn parse_node_with_typed_metadata() {
+    roundtrip(
+        "(def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))} square (fn {} (params {} x) (var {} x)))",
+    );
 }
 
 // ── Spec conformance tests ───────────────────────────────────────
