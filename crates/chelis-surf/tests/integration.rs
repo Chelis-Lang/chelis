@@ -1,12 +1,13 @@
 //! Integration tests: Surf parse → desugar → Deep print → Deep parse roundtrip.
 
-use chelis_deep::parser::parse_str as deep_parse;
+use chelis_deep::parser::parse_str_strict as deep_parse_strict;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 
-/// Parse Surf source, desugar to Deep, print Deep, re-parse Deep.
-/// Verifies the generated Deep is valid and round-trips through the Deep parser.
+/// Parse Surf source, desugar to Deep, print Deep, re-parse Deep with strict
+/// tag validation. Verifies the generated Deep uses only canonical 53-tag
+/// vocabulary and round-trips through the Deep parser.
 fn roundtrip(surf_source: &str) {
     // 1. Parse Surf
     let decls = surf_parse(surf_source).unwrap_or_else(|e| {
@@ -27,10 +28,10 @@ fn roundtrip(surf_source: &str) {
         "Deep printer produced empty output for:\n{surf_source}"
     );
 
-    // 4. Re-parse Deep — this is the key check
-    let reparsed = deep_parse(&deep_text).unwrap_or_else(|e| {
+    // 4. Re-parse Deep with STRICT validation (unknown tags = error)
+    let reparsed = deep_parse_strict(&deep_text).unwrap_or_else(|e| {
         panic!(
-            "Deep re-parse failed.\nOriginal Surf:\n{surf_source}\nDeep output:\n{deep_text}\nError: {e}"
+            "Deep strict re-parse failed.\nOriginal Surf:\n{surf_source}\nDeep output:\n{deep_text}\nError: {e}"
         );
     });
 

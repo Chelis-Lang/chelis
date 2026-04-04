@@ -94,31 +94,25 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 return;
             }
 
-            // Check tag (element[0])
-            if let Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) = list.elements.first() {
-                if !VALID_TAGS.contains(&tag.as_str()) {
-                    warnings.push(ValidationWarning {
-                        kind: WarningKind::UnknownTag,
-                        offset: span.offset,
-                        message: format!("unknown tag '{tag}' — not in the 53-tag vocabulary"),
-                    });
-                }
+            // Only validate lists that look like 3-tuple nodes:
+            // element[0] is a symbol AND element[1] is a Map.
+            // Bare structural lists like (a) or (a b) are not tagged nodes.
+            let is_tagged_node = list.elements.len() >= 2
+                && matches!(
+                    list.elements.first(),
+                    Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
+                )
+                && matches!(list.elements.get(1), Some(Expr::Map(_, _)));
 
-                // Check metadata map (element[1]) for lists with known tags
-                if list.elements.len() >= 2 {
-                    match &list.elements[1] {
-                        Expr::Map(_, _) => {} // OK
-                        _ => {
-                            warnings.push(ValidationWarning {
-                                kind: WarningKind::MissingMetadata,
-                                offset: span.offset,
-                                message: format!(
-                                    "tag '{tag}' missing {{}} metadata map at element[1]"
-                                ),
-                            });
-                        }
-                    }
-                }
+            if is_tagged_node
+                && let Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) = list.elements.first()
+                && !VALID_TAGS.contains(&tag.as_str())
+            {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::UnknownTag,
+                    offset: span.offset,
+                    message: format!("unknown tag '{tag}' — not in the 53-tag vocabulary"),
+                });
             }
 
             // Recurse into children
@@ -183,13 +177,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_metadata_map_warning() {
-        // (def square ...) — missing {} at element[1]
-        let node = make_list(vec![sym("def"), sym("square")]);
+    fn bare_list_not_validated_as_tag() {
+        // (a b) — bare structural list, NOT a tagged node (no {} at [1])
+        // Should produce no warnings — validator only checks 3-tuple nodes
+        let node = make_list(vec![sym("a"), sym("b")]);
         let warnings = validate(&[node]);
-        assert_eq!(warnings.len(), 1);
-        assert!(matches!(warnings[0].kind, WarningKind::MissingMetadata));
-        assert!(warnings[0].message.contains("def"));
+        assert!(
+            warnings.is_empty(),
+            "bare list should not trigger tag validation, got: {warnings:?}"
+        );
     }
 
     #[test]

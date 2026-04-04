@@ -71,7 +71,7 @@ Last child is the precision type (must be a numeric `t-prim`). All preceding chi
 (t-adt {} Option (t-prim {} f32))
 
 ;; List (tensor[batch, f32])
-(t-adt {} List (t-tensor {} (d-var {} batch) (t-prim {} f32)))
+(t-adt {} List (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 
 ;; No type arguments
 (t-adt {} Activation)

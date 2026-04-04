@@ -179,8 +179,9 @@ fn parse_node_with_typed_metadata() {
 
 #[test]
 fn spec_colon_as_list_head_parser_leniency() {
-    // Parser accepts (: 42 i32) even though ":" is not in the 53-tag vocabulary.
-    // This tests parser leniency — the validator should flag it.
+    // Parser accepts (: 42 i32) — bare list, not a 3-tuple node.
+    // Validator only checks 3-tuple nodes (sym + Map + children),
+    // so bare lists like this pass without warnings.
     let exprs = parse_str("(: 42 i32)").expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
@@ -193,13 +194,9 @@ fn spec_colon_as_list_head_parser_leniency() {
         }
         other => panic!("expected List, got {:?}", other),
     }
-    // Validator should produce warnings for the unknown ":" tag and missing metadata
+    // Bare list — no Map at [1], so validator skips it (not a tagged node)
     let warnings = validate(&exprs);
-    assert!(
-        !warnings.is_empty(),
-        "expected validation warnings for ':' tag, got none"
-    );
-    assert!(warnings[0].message.contains(":"));
+    assert!(warnings.is_empty(), "bare list should not trigger validation");
     roundtrip("(: 42 i32)");
 }
 

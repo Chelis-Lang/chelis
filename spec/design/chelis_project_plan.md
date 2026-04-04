@@ -745,19 +745,17 @@ Design and implementation run in parallel. Design work produces spec documents; 
 
 These can be worked on immediately, in parallel with Phase 0 coding. They don't require a working compiler — they're paper/spec work.
 
-| Design Task | Produces | Consumed By | Priority |
-|---|---|---|---|
-| **Surf formal grammar** | spec/02-surf-syntax.md with full EBNF/PEG | Phase 0c (Surf parser) | **HIGH — blocks 0c** |
-| **Deep formal grammar** | spec/03-deep-syntax.md with tag vocabulary, metadata format, canonical form rules | Phase 0b (Deep parser) | **HIGH — blocks 0b** |
-| **RISC primitive semantics** | spec/05-risc-primitives.md with precise I/O types, broadcasting rules, AD adjoints | Phase 0e (DAG), 0g (grad) | **HIGH — blocks 0e** |
-| **Type system formal rules** | spec/04-type-system.md with inference rules, tensor type algebra, dimension checking rules, fitness scoring algorithm | Phase 0d (type checker) | **HIGH — blocks 0d** |
-| **Standard op lowerings** | Appendix to spec/05 mapping matmul, conv2d, softmax, layer_norm, etc. to RISC primitives | Phase 0e (lowering) | **MEDIUM** |
-| **Effect system design** | spec/04-type-system.md §effects with formal effect typing rules, composition, interaction with HM | Phase 2a | **MEDIUM — long lead** |
-| **Linear type design** | spec/04-type-system.md §linearity with checking rules, borrowing, interaction with effects | Phase 2b | **MEDIUM — long lead** |
-| **Macro system design** | New section in spec/03-deep-syntax.md or dedicated doc. Expansion order, hygiene, type-awareness, phase separation | Phase 2c | **LOW — can wait** |
-| **Error message catalog** | Reference doc: every error type with code, message template, repair suggestions | Phase 0d onwards | **MEDIUM — iterative** |
-| **Surf module system** | spec/02 §modules. Namespacing, imports, exports, visibility. Simple for v1. | Phase 0c | **MEDIUM** |
-| **Named dimension declaration syntax** | spec/02 §dimensions. Module-level? Per-function? Both? How do dimensions scope? | Phase 0c, 0d | **MEDIUM** |
+| Design Task | Status | Notes |
+|---|---|---|
+| **Surf formal grammar** | DONE (Phase 0c) | spec/02-surf-syntax.md, implemented in chelis-surf parser |
+| **Deep formal grammar** | DONE (Phase 0b + sprint) | spec/03-deep-syntax.md, 53-tag vocabulary, 3-tuple nodes |
+| **RISC primitive semantics** | DONE | spec/05-risc-primitives.md, 3-tier hierarchy |
+| **Type system formal rules** | DONE | spec/04-type-system.md, ready for Phase 0d |
+| **Standard op lowerings** | DONE | spec/05 §4, matmul/softmax/conv2d/etc. |
+| **Named dimension syntax** | DONE | Module-level: `defdim`. Function-level: `def f[a, b](...)`. Both implemented. |
+| **Effect system design** | Phase 2 | Metadata key `eff` reserved |
+| **Linear type design** | Phase 2 | Metadata key `lin` reserved |
+| **Macro system design** | Phase 2+ | Tags `quote`/`unquote`/`splice` reserved |
 
 ### Design Decisions (Resolved by Design Sprint)
 
@@ -774,14 +772,7 @@ All of the following were resolved by the design sprint and steering memo. See `
 
 **Still open for Phase 1+:** Fusion rules, GPU memory model, effect handler syntax, borrow syntax, custom effects.
 
-### Recommended Design Sprint
+### Design Sprint (Completed)
 
-Before the agent starts coding Phase 0b, do a focused design sprint resolving items 1-4 above. This produces:
-
-- **spec/03-deep-syntax.md** — Complete tag vocabulary, metadata format, canonical form rules. Every valid Deep program can be unambiguously constructed from this document.
-- **spec/02-surf-syntax.md** — Full grammar. Every valid Surf program can be parsed from this document.
-- **spec/05-risc-primitives.md** — Complete op table with types and AD rules.
-- **spec/04-type-system.md** — Inference rules precise enough to implement from.
-
-This sprint is 3-5 days of concentrated design work. It's the highest-leverage pre-coding activity because every implementation phase consumes these documents. Getting them right avoids rework across 0b through 0h.
+The design sprint was completed and produced the authoritative specs listed above. All Phase 0 blocking design tasks are resolved. See `spec/design/chelis_steering_memo.md` for the full record of decisions.
 
