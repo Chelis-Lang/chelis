@@ -31,13 +31,11 @@ pub enum Atom {
     Bool(bool),
 }
 
-/// A parenthesized list with a tag.
+/// A parenthesized list of expressions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct List {
-    /// The tag (first symbol in the list).
-    pub tag: String,
-    /// The remaining child expressions.
-    pub children: Vec<Expr>,
+    /// All elements of the list. The first element is conventionally the tag.
+    pub elements: Vec<Expr>,
 }
 
 /// Metadata map plus the annotated expression.

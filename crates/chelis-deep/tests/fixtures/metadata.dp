@@ -1,4 +1,4 @@
 (def ^{:doc "Squares a number" :type (-> f32 f32)} square
   (sig (-> f32 f32))
-  (fn (params ^{:type f32} x)
+  (fn (^{:type f32} x)
     ^{:type f32} (apply mul x x)))

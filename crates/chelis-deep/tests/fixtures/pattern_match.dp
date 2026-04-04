@@ -1,4 +1,4 @@
-(type Option (params a) (variants (Some a) (None)))
+(type Option (a) ((Some a) (None)))
 
 (def unwrap_or
   (sig (-> (adt Option f32) f32 f32))

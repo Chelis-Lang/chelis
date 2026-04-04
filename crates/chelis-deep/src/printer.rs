@@ -82,47 +82,43 @@ impl Printer {
     }
 
     fn fmt_list_single_line(&mut self, list: &List) -> String {
-        let mut parts = vec![list.tag.clone()];
-        for child in &list.children {
-            parts.push(self.fmt_expr(child));
-        }
+        let parts: Vec<String> = list.elements.iter().map(|e| self.fmt_expr(e)).collect();
         format!("({})", parts.join(" "))
     }
 
     fn fmt_list_multi_line(&mut self, list: &List) -> String {
-        if list.children.is_empty() {
-            return format!("({})", list.tag);
+        // elements[0] is the "tag", rest are children
+        if list.elements.len() <= 1 {
+            // Just a tag with no children -- shouldn't reach multi_line, but handle it
+            return self.fmt_list_single_line(list);
         }
 
         let child_indent = self.indent + 2;
         let prefix = " ".repeat(child_indent);
-
-        // Opening line: `(tag first_child`
-        self.indent += 1 + list.tag.len() + 1; // approximate for first child
-        let saved = self.indent;
+        let old_indent = self.indent;
         self.indent = child_indent;
 
-        let mut lines = Vec::new();
-        let first_child = self.fmt_expr(&list.children[0]);
-        let opening = format!("({} {}", list.tag, first_child);
-        lines.push(opening);
+        let tag_str = self.fmt_expr(&list.elements[0]);
 
-        for child in &list.children[1..] {
-            let rendered = self.fmt_expr(child);
-            lines.push(format!("{}{}", prefix, rendered));
+        if list.elements.len() == 2 {
+            // (tag single_child)
+            let child_str = self.fmt_expr(&list.elements[1]);
+            self.indent = old_indent;
+            return format!("({} {})", tag_str, child_str);
         }
 
-        self.indent = saved;
-        // Close paren on last line.
+        // Multiple children: tag + first child on opening line, rest indented
+        let mut lines = Vec::new();
+        let first_child = self.fmt_expr(&list.elements[1]);
+        lines.push(format!("({} {}", tag_str, first_child));
+
+        for elem in &list.elements[2..] {
+            lines.push(format!("{}{}", prefix, self.fmt_expr(elem)));
+        }
+
+        self.indent = old_indent;
         let last = lines.len() - 1;
         lines[last].push(')');
-
-        // If only tag, no children (handled above), but if 1 child:
-        if list.children.len() == 1 {
-            lines[0].push(')');
-            return lines[0].clone();
-        }
-
         lines.join("\n")
     }
 
@@ -163,13 +159,9 @@ mod tests {
     }
 
     fn list_expr(tag: &str, children: Vec<Expr>) -> Expr {
-        Expr::List(
-            List {
-                tag: tag.to_string(),
-                children,
-            },
-            sp(),
-        )
+        let mut elements = vec![atom_expr(Atom::Symbol(tag.to_string()))];
+        elements.extend(children);
+        Expr::List(List { elements }, sp())
     }
 
     fn meta_expr(entries: Vec<(&str, Expr)>, expr: Expr) -> Expr {

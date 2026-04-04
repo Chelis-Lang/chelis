@@ -4,6 +4,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
+    #[error("lex error: {0}")]
+    Lex(#[from] lexer::LexError),
+
     #[error("unexpected end of input at byte {offset}")]
     UnexpectedEof { offset: usize },
 
@@ -141,24 +144,8 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // First element must be a symbol (the tag)
-        let tag_tok = self.peek().ok_or(ParseError::UnexpectedEof {
-            offset: self.current_offset(),
-        })?;
-        let tag = match &tag_tok.kind {
-            TokenKind::Symbol(s) => s.clone(),
-            other => {
-                return Err(ParseError::Expected {
-                    expected: "symbol (list tag)".to_string(),
-                    found: format!("{:?}", other),
-                    offset: tag_tok.span.offset,
-                });
-            }
-        };
-        self.advance(); // consume the tag symbol
-
-        // Read children until ')'
-        let mut children = Vec::new();
+        // Read all elements until ')'
+        let mut elements = Vec::new();
         loop {
             let tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
@@ -167,9 +154,9 @@ impl<'a> Parser<'a> {
                 let end_span = tok.span;
                 self.advance(); // consume ')'
                 let full_span = start_span.merge(end_span);
-                return Ok(Expr::List(List { tag, children }, full_span));
+                return Ok(Expr::List(List { elements }, full_span));
             }
-            children.push(self.parse_expr()?);
+            elements.push(self.parse_expr()?);
         }
     }
 
@@ -234,7 +221,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 }
 
 /// Convenience: lex and parse a source string in one step.
-pub fn parse_str(source: &str) -> Result<Vec<Expr>, Box<dyn std::error::Error>> {
+pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
     let exprs = parse(&tokens)?;
     Ok(exprs)
@@ -320,13 +307,16 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::List(list, _) => {
-                assert_eq!(list.tag, "add");
-                assert_eq!(list.children.len(), 2);
-                match &list.children[0] {
+                assert_eq!(list.elements.len(), 3);
+                match &list.elements[0] {
+                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                    other => panic!("expected Symbol(add), got {:?}", other),
+                }
+                match &list.elements[1] {
                     Expr::Atom(Atom::Int(1), _) => {}
                     other => panic!("expected Int(1), got {:?}", other),
                 }
-                match &list.children[1] {
+                match &list.elements[2] {
                     Expr::Atom(Atom::Int(2), _) => {}
                     other => panic!("expected Int(2), got {:?}", other),
                 }
@@ -341,8 +331,11 @@ mod tests {
         let exprs = p("(nop)");
         match &exprs[0] {
             Expr::List(list, _) => {
-                assert_eq!(list.tag, "nop");
-                assert!(list.children.is_empty());
+                assert_eq!(list.elements.len(), 1);
+                match &list.elements[0] {
+                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "nop"),
+                    other => panic!("expected Symbol(nop), got {:?}", other),
+                }
             }
             other => panic!("expected List, got {:?}", other),
         }
@@ -354,33 +347,46 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::List(list, _) => {
-                assert_eq!(list.tag, "def");
-                assert_eq!(list.children.len(), 3);
-                // child 0: symbol "f"
-                match &list.children[0] {
+                assert_eq!(list.elements.len(), 4);
+                // element 0: symbol "def"
+                match &list.elements[0] {
+                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
+                    other => panic!("expected Symbol(def), got {:?}", other),
+                }
+                // element 1: symbol "f"
+                match &list.elements[1] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
-                // child 1: (sig (-> f32 f32))
-                match &list.children[1] {
+                // element 2: (sig (-> f32 f32))
+                match &list.elements[2] {
                     Expr::List(inner, _) => {
-                        assert_eq!(inner.tag, "sig");
-                        assert_eq!(inner.children.len(), 1);
-                        match &inner.children[0] {
+                        assert_eq!(inner.elements.len(), 2);
+                        match &inner.elements[0] {
+                            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "sig"),
+                            other => panic!("expected Symbol(sig), got {:?}", other),
+                        }
+                        match &inner.elements[1] {
                             Expr::List(arrow, _) => {
-                                assert_eq!(arrow.tag, "->");
-                                assert_eq!(arrow.children.len(), 2);
+                                assert_eq!(arrow.elements.len(), 3);
+                                match &arrow.elements[0] {
+                                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "->"),
+                                    other => panic!("expected Symbol(->), got {:?}", other),
+                                }
                             }
                             other => panic!("expected arrow list, got {:?}", other),
                         }
                     }
                     other => panic!("expected sig list, got {:?}", other),
                 }
-                // child 2: (fn (x) x)
-                match &list.children[2] {
+                // element 3: (fn (x) x)
+                match &list.elements[3] {
                     Expr::List(inner, _) => {
-                        assert_eq!(inner.tag, "fn");
-                        assert_eq!(inner.children.len(), 2);
+                        assert_eq!(inner.elements.len(), 3);
+                        match &inner.elements[0] {
+                            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                            other => panic!("expected Symbol(fn), got {:?}", other),
+                        }
                     }
                     other => panic!("expected fn list, got {:?}", other),
                 }
@@ -422,7 +428,10 @@ mod tests {
                 assert_eq!(meta.entries[0].0, "type");
                 assert_eq!(meta.entries[1].0, "pure");
                 match meta.expr.as_ref() {
-                    Expr::List(list, _) => assert_eq!(list.tag, "add"),
+                    Expr::List(list, _) => match &list.elements[0] {
+                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                        other => panic!("expected Symbol(add), got {:?}", other),
+                    },
                     other => panic!("expected List, got {:?}", other),
                 }
             }
@@ -441,7 +450,10 @@ mod tests {
             other => panic!("expected Int(42), got {:?}", other),
         }
         match &exprs[1] {
-            Expr::List(list, _) => assert_eq!(list.tag, "add"),
+            Expr::List(list, _) => match &list.elements[0] {
+                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                other => panic!("expected Symbol(add), got {:?}", other),
+            },
             other => panic!("expected List, got {:?}", other),
         }
         match &exprs[2] {
@@ -489,15 +501,20 @@ mod tests {
     }
 
     #[test]
-    fn error_list_non_symbol_tag() {
-        let result = parse_str("(42 a b)");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("symbol"),
-            "expected 'symbol' in error, got: {}",
-            err
-        );
+    fn parse_list_non_symbol_first_element() {
+        // Any expr can be the first element of a list.
+        let exprs = p("(42 a b)");
+        assert_eq!(exprs.len(), 1);
+        match &exprs[0] {
+            Expr::List(list, _) => {
+                assert_eq!(list.elements.len(), 3);
+                match &list.elements[0] {
+                    Expr::Atom(Atom::Int(42), _) => {}
+                    other => panic!("expected Int(42), got {:?}", other),
+                }
+            }
+            other => panic!("expected List, got {:?}", other),
+        }
     }
 
     #[test]

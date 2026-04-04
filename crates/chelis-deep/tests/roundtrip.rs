@@ -52,24 +52,35 @@ fn simple_def_ast_structure() {
     let top = &exprs[0];
     match top {
         Expr::List(list, _) => {
-            assert_eq!(list.tag, "def");
-            assert_eq!(list.children.len(), 3);
+            assert_eq!(list.elements.len(), 4);
 
-            // First child is the name symbol
-            match &list.children[0] {
+            // element 0: the tag "def"
+            match &list.elements[0] {
+                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
+                other => panic!("expected Symbol(def), got {:?}", other),
+            }
+
+            // element 1: the name symbol
+            match &list.elements[1] {
                 Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "square"),
                 other => panic!("expected Symbol(square), got {:?}", other),
             }
 
-            // Second child is the sig
-            match &list.children[1] {
+            // element 2: the sig
+            match &list.elements[2] {
                 Expr::List(sig, _) => {
-                    assert_eq!(sig.tag, "sig");
-                    assert_eq!(sig.children.len(), 1);
-                    match &sig.children[0] {
+                    assert_eq!(sig.elements.len(), 2);
+                    match &sig.elements[0] {
+                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "sig"),
+                        other => panic!("expected Symbol(sig), got {:?}", other),
+                    }
+                    match &sig.elements[1] {
                         Expr::List(arrow, _) => {
-                            assert_eq!(arrow.tag, "->");
-                            assert_eq!(arrow.children.len(), 2);
+                            assert_eq!(arrow.elements.len(), 3);
+                            match &arrow.elements[0] {
+                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "->"),
+                                other => panic!("expected Symbol(->), got {:?}", other),
+                            }
                         }
                         other => panic!("expected arrow list, got {:?}", other),
                     }
@@ -77,24 +88,33 @@ fn simple_def_ast_structure() {
                 other => panic!("expected sig list, got {:?}", other),
             }
 
-            // Third child is the fn body
-            match &list.children[2] {
+            // element 3: the fn body
+            match &list.elements[3] {
                 Expr::List(func, _) => {
-                    assert_eq!(func.tag, "fn");
-                    assert_eq!(func.children.len(), 2);
+                    assert_eq!(func.elements.len(), 3);
+                    match &func.elements[0] {
+                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                        other => panic!("expected Symbol(fn), got {:?}", other),
+                    }
                     // params list
-                    match &func.children[0] {
+                    match &func.elements[1] {
                         Expr::List(params, _) => {
-                            assert_eq!(params.tag, "x");
-                            assert!(params.children.is_empty());
+                            assert_eq!(params.elements.len(), 1);
+                            match &params.elements[0] {
+                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
+                                other => panic!("expected Symbol(x), got {:?}", other),
+                            }
                         }
                         other => panic!("expected params list, got {:?}", other),
                     }
                     // body: (apply mul x x)
-                    match &func.children[1] {
+                    match &func.elements[2] {
                         Expr::List(apply, _) => {
-                            assert_eq!(apply.tag, "apply");
-                            assert_eq!(apply.children.len(), 3);
+                            assert_eq!(apply.elements.len(), 4);
+                            match &apply.elements[0] {
+                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "apply"),
+                                other => panic!("expected Symbol(apply), got {:?}", other),
+                            }
                         }
                         other => panic!("expected apply list, got {:?}", other),
                     }
@@ -112,11 +132,17 @@ fn multiple_top_level_exprs() {
     let exprs = parse_str(source).expect("parse failed");
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
-        Expr::List(list, _) => assert_eq!(list.tag, "type"),
+        Expr::List(list, _) => match &list.elements[0] {
+            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "type"),
+            other => panic!("expected Symbol(type), got {:?}", other),
+        },
         other => panic!("expected List(type), got {:?}", other),
     }
     match &exprs[1] {
-        Expr::List(list, _) => assert_eq!(list.tag, "def"),
+        Expr::List(list, _) => match &list.elements[0] {
+            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
+            other => panic!("expected Symbol(def), got {:?}", other),
+        },
         other => panic!("expected List(def), got {:?}", other),
     }
 }
@@ -154,18 +180,130 @@ fn error_empty_list() {
 }
 
 #[test]
-fn error_list_with_non_symbol_tag() {
-    let result = parse_str("(42 a b)");
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("symbol"),
-        "expected 'symbol' in error, got: {msg}"
-    );
-}
-
-#[test]
 fn error_incomplete_metadata() {
     let result = parse_str("^{:type}");
     assert!(result.is_err(), "incomplete metadata should fail to parse");
+}
+
+// ── Spec conformance tests ───────────────────────────────────────
+
+#[test]
+fn spec_colon_as_list_head() {
+    // (: 42 i32) — colon as list head element
+    let exprs = parse_str("(: 42 i32)").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::List(list, _) => {
+            assert_eq!(list.elements.len(), 3);
+            match &list.elements[0] {
+                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, ":"),
+                other => panic!("expected Symbol(:), got {:?}", other),
+            }
+            match &list.elements[1] {
+                Expr::Atom(Atom::Int(42), _) => {}
+                other => panic!("expected Int(42), got {:?}", other),
+            }
+            match &list.elements[2] {
+                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "i32"),
+                other => panic!("expected Symbol(i32), got {:?}", other),
+            }
+        }
+        other => panic!("expected List, got {:?}", other),
+    }
+    roundtrip("(: 42 i32)");
+}
+
+#[test]
+fn spec_nested_lists_as_elements() {
+    // (type Option (a) ((Some a) (None))) — nested lists as elements
+    let exprs = parse_str("(type Option (a) ((Some a) (None)))").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::List(list, _) => {
+            assert_eq!(list.elements.len(), 4);
+            // element 3 is a list whose elements are themselves lists
+            match &list.elements[3] {
+                Expr::List(variants, _) => {
+                    assert_eq!(variants.elements.len(), 2);
+                    match &variants.elements[0] {
+                        Expr::List(some, _) => {
+                            assert_eq!(some.elements.len(), 2);
+                            match &some.elements[0] {
+                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "Some"),
+                                other => panic!("expected Symbol(Some), got {:?}", other),
+                            }
+                        }
+                        other => panic!("expected List(Some ...), got {:?}", other),
+                    }
+                    match &variants.elements[1] {
+                        Expr::List(none, _) => {
+                            assert_eq!(none.elements.len(), 1);
+                            match &none.elements[0] {
+                                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "None"),
+                                other => panic!("expected Symbol(None), got {:?}", other),
+                            }
+                        }
+                        other => panic!("expected List(None), got {:?}", other),
+                    }
+                }
+                other => panic!("expected variants list, got {:?}", other),
+            }
+        }
+        other => panic!("expected List, got {:?}", other),
+    }
+    roundtrip("(type Option (a) ((Some a) (None)))");
+}
+
+#[test]
+fn spec_metadata_on_list_items() {
+    // (fn (^{:type f32} x) body) — metadata on items within a list
+    let exprs = parse_str("(fn (^{:type f32} x) body)").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::List(outer, _) => {
+            assert_eq!(outer.elements.len(), 3);
+            match &outer.elements[1] {
+                Expr::List(params, _) => {
+                    assert_eq!(params.elements.len(), 1);
+                    match &params.elements[0] {
+                        Expr::MetaExpr(meta, _) => {
+                            assert_eq!(meta.entries.len(), 1);
+                            assert_eq!(meta.entries[0].0, "type");
+                        }
+                        other => panic!("expected MetaExpr, got {:?}", other),
+                    }
+                }
+                other => panic!("expected params list, got {:?}", other),
+            }
+        }
+        other => panic!("expected List, got {:?}", other),
+    }
+    roundtrip("(fn (^{:type f32} x) body)");
+}
+
+#[test]
+fn spec_float_exponent_only() {
+    // -1e-5 as a single Float atom
+    let exprs = parse_str("-1e-5").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::Atom(Atom::Float(f), _) => assert!((f - (-1e-5)).abs() < 1e-15),
+        other => panic!("expected Float(-1e-5), got {:?}", other),
+    }
+
+    // 1e10 as Float
+    let exprs = parse_str("1e10").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::Atom(Atom::Float(f), _) => assert!((f - 1e10).abs() < 1.0),
+        other => panic!("expected Float(1e10), got {:?}", other),
+    }
+
+    // 5E3 as Float
+    let exprs = parse_str("5E3").expect("parse failed");
+    assert_eq!(exprs.len(), 1);
+    match &exprs[0] {
+        Expr::Atom(Atom::Float(f), _) => assert!((f - 5e3).abs() < 1e-10),
+        other => panic!("expected Float(5E3), got {:?}", other),
+    }
 }

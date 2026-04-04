@@ -106,11 +106,19 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 while i < bytes.len() && is_ident_continue(bytes[i]) {
                     i += 1;
                 }
-                let name = &source[kw_start..i];
-                tokens.push(Token {
-                    kind: TokenKind::Keyword(name.to_string()),
-                    span: Span::new(start, i - start),
-                });
+                if i == kw_start {
+                    // Bare `:` -- no identifier chars followed
+                    tokens.push(Token {
+                        kind: TokenKind::Symbol(":".to_string()),
+                        span: Span::new(start, 1),
+                    });
+                } else {
+                    let name = &source[kw_start..i];
+                    tokens.push(Token {
+                        kind: TokenKind::Keyword(name.to_string()),
+                        span: Span::new(start, i - start),
+                    });
+                }
             }
             b if b.is_ascii_digit() => {
                 let tok = lex_number(source, &mut i)?;
@@ -291,26 +299,32 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
     }
 
     // Check for float: decimal point
-    let is_float = *i < bytes.len()
+    let mut is_float = false;
+    if *i < bytes.len()
         && bytes[*i] == b'.'
-        && (*i + 1 < bytes.len() && bytes[*i + 1].is_ascii_digit());
-
-    if is_float {
+        && (*i + 1 < bytes.len() && bytes[*i + 1].is_ascii_digit())
+    {
+        is_float = true;
         *i += 1; // skip '.'
         while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
         }
-        // Exponent
-        if *i < bytes.len() && (bytes[*i] == b'e' || bytes[*i] == b'E') {
+    }
+
+    // Check for exponent (e/E) -- makes it a float even without decimal point
+    if *i < bytes.len() && (bytes[*i] == b'e' || bytes[*i] == b'E') {
+        is_float = true;
+        *i += 1;
+        if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
             *i += 1;
-            if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
-                *i += 1;
-            }
-            while *i < bytes.len() && bytes[*i].is_ascii_digit() {
-                *i += 1;
-            }
         }
-        let text = &source[start..(*i)];
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    }
+
+    let text = &source[start..(*i)];
+    if is_float {
         let val: f64 = text.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
@@ -320,7 +334,6 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             span: Span::new(start, *i - start),
         })
     } else {
-        let text = &source[start..(*i)];
         let val: i64 = text.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
@@ -493,5 +506,26 @@ mod tests {
     #[test]
     fn unexpected_char() {
         assert!(matches!(lex("@"), Err(LexError::UnexpectedChar { .. })));
+    }
+
+    #[test]
+    fn exponent_only_floats() {
+        assert_eq!(lex_kinds("-1e-5"), vec![TokenKind::Float(-1e-5)]);
+        assert_eq!(lex_kinds("1e10"), vec![TokenKind::Float(1e10)]);
+        assert_eq!(lex_kinds("5E3"), vec![TokenKind::Float(5e3)]);
+    }
+
+    #[test]
+    fn bare_colon_is_symbol() {
+        assert_eq!(
+            lex_kinds("(: 42 i32)"),
+            vec![
+                TokenKind::LParen,
+                TokenKind::Symbol(":".into()),
+                TokenKind::Int(42),
+                TokenKind::Symbol("i32".into()),
+                TokenKind::RParen,
+            ]
+        );
     }
 }
