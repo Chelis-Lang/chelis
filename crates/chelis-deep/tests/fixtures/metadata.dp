@@ -1,2 +1,2 @@
 (def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))} square
-  (fn {} (params x) (app {} (var {} mul) (var {} x) (var {} x))))
+  (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))

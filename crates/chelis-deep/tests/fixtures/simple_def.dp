@@ -1,1 +1,1 @@
-(def {} square (fn {} (params x) (app {} (var {} mul) (var {} x) (var {} x))))
+(def {} square (fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x))))

@@ -20,7 +20,7 @@ chelis build app.ch            # compile Surf → Deep → IR → target
 chelis deep app.ch             # emit Deep form (desugar only)
 chelis surf program.dp       # decompile Deep → Surf (best-effort)
 chelis check app.ch            # type-check, return graded feedback
-chelis repl                    # interactive mode (accepts both Surf and Deep)
+chelis tide                    # interactive mode (accepts both Surf and Deep)
 ```
 
 **Ecosystem nomenclature (turtle/ocean themed):**
@@ -39,7 +39,7 @@ Modern functional. Not "Scala 3 syntax" — draws from the ML family broadly: F#
 - **One obvious way to write anything.** Minimize syntactic ambiguity. AI agents generating Surf should converge on the same form.
 - **Types at boundaries, inference within.** Function signatures are explicitly typed. Local bindings are inferred.
 - **Left-to-right data flow.** Pipes (`|>`) are the primary composition mechanism. Tensor pipelines read naturally.
-- **No escape hatches.** No mutation, no loops, no imperative blocks. Recursion, higher-order functions, and the three concurrency primitives (`par`, `stream`, `scatter`) are the only control flow.
+- **No escape hatches.** No mutation, no loops, no imperative blocks. Recursion, higher-order functions, and DAG-implicit parallelism (plus `par`) are the only control flow.
 
 ### Surf Syntax Examples
 
@@ -62,7 +62,7 @@ def transformer_block(
   |> layer_norm(params.norm1)
   |> multi_head_attention(params.attn)
   |> add(residual)
-  |> feed_forward(params.ff, residual=_)
+  |> fn v -> feed_forward(params.ff, v)
 
 -- Pattern matching
 def step(opt: Optimizer, grads: Gradients): Params =
@@ -73,7 +73,7 @@ def step(opt: Optimizer, grads: Gradients): Params =
 -- Anonymous functions
 let scale = fn x, factor -> x * factor
 
--- Pipes with partial application
+-- Pipes with lambdas (no partial application syntax)
 data |> map(fn x -> x |> normalize |> augment) |> batch(32)
 ```
 
@@ -109,45 +109,53 @@ Every Deep expression is a tagged s-expression: `(tag metadata ...children)`.
 Metadata is a property list carrying: source location (for decompilation to Surf), inferred type (after type checking), effects (after effect inference), linearity status. Metadata is optional during construction and filled in by compiler passes.
 
 ```lisp
-;; Module
-(module MyModel
-  (type Optimizer
-    (variant Adam (record (lr f32) (betas (tuple f32 f32)) (eps f32)))
-    (variant SGD  (record (lr f32) (momentum f32))))
+;; Module (post-sprint Deep: every node is (tag {} children...))
+(module {} MyModel
+  (deftype {} Optimizer ()
+    (variant {} Adam
+      (field {} lr (t-prim {} f32))
+      (field {} betas (t-tuple {} (t-prim {} f32) (t-prim {} f32)))
+      (field {} eps (t-prim {} f32)))
+    (variant {} SGD
+      (field {} lr (t-prim {} f32))
+      (field {} momentum (t-prim {} f32))))
 
   ;; Function with type signature
-  (def transformer_block
-    (sig (-> (tensor (dim batch) (dim seq) (dim dim_) bf16)
-             BlockParams
-             (tensor (dim batch) (dim seq) (dim dim_) bf16)))
-    (fn (x params)
-      (let ((residual x))
-        (pipe x
-          (layer_norm (field params norm1))
-          (multi_head_attention (field params attn))
-          (add residual)
-          (feed_forward (field params ff))))))
+  (defsig {} transformer_block
+    (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} seq) (d-name {} dim_) (t-prim {} bf16))
+             (t-adt {} BlockParams)
+             (t-tensor {} (d-name {} batch) (d-name {} seq) (d-name {} dim_) (t-prim {} bf16))))
+  (def {} transformer_block
+    (fn {} (params x params)
+      (let {} (bind residual (var {} x))
+        (pipe {} (var {} x)
+          (fn {} (params v) (app {} (var {} layer_norm) (var {} v) (access {} (var {} params) norm1)))
+          (fn {} (params v) (app {} (var {} multi_head_attention) (var {} v) (access {} (var {} params) attn)))
+          (fn {} (params v) (app {} (var {} add) (var {} v) (var {} residual)))
+          (fn {} (params v) (app {} (var {} feed_forward) (var {} v) (access {} (var {} params) ff)))))))
 
   ;; Pattern match
-  (def step
-    (sig (-> Optimizer Gradients Params))
-    (fn (opt grads)
-      (match opt
-        ((Adam (record lr betas eps))
-         (adam_update lr betas eps grads))
-        ((SGD (record lr momentum))
-         (sgd_update lr momentum grads))))))
+  (defsig {} step (t-fn {} (t-adt {} Optimizer) (t-adt {} Gradients) (t-adt {} Params)))
+  (def {} step
+    (fn {} (params opt grads)
+      (match {} (var {} opt)
+        (arm {} (pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} betas (pat-var {} betas)) (kv {} eps (pat-var {} eps)))
+          ()
+          (app {} (var {} adam_update) (var {} lr) (var {} betas) (var {} eps) (var {} grads)))
+        (arm {} (pat-record {} SGD (kv {} lr (pat-var {} lr)) (kv {} momentum (pat-var {} momentum)))
+          ()
+          (app {} (var {} sgd_update) (var {} lr) (var {} momentum) (var {} grads)))))))
 ```
 
 ### Key Design Choices
 
 **Types in Deep.** Types are explicit s-expressions. `(tensor (dim batch) (dim seq) f32)` not inferred shorthand. The Deep form is fully annotated after type checking — every subexpression carries its type in metadata.
 
-**Effects in Deep.** After effect inference, functions carry effect annotations: `(fn/eff (Diff Random) (x) ...)`. This makes effects visible and manipulable in Deep, which is critical for AI agents reasoning about what a function does.
+**Effects in Deep (Phase 2).** Reserved metadata key `eff`. Not implemented in Phase 0 — all functions are pure. Phase 2 will add effect annotations.
 
-**Linear types in Deep.** Linear bindings are marked: `(let-linear ((x (alloc (shape 32 64) f32))) ...)`. Borrows are explicit: `(borrow x (fn (x-ref) ...))`.
+**Linear types in Deep (Phase 2).** Reserved metadata key `lin`. Not implemented in Phase 0 — all values are freely copyable. Phase 2 will add linearity tracking.
 
-**Pipe desugaring.** `(pipe x f g h)` desugars to `(h (g (f x)))` in Deep. The pipe is sugar even in Deep — but a canonical form that tools can depend on.
+**Pipe is first-class.** `(pipe {} x f g h)` is a structural Deep node, NOT sugar. It is preserved in the DAG and optimized by the compiler. Pipelines are the primary composition mechanism for tensor operations.
 
 **No ambiguity.** Every Deep program has exactly one parse. No operator precedence, no implicit conversions, no syntactic shortcuts. This is what makes Deep a low-entropy generation target for AI.
 
@@ -295,15 +303,15 @@ These are additive — the C/GPU backend remains the primary path. StableHLO and
 ```
 POST /compile
 {
-  "source": "(def f (fn (x) (add x 1)))",
-  "format": "core",
+  "source": "(def {} f (fn {} (params x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
+  "format": "deep",
   "return": ["typed_ast", "fitness_score", "suggestions"]
 }
 
 → {
   "valid": true,
   "score": 1.0,
-  "typed_ast": "(def f (sig (-> int32 int32)) (fn (x) (add x 1)))",
+  "typed_ast": "(def {type: (t-fn {} (t-prim {} int64) (t-prim {} int64))} f (fn {} (params x) (app {} (var {} add) (var {} x) (lit {type: (t-prim {} int64)} 1))))",
   "effects": [],
   "suggestions": []
 }
@@ -374,7 +382,7 @@ Endpoints:
 | **Surf family** | Modern functional (ML-family: ADTs, pipes, matching, inference) |
 | **Deep family** | Typed s-expressions with metadata (Racket/Elixir-influenced) |
 | **Macro system** | Hygienic, type-aware, operating on Deep s-expressions |
-| **Type system v1** | ADTs + HM inference + precision types + named dims + effects (Diff, Random, Resource) + linear types for tensors |
+| **Type system v1** | ADTs + HM inference + precision types + named dims. Effects and linear types reserved for Phase 2. |
 | **Compiler role** | Fitness function for AI. Graded feedback, repair suggestions, partial inference. |
 | **Programs as data** | Homoiconic Deep AST + quote/unquote + type checker as library. Enables evolution, NAS, neurosymbolic — doesn't prescribe. |
 | **RISC primitives** | ~12 tensor ops (tinygrad-style). Composition is the only complexity. |

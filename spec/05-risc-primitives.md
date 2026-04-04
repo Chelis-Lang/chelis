@@ -109,10 +109,9 @@ These are convenience functions emitted by the desugarer. The compiler lowers th
 | Name | Lowering to RISC |
 |---|---|
 | `sub(a, b)` | `add(a, neg(b))` |
-| `div(a, b)` | `mul(a, recip(b))` where `recip(x) = const(1.0) / x` via `exp(neg(log(x)))` or specialized |
-| `neg(x)` | `mul(x, const(-1.0))` or the RISC `neg` directly (neg IS a RISC primitive) |
+| `div(a, b)` | `mul(a, recip(b))` where `recip(x) = exp(neg(log(x)))` or specialized |
 
-Note: `neg` appears in both tiers. It is a RISC primitive AND a Tier 2 name. They are the same function. Listed in Tier 2 for completeness of the operator mapping.
+Note: `neg` is a Tier 1 RISC primitive (see §2). `recip` is a lowering-only helper — it is NOT a RISC primitive or a Tier 2 built-in. It decomposes to `exp(neg(log(x)))` or is pattern-matched by backends for efficiency.
 
 ### 3.2 Comparison
 
@@ -142,6 +141,20 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | `softmax(x, axis)` | See §4.2 |
 | `linear(x, w, b)` | `add(matmul(x, w), b)` (with appropriate expand on b) |
 | `cross_entropy(logits, labels)` | See §4.3 |
+| `min_elem(a, b)` | `neg(max_elem(neg(a), neg(b)))` |
+
+### 3.5 Lowering Helpers (NOT Tier 1 or Tier 2)
+
+The following names appear in lowering narratives (§4) as pseudocode or pattern-matched operations. They are NOT RISC primitives and NOT Tier 2 built-ins. They decompose into Tier 1 primitives:
+
+| Helper | Status | Decomposes to |
+|---|---|---|
+| `recip(x)` | Lowering helper | `exp(neg(log(x)))` or backend-optimized |
+| `cos(x)` | Lowering helper | `sin(add(x, const(π/2)))` |
+| `argmax(x, axis)` | Lowering helper | comparison chain via `cmplt` + `max_elem` |
+| `gather(x, idx, axis)` | Lowering helper | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
+| `im2col(x, kh, kw, ...)` | Lowering helper | `stride`, `pad`, `reshape`, `permute` |
+| `where(cond, a, b)` | Lowering helper | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
 
 ---
 

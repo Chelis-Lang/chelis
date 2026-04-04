@@ -1,7 +1,7 @@
 (deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
 
 (def {} unwrap_or
-  (fn {} (params opt default)
+  (fn {} (params {} opt default)
     (match {} (var {} opt)
       (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x))
       (arm {} (pat-var {} None) () (var {} default)))))

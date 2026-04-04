@@ -144,11 +144,11 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `params` | `(params p₁ p₂ ...)` | Parameter list; each pᵢ is a bare name or `(name {type: t})` |
-| `bind` | `(bind name₁ expr₁ name₂ expr₂ ...)` | Binding pairs for `let` |
+| `params` | `(params {} p₁ p₂ ...)` | Parameter list; each pᵢ is a bare name or `(name {type: t})` |
+| `bind` | `(bind {} name₁ expr₁ name₂ expr₂ ...)` | Binding pairs for `let` |
 | `kv` | `(kv {} key value)` | Key-value pair for records |
 
-**Note:** `params` and `bind` do NOT carry `{}` metadata themselves (they are structural helpers, not expression nodes). Names inside them are bare identifiers, not `(var ...)` wrapped.
+**Note:** `params` and `bind` follow the universal 3-tuple rule: `(params {} x y)`, `(bind {} name₁ expr₁ ...)`. Names inside them are bare identifiers, not `(var ...)` wrapped.
 
 ### 2.10 Tag Count Summary
 

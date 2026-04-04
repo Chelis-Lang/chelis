@@ -118,11 +118,9 @@ fn desugar_fun_def(
     // If type annotations exist, emit defsig first then def
     // For Phase 0, combine into single def with fn
 
-    // Build params helper (no tag/meta — structural helper)
+    // Build params node (3-tuple: params {} name1 name2 ...)
     let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
-    let mut params_elements = vec![sym("params")];
-    params_elements.extend(param_names);
-    let params_node = bare_list(params_elements);
+    let params_node = node("params", param_names);
 
     let fn_node = node("fn", vec![params_node, desugar_expr(body)]);
 
@@ -242,19 +240,18 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
 
         Expr::Let(bindings, body, _) => {
             // (let {} (bind name1 expr1 name2 expr2 ...) body)
-            let mut bind_elements = vec![sym("bind")];
+            let mut bind_children = Vec::new();
             for b in bindings {
-                bind_elements.push(sym(&b.name));
-                bind_elements.push(desugar_expr(&b.value));
+                bind_children.push(sym(&b.name));
+                bind_children.push(desugar_expr(&b.value));
             }
-            let bind_node = bare_list(bind_elements);
+            let bind_node = node("bind", bind_children);
             node("let", vec![bind_node, desugar_expr(body)])
         }
 
         Expr::Lambda(params, body, _) => {
-            let mut params_elements = vec![sym("params")];
-            params_elements.extend(params.iter().map(|p| sym(&p.name)));
-            let params_node = bare_list(params_elements);
+            let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
+            let params_node = node("params", param_names);
             node("fn", vec![params_node, desugar_expr(body)])
         }
 
@@ -633,7 +630,7 @@ mod tests {
         );
         let result = print_expr(&desugar_expr(&expr));
         assert!(result.contains("(let {}"));
-        assert!(result.contains("(bind x"));
+        assert!(result.contains("(bind {} x"));
         assert!(result.contains("(var {} x)"));
     }
 
@@ -644,7 +641,7 @@ mod tests {
         let expr = Expr::Lambda(vec![param("x", None)], Box::new(tvar("x")), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(fn {} (params x) (var {} x))"
+            "(fn {} (params {} x) (var {} x))"
         );
     }
 
@@ -660,7 +657,7 @@ mod tests {
             span: s(),
         };
         let result = print_expr(&desugar_decl(&decl));
-        assert_eq!(result, "(def {} f (fn {} (params x) (var {} x)))");
+        assert_eq!(result, "(def {} f (fn {} (params {} x) (var {} x)))");
     }
 
     // --- Transforms (tags, not app) ---
