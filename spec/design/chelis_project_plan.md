@@ -323,7 +323,7 @@ The Deep parser can parse the MNIST example in `.dp` format and round-trip it pe
    - Type annotations: pushed into metadata `{type: ...}` on the annotated node
    - Function defs: `def f(x: T): U = body` → `(defsig {} f (t-fn {} T' U'))` then `(def {} f (fn {} (params {} x) body'))`
    - Let bindings: `let x = e in body` → `(let {} (bind {} x e') body')`
-   - Variables: `x` → `(var {} x)`, literals: `42` → `(lit {type: (t-prim {} int64)} 42)`
+   - Variables: `x` → `(var {} x)`, literals: `42` → `(lit {type: (t-prim {} int32)} 42)`
 
 ### Test Strategy
 - **Parse tests:** Each Surf construct parses to the expected Surf AST.
@@ -759,33 +759,20 @@ These can be worked on immediately, in parallel with Phase 0 coding. They don't 
 | **Surf module system** | spec/02 §modules. Namespacing, imports, exports, visibility. Simple for v1. | Phase 0c | **MEDIUM** |
 | **Named dimension declaration syntax** | spec/02 §dimensions. Module-level? Per-function? Both? How do dimensions scope? | Phase 0c, 0d | **MEDIUM** |
 
-### Design Decisions Still Open
+### Design Decisions (Resolved by Design Sprint)
 
-These need to be resolved before the corresponding phase. Ranked by urgency.
+All of the following were resolved by the design sprint and steering memo. See `spec/03-deep-syntax.md` and `spec/design/chelis_steering_memo.md` for authoritative answers.
 
-**Must resolve before Phase 0 coding begins:**
+1. **Deep tag vocabulary** — 53-tag closed vocabulary. See spec/03-deep-syntax.md §2.
+2. **Deep metadata format** — Universal 3-tuple: `(tag {} children...)`. Metadata `{}` is always element[1]. See spec/03-deep-syntax.md §1.
+3. **Tensor type syntax** — `(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))`. Precision always last. Wildcard: `(d-name {} *)`. See spec/04-type-system.md.
+4. **Pipe semantics** — `pipe` is a first-class Deep node, NOT sugar. `(pipe {} x f g)` is preserved structurally. Each stage must be a function/lambda.
+5. **Integer literal default** — `int32` (not int64). See steering memo.
+6. **Effects/linearity** — Phase 2 reservations. Metadata keys `eff`/`lin` reserved. Phase 0 ignores them.
+7. **Concurrency** — DAG-implicit parallelism + `par` only. `stream`/`scatter` deferred.
+8. **Compiler language** — Rust (settled).
 
-1. **Deep tag vocabulary.** What are the exact tags in the s-expression language? The spec has examples (`def`, `fn`, `sig`, `let`, `match`, `pipe`, `module`, `type`, `variant`, `record`, `field`, `tensor`, `dim`) but no exhaustive list. This is the vocabulary an AI agent generates from — it must be precise and complete.
-
-2. **Deep metadata format.** The spec says "metadata is a property list" but doesn't specify the format. Is it `(def ^{:type (-> int32 int32)} f ...)` (Clojure-style reader metadata)? Is it `(def (meta :type (-> int32 int32)) f ...)` (explicit meta node)? Or is metadata implicit and only filled in by compiler passes, never written by hand? This affects both the parser and the AI generation interface.
-
-3. **Tensor type syntax in Deep.** Currently `(tensor (dim batch) (dim seq) f32)`. Is precision always last? Can dimensions be unnamed? What about rank-only types `(tensor 3 f32)` for "any 3D f32 tensor"? What about wildcard dimensions `(tensor * * f32)`?
-
-4. **How `pipe` desugars.** The spec says `(pipe x f g h)` desugars to `(h (g (f x)))`. But are `f`, `g`, `h` function names? Partial applications? What if `f` takes two arguments and the pipe supplies the first? Need precise semantics for the pipe in Deep.
-
-**Should resolve before Phase 1:**
-
-5. **Fusion rules.** Which RISC DAG patterns can fuse? This is partly an implementation concern but partly a language semantics question (does fusion change observable behavior? It shouldn't, but precision changes might).
-
-6. **GPU memory model.** How does the language model GPU memory? Is it an effect (`Resource(GPU(0))`)? An annotation? Invisible? This affects both the type system (Phase 2a) and the GPU backend (Phase 1).
-
-**Should resolve before Phase 2:**
-
-7. **Effect handler syntax.** How do you handle effects in Surf? `handle Diff with grad { ... }`? `with_grad { ... }`? Something else? How does it look in Deep?
-
-8. **Borrow syntax.** How does borrowing appear in Surf? `&x`? `borrow x`? How in Deep? `(borrow x ...)` or `(& x)`?
-
-9. **Custom effects.** Can users define their own effects? If so, how? If not, is the effect system extensible later?
+**Still open for Phase 1+:** Fusion rules, GPU memory model, effect handler syntax, borrow syntax, custom effects.
 
 ### Recommended Design Sprint
 

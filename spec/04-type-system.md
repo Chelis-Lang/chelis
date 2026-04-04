@@ -38,8 +38,8 @@ Last child is the return type. All preceding children are argument types. Multi-
 
 ;; g : tensor[batch, hidden, f32] -> tensor[batch, hidden, f32]
 (t-fn {}
-  (t-tensor {} (d-var {} batch) (d-var {} hidden) (t-prim {} f32))
-  (t-tensor {} (d-var {} batch) (d-var {} hidden) (t-prim {} f32)))
+  (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))
+  (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32)))
 ```
 
 ### 1.3 Tensor Types

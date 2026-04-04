@@ -435,51 +435,29 @@ mod tests {
 
     #[test]
     fn parse_nested_lists() {
-        let exprs = p("(def f (sig (-> f32 f32)) (fn (x) x))");
+        // Post-sprint canonical form: (def {} f (fn {} (params {} x) (var {} x)))
+        let exprs = p("(def {} f (fn {} (params {} x) (var {} x)))");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 4);
-                // element 0: symbol "def"
+                assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
                 match &list.elements[0] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
                     other => panic!("expected Symbol(def), got {:?}", other),
                 }
-                // element 1: symbol "f"
                 match &list.elements[1] {
+                    Expr::Map(m, _) => assert!(m.entries.is_empty()),
+                    other => panic!("expected empty Map, got {:?}", other),
+                }
+                match &list.elements[2] {
                     Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
-                // element 2: (sig (-> f32 f32))
-                match &list.elements[2] {
-                    Expr::List(inner, _) => {
-                        assert_eq!(inner.elements.len(), 2);
-                        match &inner.elements[0] {
-                            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "sig"),
-                            other => panic!("expected Symbol(sig), got {:?}", other),
-                        }
-                        match &inner.elements[1] {
-                            Expr::List(arrow, _) => {
-                                assert_eq!(arrow.elements.len(), 3);
-                                match &arrow.elements[0] {
-                                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "->"),
-                                    other => panic!("expected Symbol(->), got {:?}", other),
-                                }
-                            }
-                            other => panic!("expected arrow list, got {:?}", other),
-                        }
-                    }
-                    other => panic!("expected sig list, got {:?}", other),
-                }
-                // element 3: (fn (x) x)
                 match &list.elements[3] {
-                    Expr::List(inner, _) => {
-                        assert_eq!(inner.elements.len(), 3);
-                        match &inner.elements[0] {
-                            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
-                            other => panic!("expected Symbol(fn), got {:?}", other),
-                        }
-                    }
+                    Expr::List(func, _) => match &func.elements[0] {
+                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                        other => panic!("expected Symbol(fn), got {:?}", other),
+                    },
                     other => panic!("expected fn list, got {:?}", other),
                 }
             }

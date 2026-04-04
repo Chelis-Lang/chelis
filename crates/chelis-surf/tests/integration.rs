@@ -134,6 +134,19 @@ fn dim_params_produce_d_var() {
     );
 }
 
+// === Wildcard dimension ===
+
+#[test]
+fn wildcard_dimension_desugars_to_d_name_star() {
+    let decls = surf_parse("def f(x: tensor[*, f32]): tensor[*, f32] = x").unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(d-name {} *)"),
+        "expected (d-name {{}} *) for wildcard dim, got:\n{text}"
+    );
+}
+
 // === Specific output shape checks ===
 
 #[test]
