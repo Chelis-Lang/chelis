@@ -7,3 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-deep.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+proptest = "1"

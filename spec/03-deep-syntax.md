@@ -52,19 +52,25 @@ BOOL     = 'true' | 'false'
 
 ### 2.3 Lists
 
-A list is a parenthesized sequence of expressions. The first element is always a symbol called the **tag**. The tag determines how the rest of the list is interpreted.
+A list is a parenthesized sequence of expressions. The first element is a symbol that determines how the rest of the list is interpreted. If the first element is a **tag** from the tag vocabulary (Section 3), the list is a special form. Otherwise, the list is a function application where the first element is the function and the remaining elements are arguments.
 
 ```
-(def square (sig (-> f32 f32)) (fn (x) (apply mul x x)))
+(def square (sig (-> f32 f32)) (fn (x) (mul x x)))
 ```
 
-Here `def` is the tag, and the remaining three elements are the name, signature, and body.
+Here `def` is a tag, and the remaining three elements are the name, signature, and body.
+
+```
+(mul x x)
+```
+
+Here `mul` is not a tag -- it is a function in head position, so this is a function call.
 
 ---
 
 ## 3. Tag Vocabulary
 
-This section defines every valid tag in Deep syntax. This is a closed set: any list whose tag is not in this vocabulary is invalid.
+This section defines every valid tag in Deep syntax. This is a closed set of special forms. Any list whose first element is not in this vocabulary is interpreted as a function application.
 
 ### 3.1 Definitions
 
@@ -82,7 +88,7 @@ Example:
 ```
 (def square
   (sig (-> f32 f32))
-  (fn (x) (apply mul x x)))
+  (fn (x) (mul x x)))
 ```
 
 #### `let` -- Let Binding
@@ -97,8 +103,8 @@ Example:
 
 Example:
 ```
-(let ((y (apply mul x x))
-      (z (apply add y 1.0)))
+(let ((y (mul x x))
+      (z (add y 1.0)))
   z)
 ```
 
@@ -158,29 +164,27 @@ Example:
 
 Parameters may carry type annotations via metadata:
 ```
-(fn (^{:type f32} x  ^{:type f32} y) (apply add x y))
+(fn (^{:type f32} x  ^{:type f32} y) (add x y))
 ```
 
 Example:
 ```
-(fn (x y) (apply add x y))
+(fn (x y) (add x y))
 ```
 
-#### `apply` -- Function Application
+#### Function Application (Lisp-style)
 
 ```
-(apply f arg1 arg2 ...)
+(f arg1 arg2 ...)
 ```
 
-- `f`: The function expression.
-- Remaining elements: arguments.
-
-All function calls in Deep are explicit `apply` forms. There is no implicit application by juxtaposition (that's a Surf convenience).
+Function application in Deep is just a list where the first element is the function. There is no special `apply` tag. Any symbol or expression in head position is called as a function with the remaining elements as arguments.
 
 Example:
 ```
-(apply add 1 2)
-(apply my_function x y z)
+(add 1 2)
+(my_function x y z)
+(mul x x)
 ```
 
 #### `if` -- Conditional
@@ -193,7 +197,7 @@ Example:
 
 Example:
 ```
-(if (apply gt x 0) x (apply neg x))
+(if (gt x 0) x (neg x))
 ```
 
 #### `match` -- Pattern Matching
@@ -233,7 +237,7 @@ Example:
 
 Semantically equivalent to nested application:
 ```
-(pipe x f g h)  ===  (apply h (apply g (apply f x)))
+(pipe x f g h)  ===  (h (g (f x)))
 ```
 
 Example:
@@ -252,7 +256,7 @@ Example:
 Example:
 ```
 (: 42 i32)
-(: x (tensor (batch hidden) f32))
+(: x (tensor (dim batch) (dim hidden) f32))
 ```
 
 #### `tuple` -- Tuple Construction
@@ -266,7 +270,7 @@ Example:
 Example:
 ```
 (tuple 1 2 3)
-(tuple (apply f x) (apply g y))
+(tuple (f x) (g y))
 ```
 
 ### 3.3 Tensor Operations
@@ -298,7 +302,7 @@ Example:
 Example:
 ```
 (cast x f64)
-(cast (apply add a b) bf16)
+(cast (add a b) bf16)
 ```
 
 ### 3.4 Transformations
@@ -314,8 +318,8 @@ Example:
 
 Example:
 ```
-(grad (fn (x) (apply mul x x)))
-(def loss_grad (sig (-> (tensor (n) f32) (tensor (n) f32))) (grad loss_fn))
+(grad (fn (x) (mul x x)))
+(def loss_grad (sig (-> (tensor (dim n) f32) (tensor (dim n) f32))) (grad loss_fn))
 ```
 
 #### `vmap` -- Vectorized Map
@@ -331,7 +335,7 @@ Example:
 Example:
 ```
 (vmap normalize :axis 0)
-(apply (vmap process :axis 0) batch_data)
+((vmap process :axis 0) batch_data)
 ```
 
 #### `jit` -- JIT Compilation Marker
@@ -344,7 +348,7 @@ Example:
 
 Example:
 ```
-(jit (fn (x) (apply matmul w x)))
+(jit (fn (x) (matmul w x)))
 ```
 
 ### 3.5 Signature and Type Expressions
@@ -364,27 +368,27 @@ A wrapper used within `def` to hold the function's type signature. The `sig` for
 (-> arg1_type arg2_type return_type)
 ```
 
-Multi-argument function types list all argument types before the return type. The last element is always the return type.
+Multi-argument function types list all argument types before the return type. The last element is always the return type. `(-> A B C)` means "function taking A and B, returning C" in all contexts -- there is no nested/curried form.
 
 Example:
 ```
-(-> f32 f32)                                        -- f32 -> f32
-(-> (tensor (n) f32) (tensor (n) f32) f32)         -- two tensor args, scalar return
+(-> f32 f32)                                              -- f32 -> f32
+(-> (tensor (dim n) f32) (tensor (dim n) f32) f32)       -- two tensor args, scalar return
 ```
 
 #### `tensor` in type position -- Tensor Type
 
 ```
-(tensor dims precision)
+(tensor (dim d1) (dim d2) ... precision)
 ```
 
-When `tensor` appears inside a `sig`, `:`, or other type context, `dims` is a list of dimension names/sizes and `precision` is the element type.
+When `tensor` appears inside a `sig`, `:`, or other type context, each dimension is wrapped in its own `(dim name)` form. The final element is the bare precision (element type), not wrapped.
 
 Example:
 ```
-(tensor (batch hidden) f32)     -- tensor[batch, hidden, f32]
-(tensor (784) f32)              -- tensor[784, f32]
-(tensor (3 3) f64)              -- tensor[3, 3, f64]
+(tensor (dim batch) (dim hidden) f32)   -- tensor[batch, hidden, f32]
+(tensor (dim 784) f32)                  -- tensor[784, f32]
+(tensor (dim 3) (dim 3) f64)           -- tensor[3, 3, f64]
 ```
 
 #### `adt` -- ADT Type Application
@@ -399,7 +403,7 @@ Example:
 ```
 (adt Option f32)
 (adt Result f32 String)
-(adt List (tensor (n) f32))
+(adt List (tensor (dim n) f32))
 ```
 
 ---
@@ -436,13 +440,13 @@ Any Deep expression can carry metadata, written with the `^{...}` prefix:
   square
   (sig (-> f32 f32))
   (fn (^{:type f32} x)
-    ^{:type f32} (apply mul x x)))
+    ^{:type f32} (mul x x)))
 ```
 
 The metadata is attached to the form that immediately follows it. In the above:
 - The `def` form carries `:doc` and `:type` metadata.
 - The parameter `x` carries `:type` metadata.
-- The body `(apply mul x x)` carries `:type` metadata.
+- The body `(mul x x)` carries `:type` metadata.
 
 ---
 
@@ -539,7 +543,7 @@ def f(x: tensor[batch, hidden, f32]): tensor[batch, hidden, f32] = body
 
 -- Deep
 (def f
-  (sig (-> (tensor (batch hidden) f32) (tensor (batch hidden) f32)))
+  (sig (-> (tensor (dim batch) (dim hidden) f32) (tensor (dim batch) (dim hidden) f32)))
   (fn (x) <<body>>))
 ```
 
@@ -552,7 +556,7 @@ def add(x: f32, y: f32): f32 = x + y
 -- Deep
 (def add
   (sig (-> f32 f32 f32))
-  (fn (x y) (apply add x y)))
+  (fn (x y) (add x y)))
 ```
 
 A `def` with no type annotation (types will be inferred):
@@ -564,7 +568,7 @@ def double(x) = x + x
 -- Deep
 (def double
   (sig _)
-  (fn (x) (apply add x x)))
+  (fn (x) (add x x)))
 ```
 
 The `_` in the `sig` indicates that the type should be inferred.
@@ -590,7 +594,7 @@ in x + y
 -- Deep
 (let ((x <<a>>)
       (y <<b>>))
-  (apply add x y))
+  (add x y))
 ```
 
 #### Top-Level Let (without `in`)
@@ -612,22 +616,22 @@ Top-level `let` without `in` desugars to a `def` with inferred type.
 fn (x, y) -> x + y
 
 -- Deep
-(fn (x y) (apply add x y))
+(fn (x y) (add x y))
 ```
 
 #### Function Application
 
-Juxtaposition in Surf becomes explicit `apply` in Deep:
+Juxtaposition in Surf becomes a list with the function in head position in Deep:
 
 ```
 -- Surf
 f x y
 
 -- Deep
-(apply f x y)
+(f x y)
 ```
 
-Note: in Surf, `f x y` is `((f x) y)` (curried). In Deep, multi-argument application is flat: `(apply f x y)`. The desugaring collects curried applications into a single `apply`.
+Note: in Surf, `f x y` is `((f x) y)` (curried). In Deep, multi-argument application is flat: `(f x y)`. The desugaring collects curried applications into a single list.
 
 #### Pipe
 
@@ -646,7 +650,7 @@ When a pipe argument is a partial application:
 x |> f(a, _) |> g
 
 -- Deep (the partial application becomes a lambda)
-(pipe x (fn (__arg) (apply f a __arg)) g)
+(pipe x (fn (__arg) (f a __arg)) g)
 ```
 
 Note: Explicit partial application syntax is not in Chelis 0.1.0. The pipe always takes named functions or lambdas.
@@ -671,31 +675,31 @@ match expr with
 
 -- Deep
 (match <<expr>>
-  (case (Some x) (apply add x 1))
+  (case (Some x) (add x 1))
   (case None 0))
 ```
 
 #### Infix Operators
 
-All infix operators desugar to `apply` of named functions:
+All infix operators desugar to function calls with the operator in head position:
 
 ```
 -- Surf          -- Deep
-a + b            (apply add a b)
-a - b            (apply sub a b)
-a * b            (apply mul a b)
-a / b            (apply div a b)
-a % b            (apply mod a b)
-a == b           (apply eq a b)
-a != b           (apply ne a b)
-a < b            (apply lt a b)
-a > b            (apply gt a b)
-a <= b           (apply le a b)
-a >= b           (apply ge a b)
-a && b           (apply and a b)
-a || b           (apply or a b)
--a               (apply neg a)
-!a               (apply not a)
+a + b            (add a b)
+a - b            (sub a b)
+a * b            (mul a b)
+a / b            (div a b)
+a % b            (mod a b)
+a == b           (eq a b)
+a != b           (ne a b)
+a < b            (lt a b)
+a > b            (gt a b)
+a <= b           (le a b)
+a >= b           (ge a b)
+a && b           (and a b)
+a || b           (or a b)
+-a               (neg a)
+!a               (not a)
 ```
 
 #### Type Annotation
@@ -715,7 +719,7 @@ expr : Type
 tensor[1.0, 2.0, 3.0] : tensor[3, f32]
 
 -- Deep
-(: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (3) f32))
+(: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (dim 3) f32))
 ```
 
 Note: In Surf, tensor literals use `tensor[...]` for values and `tensor[..., precision]` for types. The desugaring must distinguish these by context.
@@ -757,14 +761,14 @@ Type expressions in Surf desugar to type expressions in Deep:
 ```
 -- Surf type             -- Deep type
 f32                      f32
-tensor[batch, hidden, f32]   (tensor (batch hidden) f32)
+tensor[batch, hidden, f32]   (tensor (dim batch) (dim hidden) f32)
 A -> B                   (-> A B)
-A -> B -> C              (-> A (-> B C))
+A -> B -> C              (-> A B C)
 Option f32               (adt Option f32)
 (f32, f32)               (tuple_type f32 f32)
 ```
 
-Note on function types: In the `sig` of a `def`, multi-argument functions use a flat `->`:
+Arrow types are always flat: `(-> A B C)` means "function taking A and B, returning C" in all contexts. There is no distinction between `sig` and annotation forms.
 
 ```
 -- Surf
@@ -774,17 +778,13 @@ def f(x: f32, y: f32): f32
 (sig (-> f32 f32 f32))
 ```
 
-This is distinct from curried function types in expression position:
-
 ```
 -- Surf type annotation
 f : f32 -> f32 -> f32
 
 -- Deep
-(: f (-> f32 (-> f32 f32)))
+(: f (-> f32 f32 f32))
 ```
-
-The `def` form's `sig` uses the flat convention for ergonomics; type annotations in expressions use the nested convention for precision.
 
 ---
 
@@ -797,11 +797,11 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
 ```
 (module HelloTensor
   (def main
-    (sig (-> unit (tensor (3) f32)))
+    (sig (-> unit (tensor (dim 3) f32)))
     (fn ()
-      (let ((a (: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (3) f32)))
-            (b (: (tensor (3) f32 (4.0 5.0 6.0)) (tensor (3) f32))))
-        (apply add a b)))))
+      (let ((a (: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (dim 3) f32)))
+            (b (: (tensor (3) f32 (4.0 5.0 6.0)) (tensor (dim 3) f32))))
+        (add a b)))))
 ```
 
 ### 7.2 Linear Regression with grad
@@ -809,28 +809,28 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
 ```
 (module LinearRegression
   (def predict
-    (sig (-> (tensor (features) f32) (tensor () f32) (tensor (features) f32) (tensor () f32)))
+    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32)))
     (fn (w b x)
-      (let ((wx (apply reduce_sum (apply mul w x))))
-        (apply add wx b))))
+      (let ((wx (reduce_sum (mul w x))))
+        (add wx b))))
 
   (def mse_loss
-    (sig (-> (tensor (features) f32) (tensor () f32) (tensor (features) f32) (tensor () f32) (tensor () f32)))
+    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32) (tensor f32)))
     (fn (w b x y)
-      (let ((pred (apply predict w b x))
-            (diff (apply sub pred y)))
-        (apply mul diff diff))))
+      (let ((pred (predict w b x))
+            (diff (sub pred y)))
+        (mul diff diff))))
 
   (def train_step
-    (sig (-> (tensor (features) f32) (tensor () f32) (tensor (features) f32) (tensor () f32) (tensor () f32)
-             (tuple_type (tensor (features) f32) (tensor () f32))))
+    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32) (tensor f32)
+             (tuple_type (tensor (dim features) f32) (tensor f32))))
     (fn (w b x y lr)
-      (let ((loss_fn (fn (w_ b_) (apply mse_loss w_ b_ x y)))
-            (grads (apply (grad loss_fn) w b))
-            (dw (apply fst grads))
-            (db (apply snd grads)))
-        (tuple (apply sub w (apply mul lr dw))
-               (apply sub b (apply mul lr db)))))))
+      (let ((loss_fn (fn (w_ b_) (mse_loss w_ b_ x y)))
+            (grads ((grad loss_fn) w b))
+            (dw (fst grads))
+            (db (snd grads)))
+        (tuple (sub w (mul lr dw))
+               (sub b (mul lr db)))))))
 ```
 
 ### 7.3 Simple MLP
@@ -840,26 +840,26 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
   (type Activation () ((Relu) (Tanh) (Sigmoid)))
 
   (def relu
-    (sig (-> (tensor (n) f32) (tensor (n) f32)))
+    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
     (fn (x)
-      (if (apply gt x (: (tensor (n) f32 ()) (tensor (n) f32)))
+      (if (gt x (: (tensor (dim n) f32 ()) (tensor (dim n) f32)))
         x
-        (: (tensor (n) f32 ()) (tensor (n) f32)))))
+        (: (tensor (dim n) f32 ()) (tensor (dim n) f32)))))
 
   (def linear
-    (sig (-> (tensor (out_dim in_dim) f32) (tensor (out_dim) f32) (tensor (in_dim) f32) (tensor (out_dim) f32)))
+    (sig (-> (tensor (dim out_dim) (dim in_dim) f32) (tensor (dim out_dim) f32) (tensor (dim in_dim) f32) (tensor (dim out_dim) f32)))
     (fn (w b x)
-      (apply add (apply matmul w x) b)))
+      (add (matmul w x) b)))
 
   (def mlp
-    (sig (-> (tensor (hidden input) f32) (tensor (hidden) f32)
-             (tensor (output hidden) f32) (tensor (output) f32)
-             (tensor (input) f32) (tensor (output) f32)))
+    (sig (-> (tensor (dim hidden) (dim input) f32) (tensor (dim hidden) f32)
+             (tensor (dim output) (dim hidden) f32) (tensor (dim output) f32)
+             (tensor (dim input) f32) (tensor (dim output) f32)))
     (fn (w1 b1 w2 b2 x)
       (pipe x
-        (fn (__arg) (apply linear w1 b1 __arg))
+        (fn (__arg) (linear w1 b1 __arg))
         relu
-        (fn (__arg) (apply linear w2 b2 __arg))))))
+        (fn (__arg) (linear w2 b2 __arg))))))
 ```
 
 ### 7.4 Pattern Matching on ADTs
@@ -875,7 +875,7 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
       (match s
         (case Scalar 0)
         (case (Vector n) n)
-        (case (Matrix r c) (apply mul r c)))))
+        (case (Matrix r c) (mul r c)))))
 
   (def unwrap_or
     (sig (-> (adt Option f32) f32 f32))
@@ -888,7 +888,7 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
     (sig (-> (-> a b) (adt Option a) (adt Option b)))
     (fn (f opt)
       (match opt
-        (case (Some x) (apply Some (apply f x)))
+        (case (Some x) (Some (f x)))
         (case None None)))))
 ```
 
@@ -897,40 +897,40 @@ The following are the Deep equivalents of the example programs from `02-surf-syn
 ```
 (module Pipeline
   (def normalize
-    (sig (-> (tensor (n) f32) (tensor (n) f32)))
+    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
     (fn (x)
-      (let ((mean (apply div (apply reduce_sum x) (cast n f32)))
-            (centered (apply sub x mean))
-            (variance (apply div
-                        (apply reduce_sum (apply mul centered centered))
+      (let ((mean (div (reduce_sum x) (cast n f32)))
+            (centered (sub x mean))
+            (variance (div
+                        (reduce_sum (mul centered centered))
                         (cast n f32))))
-        (apply div centered (apply sqrt variance)))))
+        (div centered (sqrt variance)))))
 
   (def softmax
-    (sig (-> (tensor (n) f32) (tensor (n) f32)))
+    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
     (fn (x)
-      (let ((max_x (apply reduce_max x))
-            (shifted (apply sub x max_x))
-            (exps (apply exp shifted)))
-        (apply div exps (apply reduce_sum exps)))))
+      (let ((max_x (reduce_max x))
+            (shifted (sub x max_x))
+            (exps (exp shifted)))
+        (div exps (reduce_sum exps)))))
 
   (def process
-    (sig (-> (tensor (features) f32) (tensor (features) f32)))
+    (sig (-> (tensor (dim features) f32) (tensor (dim features) f32)))
     (fn (x)
       (pipe x
         normalize
-        (fn (v) (apply mul v (: (tensor (features) f32 (2.0)) (tensor (features) f32))))
+        (fn (v) (mul v (: (tensor (dim features) f32 (2.0)) (tensor (dim features) f32))))
         softmax)))
 
   (def batch_process
-    (sig (-> (tensor (batch features) f32) (tensor (batch features) f32)))
+    (sig (-> (tensor (dim batch) (dim features) f32) (tensor (dim batch) (dim features) f32)))
     (fn (xs)
-      (apply (vmap process :axis 0) xs)))
+      ((vmap process :axis 0) xs)))
 
   (def fast_batch_process
-    (sig (-> (tensor (batch features) f32) (tensor (batch features) f32)))
+    (sig (-> (tensor (dim batch) (dim features) f32) (tensor (dim batch) (dim features) f32)))
     (fn (xs)
-      (apply (jit batch_process) xs))))
+      ((jit batch_process) xs))))
 ```
 
 ---
@@ -957,7 +957,7 @@ Deep uses semicolons for comments:
 ; This is a line comment in Deep
 (def square ; defines the square function
   (sig (-> f32 f32))
-  (fn (x) (apply mul x x)))
+  (fn (x) (mul x x)))
 ```
 
 Note: Surf uses `--` and `{- -}`. Deep uses `;`. This is intentional -- they are different languages with different conventions.
@@ -983,7 +983,7 @@ The following invariants hold for all valid Deep programs:
 4. **`let` always has exactly 2 children**: a bindings list and a body.
 5. **`if` always has exactly 3 children**: condition, then-branch, else-branch.
 6. **`fn` always has exactly 2 children**: parameter list and body.
-7. **`apply` has at least 2 children**: function and at least one argument.
+7. **Function application lists have at least 2 elements**: function and at least one argument.
 8. **`match` has at least 2 children**: scrutinee and at least one case.
 9. **Each `case` has exactly 2 children**: pattern and body.
 10. **`grad` has exactly 1 child**: the function to differentiate.
