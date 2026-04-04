@@ -21,6 +21,7 @@ pub enum TokenKind {
     /// Keyword without the leading `:`.
     Keyword(String),
     Bool(bool),
+    Comma,
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +86,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             b'}' => {
                 tokens.push(Token {
                     kind: TokenKind::RBrace,
+                    span: Span::new(start, 1),
+                });
+                i += 1;
+            }
+            b',' => {
+                tokens.push(Token {
+                    kind: TokenKind::Comma,
                     span: Span::new(start, 1),
                 });
                 i += 1;

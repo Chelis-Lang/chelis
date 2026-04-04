@@ -1,4 +1,4 @@
-use crate::ast::{Atom, Expr, List, MetaExpr};
+use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use crate::lexer::{self, Token, TokenKind};
 use thiserror::Error;
 
@@ -90,6 +90,7 @@ impl<'a> Parser<'a> {
 
         match &tok.kind {
             TokenKind::LParen => self.parse_list(),
+            TokenKind::LBrace => self.parse_map(),
             TokenKind::Caret => self.parse_meta_expr(),
             TokenKind::RParen => Err(ParseError::Expected {
                 expected: "expression".to_string(),
@@ -131,12 +132,17 @@ impl<'a> Parser<'a> {
         let lparen = self.advance().unwrap(); // consume '('
         let start_span = lparen.span;
 
-        // Check for empty list
+        // Check for empty list — now allowed (e.g., () as empty guard)
         if let Some(tok) = self.peek() {
             if tok.kind == TokenKind::RParen {
-                return Err(ParseError::EmptyList {
-                    offset: start_span.offset,
-                });
+                let end_span = tok.span;
+                self.advance();
+                return Ok(Expr::List(
+                    List {
+                        elements: Vec::new(),
+                    },
+                    start_span.merge(end_span),
+                ));
             }
         } else {
             return Err(ParseError::UnexpectedEof {
@@ -211,6 +217,76 @@ impl<'a> Parser<'a> {
             },
             full_span,
         ))
+    }
+
+    fn parse_map(&mut self) -> Result<Expr, ParseError> {
+        let lbrace = self.advance().unwrap(); // consume '{'
+        let start_span = lbrace.span;
+
+        // Check for empty map
+        if let Some(tok) = self.peek()
+            && tok.kind == TokenKind::RBrace
+        {
+            let end_span = tok.span;
+            self.advance();
+            return Ok(Expr::Map(MetaMap::default(), start_span.merge(end_span)));
+        }
+
+        let mut entries = Vec::new();
+        loop {
+            let tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            if tok.kind == TokenKind::RBrace {
+                let end_span = tok.span;
+                self.advance();
+                return Ok(Expr::Map(MetaMap { entries }, start_span.merge(end_span)));
+            }
+
+            // Key: a symbol
+            let key_offset = self.current_offset();
+            let key_tok = self
+                .advance()
+                .ok_or(ParseError::UnexpectedEof { offset: key_offset })?;
+            let key = match &key_tok.kind {
+                TokenKind::Symbol(s) => s.clone(),
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: "map key (symbol)".to_string(),
+                        found: format!("{:?}", other),
+                        offset: key_tok.span.offset,
+                    });
+                }
+            };
+
+            // Expect ':'
+            let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            match &colon_tok.kind {
+                TokenKind::Symbol(s) if s == ":" => {
+                    self.advance();
+                }
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: ":".to_string(),
+                        found: format!("{:?}", other),
+                        offset: colon_tok.span.offset,
+                    });
+                }
+            }
+
+            // Value: any expression
+            let value = self.parse_expr()?;
+            entries.push((key, value));
+
+            // Optional comma between entries
+            if let Some(tok) = self.peek()
+                && tok.kind == TokenKind::Comma
+            {
+                self.advance();
+            }
+        }
     }
 }
 
@@ -489,15 +565,14 @@ mod tests {
     }
 
     #[test]
-    fn error_empty_list() {
-        let result = parse_str("()");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("empty list"),
-            "expected empty list error, got: {}",
-            err
-        );
+    fn parse_empty_list_allowed() {
+        // Empty lists () are valid in the new spec (e.g., empty guard in match arms)
+        let exprs = parse_str("()").unwrap();
+        assert_eq!(exprs.len(), 1);
+        match &exprs[0] {
+            Expr::List(list, _) => assert!(list.elements.is_empty()),
+            other => panic!("expected empty list, got: {:?}", other),
+        }
     }
 
     #[test]

@@ -10,5 +10,5 @@ pub mod parser;
 pub mod printer;
 pub mod span;
 
-pub use ast::{Atom, Expr, List, MetaExpr};
+pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
 pub use span::Span;

@@ -3,7 +3,7 @@
 //! Converts `&[Expr]` into a canonical string representation as defined in
 //! the Chelis spec §5.
 
-use crate::ast::{Atom, Expr, List, MetaExpr};
+use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 
 const MAX_LINE: usize = 80;
 
@@ -37,8 +37,23 @@ impl Printer {
         match expr {
             Expr::Atom(atom, _) => Self::fmt_atom(atom),
             Expr::List(list, _) => self.fmt_list(list),
+            Expr::Map(map, _) => Self::fmt_map(map),
             Expr::MetaExpr(meta, _) => self.fmt_meta_expr(meta),
         }
+    }
+
+    fn fmt_map(map: &MetaMap) -> String {
+        if map.entries.is_empty() {
+            return "{}".to_string();
+        }
+        let mut sorted: Vec<_> = map.entries.iter().collect();
+        sorted.sort_by_key(|(k, _)| k.as_str());
+        let mut printer = Printer { indent: 0 };
+        let parts: Vec<String> = sorted
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, printer.fmt_expr(v)))
+            .collect();
+        format!("{{{}}}", parts.join(", "))
     }
 
     fn fmt_atom(atom: &Atom) -> String {

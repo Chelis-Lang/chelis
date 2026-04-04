@@ -1,4 +1,2 @@
-(def ^{:doc "Squares a number" :type (-> f32 f32)} square
-  (sig (-> f32 f32))
-  (fn (^{:type f32} x)
-    ^{:type f32} (apply mul x x)))
+(def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))} square
+  (fn {} (params x) (app {} (var {} mul) (var {} x) (var {} x))))

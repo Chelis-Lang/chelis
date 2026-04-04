@@ -1,8 +1,7 @@
-(type Option (a) ((Some a) (None)))
+(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))
 
-(def unwrap_or
-  (sig (-> (adt Option f32) f32 f32))
-  (fn (opt default)
-    (match opt
-      (case (Some x) x)
-      (case None default))))
+(def {} unwrap_or
+  (fn {} (params opt default)
+    (match {} (var {} opt)
+      (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x))
+      (arm {} (pat-var {} None) () (var {} default)))))

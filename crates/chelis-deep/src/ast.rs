@@ -5,16 +5,18 @@ use crate::span::Span;
 pub enum Expr {
     /// An atomic value (symbol, number, string, keyword, bool).
     Atom(Atom, Span),
-    /// A parenthesized list `(tag child1 child2 ...)`.
+    /// A parenthesized list `(tag {} children...)`.
     List(List, Span),
-    /// A metadata-annotated expression `^{k1 v1 ...} expr`.
+    /// An inline metadata map `{key: value, ...}` or `{}`.
+    Map(MetaMap, Span),
+    /// A metadata-annotated expression `^{k1 v1 ...} expr` (legacy, kept for compat).
     MetaExpr(MetaExpr, Span),
 }
 
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
-            Expr::Atom(_, s) | Expr::List(_, s) | Expr::MetaExpr(_, s) => *s,
+            Expr::Atom(_, s) | Expr::List(_, s) | Expr::Map(_, s) | Expr::MetaExpr(_, s) => *s,
         }
     }
 }
@@ -34,11 +36,20 @@ pub enum Atom {
 /// A parenthesized list of expressions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct List {
-    /// All elements of the list. The first element is conventionally the tag.
+    /// All elements of the list. In canonical 3-tuple form:
+    /// elements[0] is the tag, elements[1] is a Map (metadata),
+    /// elements[2..] are children.
     pub elements: Vec<Expr>,
 }
 
-/// Metadata map plus the annotated expression.
+/// Inline metadata map: `{key: value, ...}` or `{}`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MetaMap {
+    /// Key-value pairs. Keys are bare identifiers.
+    pub entries: Vec<(String, Expr)>,
+}
+
+/// Legacy metadata: `^{k1 v1 ...} expr` (prefix form).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetaExpr {
     /// Key-value pairs. Keys are keyword strings (without `:`).

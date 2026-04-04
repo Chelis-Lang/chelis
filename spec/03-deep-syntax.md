@@ -1,994 +1,435 @@
-# Chelis Language Specification: Deep Syntax (S-Expressions)
+# spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
-**Version:** 0.1.0-draft
-**Status:** Authoritative specification draft
-
----
-
-## 1. Overview
-
-Deep is the canonical s-expression syntax for Chelis programs. Every Chelis program, regardless of whether it was written in Surf or Deep, has a unique Deep representation. The compiler operates on Deep form internally.
-
-Deep serves as:
-- The input to the type checker (Check stage).
-- The output of desugaring (Desugar stage).
-- A serialization format for ASTs.
-- A target for machine-generated code (agents may emit Deep directly).
+**Status:** v0.2 (post design sprint)
+**Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
 ---
 
-## 2. Grammar
+## 1. Node Structure
 
-### 2.1 Core Grammar
-
-Every Deep expression is either an atom or a list:
-
-```ebnf
-expr     = atom | list | meta_expr
-list     = '(' tag expr* ')'
-tag      = SYMBOL
-meta_expr = '^' meta_map expr
-
-atom     = SYMBOL | INTEGER | FLOAT | STRING | KEYWORD | BOOL
-
-SYMBOL   = (letter | '_') (letter | digit | '_' | '-')*
-INTEGER  = '-'? digit+ | '0' ('x'|'X') hex_digit+ | '0' ('b'|'B') ('0'|'1')+
-FLOAT    = '-'? digit+ '.' digit+ (('e'|'E') ('+'|'-')? digit+)?
-STRING   = '"' string_char* '"'
-KEYWORD  = ':' (letter | '_') (letter | digit | '_' | '-')*
-BOOL     = 'true' | 'false'
-```
-
-### 2.2 Atoms
-
-| Atom type | Examples | Description |
-|-----------|----------|-------------|
-| Symbol | `x`, `foo_bar`, `MyType`, `add`, `mul` | Names for variables, types, functions, tags |
-| Integer | `42`, `-7`, `0xFF`, `0b1010` | Integer literals |
-| Float | `3.14`, `-1e-5`, `0.001` | Floating-point literals |
-| String | `"hello"`, `"line\n"` | UTF-8 string literals |
-| Keyword | `:axis`, `:type`, `:pure` | Named keys (used for metadata and named arguments) |
-| Bool | `true`, `false` | Boolean literals |
-
-### 2.3 Lists
-
-A list is a parenthesized sequence of expressions. The first element is a symbol that determines how the rest of the list is interpreted. If the first element is a **tag** from the tag vocabulary (Section 3), the list is a special form. Otherwise, the list is a function application where the first element is the function and the remaining elements are arguments.
+Every Deep AST node is a 3-tuple:
 
 ```
-(def square (sig (-> f32 f32)) (fn (x) (mul x x)))
+(tag {key: value, ...} child₁ child₂ ... childₙ)
 ```
 
-Here `def` is a tag, and the remaining three elements are the name, signature, and body.
+- **tag** — an identifier from the closed tag vocabulary (§2).
+- **meta** — a property map enclosed in `{}`. Always present in canonical form. Empty map is `{}`.
+- **children** — zero or more child nodes, or bare identifiers/literals inside helper tags like `params` and `bind`.
 
-```
-(mul x x)
-```
+### 1.1 Metadata
 
-Here `mul` is not a tag -- it is a function in head position, so this is a function call.
+The meta map carries compiler-relevant annotations. An agent MAY include metadata to constrain inference, or MAY write `{}` everywhere and let the compiler fill it in.
+
+**Phase 0 keys:**
+
+| Key | Value | Semantics |
+|---|---|---|
+| `type` | type-expr node | Type annotation (checked, not trusted) |
+| `loc` | `(loc file line col)` | Source location for error reporting |
+
+**Reserved for Phase 2 (parser accepts, compiler ignores with warning):**
+
+| Key | Value | Semantics |
+|---|---|---|
+| `eff` | effect-set | Algebraic effects |
+| `lin` | `once` / `borrow` / `unrestricted` | Linearity |
+| `doc` | string | Documentation |
+
+### 1.2 Rationale
+
+The universal 3-tuple means every node has identical shape. An agent constructing Deep never decides where metadata goes — it's always element two. Compared to alternatives:
+
+- Clojure reader metadata (`^{} expr`): prefix position requires lookahead during generation.
+- Explicit meta wrapper (`(meta {} expr)`): redundant nesting.
+- No metadata in `.dp` text: forces annotation into `.chb` only, making Deep text useless for constrained generation.
 
 ---
 
-## 3. Tag Vocabulary
+## 2. Tag Vocabulary
+
+The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tags are parse errors.
+
+### 2.1 Module Structure
+
+| Tag | Form | Semantics |
+|---|---|---|
+| `module` | `(module {} name decl...)` | Top-level module |
+| `import` | `(import {} path (name...))` | Selective import |
+| `import-all` | `(import-all {} path)` | Wildcard import |
+| `export` | `(export {} name...)` | Public API |
+
+### 2.2 Declarations
+
+| Tag | Form | Semantics |
+|---|---|---|
+| `def` | `(def {} name expr)` | Value/function binding |
+| `defsig` | `(defsig {} name type-expr)` | Type signature (precedes `def`) |
+| `deftype` | `(deftype {} name (type-params...) variant...)` | ADT declaration |
+| `variant` | `(variant {} Name field...)` | Sum type constructor (fields optional) |
+| `field` | `(field {} name type-expr)` | Named field in variant |
+| `defdim` | `(defdim {} name)` | Dimension name declaration |
+
+### 2.3 Expressions
+
+| Tag | Form | Semantics |
+|---|---|---|
+| `fn` | `(fn {} (params ...) body)` | Anonymous function |
+| `app` | `(app {} func arg...)` | Function application |
+| `let` | `(let {} (bind name₁ expr₁ ...) body)` | Sequential let binding |
+| `match` | `(match {} scrutinee arm...)` | Pattern match |
+| `arm` | `(arm {} pattern guard body)` | Match arm; guard is `()` if absent |
+| `if` | `(if {} cond then else)` | Conditional |
+| `var` | `(var {} name)` | Variable reference |
+| `lit` | `(lit {type: prim-type} value)` | Literal value |
+| `record` | `(record {} TypeName (kv {} k₁ v₁) ...)` | Record construction |
+| `access` | `(access {} expr field-name)` | Field access |
+| `pipe` | `(pipe {} expr₁ expr₂ ... exprₙ)` | Pipeline composition |
+| `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
+| `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
+| `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
+| `par` | `(par {} expr₁ expr₂ ...)` | Parallel evaluation (v1: sequential) |
+
+### 2.4 Patterns
+
+| Tag | Form | Semantics |
+|---|---|---|
+| `pat-var` | `(pat-var {} name)` | Bind to name |
+| `pat-lit` | `(pat-lit {} value)` | Match literal |
+| `pat-ctor` | `(pat-ctor {} CtorName pat...)` | Deconstruct variant |
+| `pat-record` | `(pat-record {} TypeName (kv {} k₁ pat₁) ...)` | Deconstruct record |
+| `pat-wild` | `(pat-wild {})` | Wildcard |
+| `pat-as` | `(pat-as {} name pattern)` | Bind name, then match |
+
+### 2.5 Type Expressions
 
-This section defines every valid tag in Deep syntax. This is a closed set of special forms. Any list whose first element is not in this vocabulary is interpreted as a function application.
+| Tag | Form | Semantics |
+|---|---|---|
+| `t-prim` | `(t-prim {} f32)` | Primitive type (f32, bf16, int32, bool, string) |
+| `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
+| `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
+| `t-adt` | `(t-adt {} Name type-arg...)` | ADT type application |
+| `t-var` | `(t-var {} name)` | Type variable |
+| `t-unit` | `(t-unit {})` | Unit type |
+| `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
 
-### 3.1 Definitions
+### 2.6 Dimension Expressions
 
-#### `def` -- Function Definition
+| Tag | Form | Semantics |
+|---|---|---|
+| `d-name` | `(d-name {} batch)` | Named dimension (concrete) |
+| `d-var` | `(d-var {} a)` | Dimension variable (polymorphic) |
+| `d-lit` | `(d-lit {} 512)` | Literal dimension size |
 
-```
-(def name sig body)
-```
-
-- `name`: Symbol. The function name.
-- `sig`: A `(sig ...)` form specifying the type signature.
-- `body`: An expression (typically a `(fn ...)` form).
-
-Example:
-```
-(def square
-  (sig (-> f32 f32))
-  (fn (x) (mul x x)))
-```
-
-#### `let` -- Let Binding
-
-```
-(let ((name1 expr1) (name2 expr2) ...) body)
-```
-
-- The first argument is a list of binding pairs. Each pair is `(name expr)`.
-- `body`: The expression in which the bindings are visible.
-- Bindings are evaluated sequentially: `name2`'s expression can refer to `name1`.
-
-Example:
-```
-(let ((y (mul x x))
-      (z (add y 1.0)))
-  z)
-```
-
-#### `type` -- ADT Definition
-
-```
-(type name (params...) ((Variant1 field_types...) (Variant2 field_types...) ...))
-```
-
-- `name`: Symbol. The type name (must start with uppercase).
-- `params`: A list of type parameter symbols.
-- The third argument is a list of variants. Each variant is a list: the constructor name followed by zero or more field types.
-
-Example:
-```
-(type Option (a) ((Some a) (None)))
-(type Shape () ((Scalar) (Vector i64) (Matrix i64 i64)))
-```
-
-#### `module` -- Module Declaration
-
-```
-(module name decl1 decl2 ...)
-```
-
-- `name`: Symbol. The module name (must start with uppercase).
-- Remaining elements are declarations (def, type, let, import).
-
-Example:
-```
-(module MyModule
-  (import OtherModule)
-  (type Foo () ((Bar) (Baz)))
-  (def main (sig (-> unit i32)) (fn () 42)))
-```
-
-#### `import` -- Import Declaration
-
-```
-(import module_name)
-(import module_name (name1 name2 ...))
-```
-
-- `module_name`: Symbol. The module to import.
-- Optional second argument: list of specific names to import.
-
-### 3.2 Expressions
-
-#### `fn` -- Lambda
-
-```
-(fn (param1 param2 ...) body)
-```
-
-- First argument: list of parameter names (symbols).
-- Second argument: body expression.
-
-Parameters may carry type annotations via metadata:
-```
-(fn (^{:type f32} x  ^{:type f32} y) (add x y))
-```
-
-Example:
-```
-(fn (x y) (add x y))
-```
-
-#### Function Application (Lisp-style)
-
-```
-(f arg1 arg2 ...)
-```
-
-Function application in Deep is just a list where the first element is the function. There is no special `apply` tag. Any symbol or expression in head position is called as a function with the remaining elements as arguments.
-
-Example:
-```
-(add 1 2)
-(my_function x y z)
-(mul x x)
-```
-
-#### `if` -- Conditional
-
-```
-(if condition then_expr else_expr)
-```
-
-- Always three arguments. There is no `if` without `else` in Deep (it's an expression language).
-
-Example:
-```
-(if (gt x 0) x (neg x))
-```
-
-#### `match` -- Pattern Matching
-
-```
-(match scrutinee
-  (case pattern1 body1)
-  (case pattern2 body2)
-  ...)
-```
+### 2.7 Transforms
 
-- `scrutinee`: The expression being matched.
-- Each `case` contains a pattern and a body expression.
+| Tag | Form | Semantics |
+|---|---|---|
+| `grad` | `(grad {} expr)` | Reverse-mode AD |
+| `vmap` | `(vmap {} expr dim)` | Vectorization |
+| `jit` | `(jit {} expr)` | Compilation trigger |
+| `realize` | `(realize {} expr)` | Force DAG evaluation |
+| `cast` | `(cast {} expr target-type)` | Precision cast |
+| `copy` | `(copy {} expr)` | Explicit tensor duplication (Phase 2: linearity) |
 
-Patterns use the following forms:
-- `symbol` -- variable binding (lowercase) or constructor (uppercase with no args)
-- `(ctor pat1 pat2 ...)` -- constructor pattern with sub-patterns
-- `_` -- wildcard
-- literal (integer, float, string, bool) -- literal pattern
-- `(tuple pat1 pat2 ...)` -- tuple pattern
+### 2.8 Metaprogramming
 
-Example:
-```
-(match opt
-  (case (Some x) x)
-  (case None default_val))
-```
-
-#### `pipe` -- Pipeline
-
-```
-(pipe expr fn1 fn2 fn3 ...)
-```
-
-- The first argument is the initial value.
-- Each subsequent argument is a function. The result of applying `fn_i` to the current value becomes the input to `fn_{i+1}`.
-
-Semantically equivalent to nested application:
-```
-(pipe x f g h)  ===  (h (g (f x)))
-```
-
-Example:
-```
-(pipe x normalize relu softmax)
-```
-
-#### `:` -- Type Annotation
-
-```
-(: expr type_expr)
-```
-
-- Annotates `expr` with the type `type_expr`. This is a hint to the type checker, not a coercion.
-
-Example:
-```
-(: 42 i32)
-(: x (tensor (dim batch) (dim hidden) f32))
-```
-
-#### `tuple` -- Tuple Construction
-
-```
-(tuple expr1 expr2 ...)
-```
-
-- Constructs a tuple of two or more values.
-
-Example:
-```
-(tuple 1 2 3)
-(tuple (f x) (g y))
-```
-
-### 3.3 Tensor Operations
-
-#### `tensor` -- Tensor Literal
-
-```
-(tensor shape precision data)
-```
+| Tag | Form | Semantics |
+|---|---|---|
+| `quote` | `(quote {} expr)` | Reify as AST data |
+| `unquote` | `(unquote {} expr)` | Splice into quoted AST |
+| `splice` | `(splice {} expr)` | Splice list into quoted AST |
 
-- `shape`: A list of dimension sizes (integers).
-- `precision`: A precision keyword (symbol: `f32`, `f64`, etc.).
-- `data`: A flat list of numeric literals, in row-major order.
+### 2.9 Helpers
 
-Example:
-```
-(tensor (3) f32 (1.0 2.0 3.0))
-(tensor (2 2) f64 (1.0 0.0 0.0 1.0))
-```
-
-#### `cast` -- Explicit Precision Cast
-
-```
-(cast expr precision)
-```
-
-- Converts `expr` to the specified precision. This is the only way to convert between numeric types.
-
-Example:
-```
-(cast x f64)
-(cast (add a b) bf16)
-```
+| Tag | Form | Semantics |
+|---|---|---|
+| `params` | `(params p₁ p₂ ...)` | Parameter list; each pᵢ is a bare name or `(name {type: t})` |
+| `bind` | `(bind name₁ expr₁ name₂ expr₂ ...)` | Binding pairs for `let` |
+| `kv` | `(kv {} key value)` | Key-value pair for records |
 
-### 3.4 Transformations
+**Note:** `params` and `bind` do NOT carry `{}` metadata themselves (they are structural helpers, not expression nodes). Names inside them are bare identifiers, not `(var ...)` wrapped.
 
-#### `grad` -- Automatic Differentiation
-
-```
-(grad f)
-```
+### 2.10 Tag Count Summary
 
-- `f`: A function expression. Must have a scalar return type.
-- Returns a new function computing the gradient of `f`.
+| Category | Count | Tags |
+|---|---|---|
+| Module | 4 | module, import, import-all, export |
+| Declarations | 6 | def, defsig, deftype, variant, field, defdim |
+| Expressions | 15 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, par |
+| Patterns | 6 | pat-var, pat-lit, pat-ctor, pat-record, pat-wild, pat-as |
+| Types | 7 | t-prim, t-fn, t-tensor, t-adt, t-var, t-unit, t-tuple |
+| Dimensions | 3 | d-name, d-var, d-lit |
+| Transforms | 6 | grad, vmap, jit, realize, cast, copy |
+| Meta | 3 | quote, unquote, splice |
+| Helpers | 3 | params, bind, kv |
+| **Total** | **53** | |
 
-Example:
-```
-(grad (fn (x) (mul x x)))
-(def loss_grad (sig (-> (tensor (dim n) f32) (tensor (dim n) f32))) (grad loss_fn))
-```
+---
 
-#### `vmap` -- Vectorized Map
+## 3. Built-In Scope
 
-```
-(vmap f :axis n)
-```
+These names are available without import. They are NOT tags — they are functions/values referenced via `(var {} name)` and called via `(app {} ...)`.
 
-- `f`: A function expression.
-- `:axis`: Keyword argument specifying which axis to vectorize over.
-- `n`: Integer, the axis index.
+### 3.1 RISC Primitives (~12 ops)
 
-Example:
-```
-(vmap normalize :axis 0)
-((vmap process :axis 0) batch_data)
-```
+The irreducible computational basis. All tensor computation decomposes to these during IR lowering.
 
-#### `jit` -- JIT Compilation Marker
+**Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
+**Reduce:** `sum`, `max_reduce` (over axis)
+**Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
+**Memory:** `const`, `load`
 
-```
-(jit f)
-```
+### 3.2 Derived Functions
 
-- `f`: A function expression. Returns a function with the same type and semantics, but marked for just-in-time compilation.
+Convenience functions that the compiler lowers to RISC primitive compositions during IR construction. The desugarer emits these; the IR pass decomposes them.
 
-Example:
-```
-(jit (fn (x) (matmul w x)))
-```
+`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`
 
-### 3.5 Signature and Type Expressions
+### 3.3 Standard Library (imported)
 
-#### `sig` -- Type Signature
+Not built-in — require `(import {} std.x ...)`:
 
-```
-(sig type_expr)
-```
+- `std.io`: `println`, `read_tensor`, `write_tensor`
+- `std.init`: `randn`, `uniform`, `zeros`, `ones`, `arange`
+- `std.nn`: `layer_norm`, `conv2d`, `embedding`, `multi_head_attention`, `cross_entropy`
 
-A wrapper used within `def` to hold the function's type signature. The `sig` form exists so that the signature is unambiguously distinguished from the body.
+---
 
-#### `->` -- Function Type
+## 4. Function Application
 
-```
-(-> arg_type return_type)
-(-> arg1_type arg2_type return_type)
-```
+### 4.1 Multi-Argument
 
-Multi-argument function types list all argument types before the return type. The last element is always the return type. `(-> A B C)` means "function taking A and B, returning C" in all contexts -- there is no nested/curried form.
+Deep uses explicit multi-argument application, not currying:
 
-Example:
+```scheme
+(app {} (var {} f) (var {} x) (var {} y) (var {} z))
 ```
-(-> f32 f32)                                              -- f32 -> f32
-(-> (tensor (dim n) f32) (tensor (dim n) f32) f32)       -- two tensor args, scalar return
-```
 
-#### `tensor` in type position -- Tensor Type
+If `f` expects 3 arguments and receives 2, this is a **type error**, not partial application.
 
-```
-(tensor (dim d1) (dim d2) ... precision)
-```
+### 4.2 Partial Application
 
-When `tensor` appears inside a `sig`, `:`, or other type context, each dimension is wrapped in its own `(dim name)` form. The final element is the bare precision (element type), not wrapped.
+Explicit closure construction:
 
-Example:
-```
-(tensor (dim batch) (dim hidden) f32)   -- tensor[batch, hidden, f32]
-(tensor (dim 784) f32)                  -- tensor[784, f32]
-(tensor (dim 3) (dim 3) f64)           -- tensor[3, 3, f64]
+```scheme
+;; f(x, _, z) where _ is the partial hole
+(fn {} (params y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
 ```
 
-#### `adt` -- ADT Type Application
+### 4.3 Operators
 
-```
-(adt Name param1 param2 ...)
-```
+All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 
-Applies a type constructor to type arguments.
+```scheme
+;; a + b
+(app {} (var {} add) (var {} a) (var {} b))
 
-Example:
-```
-(adt Option f32)
-(adt Result f32 String)
-(adt List (tensor (dim n) f32))
+;; a - b (sub is a derived built-in, lowered to add(a, neg(b)) at IR level)
+(app {} (var {} sub) (var {} a) (var {} b))
 ```
 
 ---
 
-## 4. Metadata
+## 5. Pipe Semantics
 
-### 4.1 Metadata Syntax
+`pipe` is a first-class node, not sugar for nested application:
 
-Any Deep expression can carry metadata, written with the `^{...}` prefix:
-
-```
-^{key1 val1 key2 val2 ...} expr
+```scheme
+(pipe {} expr₁ expr₂ expr₃)
 ```
 
-- Keys are **keywords** (`:type`, `:effects`, `:linear`, `:source_loc`, etc.).
-- Values are atoms or lists.
-- Metadata does not affect semantics. It is used by the compiler for type annotations, source locations, optimization hints, and debugging information.
+Evaluation: `(pipe {} e₁ e₂ e₃)` ≡ `(app {} e₃ (app {} e₂ e₁))`.
 
-### 4.2 Standard Metadata Keys
+`pipe` is preserved in Deep (not desugared to nested `app`) because: (a) it's the primary composition idiom, (b) preserving it enables better Deep → Surf round-tripping, (c) the compiler can reason about dataflow directly.
 
-| Key | Value type | Description |
-|-----|-----------|-------------|
-| `:type` | type expr | The inferred or annotated type of the expression |
-| `:effects` | list of keywords | Effect annotations (`:pure`, `:io`, `:random`) |
-| `:linear` | bool | Whether the function uses its argument exactly once |
-| `:source_loc` | `(file line col)` | Original source location for error reporting |
-| `:fitness` | float | Fitness score contribution of this node |
-| `:doc` | string | Documentation string |
+Each element after the first must be a function (or lambda). Pipes with multi-arg functions use lambdas:
 
-### 4.3 Example with Metadata
-
-```
-(def ^{:doc "Squares a number" :type (-> f32 f32)}
-  square
-  (sig (-> f32 f32))
-  (fn (^{:type f32} x)
-    ^{:type f32} (mul x x)))
-```
-
-The metadata is attached to the form that immediately follows it. In the above:
-- The `def` form carries `:doc` and `:type` metadata.
-- The parameter `x` carries `:type` metadata.
-- The body `(mul x x)` carries `:type` metadata.
-
----
-
-## 5. Canonical Form Rules
-
-Two Deep programs are semantically equivalent if and only if their canonical forms are byte-identical. The canonical form is defined by these rules:
-
-### 5.1 Whitespace
-
-- Elements within a list are separated by a single space.
-- When a list exceeds 80 characters on one line, it is broken across lines:
-  - The tag and first argument stay on the same line as the opening parenthesis.
-  - Subsequent arguments are each on their own line, indented by 2 spaces relative to the opening parenthesis.
-- No trailing whitespace on any line.
-- File ends with a single newline.
-
-### 5.2 Metadata
-
-- Metadata maps have keys in alphabetical order.
-- Metadata is on the same line as the opening paren of the form it annotates (if it fits in 80 chars), otherwise on the preceding line with the same indentation.
-
-### 5.3 Atoms
-
-- Integers: decimal form, no leading zeros (except `0` itself), no underscores.
-- Floats: always include a decimal point, no trailing zeros after the decimal except to keep at least one digit (e.g., `1.0` not `1.`, `0.5` not `.5`).
-- Strings: minimal escaping (only `\\`, `\"`, `\n`, `\t`, `\r`, `\0`).
-- Symbols: as-is (no quoting).
-- Keywords: `:` prefix, no quoting.
-
-### 5.4 Ordering
-
-- Within a `module`, declarations appear in the order: imports, types, defs/lets (preserving source order within each group).
-- Within a `let`, bindings appear in dependency order (a binding that references another comes after it).
-- Within a `type`, variants appear in source order.
-
-### 5.5 Encoding
-
-- UTF-8, no BOM.
-- Unix line endings (LF, not CRLF).
-
----
-
-## 6. Desugaring: Surf to Deep
-
-Every Surf construct has a defined, mechanical translation to Deep. The desugaring does not require type information -- it is purely syntactic.
-
-### 6.1 Complete Desugaring Table
-
-#### Module Declaration
-
-```
--- Surf
-module MyModule
-
--- Deep
-(module MyModule ...)
-```
-
-#### Import
-
-```
--- Surf
-import OtherModule
-import Foo(bar, baz)
-
--- Deep
-(import OtherModule)
-(import Foo (bar baz))
-```
-
-#### Type Definition
-
-```
--- Surf
-type Option a = Some a | None
-
--- Deep
-(type Option (a) ((Some a) (None)))
-```
-
-```
--- Surf
-type Shape = Scalar | Vector i64 | Matrix i64 i64
-
--- Deep
-(type Shape () ((Scalar) (Vector i64) (Matrix i64 i64)))
-```
-
-#### Function Definition
-
-```
--- Surf
-def f(x: tensor[batch, hidden, f32]): tensor[batch, hidden, f32] = body
-
--- Deep
-(def f
-  (sig (-> (tensor (dim batch) (dim hidden) f32) (tensor (dim batch) (dim hidden) f32)))
-  (fn (x) <<body>>))
-```
-
-A `def` with multiple parameters:
-
-```
--- Surf
-def add(x: f32, y: f32): f32 = x + y
-
--- Deep
-(def add
-  (sig (-> f32 f32 f32))
-  (fn (x y) (add x y)))
-```
-
-A `def` with no type annotation (types will be inferred):
-
-```
--- Surf
-def double(x) = x + x
-
--- Deep
-(def double
-  (sig _)
-  (fn (x) (add x x)))
-```
-
-The `_` in the `sig` indicates that the type should be inferred.
-
-#### Let Binding (with `in`)
-
-```
--- Surf
-let x = expr1 in body
-
--- Deep
-(let ((x <<expr1>>)) <<body>>)
-```
-
-Chained lets:
-
-```
--- Surf
-let x = a
-let y = b
-in x + y
-
--- Deep
-(let ((x <<a>>)
-      (y <<b>>))
-  (add x y))
-```
-
-#### Top-Level Let (without `in`)
-
-```
--- Surf
-let pi = 3.14159
-
--- Deep
-(def pi (sig _) 3.14159)
-```
-
-Top-level `let` without `in` desugars to a `def` with inferred type.
-
-#### Lambda
-
-```
--- Surf
-fn (x, y) -> x + y
-
--- Deep
-(fn (x y) (add x y))
-```
-
-#### Function Application
-
-Juxtaposition in Surf becomes a list with the function in head position in Deep:
-
-```
--- Surf
-f x y
-
--- Deep
-(f x y)
-```
-
-Note: in Surf, `f x y` is `((f x) y)` (curried). In Deep, multi-argument application is flat: `(f x y)`. The desugaring collects curried applications into a single list.
-
-#### Pipe
-
-```
--- Surf
-x |> f |> g |> h
-
--- Deep
-(pipe x f g h)
-```
-
-When a pipe argument is a partial application:
-
-```
--- Surf
-x |> f(a, _) |> g
-
--- Deep (the partial application becomes a lambda)
-(pipe x (fn (__arg) (f a __arg)) g)
-```
-
-Note: Explicit partial application syntax is not in Chelis 0.1.0. The pipe always takes named functions or lambdas.
-
-#### If/Then/Else
-
-```
--- Surf
-if cond then a else b
-
--- Deep
-(if <<cond>> <<a>> <<b>>)
-```
-
-#### Match
-
-```
--- Surf
-match expr with
-  | Some x -> x + 1
-  | None   -> 0
-
--- Deep
-(match <<expr>>
-  (case (Some x) (add x 1))
-  (case None 0))
-```
-
-#### Infix Operators
-
-All infix operators desugar to function calls with the operator in head position:
-
-```
--- Surf          -- Deep
-a + b            (add a b)
-a - b            (sub a b)
-a * b            (mul a b)
-a / b            (div a b)
-a % b            (mod a b)
-a == b           (eq a b)
-a != b           (ne a b)
-a < b            (lt a b)
-a > b            (gt a b)
-a <= b           (le a b)
-a >= b           (ge a b)
-a && b           (and a b)
-a || b           (or a b)
--a               (neg a)
-!a               (not a)
-```
-
-#### Type Annotation
-
-```
--- Surf
-expr : Type
-
--- Deep
-(: <<expr>> <<Type>>)
-```
-
-#### Tensor Literal
-
-```
--- Surf
-tensor[1.0, 2.0, 3.0] : tensor[3, f32]
-
--- Deep
-(: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (dim 3) f32))
-```
-
-Note: In Surf, tensor literals use `tensor[...]` for values and `tensor[..., precision]` for types. The desugaring must distinguish these by context.
-
-#### Cast
-
-```
--- Surf
-cast(x, f64)
-
--- Deep
-(cast x f64)
-```
-
-#### Transformations
-
-```
--- Surf              -- Deep
-grad(f)              (grad f)
-vmap(f, axis=0)      (vmap f :axis 0)
-vmap(f)              (vmap f :axis 0)       -- default axis is 0
-jit(f)               (jit f)
-```
-
-#### Tuple
-
-```
--- Surf
-(a, b, c)
-
--- Deep
-(tuple a b c)
-```
-
-### 6.2 Type Expression Desugaring
-
-Type expressions in Surf desugar to type expressions in Deep:
-
-```
--- Surf type             -- Deep type
-f32                      f32
-tensor[batch, hidden, f32]   (tensor (dim batch) (dim hidden) f32)
-A -> B                   (-> A B)
-A -> B -> C              (-> A B C)
-Option f32               (adt Option f32)
-(f32, f32)               (tuple_type f32 f32)
-```
-
-Arrow types are always flat: `(-> A B C)` means "function taking A and B, returning C" in all contexts. There is no distinction between `sig` and annotation forms.
-
-```
--- Surf
-def f(x: f32, y: f32): f32
-
--- Deep sig
-(sig (-> f32 f32 f32))
-```
-
-```
--- Surf type annotation
-f : f32 -> f32 -> f32
-
--- Deep
-(: f (-> f32 f32 f32))
+```scheme
+(pipe {} (var {} x)
+  (fn {} (params v) (app {} (var {} f) (var {} v) (var {} a)))
+  (var {} g))
 ```
 
 ---
 
-## 7. Example Programs in Deep
+## 6. Canonical Form
 
-The following are the Deep equivalents of the example programs from `02-surf-syntax.md`.
+Deep has exactly one textual representation per program.
 
-### 7.1 Hello Tensor
+### 6.1 Whitespace
+- 2-space indent per nesting level.
+- Node fits on one line if ≤ 80 characters (including indentation). Otherwise, each child starts on its own line.
+- No trailing whitespace. Single newline at EOF.
 
-```
-(module HelloTensor
-  (def main
-    (sig (-> unit (tensor (dim 3) f32)))
-    (fn ()
-      (let ((a (: (tensor (3) f32 (1.0 2.0 3.0)) (tensor (dim 3) f32)))
-            (b (: (tensor (3) f32 (4.0 5.0 6.0)) (tensor (dim 3) f32))))
-        (add a b)))))
-```
+### 6.2 Ordering
+- Module declarations: declaration order (not sorted).
+- Import names within an import: alphabetized.
+- Record `kv` pairs: alphabetized by key.
+- Match arms: declaration order (semantically meaningful).
+- Bind pairs in `let`: declaration order (sequential semantics).
 
-### 7.2 Linear Regression with grad
+### 6.3 Comments
+None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use the `doc` meta key for structured documentation.
 
-```
-(module LinearRegression
-  (def predict
-    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32)))
-    (fn (w b x)
-      (let ((wx (reduce_sum (mul w x))))
-        (add wx b))))
+### 6.4 Literal Normalization
 
-  (def mse_loss
-    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32) (tensor f32)))
-    (fn (w b x y)
-      (let ((pred (predict w b x))
-            (diff (sub pred y)))
-        (mul diff diff))))
+| Type | Canonical | Normalizations |
+|---|---|---|
+| Integer | Decimal, no leading zeros | `07` → `7` |
+| Float | `d.d` minimum | `1.` → `1.0`, `.5` → `0.5` |
+| Float (sci) | `d.dE±d` (uppercase E, explicit sign) | `1e3` → `1.0E+3` |
+| String | Double-quoted, standard escapes | |
+| Boolean | `true` / `false` | |
 
-  (def train_step
-    (sig (-> (tensor (dim features) f32) (tensor f32) (tensor (dim features) f32) (tensor f32) (tensor f32)
-             (tuple_type (tensor (dim features) f32) (tensor f32))))
-    (fn (w b x y lr)
-      (let ((loss_fn (fn (w_ b_) (mse_loss w_ b_ x y)))
-            (grads ((grad loss_fn) w b))
-            (dw (fst grads))
-            (db (snd grads)))
-        (tuple (sub w (mul lr dw))
-               (sub b (mul lr db)))))))
-```
+### 6.5 Identifier Rules
+- Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)
+- Types/variants: `[A-Z][a-zA-Z0-9]*` (PascalCase)
+- Module paths: dot-separated identifiers
 
-### 7.3 Simple MLP
+---
 
-```
-(module MLP
-  (type Activation () ((Relu) (Tanh) (Sigmoid)))
+## 7. Grammar (PEG)
 
-  (def relu
-    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
-    (fn (x)
-      (if (gt x (: (tensor (dim n) f32 ()) (tensor (dim n) f32)))
-        x
-        (: (tensor (dim n) f32 ()) (tensor (dim n) f32)))))
-
-  (def linear
-    (sig (-> (tensor (dim out_dim) (dim in_dim) f32) (tensor (dim out_dim) f32) (tensor (dim in_dim) f32) (tensor (dim out_dim) f32)))
-    (fn (w b x)
-      (add (matmul w x) b)))
-
-  (def mlp
-    (sig (-> (tensor (dim hidden) (dim input) f32) (tensor (dim hidden) f32)
-             (tensor (dim output) (dim hidden) f32) (tensor (dim output) f32)
-             (tensor (dim input) f32) (tensor (dim output) f32)))
-    (fn (w1 b1 w2 b2 x)
-      (pipe x
-        (fn (__arg) (linear w1 b1 __arg))
-        relu
-        (fn (__arg) (linear w2 b2 __arg))))))
-```
-
-### 7.4 Pattern Matching on ADTs
-
-```
-(module ADTExample
-  (type Option (a) ((Some a) (None)))
-  (type Shape () ((Scalar) (Vector i64) (Matrix i64 i64)))
-
-  (def describe_shape
-    (sig (-> (adt Shape) i64))
-    (fn (s)
-      (match s
-        (case Scalar 0)
-        (case (Vector n) n)
-        (case (Matrix r c) (mul r c)))))
-
-  (def unwrap_or
-    (sig (-> (adt Option f32) f32 f32))
-    (fn (opt default)
-      (match opt
-        (case (Some x) x)
-        (case None default))))
-
-  (def map_option
-    (sig (-> (-> a b) (adt Option a) (adt Option b)))
-    (fn (f opt)
-      (match opt
-        (case (Some x) (Some (f x)))
-        (case None None)))))
-```
-
-### 7.5 Pipe-Heavy Data Processing
-
-```
-(module Pipeline
-  (def normalize
-    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
-    (fn (x)
-      (let ((mean (div (reduce_sum x) (cast n f32)))
-            (centered (sub x mean))
-            (variance (div
-                        (reduce_sum (mul centered centered))
-                        (cast n f32))))
-        (div centered (sqrt variance)))))
-
-  (def softmax
-    (sig (-> (tensor (dim n) f32) (tensor (dim n) f32)))
-    (fn (x)
-      (let ((max_x (reduce_max x))
-            (shifted (sub x max_x))
-            (exps (exp shifted)))
-        (div exps (reduce_sum exps)))))
-
-  (def process
-    (sig (-> (tensor (dim features) f32) (tensor (dim features) f32)))
-    (fn (x)
-      (pipe x
-        normalize
-        (fn (v) (mul v (: (tensor (dim features) f32 (2.0)) (tensor (dim features) f32))))
-        softmax)))
-
-  (def batch_process
-    (sig (-> (tensor (dim batch) (dim features) f32) (tensor (dim batch) (dim features) f32)))
-    (fn (xs)
-      ((vmap process :axis 0) xs)))
-
-  (def fast_batch_process
-    (sig (-> (tensor (dim batch) (dim features) f32) (tensor (dim batch) (dim features) f32)))
-    (fn (xs)
-      ((jit batch_process) xs))))
+```peg
+Program     ← Spacing Node+ EOF
+Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
+Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
+Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
+MetaPair    ← MetaKey ':' Spacing MetaValue
+MetaKey     ← [a-z]+
+MetaValue   ← Node / Literal / Identifier / TypeName
+Children    ← (Child Spacing)*
+Child       ← Node / BareName / Literal
+BareName    ← Identifier / TypeName                # bare names only in params, bind, field contexts
+Identifier  ← [a-z_] [a-zA-Z0-9_]*
+TypeName    ← [A-Z] [a-zA-Z0-9]*
+Literal     ← FloatLit / IntLit / BoolLit / StringLit
+FloatLit    ← '-'? [0-9]+ '.' [0-9]+ ([Ee] [+-]? [0-9]+)?
+           /  '-'? [0-9]+ [Ee] [+-]? [0-9]+       # exponent without decimal
+IntLit      ← '-'? [0-9]+
+BoolLit     ← 'true' / 'false'
+StringLit   ← '"' (!'"' .)* '"'
+Spacing     ← ([ \t\n\r] / Comment)*
+Comment     ← ';' (![\n] .)*
+EOF         ← !.
 ```
 
 ---
 
-## 8. Parsing Deep
+## 8. Validation Rules
 
-### 8.1 Reader Algorithm
+### 8.1 Structural Validation (Parser)
+- Every node is a 3-tuple: `(tag meta children...)`.
+- Tag is from the closed vocabulary (§2).
+- Meta is a valid `{}` map (may be empty).
 
-Parsing Deep is straightforward because the grammar is regular (Lisp-style). The reader operates as follows:
+### 8.2 Arity Validation (Post-Parse)
+- `(if {} cond then else)` — exactly 3 children.
+- `(arm {} pattern guard body)` — exactly 3 children.
+- `(fn {} params body)` — exactly 2 children; first must be `(params ...)`.
+- `(let {} bindings body)` — exactly 2 children; first must be `(bind ...)`.
+- `(app {} func arg...)` — at least 1 child (the function).
 
-1. Skip whitespace and comments (`;` to end-of-line).
-2. If the next character is `(`, read a list: read expressions until `)`.
-3. If the next character is `^`, read metadata: read `{` key-value pairs until `}`, then read the annotated expression.
-4. If the next character is `"`, read a string literal.
-5. If the next character is `:`, read a keyword.
-6. If the next character is a digit or `-` followed by a digit, read a number.
-7. Otherwise, read a symbol.
-
-### 8.2 Comments in Deep
-
-Deep uses semicolons for comments:
-
-```
-; This is a line comment in Deep
-(def square ; defines the square function
-  (sig (-> f32 f32))
-  (fn (x) (mul x x)))
-```
-
-Note: Surf uses `--` and `{- -}`. Deep uses `;`. This is intentional -- they are different languages with different conventions.
-
-### 8.3 Error Recovery
-
-When parsing Deep, the reader should be lenient:
-- Unbalanced parentheses: report the location and attempt to recover by assuming the missing paren.
-- Unknown tags: parse the list normally and flag the unknown tag for the Check stage.
-- Malformed atoms: report and skip to the next whitespace.
-
-This leniency supports the fitness-score model: even a partially parseable Deep file should produce a useful score.
+### 8.3 Unknown Tags
+Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.
 
 ---
 
-## 9. Invariants
+## 9. Examples
 
-The following invariants hold for all valid Deep programs:
+### 9.1 Hello Tensor
 
-1. **Every list has a tag.** Empty lists `()` are not valid.
-2. **Tags are from the closed vocabulary** defined in Section 3.
-3. **`def` always has exactly 3 children**: name, sig, body.
-4. **`let` always has exactly 2 children**: a bindings list and a body.
-5. **`if` always has exactly 3 children**: condition, then-branch, else-branch.
-6. **`fn` always has exactly 2 children**: parameter list and body.
-7. **Function application lists have at least 2 elements**: function and at least one argument.
-8. **`match` has at least 2 children**: scrutinee and at least one case.
-9. **Each `case` has exactly 2 children**: pattern and body.
-10. **`grad` has exactly 1 child**: the function to differentiate.
-11. **`jit` has exactly 1 child**: the function to JIT-compile.
-12. **`vmap` has exactly 1 child and 1 keyword argument**: the function and `:axis`.
-13. **Metadata maps have an even number of elements** (alternating keys and values).
-14. **Metadata keys are keywords** (start with `:`).
-15. **The canonical form is deterministic**: `canonical(parse(canonical(ast))) == canonical(ast)`.
+```scheme
+(module {} hello_tensor
+  (import {} std.io (println))
+
+  (def {} twos
+    (app {} (var {} add)
+      (app {} (var {} const) (lit {type: (t-prim {} f32)} 1.0) (d-lit {} 2) (d-lit {} 3))
+      (app {} (var {} const) (lit {type: (t-prim {} f32)} 1.0) (d-lit {} 2) (d-lit {} 3))))
+
+  (def {} main
+    (fn {} (params)
+      (app {} (var {} println) (realize {} (var {} twos))))))
+```
+
+### 9.2 Linear Regression
+
+```scheme
+(module {} linear_regression
+  (defdim {} features)
+  (defdim {} samples)
+
+  (defsig {} predict
+    (t-fn {}
+      (t-tensor {} (d-name {} features) (t-prim {} f32))
+      (t-tensor {} (d-name {} features) (t-prim {} f32))
+      (t-tensor {} (d-name {} samples) (d-name {} features) (t-prim {} f32))
+      (t-tensor {} (d-name {} samples) (t-prim {} f32))))
+
+  (def {} predict
+    (fn {} (params w b x)
+      (app {} (var {} add)
+        (app {} (var {} matmul) (var {} x) (var {} w))
+        (var {} b))))
+
+  (def {} mse_loss
+    (fn {} (params y_pred y_true)
+      (let {} (bind
+        diff (app {} (var {} sub) (var {} y_pred) (var {} y_true))
+        sq   (app {} (var {} mul) (var {} diff) (var {} diff)))
+        (app {} (var {} mean) (var {} sq))))))
+```
+
+### 9.3 MLP with Pattern Matching
+
+```scheme
+(module {} mlp
+  (defdim {} batch)
+  (defdim {} input_dim)
+  (defdim {} hidden_dim)
+  (defdim {} output_dim)
+
+  (deftype {} Activation ()
+    (variant {} ReLU)
+    (variant {} Sigmoid))
+
+  (def {} activate
+    (fn {} (params act x)
+      (match {} (var {} act)
+        (arm {} (pat-ctor {} ReLU) ()
+          (app {} (var {} relu) (var {} x)))
+        (arm {} (pat-ctor {} Sigmoid) ()
+          (app {} (var {} sigmoid) (var {} x))))))
+
+  (def {} forward
+    (fn {} (params w1 b1 w2 b2 act x)
+      (pipe {} (var {} x)
+        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
+        (fn {} (params v) (app {} (var {} activate) (var {} act) (var {} v)))
+        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+```
+
+### 9.4 ADT with Record Variants
+
+```scheme
+(module {} shapes
+
+  (deftype {} Shape ()
+    (variant {} Circle
+      (field {} radius (t-prim {} f32)))
+    (variant {} Rectangle
+      (field {} width (t-prim {} f32))
+      (field {} height (t-prim {} f32))))
+
+  (def {} area
+    (fn {} (params s)
+      (match {} (var {} s)
+        (arm {} (pat-ctor {} Circle (pat-var {} r)) ()
+          (app {} (var {} mul)
+            (lit {type: (t-prim {} f32)} 3.14159)
+            (app {} (var {} mul) (var {} r) (var {} r))))
+        (arm {} (pat-ctor {} Rectangle (pat-var {} w) (pat-var {} h)) ()
+          (app {} (var {} mul) (var {} w) (var {} h)))))))
+```

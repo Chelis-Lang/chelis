@@ -169,14 +169,10 @@ fn error_unexpected_close_paren() {
 }
 
 #[test]
-fn error_empty_list() {
-    let result = parse_str("()");
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("empty list"),
-        "expected empty-list error, got: {msg}"
-    );
+fn empty_list_now_valid() {
+    // Empty lists () are valid in the new spec (e.g., empty guard)
+    let exprs = parse_str("()").unwrap();
+    assert_eq!(exprs.len(), 1);
 }
 
 #[test]

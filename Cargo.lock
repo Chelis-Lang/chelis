@@ -104,6 +104,12 @@ version = "0.1.0"
 [[package]]
 name = "chelis-surf"
 version = "0.1.0"
+dependencies = [
+ "chelis-deep",
+ "miette",
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "chelis-types"
