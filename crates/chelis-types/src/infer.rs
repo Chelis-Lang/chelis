@@ -177,6 +177,13 @@ fn infer_top_level(
             Some(n) => n.to_string(),
             None => return,
         };
+
+        // Save declared type from defsig BEFORE inferring (it may get overwritten)
+        let declared_ty = env.lookup(&name).map(|s| {
+            let s = s.clone();
+            env.instantiate(&s, vg)
+        });
+
         let body_ty = infer_expr(
             &kids[1],
             env,
@@ -187,6 +194,18 @@ fn infer_top_level(
             typed_nodes,
             total_nodes,
         );
+
+        // Enforce defsig: body must match declared signature
+        if let Some(decl_ty) = declared_ty
+            && let Err(_te) = unify(&body_ty, &decl_ty, subst)
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("def '{}' body doesn't match declared signature", name),
+                vec![],
+            ));
+        }
+
         let scheme = env.generalize(&body_ty, subst);
         env.bind(name, scheme);
     } else {
@@ -394,11 +413,11 @@ fn infer_var(
             let ty = env.instantiate(&scheme, vg);
             subst.apply(&ty)
         } else {
-            errors.push(CheckError {
-                kind: CheckErrorKind::UnboundVariable,
-                message: format!("unbound variable: {name}"),
-                suggestions: vec![],
-            });
+            errors.push(CheckError::new(
+                CheckErrorKind::UnboundVariable,
+                format!("unbound variable: {name}"),
+                vec![format!("Check spelling of '{}'", name)],
+            ));
             Type::Error
         }
     } else {
@@ -486,9 +505,52 @@ fn infer_app(
     let ret_tv = vg.fresh_type();
     let expected_fn = Type::Fn(arg_tys.clone(), Box::new(ret_tv.clone()));
 
+    const TENSOR_OPS: &[&str] = &[
+        "add",
+        "mul",
+        "sub",
+        "div",
+        "neg",
+        "exp",
+        "log",
+        "sin",
+        "sqrt",
+        "relu",
+        "sigmoid",
+        "softmax",
+        "matmul",
+        "max_elem",
+        "normalize",
+        "cmplt",
+        "eq",
+        "neq",
+        "lte",
+        "gte",
+    ];
+
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
             let result_ty = subst.apply(&ret_tv);
+
+            // Post-check: tensor ops require tensor arguments
+            if let Some(ref fname) = func_name
+                && TENSOR_OPS.contains(&fname.as_str())
+            {
+                for arg_ty in &arg_tys {
+                    let resolved = subst.apply(arg_ty);
+                    match &resolved {
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {} // OK
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("{} expects tensor arguments, got {}", fname, resolved),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+            }
 
             // Special case: comparison ops return tensor[D, bool]
             if let Some(ref fname) = func_name
@@ -530,14 +592,14 @@ fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let param_names = extract_params(&kids[0]);
+    let params = extract_params(&kids[0], vg);
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
-    for pname in &param_names {
-        let tv = vg.fresh_type();
-        fn_env.bind(pname.clone(), Scheme::mono(tv.clone()));
-        param_types.push(tv);
+    for (pname, ty_ann) in &params {
+        let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
+        fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        param_types.push(ty);
     }
 
     let body = if kids.len() > 1 {
@@ -562,23 +624,44 @@ fn infer_fn(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
-/// Extract parameter names from (params {} x1 ... xn).
-fn extract_params(expr: &deep::Expr) -> Vec<String> {
+/// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
+/// Each param can be a bare symbol or `(name {type: T})` for a typed param.
+fn extract_params(expr: &deep::Expr, vg: &mut VarGen) -> Vec<(String, Option<Type>)> {
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list);
-            if tag == Some("params") {
+            let elems = if tag == Some("params") {
                 children(list)
-                    .iter()
-                    .filter_map(|e| symbol_name(e).map(|s| s.to_string()))
-                    .collect()
             } else {
-                // Try treating all elements as param names
-                list.elements
-                    .iter()
-                    .filter_map(|e| symbol_name(e).map(|s| s.to_string()))
-                    .collect()
-            }
+                &list.elements
+            };
+            elems
+                .iter()
+                .filter_map(|e| match e {
+                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.to_string(), None)),
+                    deep::Expr::List(plist, _) => {
+                        // Typed param: (name {type: T}) — elements[0] is the name symbol,
+                        // elements[1] is the metadata map with type annotation
+                        if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) =
+                            plist.elements.first()
+                        {
+                            let mut ty_ann = None;
+                            if let Some(deep::Expr::Map(meta, _)) = plist.elements.get(1) {
+                                for (key, val) in &meta.entries {
+                                    if key == "type" {
+                                        ty_ann =
+                                            Some(deep_type_to_type(val, vg, &mut HashMap::new()));
+                                    }
+                                }
+                            }
+                            Some((name.to_string(), ty_ann))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect()
         }
         _ => vec![],
     }
@@ -667,8 +750,13 @@ fn infer_if(
     );
 
     // Condition should be bool (or tensor[D, bool])
-    // Try unifying with bool; if that fails, it might be a tensor condition
-    let _ = unify(&cond_ty, &Type::Prim(Prim::Bool), subst);
+    if let Err(_te) = unify(&cond_ty, &Type::Prim(Prim::Bool), subst) {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("if condition must be bool, got {}", subst.apply(&cond_ty)),
+            vec![],
+        ));
+    }
 
     let then_ty = infer_expr(
         &kids[1],
@@ -729,6 +817,7 @@ fn infer_match(
 
     let mut result_ty: Option<Type> = None;
     let mut covered_variants: Vec<String> = Vec::new();
+    let mut has_wildcard = false;
 
     for arm_expr in &kids[1..] {
         if let deep::Expr::List(arm_list, _) = arm_expr
@@ -746,6 +835,7 @@ fn infer_match(
                     vg,
                     subst,
                     &mut covered_variants,
+                    &mut has_wildcard,
                 );
 
                 let body_ty = infer_expr(
@@ -772,22 +862,24 @@ fn infer_match(
         }
     }
 
-    // Exhaustiveness check
-    let resolved_scrutinee = subst.apply(&scrutinee_ty);
-    if let Type::Adt(ref adt_name, _) = resolved_scrutinee
-        && let Some(all_variants) = adt_reg.variant_names(adt_name)
-    {
-        let missing: Vec<&String> = all_variants
-            .iter()
-            .filter(|v| !covered_variants.contains(v))
-            .collect();
-        if !missing.is_empty() {
-            let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-            errors.push(CheckError {
-                kind: CheckErrorKind::NonExhaustiveMatch,
-                message: format!("non-exhaustive match: missing variants {:?}", names),
-                suggestions: vec![],
-            });
+    // Exhaustiveness check (wildcard covers everything)
+    if !has_wildcard {
+        let resolved_scrutinee = subst.apply(&scrutinee_ty);
+        if let Type::Adt(ref adt_name, _) = resolved_scrutinee
+            && let Some(all_variants) = adt_reg.variant_names(adt_name)
+        {
+            let missing: Vec<&String> = all_variants
+                .iter()
+                .filter(|v| !covered_variants.contains(v))
+                .collect();
+            if !missing.is_empty() {
+                let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+                errors.push(CheckError::new(
+                    CheckErrorKind::NonExhaustiveMatch,
+                    format!("non-exhaustive match: missing variants {:?}", names),
+                    vec![],
+                ));
+            }
         }
     }
 
@@ -801,6 +893,7 @@ fn pattern_bindings(
     vg: &mut VarGen,
     subst: &mut Subst,
     covered_variants: &mut Vec<String>,
+    has_wildcard: &mut bool,
 ) {
     if let deep::Expr::List(list, _) = pat {
         let tag = get_tag(list).unwrap_or("");
@@ -813,8 +906,8 @@ fn pattern_bindings(
                 }
             }
             "pat-wild" => {
-                // Wildcard covers everything -- mark all variants if we had an ADT
-                // (conservative: treat as covering nothing specific for exhaustiveness)
+                // Wildcard covers everything
+                *has_wildcard = true;
             }
             "pat-lit" => {
                 // No bindings, but value should match scrutinee type
@@ -842,6 +935,7 @@ fn pattern_bindings(
                                             vg,
                                             subst,
                                             covered_variants,
+                                            has_wildcard,
                                         );
                                     }
                                 }
@@ -850,6 +944,48 @@ fn pattern_bindings(
                                 // Nullary constructor
                                 let _ = unify(&ctor_ty, scrutinee_ty, subst);
                             }
+                        }
+                    }
+                }
+            }
+            "pat-as" => {
+                // (pat-as {} name inner_pat): bind name to scrutinee type, recurse into inner_pat
+                if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
+                    let resolved = subst.apply(scrutinee_ty);
+                    env.bind(name.to_string(), Scheme::mono(resolved));
+                }
+                if kids.len() >= 2 {
+                    pattern_bindings(
+                        &kids[1],
+                        scrutinee_ty,
+                        env,
+                        vg,
+                        subst,
+                        covered_variants,
+                        has_wildcard,
+                    );
+                }
+            }
+            "pat-record" => {
+                // (pat-record {} TypeName (kv {} k1 p1) ...): bind each field's pattern
+                // kids[0] = TypeName, kids[1..] = (kv {} key pat)
+                for kv_expr in kids.iter().skip(1) {
+                    if let deep::Expr::List(kv_list, _) = kv_expr
+                        && get_tag(kv_list) == Some("kv")
+                    {
+                        let kv_kids = children(kv_list);
+                        if kv_kids.len() >= 2 {
+                            // Bind sub-pattern with a fresh type (field type unknown here)
+                            let field_ty = vg.fresh_type();
+                            pattern_bindings(
+                                &kv_kids[1],
+                                &field_ty,
+                                env,
+                                vg,
+                                subst,
+                                covered_variants,
+                                has_wildcard,
+                            );
                         }
                     }
                 }
@@ -973,25 +1109,25 @@ fn infer_tuple_get(
             if index < elems.len() {
                 elems[index].clone()
             } else {
-                errors.push(CheckError {
-                    kind: CheckErrorKind::TupleIndexOutOfBounds,
-                    message: format!(
+                errors.push(CheckError::new(
+                    CheckErrorKind::TupleIndexOutOfBounds,
+                    format!(
                         "tuple index {} out of bounds for tuple of size {}",
                         index,
                         elems.len()
                     ),
-                    suggestions: vec![],
-                });
+                    vec![],
+                ));
                 Type::Error
             }
         }
         Type::Error => Type::Error,
         _ => {
-            errors.push(CheckError {
-                kind: CheckErrorKind::TypeMismatch,
-                message: format!("expected tuple type, got {resolved}"),
-                suggestions: vec![],
-            });
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("expected tuple type, got {resolved}"),
+                vec![],
+            ));
             Type::Error
         }
     }
@@ -1036,11 +1172,11 @@ fn infer_cast(
         Type::Prim(_) => Type::Prim(new_prec),
         Type::Error => Type::Error,
         _ => {
-            errors.push(CheckError {
-                kind: CheckErrorKind::CastNonTensor,
-                message: format!("cast requires tensor or prim type, got {resolved}"),
-                suggestions: vec![],
-            });
+            errors.push(CheckError::new(
+                CheckErrorKind::CastNonTensor,
+                format!("cast requires tensor or prim type, got {resolved}"),
+                vec![],
+            ));
             Type::Error
         }
     }
@@ -1128,10 +1264,21 @@ fn infer_def(
 
 /// Convert a Deep type expression to an internal Type.
 /// `tvar_map` maps type variable names to TypeVars (created on demand).
+/// `dvar_map` maps dimension variable names to DimVars (created on demand).
 fn deep_type_to_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
     tvar_map: &mut HashMap<String, TypeVar>,
+) -> Type {
+    let mut dvar_map = HashMap::new();
+    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map)
+}
+
+fn deep_type_to_type_inner(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    tvar_map: &mut HashMap<String, TypeVar>,
+    dvar_map: &mut HashMap<String, DimVar>,
 ) -> Type {
     match expr {
         deep::Expr::List(list, _) => {
@@ -1167,9 +1314,10 @@ fn deep_type_to_type(
                     }
                     let args: Vec<Type> = kids[..kids.len() - 1]
                         .iter()
-                        .map(|c| deep_type_to_type(c, vg, tvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
                         .collect();
-                    let ret = deep_type_to_type(&kids[kids.len() - 1], vg, tvar_map);
+                    let ret =
+                        deep_type_to_type_inner(&kids[kids.len() - 1], vg, tvar_map, dvar_map);
                     Type::Fn(args, Box::new(ret))
                 }
                 "t-tensor" => {
@@ -1177,13 +1325,13 @@ fn deep_type_to_type(
                         return Type::Error;
                     }
                     let prec_expr = &kids[kids.len() - 1];
-                    let prec = match deep_type_to_type(prec_expr, vg, tvar_map) {
+                    let prec = match deep_type_to_type_inner(prec_expr, vg, tvar_map, dvar_map) {
                         Type::Prim(p) => p,
                         _ => return Type::Error,
                     };
                     let dims: Vec<Dim> = kids[..kids.len() - 1]
                         .iter()
-                        .filter_map(|c| parse_dim(c, vg))
+                        .filter_map(|c| parse_dim(c, vg, dvar_map))
                         .collect();
                     Type::Tensor(dims, prec)
                 }
@@ -1191,7 +1339,7 @@ fn deep_type_to_type(
                     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                         let args: Vec<Type> = kids[1..]
                             .iter()
-                            .map(|c| deep_type_to_type(c, vg, tvar_map))
+                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
                             .collect();
                         Type::Adt(name.to_string(), args)
                     } else {
@@ -1201,7 +1349,7 @@ fn deep_type_to_type(
                 "t-tuple" => {
                     let elems: Vec<Type> = kids
                         .iter()
-                        .map(|c| deep_type_to_type(c, vg, tvar_map))
+                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map))
                         .collect();
                     Type::Tuple(elems)
                 }
@@ -1214,7 +1362,11 @@ fn deep_type_to_type(
 }
 
 /// Parse a dimension expression from Deep AST, with support for dim variables.
-fn parse_dim(expr: &deep::Expr, vg: &mut VarGen) -> Option<Dim> {
+fn parse_dim(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    dvar_map: &mut HashMap<String, DimVar>,
+) -> Option<Dim> {
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list).unwrap_or("");
@@ -1231,7 +1383,16 @@ fn parse_dim(expr: &deep::Expr, vg: &mut VarGen) -> Option<Dim> {
                         None
                     }
                 }
-                "d-var" => Some(vg.fresh_dim()),
+                "d-var" => {
+                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
+                        let dv = *dvar_map
+                            .entry(name.to_string())
+                            .or_insert_with(|| vg.fresh_dvar());
+                        Some(Dim::Var(dv))
+                    } else {
+                        Some(vg.fresh_dim())
+                    }
+                }
                 "d-lit" => {
                     if let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = kids.first() {
                         Some(Dim::Lit(*n))
@@ -1739,6 +1900,145 @@ mod tests {
                (lit {type: (t-prim {} int32)} 1)
                (lit {type: (t-prim {} f32)} 2.0)
                (lit {type: (t-prim {} bool)} true)))",
+        );
+    }
+
+    // ── Regression tests for bug fixes ──────────────────────────────
+
+    // Fix 1: add(int32, int32) should fail — tensor ops require tensor args
+    #[test]
+    fn fix1_tensor_op_rejects_non_tensor_args() {
+        check_err(
+            "(def {} r (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    // Fix 2: unsound generalization — fn x -> let y = x in (y 1, y true) should fail
+    #[test]
+    fn fix2_unsound_generalization_rejected() {
+        // x is a monomorphic param, y = x so y is also monomorphic.
+        // Applying y to both int32 and bool should fail.
+        check_err(
+            "(def {} test \
+               (fn {} (params {} x) \
+                 (let {} (bind {} y (var {} x)) \
+                   (tuple {} \
+                     (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                     (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+            CheckErrorKind::PrecisionMismatch,
+        );
+    }
+
+    // Fix 3: defsig not enforced — body must match declared signature
+    #[test]
+    fn fix3_defsig_enforced() {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} int32) (t-prim {} int32))) \
+             (def {} f (lit {type: (t-prim {} bool)} true))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    // Fix 4: d-var names shared within a type — same d-var name maps to same DimVar
+    #[test]
+    fn fix4_dvar_names_shared() {
+        // Declare a function requiring same dim 'a' in both args.
+        // Call with tensor[batch,f32] and tensor[seq,f32] — should fail.
+        check_err(
+            "(defsig {} myfn \
+               (t-fn {} \
+                 (t-tensor {} (d-var {} a) (t-prim {} f32)) \
+                 (t-tensor {} (d-var {} a) (t-prim {} f32)) \
+                 (t-tensor {} (d-var {} a) (t-prim {} f32)))) \
+             (def {} myfn (fn {} (params {} x y) (var {} x))) \
+             (def {} result (app {} (var {} myfn) \
+               (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0) \
+               (lit {type: (t-tensor {} (d-name {} seq) (t-prim {} f32))} 0)))",
+            CheckErrorKind::DimensionMismatch,
+        );
+    }
+
+    // Fix 5: if condition must be bool
+    #[test]
+    fn fix5_if_condition_must_be_bool() {
+        check_err(
+            "(if {} (lit {type: (t-prim {} int32)} 0) \
+                    (lit {type: (t-prim {} int32)} 1) \
+                    (lit {type: (t-prim {} int32)} 2))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    // Fix 6a: wildcard satisfies exhaustiveness
+    #[test]
+    fn fix6a_wildcard_exhaustive() {
+        check_ok(
+            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
+             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+             (def {} result \
+               (match {} (var {} x) \
+                 (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))",
+        );
+    }
+
+    // Fix 6b: pat-as binds name
+    #[test]
+    fn fix6b_pat_as_binds_name() {
+        check_ok(
+            "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None)) \
+             (def {} x (app {} (var {} Some) (lit {type: (t-prim {} int32)} 42))) \
+             (def {} result \
+               (match {} (var {} x) \
+                 (arm {} (pat-as {} whole (pat-wild {})) () (var {} whole))))",
+        );
+    }
+
+    // Fix 7: fitness report includes unresolved names
+    #[test]
+    fn fix7_fitness_unresolved_names() {
+        let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+        let result = crate::infer::infer_program(&exprs);
+        let report = crate::fitness::FitnessReport::from_infer_result(&result);
+        assert!(
+            report.unresolved_names.contains(&"unknown".to_string()),
+            "expected 'unknown' in unresolved_names, got {:?}",
+            report.unresolved_names
+        );
+        // Check severity is set
+        assert!(report.errors.iter().all(|e| e.severity > 0.0));
+    }
+
+    // Fix 7b: suggestions populated for UnboundVariable
+    #[test]
+    fn fix7b_suggestions_for_unbound() {
+        let result = check("(def {} x (var {} typo))");
+        let unbound_err = result
+            .errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+            .expect("expected UnboundVariable error");
+        assert!(
+            !unbound_err.suggestions.is_empty(),
+            "expected suggestions for unbound variable"
+        );
+    }
+
+    // Fix 8: typed params in Deep
+    #[test]
+    fn fix8_typed_params() {
+        // fn with typed param x: f32 — using x should give f32
+        check_ok("(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
+    }
+
+    // Fix 8b: typed param enforces type
+    #[test]
+    fn fix8b_typed_param_enforced() {
+        // Param x is f32, but we try to add it (tensor op) — should fail
+        check_err(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) \
+               (app {} (var {} add) (var {} x) (var {} x))))",
+            CheckErrorKind::TypeMismatch,
         );
     }
 }

@@ -1,6 +1,6 @@
 //! Type environment: maps variable names to type schemes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::*;
 use crate::unify::Subst;
@@ -38,22 +38,59 @@ impl Env {
         subst.apply(&scheme.body)
     }
 
+    /// Collect all free type variables across all bindings in the environment.
+    pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
+        let mut result = HashSet::new();
+        for scheme in self.bindings.values() {
+            let ty = subst.apply(&scheme.body);
+            let body_vars = free_tvars(&ty);
+            for v in body_vars {
+                if !scheme.tvars.contains(&v) {
+                    result.insert(v);
+                }
+            }
+        }
+        result
+    }
+
+    /// Collect all free dimension variables across all bindings in the environment.
+    pub fn free_dvars(&self, subst: &Subst) -> HashSet<DimVar> {
+        let mut result = HashSet::new();
+        for scheme in self.bindings.values() {
+            let ty = subst.apply(&scheme.body);
+            let body_dvars = free_dvars(&ty);
+            for v in body_dvars {
+                if !scheme.dvars.contains(&v) {
+                    result.insert(v);
+                }
+            }
+        }
+        result
+    }
+
     /// Generalize a type over variables not free in the environment.
-    /// For now, a simplified version that generalizes ALL type/dim vars.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
         let ty = subst.apply(ty);
-        let tvars = free_tvars(&ty);
-        let dvars = free_dvars(&ty);
+        let env_tvars = self.free_tvars(subst);
+        let env_dvars = self.free_dvars(subst);
+        let ty_tvars = free_tvars(&ty);
+        let ty_dvars = free_dvars(&ty);
         Scheme {
-            tvars,
-            dvars,
+            tvars: ty_tvars
+                .into_iter()
+                .filter(|v| !env_tvars.contains(v))
+                .collect(),
+            dvars: ty_dvars
+                .into_iter()
+                .filter(|v| !env_dvars.contains(v))
+                .collect(),
             body: ty,
         }
     }
 }
 
 /// Collect all free type variables in a type.
-fn free_tvars(ty: &Type) -> Vec<TypeVar> {
+pub fn free_tvars(ty: &Type) -> Vec<TypeVar> {
     let mut vars = Vec::new();
     collect_tvars(ty, &mut vars);
     vars.sort_by_key(|v| v.0);
@@ -85,7 +122,7 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
 }
 
 /// Collect all free dimension variables in a type.
-fn free_dvars(ty: &Type) -> Vec<DimVar> {
+pub fn free_dvars(ty: &Type) -> Vec<DimVar> {
     let mut vars = Vec::new();
     collect_dvars(ty, &mut vars);
     vars.sort_by_key(|v| v.0);

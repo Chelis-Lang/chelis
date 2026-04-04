@@ -409,8 +409,10 @@ This is the most critical checkpoint. Questions:
 **`chelis-backend-c` crate:**
 
 1. **C emission** (`emit.rs`): Walk the RISC DAG in topological order. Emit C code for each node. Elementwise ops become loops. Reductions become loops with accumulators. Movement ops become index transformations.
+   - **CPU parallelism in Phase 0f:** Elementwise loops and reduction loops emit OpenMP pragmas by default. For example, elementwise kernels use `#pragma omp parallel for`; reductions use OpenMP reduction clauses where applicable. This is a backend codegen detail, not a language feature.
 
 2. **BLAS integration** (`blas.rs`): Pattern-match RISC DAG subgraphs that correspond to BLAS operations (matmul → `cblas_sgemm`, etc.). Emit BLAS calls instead of naive loops.
+   - **Threading model:** BLAS handles internal multithreading for matmul and related dense linear algebra. OpenMP covers the non-BLAS loops emitted by `emit.rs` (elementwise ops, reductions, some movement kernels). This gives Phase 0 CPU execution multi-core parallelism without introducing new language/runtime semantics.
 
 3. **Memory planning** (`memory.rs`): Analyze DAG node lifetimes. Allocate buffers. Reuse buffers when lifetimes don't overlap. Emit `malloc`/`free` calls.
 
@@ -422,12 +424,13 @@ The generated output for a Chelis program `model.ch` is:
 model.c       # Generated C source (host code + tensor operations)
 model.h       # Generated C header (public API)
 ```
-Compiled with: `gcc -O2 -o model model.c chelis_runtime.c -lopenblas -lm`
+Compiled with: `gcc -O2 -fopenmp -o model model.c chelis_runtime.c -lopenblas -lm`
 
 ### Test Strategy
 - **Emission tests:** Each RISC op emits correct C code (inspect output).
 - **Numerical tests:** The critical tests. Generate C for known operations, compile, run, compare output against reference values. Tolerance: 1e-6 for f32, 1e-12 for f64. Test at LEAST: add, mul, matmul, softmax, relu, reduce_sum, reshape, transpose.
 - **BLAS tests:** Verify BLAS path produces identical results to naive path.
+- **OpenMP tests:** Verify emitted elementwise/reduction kernels compile with `-fopenmp`, produce identical output to single-threaded reference code, and do not introduce races.
 - **Memory tests:** Verify no memory leaks (Valgrind or AddressSanitizer on generated C).
 
 ---
@@ -775,4 +778,3 @@ All of the following were resolved by the design sprint and steering memo. See `
 ### Design Sprint (Completed)
 
 The design sprint was completed and produced the authoritative specs listed above. All Phase 0 blocking design tasks are resolved. See `spec/design/chelis_steering_memo.md` for the full record of decisions.
-

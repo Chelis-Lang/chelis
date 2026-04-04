@@ -25,6 +25,8 @@ pub struct FitnessReport {
     pub typed_nodes: usize,
     /// Total number of sub-expressions visited.
     pub total_nodes: usize,
+    /// Names that could not be resolved.
+    pub unresolved_names: Vec<String>,
 }
 
 /// Individual component scores, each in [0.0, 1.0].
@@ -71,6 +73,18 @@ impl FitnessReport {
 
         let score = W_PARSE * parse + W_STRUCTURE * structure + W_NAMES * names + W_TYPES * types;
 
+        // Collect unresolved names from UnboundVariable errors
+        let unresolved_names: Vec<String> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+            .filter_map(|e| {
+                e.message
+                    .strip_prefix("unbound variable: ")
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
         FitnessReport {
             score,
             components: FitnessComponents {
@@ -82,6 +96,7 @@ impl FitnessReport {
             errors: result.errors.clone(),
             typed_nodes: result.typed_nodes,
             total_nodes: result.total_nodes,
+            unresolved_names,
         }
     }
 }
