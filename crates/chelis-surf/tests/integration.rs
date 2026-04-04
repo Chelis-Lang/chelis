@@ -84,6 +84,18 @@ fn roundtrip_match() {
     roundtrip(include_str!("fixtures/match_expr.ch"));
 }
 
+// === Example programs roundtrip ===
+
+#[test]
+fn roundtrip_example_pattern_matching() {
+    roundtrip(include_str!("../../../examples/pattern_matching.ch"));
+}
+
+#[test]
+fn roundtrip_example_pipeline() {
+    roundtrip(include_str!("../../../examples/pipeline.ch"));
+}
+
 // === Specific output shape checks ===
 
 #[test]

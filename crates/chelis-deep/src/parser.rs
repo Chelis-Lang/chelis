@@ -303,6 +303,22 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     Ok(exprs)
 }
 
+/// Strict parse: lex, parse, then validate tag vocabulary.
+/// Returns error if any unknown tags are found.
+pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    let exprs = parse(&tokens)?;
+    let warnings = crate::validate::validate(&exprs);
+    if let Some(w) = warnings.first() {
+        return Err(ParseError::Expected {
+            expected: "valid Deep tag".to_string(),
+            found: w.message.clone(),
+            offset: w.offset,
+        });
+    }
+    Ok(exprs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

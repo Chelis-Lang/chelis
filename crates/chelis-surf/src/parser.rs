@@ -153,10 +153,28 @@ impl Parser {
     fn parse_fun_def(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Def
         let (name, _) = self.expect_ident()?;
+
+        // Optional dimension parameters: def f[a, b](...)
+        let dim_params = if *self.peek() == TokenKind::LBracket {
+            self.advance(); // consume [
+            let mut dims = Vec::new();
+            if *self.peek() != TokenKind::RBracket {
+                let (d, _) = self.expect_ident()?;
+                dims.push(d);
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    let (d, _) = self.expect_ident()?;
+                    dims.push(d);
+                }
+            }
+            self.expect(&TokenKind::RBracket)?;
+            dims
+        } else {
+            Vec::new()
+        };
+
         self.expect(&TokenKind::LParen)?;
-
         let params = self.parse_params()?;
-
         self.expect(&TokenKind::RParen)?;
 
         let ret_ty = if *self.peek() == TokenKind::Colon {
@@ -172,6 +190,7 @@ impl Parser {
 
         Ok(Decl::FunDef {
             name,
+            dim_params,
             params,
             ret_ty,
             body,
@@ -890,6 +909,7 @@ impl Parser {
                 | TokenKind::Tensor
                 | TokenKind::LParen
                 | TokenKind::Underscore
+                | TokenKind::Star
         )
     }
 
@@ -937,6 +957,11 @@ impl Parser {
                 } else {
                     Ok(TypeExpr::Named(name, tok.span))
                 }
+            }
+            TokenKind::Star => {
+                // * in type position = wildcard dimension
+                let tok = self.advance();
+                Ok(TypeExpr::Named("*".to_string(), tok.span))
             }
             TokenKind::Tensor => {
                 let tok = self.advance();
@@ -1000,7 +1025,11 @@ impl Parser {
     fn is_type_arg_start(&self) -> bool {
         matches!(
             self.peek(),
-            TokenKind::Ident(_) | TokenKind::Tensor | TokenKind::LParen | TokenKind::Underscore
+            TokenKind::Ident(_)
+                | TokenKind::Tensor
+                | TokenKind::LParen
+                | TokenKind::Underscore
+                | TokenKind::Star
         )
     }
 

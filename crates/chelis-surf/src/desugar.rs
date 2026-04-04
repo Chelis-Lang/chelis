@@ -97,11 +97,12 @@ fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
     match decl {
         Decl::FunDef {
             name,
+            dim_params,
             params,
             ret_ty,
             body,
             ..
-        } => desugar_fun_def(name, params, ret_ty, body),
+        } => desugar_fun_def(name, dim_params, params, ret_ty, body),
 
         Decl::LetDef {
             name,
@@ -159,6 +160,7 @@ fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
 
 fn desugar_fun_def(
     name: &str,
+    dim_params: &[String],
     params: &[Param],
     ret_ty: &Option<TypeExpr>,
     body: &Expr,
@@ -184,9 +186,21 @@ fn desugar_fun_def(
             None => node("t-var", vec![sym("_")]),
         });
         let sig = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
-        vec![sig, def_node]
+        let mut result = Vec::new();
+        // Emit defdim for each dimension parameter
+        for dp in dim_params {
+            result.push(node("defdim", vec![sym(dp)]));
+        }
+        result.push(sig);
+        result.push(def_node);
+        result
     } else {
-        vec![def_node]
+        let mut result = Vec::new();
+        for dp in dim_params {
+            result.push(node("defdim", vec![sym(dp)]));
+        }
+        result.push(def_node);
+        result
     }
 }
 
@@ -338,7 +352,7 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
     match lit {
         Literal::Int(n) => node_meta(
             "lit",
-            meta_with_type(node("t-prim", vec![sym("int64")])),
+            meta_with_type(node("t-prim", vec![sym("int32")])),
             vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
         ),
         Literal::Float(f) => node_meta(
@@ -424,6 +438,15 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
             let mut children: Vec<deep::Expr> = dims
                 .iter()
                 .map(|d| match d {
+                    // * → wildcard dimension (d-name {} *)
+                    TypeExpr::Named(n, _) if n == "*" => node("d-name", vec![sym("*")]),
+                    // Single lowercase letter → d-var (polymorphic dimension)
+                    // Multi-char names → d-name (concrete dimension)
+                    TypeExpr::Named(n, _)
+                        if n.len() == 1 && n.starts_with(|c: char| c.is_lowercase()) =>
+                    {
+                        node("d-var", vec![sym(n)])
+                    }
                     TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
                     _ => node("d-var", vec![desugar_type(d)]),
                 })
@@ -541,7 +564,7 @@ mod tests {
     #[test]
     fn test_int_literal() {
         let result = print_expr(&desugar_expr(&int_lit(42)));
-        assert_eq!(result, "(lit {type: (t-prim {} int64)} 42)");
+        assert_eq!(result, "(lit {type: (t-prim {} int32)} 42)");
     }
 
     #[test]
@@ -698,7 +721,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(match {}\n  (var {} x)\n  (arm {} (pat-ctor {} Some (pat-var {} y)) () (var {} y))\n  (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int64)} 0)))"
+            "(match {}\n  (var {} x)\n  (arm {} (pat-ctor {} Some (pat-var {} y)) () (var {} y))\n  (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int32)} 0)))"
         );
     }
 
@@ -718,7 +741,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(let {} (bind {} x (lit {type: (t-prim {} int64)} 1)) (var {} x))"
+            "(let {} (bind {} x (lit {type: (t-prim {} int32)} 1)) (var {} x))"
         );
     }
 
@@ -739,6 +762,7 @@ mod tests {
     fn test_fun_def() {
         let decl = Decl::FunDef {
             name: "f".to_string(),
+            dim_params: vec![],
             params: vec![param("x", None)],
             ret_ty: None,
             body: tvar("x"),
@@ -756,6 +780,7 @@ mod tests {
         // def f(x: f32): f32 = x
         let decl = Decl::FunDef {
             name: "f".to_string(),
+            dim_params: vec![],
             params: vec![param("x", Some(named_ty("f32")))],
             ret_ty: Some(named_ty("f32")),
             body: tvar("x"),
@@ -799,7 +824,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(def {} x (lit {type: (t-prim {} int64)} 42))");
+        assert_eq!(nodes[0], "(def {} x (lit {type: (t-prim {} int32)} 42))");
     }
 
     // --- Annotate preserves type in metadata ---

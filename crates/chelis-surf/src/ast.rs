@@ -22,6 +22,7 @@ pub enum Decl {
     },
     FunDef {
         name: String,
+        dim_params: Vec<String>, // [a, b] dimension parameters
         params: Vec<Param>,
         ret_ty: Option<TypeExpr>,
         body: Expr,
