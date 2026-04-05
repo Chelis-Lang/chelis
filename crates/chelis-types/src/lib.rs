@@ -11,4 +11,4 @@ pub mod unify;
 mod builtins;
 pub use builtins::builtin_env;
 pub use fitness::{FitnessReport, check_program};
-pub use infer::{InferResult, infer_program};
+pub use infer::{CheckedProgram, InferResult, check_phase0e_program, infer_program};

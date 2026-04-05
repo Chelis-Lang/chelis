@@ -5,18 +5,24 @@
 use std::collections::HashMap;
 
 use chelis_deep::ast::{Atom, Expr, List};
-use chelis_types::types::Prim;
+use chelis_types::{CheckedProgram, types::Prim};
 
 use crate::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use crate::tier2;
 
-/// Lower a sequence of top-level Deep expressions into a RISC DAG.
-pub fn lower_program(exprs: &[Expr]) -> Dag {
-    for expr in exprs {
+/// Lower a checked Phase 0e Deep program into a RISC DAG.
+pub fn lower_program(program: &CheckedProgram) -> Dag {
+    for expr in program.exprs() {
         assert_phase0e_lowerable(expr);
+        assert_phase0e_typed(expr);
     }
-    let mut ctx = LowerCtx::new();
-    for expr in exprs {
+    let program_types = program
+        .type_env()
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+        .collect();
+    let mut ctx = LowerCtx::new(program_types);
+    for expr in program.exprs() {
         if let Some(id) = ctx.lower_top_level(expr) {
             ctx.dag.add_root(id);
         }
@@ -27,15 +33,15 @@ pub fn lower_program(exprs: &[Expr]) -> Dag {
 fn assert_phase0e_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() {
-                if matches!(
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+                && matches!(
                     tag.as_str(),
                     "if" | "tuple" | "tuple-get" | "match" | "grad" | "par" | "vmap" | "jit"
-                ) {
-                    panic!(
-                        "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
-                    );
-                }
+                )
+            {
+                panic!(
+                    "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
+                );
             }
             for elem in &list.elements {
                 assert_phase0e_lowerable(elem);
@@ -56,16 +62,87 @@ fn assert_phase0e_lowerable(expr: &Expr) {
     }
 }
 
+fn assert_phase0e_typed(expr: &Expr) {
+    match expr {
+        Expr::List(list, _) => {
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+                && tag == "app"
+                && is_shape_sensitive_builtin_app(list)
+                && !has_type_metadata(list)
+            {
+                panic!(
+                    "shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering"
+                );
+            }
+            for elem in &list.elements {
+                assert_phase0e_typed(elem);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                assert_phase0e_typed(value);
+            }
+        }
+        Expr::MetaExpr(inner, _) => {
+            for (_, value) in &inner.entries {
+                assert_phase0e_typed(value);
+            }
+            assert_phase0e_typed(&inner.expr);
+        }
+        Expr::Atom(_, _) => {}
+    }
+}
+
+fn has_type_metadata(list: &List) -> bool {
+    matches!(list.elements.get(1), Some(Expr::Map(meta, _)) if meta.entries.iter().any(|(k, _)| k == "type"))
+}
+
+fn is_shape_sensitive_builtin_app(list: &List) -> bool {
+    let func_name = match list.elements.get(2) {
+        Some(Expr::List(func_list, _)) => {
+            match (func_list.elements.first(), func_list.elements.get(2)) {
+                (
+                    Some(Expr::Atom(Atom::Symbol(tag), _)),
+                    Some(Expr::Atom(Atom::Symbol(name), _)),
+                ) if tag == "var" => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    matches!(
+        func_name,
+        Some(
+            "matmul"
+                | "softmax"
+                | "mean"
+                | "layer_norm"
+                | "conv2d"
+                | "sum"
+                | "max_reduce"
+                | "reshape"
+                | "permute"
+                | "expand"
+                | "pad"
+                | "shrink"
+                | "stride"
+        )
+    )
+}
+
 struct LowerCtx {
     dag: Dag,
     bindings: HashMap<String, NodeId>,
+    program_types: HashMap<String, TensorType>,
 }
 
 impl LowerCtx {
-    fn new() -> Self {
+    fn new(program_types: HashMap<String, TensorType>) -> Self {
         Self {
             dag: Dag::new(),
             bindings: HashMap::new(),
+            program_types,
         }
     }
 
@@ -78,16 +155,21 @@ impl LowerCtx {
     fn type_from_meta(meta: &[(String, Expr)]) -> TensorType {
         for (key, val) in meta {
             if key == "type" {
-                if let Some(prim) = Self::try_extract_prim(val) {
-                    return TensorType {
-                        dims: vec![],
-                        precision: prim,
-                    };
-                }
-                if let Some(tt) = Self::try_extract_tensor_type(val) {
-                    return tt;
-                }
+                return Self::type_from_type_expr(val);
             }
+        }
+        Self::default_type()
+    }
+
+    fn type_from_type_expr(expr: &Expr) -> TensorType {
+        if let Some(prim) = Self::try_extract_prim(expr) {
+            return TensorType {
+                dims: vec![],
+                precision: prim,
+            };
+        }
+        if let Some(tt) = Self::try_extract_tensor_type(expr) {
+            return tt;
         }
         Self::default_type()
     }
@@ -379,8 +461,8 @@ impl LowerCtx {
 
     /// `(var {meta...} name)`
     fn lower_var(&mut self, elems: &[Expr]) -> NodeId {
-        // C6: Extract type from metadata if available.
-        let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+        // C6: Extract type from metadata if available, otherwise use checked top-level type info.
+        let explicit_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             Self::type_from_meta(&meta.entries)
         } else {
             Self::default_type()
@@ -390,6 +472,11 @@ impl LowerCtx {
             if let Some(&id) = self.bindings.get(name) {
                 return id;
             }
+            let ty = if explicit_ty == Self::default_type() {
+                self.program_types.get(name).cloned().unwrap_or(explicit_ty)
+            } else {
+                explicit_ty
+            };
             return self
                 .dag
                 .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
@@ -1043,7 +1130,9 @@ mod tests {
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        lower_program(&exprs)
+        let checked = chelis_types::check_phase0e_program(&exprs)
+            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        lower_program(&checked)
     }
 
     #[test]
@@ -1057,8 +1146,8 @@ mod tests {
     #[test]
     fn lower_add_two_consts() {
         let src = r#"
-            (def {} a (lit {type: (t-prim {} f32)} 1.0))
-            (def {} b (lit {type: (t-prim {} f32)} 2.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} add) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1072,7 +1161,7 @@ mod tests {
     #[test]
     fn lower_neg() {
         let src = r#"
-            (def {} x (lit {type: (t-prim {} f32)} 5.0))
+            (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} y (app {} (var {} neg) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
@@ -1086,8 +1175,8 @@ mod tests {
     #[test]
     fn lower_sub_decomposes() {
         let src = r#"
-            (def {} a (lit {} 3.0))
-            (def {} b (lit {} 1.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1101,7 +1190,7 @@ mod tests {
     #[test]
     fn lower_relu_decomposes() {
         let src = r#"
-            (def {} x (lit {} -2.0))
+            (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} -2.0))
             (def {} y (app {} (var {} relu) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
@@ -1115,7 +1204,8 @@ mod tests {
     #[test]
     fn lower_let_binding() {
         let src = r#"
-            (let {} (bind {} x (lit {} 10.0)) (app {} (var {} neg) (var {} x)))
+            (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
+                (app {} (var {} neg) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         // x=Const(10), Neg(x)
@@ -1142,8 +1232,8 @@ mod tests {
     #[test]
     fn lower_gt_decomposes() {
         let src = r#"
-            (def {} a (lit {} 5.0))
-            (def {} b (lit {} 3.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gt) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1158,8 +1248,8 @@ mod tests {
     #[test]
     fn lower_gte_decomposes() {
         let src = r#"
-            (def {} a (lit {} 5.0))
-            (def {} b (lit {} 3.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gte) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1172,8 +1262,8 @@ mod tests {
     #[test]
     fn lower_lte_decomposes() {
         let src = r#"
-            (def {} a (lit {} 3.0))
-            (def {} b (lit {} 5.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} c (app {} (var {} lte) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1183,8 +1273,8 @@ mod tests {
     #[test]
     fn lower_eq_decomposes() {
         let src = r#"
-            (def {} a (lit {} 3.0))
-            (def {} b (lit {} 3.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} eq) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1195,8 +1285,8 @@ mod tests {
     #[test]
     fn lower_min_elem_decomposes() {
         let src = r#"
-            (def {} a (lit {} 5.0))
-            (def {} b (lit {} 3.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1212,8 +1302,8 @@ mod tests {
     #[test]
     fn lower_and_decomposes() {
         let src = r#"
-            (def {} a (lit {} 1.0))
-            (def {} b (lit {} 0.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} c (app {} (var {} and) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1226,8 +1316,8 @@ mod tests {
     #[test]
     fn lower_or_decomposes() {
         let src = r#"
-            (def {} a (lit {} 0.0))
-            (def {} b (lit {} 1.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} false))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} c (app {} (var {} or) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1240,7 +1330,7 @@ mod tests {
     #[test]
     fn lower_not_decomposes() {
         let src = r#"
-            (def {} a (lit {} 1.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (app {} (var {} not) (var {} a)))
         "#;
         let dag = parse_and_lower(src);
@@ -1256,7 +1346,7 @@ mod tests {
     fn lower_reshape_recognized() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} reshape) (var {} x)))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} reshape) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
@@ -1268,7 +1358,7 @@ mod tests {
     fn lower_pad_recognized() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} pad) (var {} x)))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} pad) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
@@ -1280,7 +1370,7 @@ mod tests {
     fn lower_shrink_recognized() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} shrink) (var {} x)))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} shrink) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
@@ -1292,7 +1382,7 @@ mod tests {
     fn lower_stride_recognized() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} stride) (var {} x)))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} stride) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
@@ -1305,8 +1395,8 @@ mod tests {
     #[test]
     fn lower_sum_reduction() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} sum) (var {} x) (lit {} 0)))
+            (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum) (var {} x) (lit {} 0)))
         "#;
         let dag = parse_and_lower(src);
         // x=Const(1), axis_const=Const(0) is lowered inline, Sum{axis:0}
@@ -1320,8 +1410,8 @@ mod tests {
     #[test]
     fn lower_max_reduce_reduction() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {} (var {} max_reduce) (var {} x) (lit {} 1)))
+            (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} max_reduce) (var {} x) (lit {} 1)))
         "#;
         let dag = parse_and_lower(src);
         let found = dag
@@ -1336,8 +1426,8 @@ mod tests {
     #[test]
     fn lower_cmplt_produces_bool_output() {
         let src = r#"
-            (def {} a (lit {type: (t-prim {} f32)} 1.0))
-            (def {} b (lit {type: (t-prim {} f32)} 2.0))
+            (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
+            (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} cmplt) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
@@ -1382,7 +1472,9 @@ mod regression_tests {
 
     fn parse_and_lower(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        lower_program(&exprs)
+        let checked = chelis_types::check_phase0e_program(&exprs)
+            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        lower_program(&checked)
     }
 
     // Fix 1: Tensor type metadata with flat Deep shape format.
@@ -1426,7 +1518,8 @@ mod regression_tests {
     #[test]
     fn fix3_let_multiple_bindings() {
         let src = r#"
-            (let {} (bind {} x (lit {} 1.0) y (lit {} 2.0))
+            (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 1.0)
+                           y (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
                 (app {} (var {} add) (var {} x) (var {} y)))
         "#;
         let dag = parse_and_lower(src);
@@ -1467,19 +1560,19 @@ mod regression_tests {
 
     // Fix 4: Unsupported constructs.
     #[test]
-    #[should_panic(expected = "`grad` is not representable in the Phase 0e RISC DAG")]
+    #[should_panic(expected = "`grad` is not supported by Phase 0e lowering")]
     fn fix4_grad_is_rejected_before_lowering() {
         let _ = parse_and_lower("(grad {} (var {} f))");
     }
 
     #[test]
-    #[should_panic(expected = "`vmap` is not representable in the Phase 0e RISC DAG")]
+    #[should_panic(expected = "`vmap` is not supported by Phase 0e lowering")]
     fn fix4_vmap_is_rejected_before_lowering() {
         let _ = parse_and_lower("(vmap {} (var {} f))");
     }
 
     #[test]
-    #[should_panic(expected = "`jit` is not representable in the Phase 0e RISC DAG")]
+    #[should_panic(expected = "`jit` is not supported by Phase 0e lowering")]
     fn fix4_jit_is_rejected_before_lowering() {
         let _ = parse_and_lower("(jit {} (var {} f))");
     }
@@ -1497,7 +1590,7 @@ mod regression_tests {
 
     #[test]
     fn fix4_copy_is_identity() {
-        let src = "(copy {} (lit {} 7.0))";
+        let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 1);
         assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
@@ -1565,14 +1658,25 @@ mod regression_tests {
     }
 
     #[test]
-    #[should_panic(expected = "`if` is not representable in the Phase 0e RISC DAG")]
+    #[should_panic(expected = "`if` is not supported by Phase 0e lowering")]
     fn unsupported_if_is_rejected_before_lowering() {
         let _ = parse_and_lower("(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))");
     }
 
     #[test]
-    #[should_panic(expected = "`match` is not representable in the Phase 0e RISC DAG")]
+    #[should_panic(expected = "`match` is not supported by Phase 0e lowering")]
     fn unsupported_match_is_rejected_before_lowering() {
         let _ = parse_and_lower("(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Phase 0e builtin `reshape` requires explicit type metadata on the app node"
+    )]
+    fn shape_sensitive_app_without_type_metadata_is_rejected() {
+        let _ = parse_and_lower(
+            "(def {} x (lit {} 1.0))
+             (def {} y (app {} (var {} reshape) (var {} x)))",
+        );
     }
 }

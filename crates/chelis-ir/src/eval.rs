@@ -375,7 +375,9 @@ mod tests {
 
     fn lower(src: &str) -> Dag {
         let exprs = parse_str(src).expect("parse failed");
-        lower_program(&exprs)
+        let checked = chelis_types::check_phase0e_program(&exprs)
+            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        lower_program(&checked)
     }
 
     #[test]
@@ -500,6 +502,36 @@ mod tests {
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![2.0, 4.0, 6.0, 8.0])
+        );
+    }
+
+    #[test]
+    fn lowered_conv2d_2x2_has_correct_numeric_result() {
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} x))
+            (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
+                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+        "#;
+        let dag = lower(src);
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".into(),
+            TensorValue::from_vec(
+                vec![1, 1, 3, 3],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            ),
+        );
+        inputs.insert(
+            "k".into(),
+            TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
+        );
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let last = vals.get(&NodeId(dag.len() - 1)).unwrap();
+        assert_eq!(
+            *last,
+            TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])
         );
     }
 }

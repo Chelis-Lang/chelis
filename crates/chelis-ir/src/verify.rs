@@ -243,7 +243,222 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             _ => {}
         }
 
-        // C10: Store arity (already checked above, but explicit message).
+        // C10: Movement op shape validation.
+        match &node.op {
+            RiscOp::Expand { axis, size } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    let input_rank = input.output_type.dims.len();
+                    if *axis > input_rank {
+                        errors.push(format!(
+                            "expand at node {}: axis {} > input rank {}",
+                            node.id.0, axis, input_rank
+                        ));
+                    }
+                    if *size == 0 {
+                        errors.push(format!("expand at node {}: size must be > 0", node.id.0));
+                    }
+                    if node.output_type.precision != input.output_type.precision {
+                        errors.push(format!(
+                            "expand at node {}: output precision {:?} != input precision {:?}",
+                            node.id.0, node.output_type.precision, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.dims.len() != input_rank + 1 {
+                        errors.push(format!(
+                            "expand at node {}: output rank {} != expected {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank + 1
+                        ));
+                    } else if *axis <= input_rank {
+                        for out_i in 0..node.output_type.dims.len() {
+                            if out_i == *axis {
+                                if let Some(out_size) =
+                                    dim_known_size(&node.output_type.dims[out_i])
+                                    && out_size != *size
+                                {
+                                    errors.push(format!(
+                                        "expand at node {}: inserted axis {} has size {}, expected {}",
+                                        node.id.0, axis, out_size, size
+                                    ));
+                                }
+                            } else {
+                                let in_i = if out_i < *axis { out_i } else { out_i - 1 };
+                                if !dims_compatible(
+                                    &node.output_type.dims[out_i],
+                                    &input.output_type.dims[in_i],
+                                ) {
+                                    errors.push(format!(
+                                        "expand at node {}: output axis {} {:?} incompatible with input axis {} {:?}",
+                                        node.id.0, out_i, node.output_type.dims[out_i], in_i, input.output_type.dims[in_i]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RiscOp::Pad { padding, .. } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    let input_rank = input.output_type.dims.len();
+                    if padding.len() != input_rank {
+                        errors.push(format!(
+                            "pad at node {}: padding len {} != input rank {}",
+                            node.id.0,
+                            padding.len(),
+                            input_rank
+                        ));
+                    }
+                    if node.output_type.precision != input.output_type.precision {
+                        errors.push(format!(
+                            "pad at node {}: output precision {:?} != input precision {:?}",
+                            node.id.0, node.output_type.precision, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.dims.len() != input_rank {
+                        errors.push(format!(
+                            "pad at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
+                    } else {
+                        for (axis, ((before, after), in_dim)) in padding
+                            .iter()
+                            .zip(input.output_type.dims.iter())
+                            .enumerate()
+                        {
+                            if let Some(in_size) = dim_known_size(in_dim) {
+                                let expected = in_size + before + after;
+                                if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
+                                    && out_size != expected
+                                {
+                                    errors.push(format!(
+                                        "pad at node {}: output axis {} has size {}, expected {}",
+                                        node.id.0, axis, out_size, expected
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RiscOp::Shrink { bounds } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    let input_rank = input.output_type.dims.len();
+                    if bounds.len() != input_rank {
+                        errors.push(format!(
+                            "shrink at node {}: bounds len {} != input rank {}",
+                            node.id.0,
+                            bounds.len(),
+                            input_rank
+                        ));
+                    }
+                    if node.output_type.precision != input.output_type.precision {
+                        errors.push(format!(
+                            "shrink at node {}: output precision {:?} != input precision {:?}",
+                            node.id.0, node.output_type.precision, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.dims.len() != input_rank {
+                        errors.push(format!(
+                            "shrink at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
+                    } else {
+                        for (axis, ((start, end), in_dim)) in
+                            bounds.iter().zip(input.output_type.dims.iter()).enumerate()
+                        {
+                            if start > end {
+                                errors.push(format!(
+                                    "shrink at node {}: axis {} has invalid bounds ({}, {})",
+                                    node.id.0, axis, start, end
+                                ));
+                                continue;
+                            }
+                            if let Some(in_size) = dim_known_size(in_dim)
+                                && *end > in_size
+                            {
+                                errors.push(format!(
+                                    "shrink at node {}: axis {} end {} > input size {}",
+                                    node.id.0, axis, end, in_size
+                                ));
+                            }
+                            let expected = end - start;
+                            if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
+                                && out_size != expected
+                            {
+                                errors.push(format!(
+                                    "shrink at node {}: output axis {} has size {}, expected {}",
+                                    node.id.0, axis, out_size, expected
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            RiscOp::Stride { strides } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    let input_rank = input.output_type.dims.len();
+                    if strides.len() != input_rank {
+                        errors.push(format!(
+                            "stride at node {}: strides len {} != input rank {}",
+                            node.id.0,
+                            strides.len(),
+                            input_rank
+                        ));
+                    }
+                    if node.output_type.precision != input.output_type.precision {
+                        errors.push(format!(
+                            "stride at node {}: output precision {:?} != input precision {:?}",
+                            node.id.0, node.output_type.precision, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.dims.len() != input_rank {
+                        errors.push(format!(
+                            "stride at node {}: output rank {} != input rank {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            input_rank
+                        ));
+                    } else {
+                        for (axis, (step, in_dim)) in strides
+                            .iter()
+                            .zip(input.output_type.dims.iter())
+                            .enumerate()
+                        {
+                            if *step == 0 {
+                                errors.push(format!(
+                                    "stride at node {}: axis {} has invalid step 0",
+                                    node.id.0, axis
+                                ));
+                                continue;
+                            }
+                            if let Some(in_size) = dim_known_size(in_dim) {
+                                let expected = in_size.div_ceil(*step);
+                                if let Some(out_size) = dim_known_size(&node.output_type.dims[axis])
+                                    && out_size != expected
+                                {
+                                    errors.push(format!(
+                                        "stride at node {}: output axis {} has size {}, expected {}",
+                                        node.id.0, axis, out_size, expected
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // C11: Store arity (already checked above, but explicit message).
         if let RiscOp::Store { .. } = &node.op
             && node.inputs.len() != 1
         {
@@ -280,6 +495,14 @@ fn dim_product(dims: &[DimInfo]) -> Option<usize> {
         }
     }
     Some(product)
+}
+
+fn dim_known_size(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(n) => Some(*n),
+        DimInfo::Named(_, Some(n)) => Some(*n),
+        DimInfo::Named(_, None) => None,
+    }
 }
 
 /// Check if two dimension descriptors are compatible.
@@ -539,7 +762,94 @@ mod tests {
         assert!(verify(&dag).is_empty());
     }
 
-    // --- C10: Store arity ---
+    // --- C10: movement shape validation ---
+
+    #[test]
+    fn c10_expand_axis_out_of_bounds_is_error() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Expand { axis: 2, size: 4 },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|e| e.contains("expand")));
+    }
+
+    #[test]
+    fn c10_pad_wrong_rank_is_error() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Pad {
+                padding: vec![(1, 1)],
+                fill: 0.0,
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(5), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|e| e.contains("pad")));
+    }
+
+    #[test]
+    fn c10_shrink_invalid_bounds_is_error() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(8)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(6, 2)],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|e| e.contains("shrink")));
+    }
+
+    #[test]
+    fn c10_stride_zero_step_is_error() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(8)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Stride { strides: vec![0] },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(8)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|e| e.contains("stride")));
+    }
+
+    // --- C11: Store arity ---
 
     #[test]
     fn store_correct_arity() {

@@ -21,6 +21,22 @@ pub struct InferResult {
     pub total_nodes: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct CheckedProgram {
+    exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+}
+
+impl CheckedProgram {
+    pub fn exprs(&self) -> &[deep::Expr] {
+        &self.exprs
+    }
+
+    pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
+        &self.type_env
+    }
+}
+
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let (mut env, mut vg) = builtins::builtin_env();
@@ -60,6 +76,260 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         errors,
         typed_nodes,
         total_nodes,
+    }
+}
+
+pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+    let mut result = infer_program(exprs);
+    result
+        .errors
+        .retain(|error| !matches!(error.kind, CheckErrorKind::UnboundVariable));
+    let type_env = build_phase0e_type_env(exprs);
+    validate_phase0e_program(exprs, &type_env, &mut result.errors);
+    if result.errors.is_empty() {
+        Ok(CheckedProgram {
+            exprs: exprs.to_vec(),
+            type_env,
+        })
+    } else {
+        Err(result)
+    }
+}
+
+type Phase0eTypeEnv = HashMap<String, deep::Expr>;
+
+fn build_phase0e_type_env(exprs: &[deep::Expr]) -> Phase0eTypeEnv {
+    let mut env = HashMap::new();
+    for expr in exprs {
+        collect_phase0e_types(expr, &mut env);
+    }
+    env
+}
+
+fn collect_phase0e_types(expr: &deep::Expr, env: &mut Phase0eTypeEnv) {
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    if get_tag(list) != Some("def") {
+        return;
+    }
+    let kids = children(list);
+    if kids.len() < 2 {
+        return;
+    }
+    if let Some(name) = symbol_name(&kids[0])
+        && let Some(ty) = expr_type_expr(&kids[1], env)
+    {
+        env.insert(name.to_string(), ty);
+    }
+}
+
+fn validate_phase0e_program(
+    exprs: &[deep::Expr],
+    type_env: &Phase0eTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    for expr in exprs {
+        validate_phase0e_expr(expr, type_env, errors);
+    }
+}
+
+fn validate_phase0e_expr(
+    expr: &deep::Expr,
+    type_env: &Phase0eTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    match expr {
+        deep::Expr::List(list, _) => {
+            if let Some(tag) = get_tag(list) {
+                if matches!(
+                    tag,
+                    "if" | "tuple" | "tuple-get" | "match" | "grad" | "par" | "vmap" | "jit"
+                ) {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::Other,
+                        format!("`{tag}` is not supported by Phase 0e lowering"),
+                        vec!["Remove this construct or defer it to a later phase".to_string()],
+                    ));
+                }
+
+                if tag == "app"
+                    && let Some(func_name) = phase0e_builtin_name(list)
+                {
+                    if is_phase0e_shape_sensitive_builtin(func_name) {
+                        if !has_type_metadata(list) {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::Other,
+                                format!(
+                                    "Phase 0e builtin `{func_name}` requires explicit type metadata on the app node"
+                                ),
+                                vec!["Run lowering only on checked/annotated Deep".to_string()],
+                            ));
+                        }
+                        if !app_result_type_is_concrete(list) {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::Other,
+                                format!(
+                                    "Phase 0e builtin `{func_name}` requires concrete output tensor dimensions"
+                                ),
+                                vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                            ));
+                        }
+                    }
+
+                    let tensor_arg_count = match func_name {
+                        "matmul" => 2,
+                        "softmax" | "mean" => 1,
+                        "layer_norm" => 3,
+                        "conv2d" => 2,
+                        _ => 0,
+                    };
+                    if tensor_arg_count > 0 {
+                        for arg in list.elements.iter().skip(3).take(tensor_arg_count) {
+                            if !expr_tensor_type_is_concrete(arg, type_env) {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::Other,
+                                    format!(
+                                        "Phase 0e builtin `{func_name}` requires concrete tensor argument metadata"
+                                    ),
+                                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for elem in &list.elements {
+                validate_phase0e_expr(elem, type_env, errors);
+            }
+        }
+        deep::Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                validate_phase0e_expr(value, type_env, errors);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            for (_, value) in &meta.entries {
+                validate_phase0e_expr(value, type_env, errors);
+            }
+            validate_phase0e_expr(&meta.expr, type_env, errors);
+        }
+        deep::Expr::Atom(_, _) => {}
+    }
+}
+
+fn has_type_metadata(list: &deep::List) -> bool {
+    matches!(get_meta(list), Some(meta) if meta.entries.iter().any(|(k, _)| k == "type"))
+}
+
+fn phase0e_builtin_name(list: &deep::List) -> Option<&str> {
+    let func_expr = list.elements.get(2)?;
+    let func_list = match func_expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    match (func_list.elements.first(), func_list.elements.get(2)) {
+        (
+            Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)),
+            Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)),
+        ) if tag == "var" => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "matmul"
+            | "softmax"
+            | "mean"
+            | "layer_norm"
+            | "conv2d"
+            | "sum"
+            | "max_reduce"
+            | "reshape"
+            | "permute"
+            | "expand"
+            | "pad"
+            | "shrink"
+            | "stride"
+    )
+}
+
+fn app_result_type_is_concrete(list: &deep::List) -> bool {
+    get_meta(list)
+        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
+        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
+        .unwrap_or(false)
+}
+
+fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::Expr> {
+    match expr {
+        deep::Expr::List(list, _) => {
+            if let Some(meta) = get_meta(list)
+                && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")
+            {
+                return Some(ty.clone());
+            }
+            if get_tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                return type_env.get(name).cloned();
+            }
+            None
+        }
+        deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env),
+        _ => None,
+    }
+}
+
+fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> bool {
+    expr_type_expr(expr, type_env)
+        .map(|ty| type_expr_is_phase0e_concrete(&ty))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepDimKind {
+    Lit(i64),
+    NonConcrete,
+}
+
+fn tensor_dims_from_type_expr(expr: &deep::Expr) -> Option<Vec<DeepDimKind>> {
+    let list = match expr {
+        deep::Expr::List(list, _) => list,
+        _ => return None,
+    };
+    if get_tag(list) != Some("t-tensor") {
+        return None;
+    }
+    let kids = children(list);
+    if kids.is_empty() {
+        return None;
+    }
+    let mut dims = Vec::new();
+    for kid in &kids[..kids.len().saturating_sub(1)] {
+        dims.push(match kid {
+            deep::Expr::List(dim_list, _) if get_tag(dim_list) == Some("d-lit") => {
+                match children(dim_list).first() {
+                    Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => DeepDimKind::Lit(*n),
+                    _ => DeepDimKind::NonConcrete,
+                }
+            }
+            _ => DeepDimKind::NonConcrete,
+        });
+    }
+    Some(dims)
+}
+
+fn type_expr_is_phase0e_concrete(expr: &deep::Expr) -> bool {
+    match expr {
+        deep::Expr::List(list, _) if get_tag(list) == Some("t-prim") => true,
+        _ => tensor_dims_from_type_expr(expr)
+            .map(|dims| dims.iter().all(|d| matches!(d, DeepDimKind::Lit(_))))
+            .unwrap_or(false),
     }
 }
 
@@ -663,14 +933,15 @@ fn infer_app(
         "sqrt",
         "relu",
         "sigmoid",
-        "softmax",
         "matmul",
         "layer_norm",
         "max_elem",
+        "min_elem",
         "normalize",
         "cmplt",
         "eq",
         "neq",
+        "gt",
         "lte",
         "gte",
         "and",
@@ -696,6 +967,40 @@ fn infer_app(
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 format!("{} expects tensor arguments, got {}", fname, resolved),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name
+                && matches!(fname.as_str(), "softmax" | "mean" | "sum" | "max_reduce")
+            {
+                if let Some(first_arg) = arg_tys.first() {
+                    let resolved = subst.apply(first_arg);
+                    match &resolved {
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("{} expects tensor input, got {}", fname, resolved),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+
+                if let Some(axis_arg) = arg_tys.get(1) {
+                    let resolved = subst.apply(axis_arg);
+                    match &resolved {
+                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("{} expects int32 axis, got {}", fname, resolved),
                                 vec![],
                             ));
                             return Type::Error;

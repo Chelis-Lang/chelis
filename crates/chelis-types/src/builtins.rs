@@ -143,6 +143,19 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn tensor_reduce(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(input), Type::Prim(Prim::Int32)],
+                Box::new(Type::Var(input)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     // --- Register all built-ins ---
 
     // Tier 1: RISC Primitives
@@ -163,6 +176,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("div", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
+    cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
 
@@ -172,12 +186,22 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     tensor_unop("relu", &mut env, &mut vg);
     tensor_unop("sigmoid", &mut env, &mut vg);
-    tensor_unop("softmax", &mut env, &mut vg);
+    tensor_reduce("softmax", &mut env, &mut vg);
     tensor_unop("normalize", &mut env, &mut vg);
+    tensor_reduce("mean", &mut env, &mut vg);
 
     tensor_binop("matmul", &mut env, &mut vg);
+    tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
+    tensor_reduce("sum", &mut env, &mut vg);
+    tensor_reduce("max_reduce", &mut env, &mut vg);
+    tensor_unop("reshape", &mut env, &mut vg);
+    tensor_unop("permute", &mut env, &mut vg);
+    tensor_unop("expand", &mut env, &mut vg);
+    tensor_unop("pad", &mut env, &mut vg);
+    tensor_unop("shrink", &mut env, &mut vg);
+    tensor_unop("stride", &mut env, &mut vg);
 
     (env, vg)
 }
@@ -185,7 +209,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 /// Names that the inference engine should special-case for return type.
 /// cmplt, eq, neq, lte, gte return tensor[D, bool] instead of tensor[D, p].
 #[allow(dead_code)] // Used by inference engine (Step 6)
-pub const COMPARISON_OPS: &[&str] = &["cmplt", "eq", "neq", "lte", "gte"];
+pub const COMPARISON_OPS: &[&str] = &["cmplt", "eq", "neq", "gt", "lte", "gte"];
 
 #[cfg(test)]
 mod tests {
