@@ -1,167 +1,159 @@
 # Chelis Language Specification: Context and Philosophy
 
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
 **Status:** Authoritative specification draft
 
 ---
 
 ## 1. What Chelis Is
 
-Chelis is a statically typed, compiled programming language for tensor computation. Its thesis can be stated in six words: **AI writing AI writing AI.**
+Chelis is a functional programming language for AI research.
+It is built for a workflow where a coding agent is the primary author and a human is
+the supervisor.
+The target programs are themselves AI systems: models, training pipelines,
+architecture-search programs, and learned functions.
 
-Chelis is designed from the ground up to serve two masters simultaneously:
+Chelis is designed around three linked claims:
 
-1. **AI coding agents** that write Chelis code. The compiler emits structured feedback -- fitness scores between 0.0 and 1.0, repair suggestions as diffs, and typed error traces -- so that compiler output functions as a training signal, not just a diagnostic dump. An agent that generates Chelis code can hill-climb toward correctness by treating the compiler as a differentiable loss function over programs.
+1. AI workloads deserve a type system that understands tensor dimensions, precision,
+   and differentiability.
+2. AI-generated code benefits from a machine-friendly canonical syntax.
+3. Compiler feedback should be useful as training signal, not only as a pass/fail gate.
 
-2. **ML researchers and engineers** who build AI/ML systems in Chelis. The language provides first-class automatic differentiation, vectorized mapping, JIT compilation markers, and a type system that understands tensor shapes and named dimensions. If a program type-checks, its tensor operations are shape-correct and its precision conversions are intentional.
+## 2. What Chelis Is Not
 
-The intersection of these two goals is the core insight: a language whose compiler is a collaborator rather than a gatekeeper is simultaneously better for humans and better for machines.
+- Not a Python replacement for general scripting
+- Not a web or systems language
+- Not a framework embedded in another host language
+- Not "PyTorch but with different syntax"
 
-## 2. Target Audience
+Chelis targets the model-definition and compilation layer, not the entire surrounding
+application stack.
 
-**Primary:**
-- ML researchers who want type-safe tensor code with first-class `grad`, `vmap`, and `jit`.
-- Compiler enthusiasts interested in type-directed tensor compilation and DAG rewriting.
-- AI coding agents and agent frameworks that generate, evaluate, and iterate on code.
+## 3. Audience
 
-**Secondary:**
-- Educators teaching functional programming, type theory, or compiler construction.
-- Teams building reproducible ML pipelines who want compile-time shape checking.
+Primary users:
 
-**Explicitly not:**
-- General-purpose application developers. Chelis has no standard library for file I/O, networking, or string processing beyond what's needed for its core mission.
-- Data scientists who need a REPL-first, dynamically typed workflow. (Chelis has a REPL -- Tide -- but the type checker is always on.)
+- ML researchers building new architectures and training procedures
+- AI systems engineers working on correctness-sensitive tensor programs
+- agent frameworks that generate, evaluate, and repair code automatically
 
-## 3. What Chelis Is Not
+The language is intentionally optimized for AI-native authoring rather than for
+manually writing large general-purpose applications.
 
-- **Not a Python replacement.** Chelis doesn't compete with Python for scripting, glue code, or general-purpose programming. It targets the inner loop: the tensor computation kernel, the model definition, the loss function.
+## 4. Core Bet
 
-- **Not a framework.** It's not PyTorch, JAX, or TensorFlow. It's a language. You don't `import chelis` -- you write `.ch` files and compile them.
+AI development benefits from a language whose representation, type system, and
+compilation strategy are designed around AI primitives from the start rather than
+retrofitted onto Python or a systems language later.
 
-- **Not a DSL embedded in another language.** Chelis has its own lexer, parser, type checker, IR, optimizer, and code generator. It stands alone.
+## 5. Design Principles
 
-- **Not dynamically typed.** Every expression has a type known at compile time. Shape mismatches are compile errors, not runtime crashes.
+When tradeoffs appear, Chelis applies these in order:
 
-- **Not a research toy.** The goal is production-quality compiled output targeting C, CUDA, and StableHLO backends.
+1. **Unambiguity over ergonomics**
+2. **Composition over special cases**
+3. **Inference over annotation**
+4. **Machine generation first**
+5. **Additive sugar only**
+6. **Explicit over implicit**
+7. **Small language, big library**
+8. **Future-proof without over-building**
 
-## 4. Key Influences
+These principles lead directly to several current rules:
 
-Chelis draws ideas from five distinct traditions:
+- Deep is canonical
+- Surf is sugar over Deep
+- broadcasting and precision conversion are explicit
+- compiler stages should remain mechanically understandable
+- the core IR stays small even when the user-facing language grows
 
-### JAX
-Functional transformations as the programming model. In JAX, `grad`, `vmap`, and `jit` are higher-order functions that transform functions into new functions. Chelis elevates these from library functions to language-level constructs: they are DAG-to-DAG rewrites with formal semantics and type rules. When you write `grad(f)`, the compiler doesn't call into a tracing runtime -- it rewrites the computation graph using adjoint rules.
+## 6. Dual Syntax
 
-### Futhark
-A pure functional language that compiles to efficient parallel GPU code. Futhark proved that you don't need imperative mutation to get high-performance parallel tensor code. Chelis adopts the same bet: pure functions in, fast parallel code out. The compiler, not the programmer, decides how to partition work.
+Chelis has two syntax layers:
 
-### Haskell
-The type system is Hindley-Milner with algebraic data types (ADTs), parametric polymorphism, and full type inference. You can write type annotations everywhere, nowhere, or somewhere in between -- the compiler infers the rest. Pattern matching is exhaustive. Types are the specification: if it compiles, the shapes match.
+- **Surf** (`.ch`): human-facing syntax for reading, review, and supervision
+- **Deep** (`.dp`): machine-facing canonical syntax used by the compiler
 
-### tinygrad
-A minimal set of RISC-like operations (~12 primitives) that every tensor computation reduces to. Chelis's IR is a DAG of these primitives. This tiny instruction set makes it tractable to define adjoint rules (for AD), fusion rules (for optimization), and emission rules (for backends) exhaustively.
+Every Deep node has the form:
 
-### Lean
-Type theory as a foundation, not an afterthought. Lean demonstrated that dependent types and proof assistants can be practical tools, not just research artifacts. Chelis doesn't go full dependent types (yet), but it borrows the philosophy: the type system should be expressive enough that "well-typed programs don't go wrong" is a meaningful guarantee for tensor code.
-
-## 5. The Turtle Metaphor
-
-Chelis is named after **Chelonia** -- the order of turtles and tortoises. The ocean metaphor pervades every layer of the system:
-
-| Concept | Ocean term | Meaning |
-|---------|-----------|---------|
-| Surface syntax | **Surf** | What humans and agents read and write (`.ch` files) |
-| Canonical s-expression syntax | **Deep** | What the compiler works with internally (`.dp` files) |
-| Interactive mode | **Tide** | The REPL and agent API -- comes and goes, stateful |
-| Package ecosystem | **Reef** | Where packages live and grow, interconnected |
-| Compiled artifacts | **Shells** | Hard, portable, self-contained output |
-| Concurrency model | **Current** | Data flows through the system like water |
-
-**"It's turtles all the way down."** The language is self-referential in its design philosophy:
-
-- The compiler's fitness-score output is itself a differentiable signal -- you could, in principle, train a model to write Chelis by treating the compiler as a loss function.
-- The surface syntax desugars to s-expressions, which desugar to a DAG of ~12 primitives, which emit to target code. Each layer is a complete representation of the program. Turtles all the way down.
-- The language is designed for AI agents to write code that builds AI systems. The tool builds the toolmaker.
-
-## 6. Design Principles
-
-### Principle 1: Types Are the Specification
-
-If a Chelis program type-checks, its tensor operations are shape-correct, its precision conversions are intentional, and its differentiable functions are actually differentiable. The type system is not a bureaucratic hurdle -- it is the primary mechanism by which the language guarantees correctness.
-
-This means the type system must be expressive enough to capture:
-- Named tensor dimensions (`batch`, `hidden`, `seq_len`)
-- Precision types (`f32`, `bf16`) with no implicit conversion
-- Function linearity (for correct automatic differentiation)
-- Algebraic data types for structured model outputs
-
-### Principle 2: No Implicit Anything
-
-Chelis never silently broadcasts a tensor, coerces a precision, or reshapes an array. Every such operation is explicit in the source code. This is a deliberate trade-off: more verbosity in exchange for more predictability. When a shape mismatch occurs, the error message can point to the exact line, because there's no invisible broadcasting rule that might or might not apply.
-
-- No implicit precision widening (`f32` to `f64` requires `cast`)
-- No implicit broadcasting (use explicit `vmap` or reshape)
-- No implicit tensor creation (shapes are always specified)
-- No implicit effects (pure by default)
-
-### Principle 3: The Compiler Is a Collaborator
-
-Traditional compilers are gatekeepers: the program is either correct or it's rejected with an error message. Chelis's compiler is a collaborator:
-
-- **Fitness scores** (0.0 to 1.0): Every program gets a score. A fully correct program scores 1.0. A program with one shape mismatch might score 0.85. An agent can use this as a differentiable signal to improve its output.
-- **Repair suggestions**: The compiler doesn't just say "type mismatch on line 7" -- it says "insert `cast(x, f32)` on line 7 to fix precision mismatch" or "change dimension `hidden` to 512 to match the weight matrix."
-- **Partial compilation**: Even programs with type errors can be partially lowered, so the compiler can report which parts are correct and which aren't.
-- **Structured output**: All compiler output is available as JSON, not just human-readable text. Agents parse JSON; humans read the pretty-printed version.
-
-### Principle 4: Small Core, Big Surface
-
-The internal representation (RISC DAG) has approximately 12 primitive operations:
-
-```
-add, mul, reduce_sum, reduce_max, reshape, broadcast, 
-slice, concat, matmul, exp, log, compare
+```lisp
+(tag {} children...)
 ```
 
-Every tensor computation in Chelis -- no matter how complex the surface syntax -- desugars through the type checker and lowering passes into a DAG of these primitives. This tiny core makes the system tractable:
+This regularity is a design feature.
+Agents do not need to infer whether a node head is structural or user-defined.
 
-- Each primitive has one adjoint rule (for automatic differentiation).
-- Each primitive has one fusion rule set (for optimization).
-- Each primitive has one emission template per backend (for code generation).
-- The entire core can be formally verified.
+Surf desugars losslessly to Deep.
+Deep decompiles back to Surf on a best-effort basis.
+The compiler treats Deep as the source of truth.
 
-But the surface syntax is rich: named dimensions, pattern matching, ADTs, pipe operators, comprehension-like `vmap`, and ergonomic type annotations. The surface is for humans; the core is for machines.
+## 7. Type System Scope
 
-### Principle 5: Transformations Are First-Class
+Phase 0 / v1 scope:
 
-`grad`, `vmap`, and `jit` are not library functions. They are language-level constructs with formal type rules and semantics:
+- algebraic data types
+- Hindley-Milner inference
+- named tensor dimensions
+- explicit precision tracking
+- graded fitness scoring with repair suggestions
 
-- **`grad(f)`** takes a function `f : A -> scalar` and returns `f' : A -> A` (the gradient). Implemented as a DAG rewrite using adjoint rules. The type system ensures `f` actually returns a scalar and that `A` is a differentiable type.
+Deferred:
 
-- **`vmap(f, axis=k)`** takes a function `f : A -> B` and returns a function that maps `f` over axis `k` of its input. Implemented as a DAG rewrite that lifts each primitive to operate over an additional dimension. The type system tracks the new dimension.
+- algebraic effects
+- linear types and borrowing
+- richer research type features
 
-- **`jit(f)`** marks a function for just-in-time compilation. At the DAG level, this inserts a compilation boundary. The type doesn't change, but the execution strategy does.
+## 8. Computational Model
 
-These transformations compose: `grad(vmap(f, axis=0))` is a valid expression with a well-defined type and a mechanical DAG rewrite.
+Chelis lowers typed programs into a RISC DAG composed from a small set of primitive
+tensor operations.
+Higher-level operations such as `matmul`, `relu`, `softmax`, and loss functions lower
+into primitive compositions during compilation.
 
-## 7. A Note on Versioning
+Three transforms are first-class in the language design:
 
-This specification describes Chelis version 0.1.0. The language is in active design. Breaking changes are expected. The stability promise is:
+- `grad`
+- `vmap`
+- `jit`
 
-- **Deep syntax**: Stable. Programs written in Deep form will continue to parse.
-- **Surf syntax**: Unstable. Surface syntax may change between minor versions.
-- **RISC primitives**: Stable set, but semantics may be refined.
-- **Type system**: The core (HM + ADTs + tensor types) is stable. Extensions (effects, linearity, dependent dimensions) are experimental.
+They are compiler transforms, not ordinary library conveniences.
 
-## 8. How to Read This Specification
+## 9. Backends and Execution
 
-The specification is organized as follows:
+The current reference backend is C with BLAS and OpenMP.
+Future GPU compilation is planned around HIP, not separate CUDA and OpenCL backends.
+StableHLO and FX are later integration layers rather than replacements.
 
-| Document | Contents |
-|----------|----------|
-| `00-context.md` | This document. Philosophy, goals, non-goals. |
-| `01-nomenclature.md` | Glossary of all terms, metaphors, and conventions. |
-| `02-surf-syntax.md` | Complete grammar and semantics of the surface language. |
-| `03-deep-syntax.md` | Complete grammar and semantics of the s-expression form. |
+Interactive execution uses the IR evaluator first.
+If latency later becomes a problem, the escalation order is cached C artifacts,
+persistent compiler helpers, and only then a possible JIT path.
 
-Future specification documents will cover the type system, RISC DAG, transformation semantics, backend emission, the Tide REPL, and the Reef package system.
+## 10. Key Influences
 
-An implementer should read these documents in order. A user of the language needs only `02-surf-syntax.md` and the examples therein to start writing Chelis code.
+Chelis draws important ideas from:
+
+- **Dex** for algebraic effects around differentiation
+- **Futhark** for purity-driven compilation and linearity direction
+- **tinygrad** for the compact RISC-like primitive set
+- **JAX** for composable transforms such as `grad` and `vmap`
+- **Lisp / Clojure** for homoiconicity
+- **ML-family languages** for HM inference, ADTs, and pattern matching
+- **Rust** for explicitness and error-quality ambitions
+
+## 11. Reading Order
+
+Use the spec in this order:
+
+1. `00-context.md`
+2. `01-nomenclature.md`
+3. `02-surf-syntax.md`
+4. `03-deep-syntax.md`
+5. `04-type-system.md`
+6. `05-risc-primitives.md`
+7. `08-backends.md`
+8. `09-tide.md`
+9. `12-roadmap.md`
+
+For project-level decisions rather than language semantics, read
+`spec/design/chelis_canonical_reference.md`.

@@ -1,10 +1,21 @@
 # Architecture
 
-This document orients new developers and coding agents to the Chelis compiler. It describes the compilation pipeline, crate structure, and key design decisions.
+This document orients new developers and coding agents to the Chelis compiler as it
+exists today.
+For project-level decisions, read `spec/design/chelis_canonical_reference.md` first.
+This file explains how the workspace is structured and how a source file moves through
+the compiler.
+
+## Current Status
+
+Phase 0f (C backend codegen) is in progress.
+Phases 0a-0e are complete.
+The active work is backend emission, runtime support, BLAS integration, and numerical
+validation.
 
 ## Compilation Pipeline
 
-```
+```text
   .ch source          .dp source
       |                    |
   [Surf Lexer]        [Deep Lexer]
@@ -23,25 +34,33 @@ This document orients new developers and coding agents to the Chelis compiler. I
                            |
                        RISC DAG
                            |
-                   [Transformations]
-                   (grad, optimize)
+              [Optimize / Transform / Evaluate]
                            |
-                    Optimized DAG
-                           |
-                    [C Code Emitter]
-                           |
-                      C source code
-                           |
-                     [gcc / clang]
-                           |
-                      Executable
+                 +---------+----------+
+                 |                    |
+          [IR Evaluator]      [C Code Emitter]
+                 |                    |
+          Interactive result      C source code
+                                       |
+                                [gcc / clang]
+                                       |
+                                  Executable
 ```
 
-Both entry points (Surf `.ch` files and Deep `.dp` files) converge at the Deep AST. The type checker operates on Deep AST, then lowering produces a RISC DAG of ~12 primitive operations. Transformations like `grad` (reverse-mode AD) and optimizations are DAG-to-DAG rewrites. Finally, a backend emits target code — currently C, with GPU backends planned.
+Both source forms converge at Deep.
+The type checker runs on Deep, lowering produces the RISC DAG, and then the pipeline
+forks:
+
+- interactive workflows use the IR evaluator
+- production builds emit C and compile it with the system toolchain
+
+This split is deliberate.
+Chelis does not plan a second general-purpose JIT backend unless measured latency makes
+it necessary.
 
 ## Crate Dependency Graph
 
-```
+```text
 chelis-cli
   ├── chelis-surf
   │     └── chelis-deep
@@ -54,56 +73,87 @@ chelis-cli
         └── chelis-ir
 ```
 
-The dependency graph is a strict DAG with no cycles. `chelis-deep` is the foundation that everything else depends on. The CLI crate at the top ties everything together but contains no compiler logic itself.
+The dependency graph is a strict DAG.
+`chelis-deep` is the foundation, and `chelis-cli` only orchestrates library crates.
 
 ## Crates
 
-### `chelis-deep` (foundation)
+### `chelis-deep`
 
-Parses the Deep syntax — s-expressions that serve as the canonical, machine-friendly representation of Chelis programs. Every Surf program desugars to Deep, and all compiler passes operate on the Deep AST. Key types will include `Expr` (the AST node enum), `Atom`, and the parser entry point.
+Parses and prints Deep, the canonical machine-facing syntax.
+Deep is the compiler's common representation and the target produced by Surf
+desugaring.
 
 ### `chelis-surf`
 
-Parses the surface syntax (Surf) that humans write, and desugars it to Deep AST. Surf adds syntactic conveniences like infix operators, `where` blocks, and indentation-sensitive syntax. Depends on `chelis-deep` because desugaring produces Deep AST nodes.
+Parses Surf and desugars it into Deep.
+It also owns best-effort decompilation back to Surf.
 
 ### `chelis-types`
 
-Implements type checking over the Deep AST using Hindley-Milner inference extended with named tensor dimensions and precision tracking. Produces a typed AST where every node carries its inferred type. Also implements the fitness scoring system that rates type errors on a 0.0-1.0 scale and suggests repairs.
+Implements Hindley-Milner inference extended with named tensor dimensions, precision
+tracking, and fitness-oriented error reporting.
 
 ### `chelis-ir`
 
-Defines the RISC DAG intermediate representation — approximately 12 primitive operations that every higher-level operation decomposes into. Handles lowering from typed Deep AST to DAG, and implements DAG-to-DAG transformations including `grad` (reverse-mode automatic differentiation) and optimization passes.
+Defines the RISC DAG, lowering, verification, optimization passes, transform passes,
+and the IR evaluator used for interactive execution.
 
 ### `chelis-backend-c`
 
-Generates C source code from an optimized RISC DAG. Handles memory planning (buffer allocation and reuse), BLAS integration for matrix operations, and emission of a self-contained C file that can be compiled with gcc or clang. Future backends (GPU, StableHLO) will follow the same interface.
+Emits C from the DAG, performs BLAS-oriented lowering decisions, and manages runtime
+and memory-planning concerns for the reference backend.
 
 ### `chelis-cli`
 
-The command-line binary. Orchestrates the pipeline from source file to compiled output. Contains no compiler logic — just argument parsing, file I/O, and calls into the library crates. Will eventually host the Tide interactive shell (Phase 0i).
+Exposes the compiler pipeline as commands such as `build`, `check`, `deep`, `surf`,
+`eval`, and `tide`.
 
 ## Where to Start
 
-Current project status: Phase 0f (C backend codegen) is in progress. Phases 0a-0e are complete, and the core spec set is written and reviewed.
+If you are working on the current phase, start with:
 
-If you are working on the current phase, start with `spec/08-backends.md`, `spec/05-risc-primitives.md`, and `spec/12-roadmap.md`, then inspect `crates/chelis-backend-c` and `crates/chelis-ir`. The current implementation work is C emission, runtime support, BLAS integration, and numerical verification.
+1. `spec/design/chelis_canonical_reference.md`
+2. `spec/05-risc-primitives.md`
+3. `spec/08-backends.md`
+4. `spec/12-roadmap.md`
 
-If you are an AI coding agent, the spec files in `spec/` are your primary reference. Each spec document is self-contained and numbered in dependency order.
+Then inspect:
 
-## Key Design Decisions
+- `crates/chelis-ir`
+- `crates/chelis-backend-c`
+- `crates/chelis-cli`
 
-### Virtual workspace
+If you are extending the language front end, read `spec/02-surf-syntax.md`,
+`spec/03-deep-syntax.md`, and `spec/04-type-system.md` in order.
 
-The project uses a Cargo virtual workspace (the root `Cargo.toml` has no `[package]`, only `[workspace]`). This keeps each compiler phase in its own crate with explicit dependencies, enabling parallel compilation and ensuring clean separation of concerns. A developer working on the type checker never accidentally depends on the C backend.
+## Design Constraints
 
-### S-expressions as the canonical form
+### Deep Is Canonical
 
-Deep syntax uses s-expressions because they are trivial to parse, trivial to generate, and unambiguous. AI agents can emit Deep directly without worrying about operator precedence, indentation, or syntactic sugar. The surface syntax (Surf) exists purely for human ergonomics and desugars completely to Deep — the compiler never sees Surf after the desugaring pass.
+Surf is for supervision.
+Deep is the canonical compiler-facing syntax.
+Every Deep node has the form `(tag {} children...)`, which keeps generation and
+transformation regular for both agents and compiler passes.
 
-### ~12 RISC primitives
+### Small IR, Rich Surface
 
-Instead of having dedicated IR nodes for matmul, softmax, conv2d, attention, and every other operation, Chelis decomposes everything into approximately 12 primitives (elementwise ops, reduce, broadcast, reshape, index, etc.). This makes transformations like `grad` tractable — you only need differentiation rules for ~12 operations instead of hundreds. It also means new high-level operations can be added to Surf without changing the IR or backends.
+High-level language constructs lower into a compact RISC DAG rather than requiring a
+large backend surface area.
+That keeps `grad`, optimization, and backend emission tractable.
 
-### Named dimensions instead of positional
+### Pure Stage Boundaries
 
-Tensor dimensions carry names (like `batch`, `hidden`, `seq_len`) rather than being identified by position (axis 0, axis 1, ...). This eliminates a large class of shape errors — transposing `[batch, hidden]` to `[hidden, batch]` is explicit, not a silent `transpose()`. It also makes dimension checking local: each operation specifies which named dimensions it expects, and the type checker verifies compatibility without needing to track axis ordering through an entire program.
+Compilation stages should remain pure functions from inputs to outputs.
+Avoid global mutable state and long-lived compiler objects with implicit sequencing.
+This keeps the design easy to test now and makes a later `salsa` migration mechanical
+rather than architectural.
+
+### Evaluator First for Interactivity
+
+Tide and `chelis eval` should go through the IR evaluator first.
+If interactive latency later needs more work, the escalation order is:
+
+1. cache compiled C artifacts
+2. use a persistent compiler helper
+3. only then evaluate a JIT backend

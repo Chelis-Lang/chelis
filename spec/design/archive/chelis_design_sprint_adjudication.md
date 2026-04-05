@@ -1,3 +1,12 @@
+# Historical Note
+
+This document is preserved as design-history context only.
+It is **not** current guidance.
+For active project decisions, use `spec/design/chelis_canonical_reference.md`,
+`spec/design/chelis_project_plan.md`, and the numbered spec docs.
+
+---
+
 # Design Sprint Results: Adjudication and Next Steps
 
 ## Summary

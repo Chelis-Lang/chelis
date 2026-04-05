@@ -1,3 +1,12 @@
+# Historical Note
+
+This document is preserved as design-history context only.
+It is **not** current guidance.
+For active project decisions, use `spec/design/chelis_canonical_reference.md`,
+`spec/design/chelis_project_plan.md`, and the numbered spec docs.
+
+---
+
 # Steering Memo: Design Sprint Results for Phase 0c
 
 **To:** Coding agent (Phase 0c)
