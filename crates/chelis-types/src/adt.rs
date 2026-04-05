@@ -211,6 +211,19 @@ impl AdtRegistry {
             .get(adt_name)
             .map(|d| d.variants.iter().map(|v| v.name.clone()).collect())
     }
+
+    /// Look up a variant by constructor name across all ADTs.
+    /// Returns the ADT name and variant info.
+    pub fn lookup_variant(&self, ctor_name: &str) -> Option<(&str, &VariantInfo)> {
+        for (adt_name, def) in &self.defs {
+            for variant in &def.variants {
+                if variant.name == ctor_name {
+                    return Some((adt_name.as_str(), variant));
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Helper: get tag string from a Deep List.

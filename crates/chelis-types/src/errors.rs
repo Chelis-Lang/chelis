@@ -8,6 +8,10 @@ pub struct CheckError {
     pub message: String,
     pub suggestions: Vec<String>,
     pub severity: f64,
+    /// Expected type (for structured error reports).
+    pub expected: Option<String>,
+    /// Actual type found (for structured error reports).
+    pub got: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,27 @@ impl CheckError {
             message,
             suggestions,
             severity,
+            expected: None,
+            got: None,
+        }
+    }
+
+    /// Create with expected/got for structured error reports.
+    pub fn with_types(
+        kind: CheckErrorKind,
+        message: String,
+        expected: String,
+        got: String,
+        suggestions: Vec<String>,
+    ) -> Self {
+        let severity = kind.default_severity();
+        CheckError {
+            kind,
+            message,
+            suggestions,
+            severity,
+            expected: Some(expected),
+            got: Some(got),
         }
     }
 }
@@ -80,6 +105,8 @@ impl From<TypeError> for CheckError {
             message: te.message,
             suggestions,
             severity,
+            expected: None,
+            got: None,
         }
     }
 }

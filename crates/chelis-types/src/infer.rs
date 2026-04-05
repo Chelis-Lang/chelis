@@ -526,7 +526,12 @@ fn infer_app(
         "neq",
         "lte",
         "gte",
+        "and",
+        "or",
+        "not",
     ];
+
+    const LOGICAL_OPS: &[&str] = &["and", "or", "not"];
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
@@ -548,6 +553,31 @@ fn infer_app(
                             ));
                             return Type::Error;
                         }
+                    }
+                }
+            }
+
+            // Post-check: logical ops require tensor[D, bool] arguments
+            if let Some(ref fname) = func_name
+                && LOGICAL_OPS.contains(&fname.as_str())
+            {
+                for arg_ty in &arg_tys {
+                    let resolved = subst.apply(arg_ty);
+                    match &resolved {
+                        Type::Tensor(_, Prim::Bool) | Type::Var(_) | Type::Error => {} // OK
+                        Type::Tensor(_, prec) => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!(
+                                    "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
+                                    fname,
+                                    prec.name()
+                                ),
+                                vec!["Logical ops only work on bool tensors".to_string()],
+                            ));
+                            return Type::Error;
+                        }
+                        _ => {} // Already caught by tensor-op check above
                     }
                 }
             }
@@ -834,6 +864,7 @@ fn infer_match(
                     &mut arm_env,
                     vg,
                     subst,
+                    adt_reg,
                     &mut covered_variants,
                     &mut has_wildcard,
                 );
@@ -886,12 +917,14 @@ fn infer_match(
     result_ty.unwrap_or(Type::Error)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pattern_bindings(
     pat: &deep::Expr,
     scrutinee_ty: &Type,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
+    adt_reg: &AdtRegistry,
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
@@ -934,6 +967,7 @@ fn pattern_bindings(
                                             env,
                                             vg,
                                             subst,
+                                            adt_reg,
                                             covered_variants,
                                             has_wildcard,
                                         );
@@ -961,31 +995,51 @@ fn pattern_bindings(
                         env,
                         vg,
                         subst,
+                        adt_reg,
                         covered_variants,
                         has_wildcard,
                     );
                 }
             }
             "pat-record" => {
-                // (pat-record {} TypeName (kv {} k1 p1) ...): bind each field's pattern
+                // (pat-record {} TypeName (kv {} k1 p1) ...): validate against ADT registry
                 // kids[0] = TypeName, kids[1..] = (kv {} key pat)
-                for kv_expr in kids.iter().skip(1) {
-                    if let deep::Expr::List(kv_list, _) = kv_expr
-                        && get_tag(kv_list) == Some("kv")
-                    {
-                        let kv_kids = children(kv_list);
-                        if kv_kids.len() >= 2 {
-                            // Bind sub-pattern with a fresh type (field type unknown here)
-                            let field_ty = vg.fresh_type();
-                            pattern_bindings(
-                                &kv_kids[1],
-                                &field_ty,
-                                env,
-                                vg,
-                                subst,
-                                covered_variants,
-                                has_wildcard,
-                            );
+                if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
+                    covered_variants.push(ctor_name.to_string());
+
+                    // Look up variant in ADT registry to get field types
+                    let variant_info = adt_reg.lookup_variant(ctor_name);
+                    let declared_fields: std::collections::HashMap<&str, &Type> = variant_info
+                        .map(|(_, vi)| {
+                            vi.fields
+                                .iter()
+                                .filter_map(|(name, ty)| name.as_deref().map(|n| (n, ty)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    for kv_expr in kids.iter().skip(1) {
+                        if let deep::Expr::List(kv_list, _) = kv_expr
+                            && get_tag(kv_list) == Some("kv")
+                        {
+                            let kv_kids = children(kv_list);
+                            if kv_kids.len() >= 2 {
+                                let field_name = symbol_name(&kv_kids[0]);
+                                // Use declared field type if available, else fresh var
+                                let field_ty = field_name
+                                    .and_then(|n| declared_fields.get(n).cloned().cloned())
+                                    .unwrap_or_else(|| vg.fresh_type());
+                                pattern_bindings(
+                                    &kv_kids[1],
+                                    &field_ty,
+                                    env,
+                                    vg,
+                                    subst,
+                                    adt_reg,
+                                    covered_variants,
+                                    has_wildcard,
+                                );
+                            }
                         }
                     }
                 }
@@ -2039,6 +2093,63 @@ mod tests {
             "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) \
                (app {} (var {} add) (var {} x) (var {} x))))",
             CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    // ── Round 3 regression tests ──────────────────────────────────
+
+    #[test]
+    fn fix9_logical_ops_reject_non_bool_tensors() {
+        // and(tensor[batch, f32], tensor[batch, f32]) should fail — requires bool
+        check_err(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+             (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+             (def {} r (app {} (var {} and) (var {} a) (var {} b)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn fix9b_logical_ops_reject_non_tensor() {
+        // and(int32, int32) should fail — requires tensor
+        check_err(
+            "(def {} r (app {} (var {} and) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn fix9c_not_rejects_non_bool_tensor() {
+        // not(tensor[batch, f32]) should fail — requires bool
+        check_err(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0)) \
+             (def {} r (app {} (var {} not) (var {} a)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn fix9d_logical_ops_accept_bool_tensors() {
+        // and(tensor[batch, bool], tensor[batch, bool]) should pass
+        check_ok(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} bool))} 0)) \
+             (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} bool))} 0)) \
+             (def {} r (app {} (var {} and) (var {} a) (var {} b)))",
+        );
+    }
+
+    #[test]
+    fn fix10_fitness_has_untyped_nodes() {
+        let result = check(
+            "(def {} good (lit {type: (t-prim {} int32)} 42)) \
+                            (def {} bad (var {} nope))",
+        );
+        let report = crate::fitness::FitnessReport::from_infer_result(&result);
+        assert!(report.untyped_nodes > 0, "expected untyped_nodes > 0");
+        // Errors should have severity set
+        assert!(
+            report.errors.iter().all(|e| e.severity > 0.0),
+            "all errors should have severity > 0"
         );
     }
 }

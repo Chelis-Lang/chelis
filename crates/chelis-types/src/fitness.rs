@@ -23,6 +23,8 @@ pub struct FitnessReport {
     pub errors: Vec<CheckError>,
     /// Number of sub-expressions that typed successfully.
     pub typed_nodes: usize,
+    /// Number of sub-expressions that failed to type.
+    pub untyped_nodes: usize,
     /// Total number of sub-expressions visited.
     pub total_nodes: usize,
     /// Names that could not be resolved.
@@ -95,6 +97,7 @@ impl FitnessReport {
             },
             errors: result.errors.clone(),
             typed_nodes: result.typed_nodes,
+            untyped_nodes: result.total_nodes.saturating_sub(result.typed_nodes),
             total_nodes: result.total_nodes,
             unresolved_names,
         }
