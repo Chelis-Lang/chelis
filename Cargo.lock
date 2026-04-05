@@ -120,6 +120,7 @@ dependencies = [
  "chelis-ir",
  "chelis-surf",
  "chelis-types",
+ "tempfile",
 ]
 
 [[package]]

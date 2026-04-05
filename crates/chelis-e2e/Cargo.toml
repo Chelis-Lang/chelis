@@ -12,3 +12,6 @@ chelis-surf.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-ir = { path = "../chelis-ir" }
 chelis-backend-c = { path = "../chelis-backend-c" }
+
+[dev-dependencies]
+tempfile = "3"
