@@ -19,9 +19,11 @@ typedef struct {
     int ndim;
     int dtype;
     int size;
+    int owns_data;
 } chelis_tensor;
 
 chelis_tensor* chelis_alloc(int ndim, const int *shape, int dtype);
+chelis_tensor* chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 

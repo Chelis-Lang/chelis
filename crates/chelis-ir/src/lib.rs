@@ -9,6 +9,7 @@
 
 pub mod dag;
 pub mod eval;
+pub mod grad;
 pub mod lower;
 pub mod optimize;
 pub mod tier2;

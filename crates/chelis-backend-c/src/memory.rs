@@ -4,28 +4,22 @@
 
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
 
-/// Returns true if the node's op aliases its input's data pointer (no owned allocation).
-fn is_data_alias(op: &RiscOp) -> bool {
-    matches!(
-        op,
-        RiscOp::Permute { .. }
-            | RiscOp::Expand { .. }
-            | RiscOp::Stride { .. }
-            | RiscOp::Store { .. }
-    )
+/// Returns true if the node is borrowed from the caller and must never be freed here.
+fn is_borrowed(op: &RiscOp) -> bool {
+    matches!(op, RiscOp::Load { .. })
 }
 
 /// Emit `chelis_free()` calls for all nodes except the specified output nodes.
-/// For nodes that alias their input's data pointer (Permute, Expand, Stride, Store),
-/// null the data pointer before freeing to avoid double-free.
+/// Phase 0f uses allocate-per-node and frees everything at function end.
+/// The runtime tracks ownership, so aliasing views can be freed directly.
 pub fn emit_cleanup(dag: &Dag, output_ids: &[NodeId]) -> Vec<String> {
     let mut lines = Vec::new();
     for n in dag.nodes() {
         if output_ids.contains(&n.id) {
             continue;
         }
-        if is_data_alias(&n.op) {
-            lines.push(format!("    t{}->data = NULL;", n.id.0));
+        if is_borrowed(&n.op) {
+            continue;
         }
         lines.push(format!("    chelis_free(t{});", n.id.0));
     }
@@ -88,5 +82,19 @@ mod tests {
         dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         let lines = emit_cleanup(&dag, &[]);
         assert!(lines[0].starts_with("    chelis_free(t0)"));
+    }
+
+    #[test]
+    fn cleanup_skips_borrowed_loads() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        let lines = emit_cleanup(&dag, &[]);
+        assert!(lines.is_empty());
     }
 }

@@ -1,22 +1,47 @@
 //! RISC DAG to C source code emission.
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_types::types::Prim;
 
 /// Emits C source code from a RISC DAG.
 pub struct CEmitter {
     lines: Vec<String>,
     indent: usize,
+    use_blas: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OutputSpec {
+    id: NodeId,
+    label: String,
+    is_store: bool,
 }
 
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
     pub fn emit_dag(dag: &Dag, func_name: &str) -> String {
+        Self::emit_dag_with_options(dag, func_name, crate::CodegenOptions::default())
+    }
+
+    /// Emit C source for an entire DAG with explicit backend options.
+    pub fn emit_dag_with_options(
+        dag: &Dag,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> String {
+        Self::validate_supported_precisions(dag);
+        Self::validate_load_abi(dag);
+
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
+            use_blas: options.use_blas,
         };
 
         e.line("#include \"chelis_runtime.h\"");
+        if e.use_blas {
+            e.line("#include <cblas.h>");
+        }
         e.line("");
 
         e.line(&format!(
@@ -24,28 +49,81 @@ impl CEmitter {
         ));
         e.indent = 1;
 
-        // Track input counter for Load nodes
-        let mut input_idx = 0usize;
+        let input_labels = Self::input_labels(dag);
+        let input_slots = Self::input_slots(&input_labels);
+        let expected_inputs = input_labels.len();
+        let output_specs = Self::output_specs(dag);
+        let expected_outputs = output_specs.len();
+
+        e.line(&format!("if (n_in != {expected_inputs}) {{"));
+        e.indent += 1;
+        e.line(&format!(
+            "fprintf(stderr, \"{func_name}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+        ));
+        e.line("abort();");
+        e.indent -= 1;
+        e.line("}");
+        if expected_inputs > 0 {
+            e.line("if (inputs == NULL) {");
+            e.indent += 1;
+            e.line(&format!(
+                "fprintf(stderr, \"{func_name}: inputs array is NULL but %d inputs are required\\n\", {expected_inputs});"
+            ));
+            e.line("abort();");
+            e.indent -= 1;
+            e.line("}");
+        }
+
+        e.line(&format!("if (n_out != {expected_outputs}) {{"));
+        e.indent += 1;
+        e.line(&format!(
+            "fprintf(stderr, \"{func_name}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+        ));
+        e.line("abort();");
+        e.indent -= 1;
+        e.line("}");
+        if expected_outputs > 0 {
+            e.line("if (outputs == NULL) {");
+            e.indent += 1;
+            e.line(&format!(
+                "fprintf(stderr, \"{func_name}: outputs array is NULL but %d outputs are required\\n\", {expected_outputs});"
+            ));
+            e.line("abort();");
+            e.indent -= 1;
+            e.line("}");
+        }
 
         for node in dag.nodes() {
-            if matches!(node.op, RiscOp::Load { .. }) {
-                e.emit_load(node.id.0, &node.op, &node.output_type, input_idx);
-                input_idx += 1;
+            if let RiscOp::Load { name } = &node.op {
+                let input_idx = *input_slots
+                    .get(name)
+                    .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                e.emit_load(node.id.0, input_idx);
             } else {
                 e.emit_node(node, dag);
             }
         }
 
-        // Return last node as output
-        if let Some(last) = dag.nodes().last() {
-            e.line(&format!("outputs[0] = t{};", last.id.0));
-
-            // Free all intermediate tensors that are not the output
-            let output_ids = vec![last.id];
-            let cleanup = crate::memory::emit_cleanup(dag, &output_ids);
-            for line in cleanup {
-                e.lines.push(line);
+        for (slot, output) in output_specs.iter().enumerate() {
+            if output.is_store {
+                e.line(&format!("outputs[{slot}] = t{};", output.id.0));
+            } else {
+                e.line(&format!(
+                    "outputs[{slot}] = chelis_contiguous(t{});",
+                    output.id.0
+                ));
             }
+        }
+
+        let cleanup = crate::memory::emit_cleanup(
+            dag,
+            &output_specs
+                .iter()
+                .map(|output| output.id)
+                .collect::<Vec<_>>(),
+        );
+        for line in cleanup {
+            e.lines.push(line);
         }
 
         e.indent = 0;
@@ -103,6 +181,112 @@ impl CEmitter {
         self.lines.push(format!("{prefix}{s}"));
     }
 
+    fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
+        let mut specs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for node in dag.nodes() {
+            if let RiscOp::Store { name } = &node.op
+                && seen.insert(node.id)
+            {
+                specs.push(OutputSpec {
+                    id: node.id,
+                    label: name.clone(),
+                    is_store: true,
+                });
+            }
+        }
+
+        let roots: Vec<NodeId> = if dag.roots().is_empty() {
+            dag.nodes()
+                .last()
+                .map(|node| vec![node.id])
+                .unwrap_or_default()
+        } else {
+            dag.roots().to_vec()
+        };
+
+        for (index, root_id) in roots.into_iter().enumerate() {
+            if seen.insert(root_id) {
+                specs.push(OutputSpec {
+                    id: root_id,
+                    label: format!("root{index}"),
+                    is_store: false,
+                });
+            }
+        }
+        specs
+    }
+
+    pub(crate) fn output_labels(dag: &Dag) -> Vec<String> {
+        Self::output_specs(dag)
+            .into_iter()
+            .map(|output| output.label)
+            .collect()
+    }
+
+    pub(crate) fn input_labels(dag: &Dag) -> Vec<String> {
+        let mut labels = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op
+                && seen.insert(name.clone())
+            {
+                labels.push(name.clone());
+            }
+        }
+        labels
+    }
+
+    fn input_slots(labels: &[String]) -> std::collections::HashMap<String, usize> {
+        labels
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(slot, label)| (label, slot))
+            .collect()
+    }
+
+    fn validate_supported_precisions(dag: &Dag) {
+        for node in dag.nodes() {
+            match node.output_type.precision {
+                Prim::F32 | Prim::Bool => {}
+                other => panic!(
+                    "Phase 0f C backend only supports f32/bool tensors, found {} at node {}",
+                    other.name(),
+                    node.id.0
+                ),
+            }
+
+            if let RiscOp::Cast { new_precision } = node.op
+                && new_precision != Prim::F32
+            {
+                panic!(
+                    "Phase 0f C backend only supports casts to f32, found cast to {} at node {}",
+                    new_precision.name(),
+                    node.id.0
+                );
+            }
+        }
+    }
+
+    fn validate_load_abi(dag: &Dag) {
+        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op {
+                if let Some(prev_ty) = seen.get(name) {
+                    assert_eq!(
+                        prev_ty, &node.output_type,
+                        "Load name '{}' used with inconsistent tensor types in C codegen",
+                        name
+                    );
+                } else {
+                    seen.insert(name.clone(), node.output_type.clone());
+                }
+            }
+        }
+    }
+
     fn shape_literal(ty: &TensorType) -> String {
         let dims: Vec<String> = ty
             .dims
@@ -136,18 +320,30 @@ impl CEmitter {
         }
     }
 
+    fn dtype_macro(ty: &TensorType) -> &'static str {
+        match ty.precision {
+            Prim::F32 => "CHELIS_F32",
+            Prim::Bool => "CHELIS_BOOL",
+            other => panic!(
+                "Phase 0f C backend only supports f32/bool tensors, got {}",
+                other.name()
+            ),
+        }
+    }
+
     // ---- Const ----
     fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", value as f32));
     }
 
     // ---- Load ----
-    fn emit_load(&mut self, id: usize, _op: &RiscOp, _ty: &TensorType, input_idx: usize) {
+    fn emit_load(&mut self, id: usize, input_idx: usize) {
         self.line(&format!("chelis_tensor *t{id} = inputs[{input_idx}];"));
     }
 
@@ -157,8 +353,9 @@ impl CEmitter {
         let b = inputs[1].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -186,8 +383,9 @@ impl CEmitter {
         let b = inputs[1].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -215,8 +413,9 @@ impl CEmitter {
         let b = inputs[1].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -243,8 +442,9 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -266,8 +466,9 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -284,37 +485,34 @@ impl CEmitter {
         self.line("}");
     }
 
-    // ---- BLAS matmul (naive fallback) ----
-    fn emit_blas_matmul(&mut self, id: usize, info: &crate::blas::MatmulInfo, _dag: &Dag) {
+    // ---- BLAS matmul ----
+    fn emit_blas_matmul(&mut self, id: usize, info: &crate::blas::MatmulInfo, ty: &TensorType) {
         let a = info.a.0;
         let b = info.b.0;
         let m = info.m;
         let n = info.n;
         let k = info.k;
-        self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc(2, (int[]){{ {m}, {n} }}, CHELIS_F32);"
-        ));
-        self.line(&format!("for (int i = 0; i < {m}; i++) {{"));
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
+        self.line(&format!("if (!chelis_is_contiguous(t{id}_a)) {{"));
         self.indent += 1;
-        self.line(&format!("for (int j = 0; j < {n}; j++) {{"));
-        self.indent += 1;
-        self.line("float acc = 0.0f;");
-        self.line(&format!("for (int p = 0; p < {k}; p++) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "int a_idx = i * t{a}->strides[0] + p * t{a}->strides[1];"
-        ));
-        self.line(&format!(
-            "int b_idx = p * t{b}->strides[0] + j * t{b}->strides[1];"
-        ));
-        self.line(&format!("acc += t{a}->data[a_idx] * t{b}->data[b_idx];"));
+        self.line(&format!("t{id}_a = chelis_contiguous(t{id}_a);"));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[i * {n} + j] = acc;"));
+        self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
+        self.line(&format!("if (!chelis_is_contiguous(t{id}_b)) {{"));
+        self.indent += 1;
+        self.line(&format!("t{id}_b = chelis_contiguous(t{id}_b);"));
         self.indent -= 1;
         self.line("}");
-        self.indent -= 1;
-        self.line("}");
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc(2, (int[]){{ {m}, {n} }}, {dtype});"
+        ));
+        self.line(&format!(
+            "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m}, {n}, {k}, 1.0f, t{id}_a->data, {k}, t{id}_b->data, {n}, 0.0f, t{id}->data, {n});"
+        ));
+        self.line(&format!("if (t{id}_a != t{a}) chelis_free(t{id}_a);"));
+        self.line(&format!("if (t{id}_b != t{b}) chelis_free(t{id}_b);"));
     }
 
     // ---- Reduce sum ----
@@ -327,8 +525,10 @@ impl CEmitter {
         dag: &Dag,
     ) {
         // Check for matmul pattern before generic reduction
-        if let Some(matmul) = crate::blas::detect_matmul_pattern(dag, NodeId(id)) {
-            self.emit_blas_matmul(id, &matmul, dag);
+        if self.use_blas
+            && let Some(matmul) = crate::blas::detect_matmul_pattern(dag, NodeId(id))
+        {
+            self.emit_blas_matmul(id, &matmul, ty);
             return;
         }
         let a = inputs[0].0;
@@ -336,8 +536,9 @@ impl CEmitter {
         let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
         self.line("#pragma omp parallel for");
@@ -394,8 +595,9 @@ impl CEmitter {
         let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line("#pragma omp parallel for");
         self.line(&format!(
@@ -441,22 +643,24 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
-        // If the source might be non-contiguous, make it contiguous first
-        self.line(&format!("chelis_tensor *t{id}_src = t{a};"));
-        self.line(&format!("if (!chelis_is_contiguous(t{id}_src)) {{"));
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!("chelis_tensor *t{id};"));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
         self.indent += 1;
-        self.line(&format!("t{id}_src = chelis_contiguous(t{id}_src);"));
+        self.line(&format!(
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
+        ));
         self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
-        ));
-        self.line(&format!(
-            "memcpy(t{id}->data, t{id}_src->data, t{id}->size * sizeof(float));"
-        ));
-        // Free the contiguous copy if one was made
-        self.line(&format!("if (t{id}_src != t{a}) {{"));
+        self.line("} else {");
         self.indent += 1;
+        self.line(&format!(
+            "chelis_tensor *t{id}_src = chelis_contiguous(t{a});"
+        ));
+        self.line(&format!(
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{id}_src->data);"
+        ));
+        self.line(&format!("t{id}->owns_data = 1;"));
+        self.line(&format!("t{id}_src->owns_data = 0;"));
         self.line(&format!("chelis_free(t{id}_src);"));
         self.indent -= 1;
         self.line("}");
@@ -474,12 +678,10 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
         ));
-        // Copy data pointer (share data, adjust strides)
-        self.line(&format!("free(t{id}->data);"));
-        self.line(&format!("t{id}->data = t{a}->data;"));
         // Set permuted strides
         for (new_d, &old_d) in axes.iter().enumerate() {
             self.line(&format!(
@@ -502,12 +704,19 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let _ = size; // used in shape already
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
         ));
-        self.line(&format!("free(t{id}->data);"));
-        self.line(&format!("t{id}->data = t{a}->data;"));
-        // Copy strides from source, inserting stride 0 at the expanded axis
+        self.line(&format!("if (t{id}->ndim == t{a}->ndim) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "for (int d = 0; d < t{a}->ndim; d++) t{id}->strides[d] = t{a}->strides[d];"
+        ));
+        self.line(&format!("t{id}->strides[{axis}] = 0;"));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         for d in 0..axis {
             self.line(&format!("t{id}->strides[{d}] = t{a}->strides[{d}];"));
         }
@@ -515,6 +724,8 @@ impl CEmitter {
         self.line(&format!(
             "for (int d = {axis}; d < t{a}->ndim; d++) t{id}->strides[d+1] = t{a}->strides[d];"
         ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Pad ----
@@ -530,8 +741,9 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", fill as f32));
         // Copy source data into the padded region
@@ -568,8 +780,9 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -594,11 +807,10 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
         ));
-        self.line(&format!("free(t{id}->data);"));
-        self.line(&format!("t{id}->data = t{a}->data;"));
         let max_dims = ty.dims.len().max(1);
         for (d, &s) in strides.iter().enumerate() {
             if d >= max_dims {
@@ -610,12 +822,13 @@ impl CEmitter {
 
     // ---- Cast ----
     fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
-        // Phase 0: everything is f32, so cast is identity copy
+        // Phase 0f only supports casts to f32, validated before emission.
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, CHELIS_F32);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!(
             "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof(float));"
@@ -625,7 +838,9 @@ impl CEmitter {
     // ---- Store ----
     fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId]) {
         let a = inputs[0].0;
-        self.line(&format!("chelis_tensor *t{id} = t{a}; /* store: {name} */"));
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_contiguous(t{a}); /* store: {name} */"
+        ));
     }
 }
 
@@ -827,7 +1042,7 @@ mod tests {
             scalar_f32(),
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("store: out"));
+        assert!(c.contains("chelis_contiguous(t0); /* store: out */"));
     }
 
     #[test]
@@ -857,6 +1072,57 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("inputs[0]"));
+    }
+
+    #[test]
+    fn repeated_load_names_share_one_input_slot() {
+        let mut dag = Dag::new();
+        let x0 = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        let x1 = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("if (n_in != 1)"));
+        assert!(c.contains("chelis_tensor *t0 = inputs[0];"));
+        assert!(c.contains("chelis_tensor *t1 = inputs[0];"));
+    }
+
+    #[test]
+    fn input_labels_follow_first_load_occurrence() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load {
+                name: "b".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        dag.add_node(
+            RiscOp::Load {
+                name: "a".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        dag.add_node(
+            RiscOp::Load {
+                name: "b".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        assert_eq!(CEmitter::input_labels(&dag), vec!["b", "a"]);
     }
 
     #[test]
@@ -951,5 +1217,138 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         assert!(c.contains("-t1->data[idx]"));
+    }
+
+    #[test]
+    fn load_is_borrowed_not_freed() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(!c.contains("chelis_free(t0);"));
+        assert!(c.contains("outputs[0] = chelis_contiguous(t0);"));
+    }
+
+    #[test]
+    fn roots_are_emitted_as_multiple_outputs() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_root(a);
+        dag.add_root(b);
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("if (n_out != 2)"));
+        assert!(c.contains("outputs[0] = chelis_contiguous(t0);"));
+        assert!(c.contains("outputs[1] = chelis_contiguous(t1);"));
+    }
+
+    #[test]
+    fn bool_outputs_use_bool_dtype() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+        );
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("chelis_alloc(1, (int[]){1}, CHELIS_BOOL);"));
+    }
+
+    #[test]
+    fn matmul_pattern_emits_cblas_call() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+        let ea = dag.add_node(
+            RiscOp::Expand { axis: 2, size: 4 },
+            vec![a],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let eb = dag.add_node(
+            RiscOp::Expand { axis: 0, size: 2 },
+            vec![b],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let mul = dag.add_node(
+            RiscOp::Mul,
+            vec![ea, eb],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        let c = CEmitter::emit_dag_with_options(
+            &dag,
+            "test_fn",
+            crate::CodegenOptions { use_blas: true },
+        );
+        assert!(c.contains("cblas_sgemm("));
+    }
+
+    #[test]
+    fn default_codegen_uses_generic_matmul_path() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+        let ea = dag.add_node(
+            RiscOp::Expand { axis: 2, size: 4 },
+            vec![a],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let eb = dag.add_node(
+            RiscOp::Expand { axis: 0, size: 2 },
+            vec![b],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let mul = dag.add_node(
+            RiscOp::Mul,
+            vec![ea, eb],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(!c.contains("cblas_sgemm("));
+        assert!(c.contains("for (int k = 0; k < 3; k++) {"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Phase 0f C backend only supports f32/bool tensors")]
+    fn unsupported_precision_panics() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Const { value: 1.0 },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F64,
+            },
+        );
+        let _ = CEmitter::emit_dag(&dag, "test_fn");
     }
 }

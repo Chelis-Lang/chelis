@@ -136,16 +136,22 @@ fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
     }
 }
 
-fn expand(input: &TensorValue, axis: usize, size: usize) -> TensorValue {
+fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>) -> TensorValue {
     assert!(axis <= input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.insert(axis, size);
     let out_len = numel(&out_shape);
     let mut out = vec![0.0; out_len];
     for (flat_idx, slot) in out.iter_mut().enumerate() {
-        let mut out_index = linear_to_index(flat_idx, &out_shape);
-        out_index.remove(axis);
-        *slot = input.data[index_to_linear(&out_index, &input.shape)];
+        let out_index = linear_to_index(flat_idx, &out_shape);
+        let in_index = if out_shape.len() == input.shape.len() {
+            let mut idx = out_index;
+            idx[axis] = 0;
+            idx
+        } else {
+            let mut idx = out_index;
+            idx.remove(axis);
+            idx
+        };
+        *slot = input.data[index_to_linear(&in_index, &input.shape)];
     }
     TensorValue {
         data: out,
@@ -297,7 +303,12 @@ pub fn eval_tensor(
                 reshape(&values[&node.inputs[0]], shape)
             }
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
-            RiscOp::Expand { axis, size } => expand(&values[&node.inputs[0]], *axis, *size),
+            RiscOp::Expand { axis, size } => expand(
+                &values[&node.inputs[0]],
+                *axis,
+                *size,
+                concrete_shape(&node.output_type)?,
+            ),
             RiscOp::Pad { padding, fill } => pad(&values[&node.inputs[0]], padding, *fill),
             RiscOp::Shrink { bounds } => shrink(&values[&node.inputs[0]], bounds),
             RiscOp::Stride { strides } => stride(&values[&node.inputs[0]], strides),
@@ -370,6 +381,28 @@ mod tests {
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
+        );
+    }
+
+    #[test]
+    fn eval_same_rank_expand_broadcast() {
+        let mut dag = Dag::new();
+        let in_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        let out_ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty);
+        let y = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], out_ty);
+        let mut inputs = HashMap::new();
+        inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
+        let vals = eval_tensor(&dag, &inputs).unwrap();
+        assert_eq!(
+            vals[&y],
+            TensorValue::from_vec(vec![4], vec![2.5, 2.5, 2.5, 2.5])
         );
     }
 

@@ -8,10 +8,24 @@ use chelis_types::types::Prim;
 pub fn verify(dag: &Dag) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
+    let mut load_types = std::collections::HashMap::<String, crate::dag::TensorType>::new();
     for node in dag.nodes() {
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {
                 consumers[input_id.0] += 1;
+            }
+        }
+
+        if let RiscOp::Load { name } = &node.op {
+            if let Some(prev_ty) = load_types.get(name) {
+                if prev_ty != &node.output_type {
+                    errors.push(format!(
+                        "load '{}' has inconsistent tensor types: {:?} vs {:?}",
+                        name, prev_ty, node.output_type
+                    ));
+                }
+            } else {
+                load_types.insert(name.clone(), node.output_type.clone());
             }
         }
     }
@@ -249,6 +263,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 if arity == 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
+                    let output_rank = node.output_type.dims.len();
                     if *axis > input_rank {
                         errors.push(format!(
                             "expand at node {}: axis {} > input rank {}",
@@ -264,15 +279,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, node.output_type.precision, input.output_type.precision
                         ));
                     }
-                    if node.output_type.dims.len() != input_rank + 1 {
-                        errors.push(format!(
-                            "expand at node {}: output rank {} != expected {}",
-                            node.id.0,
-                            node.output_type.dims.len(),
-                            input_rank + 1
-                        ));
-                    } else if *axis <= input_rank {
-                        for out_i in 0..node.output_type.dims.len() {
+                    if output_rank == input_rank + 1 && *axis <= input_rank {
+                        for out_i in 0..output_rank {
                             if out_i == *axis {
                                 if let Some(out_size) =
                                     dim_known_size(&node.output_type.dims[out_i])
@@ -296,6 +304,52 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 }
                             }
                         }
+                    } else if output_rank == input_rank {
+                        if *axis >= input_rank {
+                            errors.push(format!(
+                                "expand at node {}: axis {} >= input rank {} for same-rank expand",
+                                node.id.0, axis, input_rank
+                            ));
+                        } else {
+                            if let Some(in_size) = dim_known_size(&input.output_type.dims[*axis])
+                                && in_size != 1
+                            {
+                                errors.push(format!(
+                                    "expand at node {}: same-rank expand requires input axis {} to have size 1, got {}",
+                                    node.id.0, axis, in_size
+                                ));
+                            }
+                            if let Some(out_size) = dim_known_size(&node.output_type.dims[*axis])
+                                && out_size != *size
+                            {
+                                errors.push(format!(
+                                    "expand at node {}: output axis {} has size {}, expected {}",
+                                    node.id.0, axis, out_size, size
+                                ));
+                            }
+                            for out_i in 0..output_rank {
+                                if out_i == *axis {
+                                    continue;
+                                }
+                                if !dims_compatible(
+                                    &node.output_type.dims[out_i],
+                                    &input.output_type.dims[out_i],
+                                ) {
+                                    errors.push(format!(
+                                        "expand at node {}: output axis {} {:?} incompatible with input axis {} {:?}",
+                                        node.id.0, out_i, node.output_type.dims[out_i], out_i, input.output_type.dims[out_i]
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        errors.push(format!(
+                            "expand at node {}: output rank {} must equal input rank {} or {}",
+                            node.id.0,
+                            output_rank,
+                            input_rank,
+                            input_rank + 1
+                        ));
                     }
                 }
             }
@@ -785,6 +839,48 @@ mod tests {
     }
 
     #[test]
+    fn c10_expand_same_rank_broadcast_ok() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Expand { axis: 0, size: 4 },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn c10_expand_same_rank_requires_unit_input_axis() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        dag.add_node(
+            RiscOp::Expand { axis: 0, size: 4 },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("requires input axis 0 to have size 1"))
+        );
+    }
+
+    #[test]
     fn c10_pad_wrong_rank_is_error() {
         let mut dag = Dag::new();
         let input_ty = TensorType {
@@ -914,5 +1010,35 @@ mod tests {
         dag.add_root(a);
         dag.add_root(b);
         assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn load_name_type_mismatch_is_error() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+        );
+        dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+        );
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("load 'x' has inconsistent tensor types"))
+        );
     }
 }

@@ -1,10 +1,10 @@
 #include "chelis_runtime.h"
 
-chelis_tensor* chelis_alloc(int ndim, const int *shape, int dtype) {
-    chelis_tensor *t = (chelis_tensor*)calloc(1, sizeof(chelis_tensor));
+static void chelis_init_tensor(chelis_tensor *t, int ndim, const int *shape, int dtype) {
     t->ndim = ndim;
     t->dtype = dtype;
     t->size = 1;
+    t->owns_data = 1;
     for (int d = 0; d < ndim; d++) {
         t->shape[d] = shape[d];
         t->size *= shape[d];
@@ -14,12 +14,28 @@ chelis_tensor* chelis_alloc(int ndim, const int *shape, int dtype) {
         t->strides[d] = (d == ndim - 1) ? 1 : t->strides[d + 1] * t->shape[d + 1];
     }
     if (t->size == 0) t->size = 1; /* scalar */
+}
+
+chelis_tensor* chelis_alloc(int ndim, const int *shape, int dtype) {
+    chelis_tensor *t = (chelis_tensor*)calloc(1, sizeof(chelis_tensor));
+    chelis_init_tensor(t, ndim, shape, dtype);
     t->data = (float*)calloc(t->size, sizeof(float));
     return t;
 }
 
+chelis_tensor* chelis_alloc_view(int ndim, const int *shape, int dtype, float *data) {
+    chelis_tensor *t = (chelis_tensor*)calloc(1, sizeof(chelis_tensor));
+    chelis_init_tensor(t, ndim, shape, dtype);
+    t->data = data;
+    t->owns_data = 0;
+    return t;
+}
+
 void chelis_free(chelis_tensor *t) {
-    if (t) { free(t->data); free(t); }
+    if (t) {
+        if (t->owns_data) free(t->data);
+        free(t);
+    }
 }
 
 void chelis_fill_f32(chelis_tensor *t, float val) {
