@@ -2,7 +2,7 @@
 
 Chelis is a programming language for tensor computation, designed to be written by both humans and AI agents. It compiles through a minimal set of ~12 primitive operations (the RISC DAG) to efficient C code, with automatic differentiation as a first-class language feature.
 
-**Status:** Phase 0a (project scaffold). Not yet usable.
+**Status:** Phase 0f (C backend codegen) in progress. Phases 0a-0e complete. All core spec documents written and reviewed.
 
 ## Build
 

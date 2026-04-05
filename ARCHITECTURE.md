@@ -84,7 +84,9 @@ The command-line binary. Orchestrates the pipeline from source file to compiled 
 
 ## Where to Start
 
-If you are implementing the next phase (0b: Deep parser), start by reading `spec/03-deep-syntax.md` for the grammar and semantics, then look at `crates/chelis-deep/src/lib.rs`. The Deep parser is the foundation — every other crate depends on it. See `spec/12-roadmap.md` for the full phase plan.
+Current project status: Phase 0f (C backend codegen) is in progress. Phases 0a-0e are complete, and the core spec set is written and reviewed.
+
+If you are working on the current phase, start with `spec/08-backends.md`, `spec/05-risc-primitives.md`, and `spec/12-roadmap.md`, then inspect `crates/chelis-backend-c` and `crates/chelis-ir`. The current implementation work is C emission, runtime support, BLAS integration, and numerical verification.
 
 If you are an AI coding agent, the spec files in `spec/` are your primary reference. Each spec document is self-contained and numbered in dependency order.
 

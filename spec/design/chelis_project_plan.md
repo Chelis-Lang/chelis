@@ -2,7 +2,9 @@
 
 ## Overview
 
-Build the Chelis programming language from zero to MNIST-on-CPU, structured for a coding agent working with a small team. Each phase has clear deliverables, test criteria, and red team checkpoints.
+Build the Chelis programming language from zero to MNIST-on-CPU and beyond. Structured for a coding agent working with a small team. Each phase has clear deliverables, test criteria, and red team checkpoints.
+
+**Current status:** Phase 0f (C backend codegen) in progress. Phases 0a-0e complete. All core spec documents written and reviewed.
 
 **Repo:** `chelis-lang/chelis` (Rust workspace)
 **Domain:** chelis.ch
@@ -12,20 +14,20 @@ Build the Chelis programming language from zero to MNIST-on-CPU, structured for 
 
 ## Phasing
 
-| Phase | Deliverable | Timeline Target |
+| Phase | Deliverable | Status |
 |---|---|---|
-| **0a** | Project scaffold, spec docs, CI, test infra | Week 1 |
-| **0b** | Deep parser (s-expressions) | Week 2 |
-| **0c** | Surf parser + Surf→Deep desugaring | Week 3-4 |
-| **0d** | Type checker (ADTs, HM inference, precision, named dims) | Week 5-8 |
-| **0e** | RISC DAG construction from typed AST | Week 9-10 |
-| **0f** | C backend codegen (host + BLAS) | Week 11-13 |
-| **0g** | `grad` transformation (reverse-mode AD on DAG) | Week 14-16 |
-| **0h** | End-to-end: MNIST on CPU | Week 17-18 |
-| **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`) | Week 19-20 |
-| **1** | Futhark-style GPU backend (CUDA/OpenCL) | Months 6-9 |
-| **2** | Effects, linear types, macros, Tide Agent API, MCP | Months 9-14 |
-| **3** | StableHLO/FX, package ecosystem (Reef), research type features | Months 14+ |
+| **0a** | Project scaffold, spec docs, CI, test infra | ✅ Complete |
+| **0b** | Deep parser (s-expressions) | ✅ Complete |
+| **0c** | Surf parser + Surf→Deep desugaring | ✅ Complete |
+| **0d** | Type checker (ADTs, HM inference, precision, named dims) | ✅ Complete |
+| **0e** | RISC DAG construction from typed AST | ✅ Complete |
+| **0f** | C backend codegen (host + BLAS + OpenMP) | 🔨 In progress |
+| **0g** | `grad` transformation (reverse-mode AD on DAG) |  |
+| **0h** | End-to-end: MNIST on CPU + spec test suite |  |
+| **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) |  |
+| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) |  |
+| **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
+| **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), first-party coding model |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase. A red team round means: an adversarial review of design decisions, test coverage, spec compliance, and architectural debt. Document findings, revise, then proceed.
 
@@ -744,37 +746,37 @@ These are publication-grade type system extensions. Each should be a paper befor
 
 Design and implementation run in parallel. Design work produces spec documents; implementation consumes them. The rule: a spec doc must be written and reviewed BEFORE the corresponding implementation phase begins.
 
-### Design Work Available Now (During Phase 0)
+### Completed Design Work
 
-These can be worked on immediately, in parallel with Phase 0 coding. They don't require a working compiler — they're paper/spec work.
-
-| Design Task | Status | Notes |
+| Design Task | Document | Status |
 |---|---|---|
-| **Surf formal grammar** | DONE (Phase 0c) | spec/02-surf-syntax.md, implemented in chelis-surf parser |
-| **Deep formal grammar** | DONE (Phase 0b + sprint) | spec/03-deep-syntax.md, 53-tag vocabulary, 3-tuple nodes |
-| **RISC primitive semantics** | DONE | spec/05-risc-primitives.md, 3-tier hierarchy |
-| **Type system formal rules** | DONE | spec/04-type-system.md, ready for Phase 0d |
-| **Standard op lowerings** | DONE | spec/05 §4, matmul/softmax/conv2d/etc. |
-| **Named dimension syntax** | DONE | Module-level: `defdim`. Function-level: `def f[a, b](...)`. Both implemented. |
-| **Effect system design** | Phase 2 | Metadata key `eff` reserved |
-| **Linear type design** | Phase 2 | Metadata key `lin` reserved |
-| **Macro system design** | Phase 2+ | Tags `quote`/`unquote`/`splice` reserved |
+| Surf formal grammar | `spec/02-surf-syntax.md` — full PEG, keywords, precedence, desugaring table | ✅ Complete (consumed by Phase 0c) |
+| Deep formal grammar | `spec/03-deep-syntax.md` — 56-tag vocabulary, 3-tuple node structure, canonical form, PEG | ✅ Complete (consumed by Phase 0b) |
+| RISC primitive semantics | `spec/05-risc-primitives.md` — all ops with types, AD adjoints, standard lowerings, C reference impls | ✅ Complete (consumed by Phase 0e) |
+| Type system formal rules | `spec/04-type-system.md` — HM inference rules, tensor type algebra, precision rules, fitness scoring | ✅ Complete (consumed by Phase 0d) |
+| Standard op lowerings | Included in `spec/05` — matmul, softmax, cross-entropy, layer norm, conv2d, embedding, MHA | ✅ Complete |
+| Deep tag vocabulary | 56 tags across 9 categories, closed set, explicit `app`/`var`/`lit` | ✅ Settled |
+| Deep metadata format | Universal 3-tuple `(tag {} children...)`, `{}` always present | ✅ Settled |
+| Surf module system | One module per file, flat, explicit import/export, `(..)` for wildcard | ✅ Settled |
+| Named dimension syntax | Module-level `dim`, function-level `[a, b]` brackets, `d-name`/`d-var` in Deep | ✅ Settled |
+| Pipe semantics | First-class `pipe` node in Deep, not desugared to nested `app` | ✅ Settled |
+| Tensor type syntax in Deep | `(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))`, precision last | ✅ Settled |
+| Block/sequencing syntax | Braces, sequential `let` without `in`, newlines and semicolons interchangeable | ✅ Settled |
+| Pattern matching details | Nested patterns, guards, record punning, `=>` for arms, exhaustiveness required | ✅ Settled |
+| Type aliases | `type Weights = tensor[h, h, f32]`, transparent, `typealias` Deep tag | ✅ Settled |
+| Record update | `{ e with field: val }`, `record-update` Deep tag | ✅ Settled (Phase 1 implementation) |
+| Transform syntax | Call-like in Surf, dedicated tags in Deep, `cast` second arg is type literal | ✅ Settled |
+| Error message catalog | Structured error types with repair suggestions in `chelis-types/src/errors.rs` | ✅ In progress (iterative) |
 
-### Design Decisions (Resolved by Design Sprint)
+### Remaining Design Work
 
-All of the following were resolved by the design sprint and steering memo. See `spec/03-deep-syntax.md` and `spec/design/chelis_steering_memo.md` for authoritative answers.
-
-1. **Deep tag vocabulary** — 53-tag closed vocabulary. See spec/03-deep-syntax.md §2.
-2. **Deep metadata format** — Universal 3-tuple: `(tag {} children...)`. Metadata `{}` is always element[1]. See spec/03-deep-syntax.md §1.
-3. **Tensor type syntax** — `(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))`. Precision always last. Wildcard: `(d-name {} *)`. See spec/04-type-system.md.
-4. **Pipe semantics** — `pipe` is a first-class Deep node, NOT sugar. `(pipe {} x f g)` is preserved structurally. Each stage must be a function/lambda.
-5. **Integer literal default** — `int32` (not int64). See steering memo.
-6. **Effects/linearity** — Phase 2 reservations. Metadata keys `eff`/`lin` reserved. Phase 0 ignores them.
-7. **Concurrency** — DAG-implicit parallelism + `par` only. `stream`/`scatter` deferred.
-8. **Compiler language** — Rust (settled).
-
-**Still open for Phase 1+:** Fusion rules, GPU memory model, effect handler syntax, borrow syntax, custom effects.
-
-### Design Sprint (Completed)
-
-The design sprint was completed and produced the authoritative specs listed above. All Phase 0 blocking design tasks are resolved. See `spec/design/chelis_steering_memo.md` for the full record of decisions.
+| Design Task | Produces | Consumed By | Priority |
+|---|---|---|---|
+| **Effect system design** | spec/04 §effects — formal effect typing rules, row polymorphism, handler syntax in both Surf and Deep, interaction with HM | Phase 2a | **HIGH — long lead time, start before Phase 1 ends** |
+| **Linear type design** | spec/04 §linearity — which types are linear, borrowing rules, interaction with effects, closures, pattern matching | Phase 2b | **HIGH — long lead time** |
+| **Macro system design** | Dedicated spec doc or spec/03 §macros — expansion order, hygiene (scope sets), type-awareness, phase separation | Phase 2c | **MEDIUM** |
+| **Fusion rules** | spec/05 §fusion — which DAG patterns fuse, correctness constraints, interaction with precision | Phase 1b | **MEDIUM — needed before `egg` prototype** |
+| **GPU memory model** | spec/08 §gpu-memory — how GPU memory is modeled (effect? annotation?), interaction with linear types | Phase 1, Phase 2a | **MEDIUM** |
+| **Effect handler syntax** | spec/02 + spec/03 — Surf and Deep forms for handling effects | Phase 2a | **MEDIUM** |
+| **Borrow syntax** | spec/02 + spec/03 — `&x` or `borrow x` in Surf, `(borrow {} x)` in Deep | Phase 2b | **LOW — follows linear type design** |
+| **Custom effects** | spec/04 — can users define effects? Extensibility model | Phase 2a | **LOW** |
