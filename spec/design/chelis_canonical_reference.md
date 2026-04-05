@@ -271,7 +271,41 @@ To keep a future `salsa` migration cheap:
 
 ---
 
-## 12. Documentation Hierarchy
+## 12. AI Integration
+
+### Coding model strategy
+
+Chelis uses a staged first-party coding-capability strategy rather than assuming a
+fine-tuned model from the start.
+
+**Stage A (Phase 2, near-zero cost):** write a `SKILL.md` covering the Deep tag
+vocabulary, desugaring rules, canonical form, and worked examples, then use frontier
+models with the compiler through the Tide MCP server.
+No training.
+Pure in-context learning plus compiler feedback.
+
+**Stage B (Phase 2-3):** wrap the compiler as a trajectory-generating evaluator.
+Collect model attempts, repair loops, and failures as training data.
+The compiler-as-teacher loop is both an inference-time tool and a data-generation
+mechanism.
+
+**Stage C (Phase 3, only if needed):** fine-tune on trajectories, spec tests, and
+examples only if the earlier stages do not meet the quality bar.
+
+Non-negotiable prerequisite:
+
+- 50-100 seed programs covering core Chelis patterns
+
+Critical dependency:
+
+- Tide MCP server in Phase 2e
+
+The default assumption is **skill file + compiler-in-the-loop first, fine-tune only if
+necessary**.
+
+---
+
+## 13. Documentation Hierarchy
 
 Use the docs in this order:
 

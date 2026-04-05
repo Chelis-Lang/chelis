@@ -14,7 +14,8 @@ pub struct TrainConfig {
 /// Build a simple forward DAG programmatically for an MLP.
 /// x[batch,784] -> matmul(w1[784,128]) + b1[128] -> relu -> matmul(w2[128,10]) + b2[10]
 /// Then: softmax -> log -> mul(labels) -> neg -> sum (cross-entropy loss)
-pub fn build_mnist_dag() -> (Dag, NodeId, Vec<(String, NodeId)>) {
+/// Returns (dag, loss_node, logits_node, param_nodes)
+pub fn build_mnist_dag() -> (Dag, NodeId, NodeId, Vec<(String, NodeId)>) {
     let mut dag = Dag::new();
     let f32_ty = |dims: Vec<DimInfo>| TensorType {
         dims,
@@ -121,7 +122,7 @@ pub fn build_mnist_dag() -> (Dag, NodeId, Vec<(String, NodeId)>) {
         ("b2".to_string(), b2),
     ];
 
-    (dag, loss, params)
+    (dag, loss, logits, params)
 }
 
 /// Initialize random parameters

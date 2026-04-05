@@ -262,8 +262,77 @@ It is not a proposal to rewrite the Surf parser.
 
 ### 3g: Chelis Coding Model
 
-- first-party model for Surf and Deep generation
-- training and evaluation driven by the compiler and spec suite
+A first-party AI capability for generating Chelis code in both Surf and Deep.
+This follows a staged, cheapest-first strategy rather than assuming up front that
+fine-tuning is required.
+
+**Stage A: Skill File + Compiler-in-the-Loop (Phase 2, near-zero cost)**
+
+Write a `SKILL.md` containing:
+
+- the 56-tag Deep grammar and arity rules
+- the Surf→Deep desugaring table
+- canonical form rules
+- built-in scope and core type signatures
+- 20-30 worked examples
+- common error patterns and fixes
+
+Use that skill file with frontier models and the Chelis compiler through the Tide MCP
+server.
+No training.
+Pure in-context learning plus compiler feedback.
+
+Success test:
+
+- can a frontier model with `SKILL.md` + MCP produce valid Deep programs?
+- if pass@5-with-feedback exceeds 50%, later stages are optimization, not necessity
+
+**Stage B: Trajectory Collection (Phase 2-3, modest budget)**
+
+Wrap the compiler as a GEPA-style evaluator.
+Prompt frontier models with Chelis programming tasks, collect full attempt trajectories,
+and retain failures as well as successes.
+
+Why this matters:
+
+- failed trajectories still contain useful skills
+- compiler feedback becomes training data, not only a runtime repair loop
+- 50-100 trajectories over core patterns should be enough to seed a narrow-language
+  corpus
+
+Outputs:
+
+- seed corpus of successful programs
+- SFT-style data from full trajectories
+- paired Surf↔Deep examples
+- PyTorch→Chelis translation examples where useful
+
+**Stage C: Fine-Tune If Needed (Phase 3, fallback only)**
+
+LoRA fine-tune a strong coding base model only if Stages A and B fail to meet the
+quality bar.
+
+Training data:
+
+- trajectories from Stage B
+- spec test suite
+- examples
+- curated seed programs
+
+Evaluation:
+
+- compiler fitness score remains the primary evaluator
+- target is high-fitness generation rather than benchmark overfitting
+
+**Important constraint:** Stage C is explicitly a fallback.
+The default assumption is that frontier models with a strong skill file and compiler
+feedback may already be sufficient.
+
+**Critical dependency:** the Tide MCP server from Phase 2e.
+
+**Non-negotiable prerequisite:** 50-100 hand-written or supervised-interaction seed
+programs covering core Chelis patterns.
+These serve triple duty as few-shot examples, trajectory seeds, and evaluation anchors.
 
 ---
 
