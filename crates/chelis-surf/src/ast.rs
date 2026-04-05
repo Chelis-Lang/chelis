@@ -114,9 +114,16 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetBinding {
-    pub name: String,
+    pub pattern: LetPattern,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LetPattern {
+    Var(String, Span),
+    Wildcard(Span),
+    Tuple(Vec<LetPattern>, Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]

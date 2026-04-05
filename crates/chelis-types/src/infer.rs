@@ -84,6 +84,16 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     result
         .errors
         .retain(|error| !matches!(error.kind, CheckErrorKind::UnboundVariable));
+    for warning in chelis_deep::validate::validate(exprs) {
+        result.errors.push(CheckError::new(
+            match warning.kind {
+                chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
+                _ => CheckErrorKind::Other,
+            },
+            warning.message,
+            vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
+        ));
+    }
     let type_env = build_phase0e_type_env(exprs);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
     if result.errors.is_empty() {
@@ -2048,8 +2058,18 @@ fn infer_grad(
 
     match resolved {
         Type::Fn(args, ret) => {
-            // grad(f) : Fn([T1,...,Tn], Tuple([S, Tuple([T1,...,Tn])]))
-            let grad_ret = Type::Tuple(vec![*ret, Type::Tuple(args.clone())]);
+            let ret = *ret;
+            if !grad_output_supported(&ret) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    format!("grad requires a scalar floating output, got {}", ret),
+                    vec!["Reduce the function result to a scalar before applying grad".to_string()],
+                ));
+                return Type::Error;
+            }
+
+            let grad_payload = grad_argument_payload(&args);
+            let grad_ret = Type::Tuple(vec![ret, grad_payload]);
             Type::Fn(args, Box::new(grad_ret))
         }
         Type::Error => Type::Error,
@@ -2057,6 +2077,30 @@ fn infer_grad(
             // Can't determine function structure, return fresh var
             vg.fresh_type()
         }
+    }
+}
+
+fn grad_output_supported(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => prim.is_float(),
+        Type::Tensor(dims, prim) => dims.is_empty() && prim.is_float(),
+        _ => false,
+    }
+}
+
+fn grad_argument_payload(args: &[Type]) -> Type {
+    if args.len() == 1 {
+        grad_argument_type(&args[0])
+    } else {
+        Type::Tuple(args.iter().map(grad_argument_type).collect())
+    }
+}
+
+fn grad_argument_type(arg: &Type) -> Type {
+    match arg {
+        Type::Prim(prim) if prim.is_float() => Type::Prim(*prim),
+        Type::Tensor(dims, prim) if prim.is_float() => Type::Tensor(dims.clone(), *prim),
+        _ => Type::Unit,
     }
 }
 
@@ -2541,6 +2585,36 @@ mod tests {
             "(defsig {} loss (t-fn {} (t-prim {} f32) (t-prim {} f32)))
              (def {} loss (fn {} (params {} x) (var {} x)))
              (def {} g (grad {} (var {} loss)))",
+        );
+    }
+
+    #[test]
+    fn grad_non_float_param_gets_unit_gradient() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+        )
+        .unwrap();
+        let result = infer_program(&exprs);
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn grad_rejects_non_scalar_output() {
+        check_err(
+            "(defsig {} f (t-fn {}
+                (t-prim {} f32)
+                (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+             (def {} f
+                (fn {} (params {} x)
+                  (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 1.0)))
+             (def {} g (grad {} (var {} f)))",
+            CheckErrorKind::Other,
         );
     }
 

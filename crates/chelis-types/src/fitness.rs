@@ -118,9 +118,13 @@ pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     let structure = if exprs.is_empty() {
         1.0
     } else {
-        // Count nodes, subtract warning count
         let node_count = count_nodes(exprs).max(1);
-        let valid = node_count.saturating_sub(warnings.len());
+        let invalid_nodes = warnings
+            .iter()
+            .map(|warning| warning.offset)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let valid = node_count.saturating_sub(invalid_nodes);
         valid as f64 / node_count as f64
     };
 

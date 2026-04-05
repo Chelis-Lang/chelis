@@ -23,6 +23,7 @@ pub enum ParseError {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    module_allowed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
         tokens: tokens.to_vec(),
         pos: 0,
+        module_allowed: true,
     };
     p.parse_program()
 }
@@ -221,7 +223,11 @@ impl Parser {
     fn parse_program(&mut self) -> Result<Vec<Decl>, ParseError> {
         let mut decls = Vec::new();
         while !self.at_eof() {
-            decls.push(self.parse_decl()?);
+            let decl = self.parse_decl()?;
+            if !matches!(decl, Decl::Module { .. }) {
+                self.module_allowed = false;
+            }
+            decls.push(decl);
         }
         Ok(decls)
     }
@@ -233,7 +239,18 @@ impl Parser {
             TokenKind::Let => self.parse_let_def(),
             TokenKind::Type => self.parse_type_decl(),
             TokenKind::Dim => self.parse_dim_decl(),
-            TokenKind::Module => self.parse_module(),
+            TokenKind::Module => {
+                if self.module_allowed {
+                    self.parse_module()
+                } else {
+                    Err(ParseError::Expected {
+                        expected: "module declaration only as the first declaration in a file"
+                            .into(),
+                        found: "Module".into(),
+                        offset: self.current_offset(),
+                    })
+                }
+            }
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
             _ => Err(ParseError::Expected {
@@ -456,6 +473,7 @@ impl Parser {
     fn parse_module(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Module
         let (name, _) = self.parse_module_path()?;
+        self.module_allowed = false;
 
         let mut decls = Vec::new();
         while !self.at_eof() {
@@ -923,8 +941,9 @@ impl Parser {
 
         while *self.peek() == TokenKind::Let {
             self.advance(); // consume Let
-            let (name, _) = self.expect_ident()?;
-            let ty = if *self.peek() == TokenKind::Colon {
+            let pattern = self.parse_let_pattern()?;
+            let ty = if matches!(pattern, LetPattern::Var(_, _)) && *self.peek() == TokenKind::Colon
+            {
                 self.advance();
                 Some(self.parse_type()?)
             } else {
@@ -932,7 +951,7 @@ impl Parser {
             };
             self.expect(&TokenKind::Eq)?;
             let value = self.parse_expr(0)?;
-            bindings.push(LetBinding { name, ty, value });
+            bindings.push(LetBinding { pattern, ty, value });
         }
 
         self.expect(&TokenKind::In)?;
@@ -1100,8 +1119,8 @@ impl Parser {
 
     fn parse_block_let_binding(&mut self) -> Result<LetBinding, ParseError> {
         self.expect(&TokenKind::Let)?;
-        let (name, _) = self.expect_ident()?;
-        let ty = if *self.peek() == TokenKind::Colon {
+        let pattern = self.parse_let_pattern()?;
+        let ty = if matches!(pattern, LetPattern::Var(_, _)) && *self.peek() == TokenKind::Colon {
             self.advance();
             Some(self.parse_type()?)
         } else {
@@ -1109,7 +1128,46 @@ impl Parser {
         };
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr(0)?;
-        Ok(LetBinding { name, ty, value })
+        Ok(LetBinding { pattern, ty, value })
+    }
+
+    fn parse_let_pattern(&mut self) -> Result<LetPattern, ParseError> {
+        match self.peek().clone() {
+            TokenKind::Ident(name) => {
+                let tok = self.advance();
+                Ok(LetPattern::Var(name, tok.span))
+            }
+            TokenKind::Underscore => {
+                let tok = self.advance();
+                Ok(LetPattern::Wildcard(tok.span))
+            }
+            TokenKind::LParen => {
+                let start = self.advance().span;
+                let first = self.parse_let_pattern()?;
+                if *self.peek() != TokenKind::Comma {
+                    return Err(ParseError::Expected {
+                        expected: "tuple destructuring pattern".into(),
+                        found: format!("{:?}", self.peek()),
+                        offset: self.current_offset(),
+                    });
+                }
+                let mut pats = vec![first];
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    pats.push(self.parse_let_pattern()?);
+                }
+                let end = self.expect(&TokenKind::RParen)?;
+                Ok(LetPattern::Tuple(pats, start.merge(end.span)))
+            }
+            _ => Err(ParseError::Expected {
+                expected: "let binding pattern".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            }),
+        }
     }
 
     fn parse_record_expr(&mut self, name: String, start: Span) -> Result<Expr, ParseError> {
@@ -1881,8 +1939,29 @@ mod tests {
         match e {
             Expr::Let(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
-                assert_eq!(bindings[0].name, "y");
+                assert!(matches!(
+                    &bindings[0].pattern,
+                    LetPattern::Var(name, _) if name == "y"
+                ));
                 assert!(matches!(*body, Expr::Binary(BinOp::Add, _, _, _)));
+            }
+            _ => panic!("expected Let, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn let_in_tuple_destructuring() {
+        let e = body("def f(x) = let (a, b) = pair in a");
+        match e {
+            Expr::Let(bindings, body, _) => {
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(
+                    &bindings[0].pattern,
+                    LetPattern::Tuple(parts, _)
+                        if matches!(&parts[0], LetPattern::Var(name, _) if name == "a")
+                            && matches!(&parts[1], LetPattern::Var(name, _) if name == "b")
+                ));
+                assert!(matches!(*body, Expr::Var(ref n, _) if n == "a"));
             }
             _ => panic!("expected Let, got {e:?}"),
         }
@@ -2073,6 +2152,26 @@ mod tests {
         assert_eq!(decls.len(), 3);
     }
 
+    #[test]
+    fn module_must_be_first_decl() {
+        let err = p_err("let x = 1\nmodule M\ndef y = 2");
+        assert!(matches!(
+            err,
+            ParseError::Expected { ref expected, .. }
+                if expected == "module declaration only as the first declaration in a file"
+        ));
+    }
+
+    #[test]
+    fn nested_module_is_rejected() {
+        let err = p_err("module Outer\nmodule Inner\ndef y = 2");
+        assert!(matches!(
+            err,
+            ParseError::Expected { ref expected, .. }
+                if expected == "module declaration only as the first declaration in a file"
+        ));
+    }
+
     // ===== Logical operators =====
 
     #[test]
@@ -2131,8 +2230,14 @@ mod tests {
         match e {
             Expr::Let(bindings, _, _) => {
                 assert_eq!(bindings.len(), 2);
-                assert_eq!(bindings[0].name, "a");
-                assert_eq!(bindings[1].name, "b");
+                assert!(matches!(
+                    &bindings[0].pattern,
+                    LetPattern::Var(name, _) if name == "a"
+                ));
+                assert!(matches!(
+                    &bindings[1].pattern,
+                    LetPattern::Var(name, _) if name == "b"
+                ));
             }
             _ => panic!("expected Let, got {e:?}"),
         }

@@ -80,6 +80,8 @@ pub struct ValidationWarning {
 pub enum WarningKind {
     UnknownTag,
     MissingMetadata,
+    Structural,
+    Arity,
 }
 
 pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
@@ -98,28 +100,41 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 return;
             }
 
-            // Only validate lists that look like 3-tuple nodes:
-            // element[0] is a symbol AND element[1] is a Map.
-            // Bare structural lists like (a) or (a b) are not tagged nodes.
-            let is_tagged_node = list.elements.len() >= 2
-                && matches!(
-                    list.elements.first(),
-                    Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
-                )
-                && matches!(list.elements.get(1), Some(Expr::Map(_, _)));
-
-            if is_tagged_node
-                && let Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) = list.elements.first()
+            if let Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) = list.elements.first() {
                 // Typed helper forms like `(x {type: ...})` are structural children inside
-                // `(params {} ...)`, not top-level tagged Deep nodes.
-                && (list.elements.len() != 2 || VALID_TAGS.contains(&tag.as_str()))
-                && !VALID_TAGS.contains(&tag.as_str())
-            {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::UnknownTag,
-                    offset: span.offset,
-                    message: format!("unknown tag '{tag}' — not in the 56-tag vocabulary"),
-                });
+                // `(params {} ...)`, not standalone tagged Deep nodes.
+                let helper_typed_name = list.elements.len() == 2
+                    && matches!(list.elements.get(1), Some(Expr::Map(_, _)));
+                if helper_typed_name && !VALID_TAGS.contains(&tag.as_str()) {
+                    for child in &list.elements {
+                        validate_expr(child, warnings);
+                    }
+                    return;
+                }
+
+                match list.elements.get(1) {
+                    Some(Expr::Map(_, _)) => {
+                        if !VALID_TAGS.contains(&tag.as_str()) {
+                            warnings.push(ValidationWarning {
+                                kind: WarningKind::UnknownTag,
+                                offset: span.offset,
+                                message: format!(
+                                    "unknown tag '{tag}' — not in the 56-tag vocabulary"
+                                ),
+                            });
+                        } else {
+                            validate_tag_shape(tag, list, span.offset, warnings);
+                        }
+                    }
+                    _ if VALID_TAGS.contains(&tag.as_str()) => warnings.push(ValidationWarning {
+                        kind: WarningKind::MissingMetadata,
+                        offset: span.offset,
+                        message: format!(
+                            "tagged node '{tag}' must use canonical 3-tuple form `(tag {{}} ...)`"
+                        ),
+                    }),
+                    _ => {}
+                }
             }
 
             // Recurse into children
@@ -139,6 +154,105 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::Atom(_, _) => {} // Atoms are always valid
+    }
+}
+
+fn validate_tag_shape(
+    tag: &str,
+    list: &crate::ast::List,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let child_count = list.elements.len().saturating_sub(2);
+
+    let warn_arity = |warnings: &mut Vec<ValidationWarning>, expected: &str| {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Arity,
+            offset,
+            message: format!(
+                "`{tag}` has invalid arity: expected {expected}, found {child_count} child(ren)"
+            ),
+        });
+    };
+
+    match tag {
+        "if" | "arm" => {
+            if child_count != 3 {
+                warn_arity(warnings, "exactly 3 children");
+            }
+        }
+        "fn" => {
+            if child_count != 2 {
+                warn_arity(warnings, "exactly 2 children");
+                return;
+            }
+            if !matches!(
+                list.elements.get(2),
+                Some(Expr::List(params, _))
+                    if matches!(params.elements.first(), Some(Expr::Atom(crate::ast::Atom::Symbol(s), _)) if s == "params")
+                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+            ) {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset,
+                    message: "`fn` must use `(fn {} (params {} ...) body)`".to_string(),
+                });
+            }
+        }
+        "let" => {
+            if child_count != 2 {
+                warn_arity(warnings, "exactly 2 children");
+                return;
+            }
+            if !matches!(
+                list.elements.get(2),
+                Some(Expr::List(bind, _))
+                    if matches!(bind.elements.first(), Some(Expr::Atom(crate::ast::Atom::Symbol(s), _)) if s == "bind")
+                        && matches!(bind.elements.get(1), Some(Expr::Map(_, _)))
+            ) {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset,
+                    message: "`let` must use `(let {} (bind {} ...) body)`".to_string(),
+                });
+            }
+        }
+        "app" => {
+            if child_count < 1 {
+                warn_arity(warnings, "at least 1 child");
+            }
+        }
+        "params" => {
+            if !list.elements.iter().skip(2).all(|child| match child {
+                Expr::Atom(crate::ast::Atom::Symbol(_), _) => true,
+                Expr::List(inner, _) => {
+                    inner.elements.len() == 2
+                        && matches!(
+                            inner.elements.first(),
+                            Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
+                        )
+                        && matches!(inner.elements.get(1), Some(Expr::Map(_, _)))
+                }
+                _ => false,
+            }) {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset,
+                    message: "`params` must contain bare names or typed-name helper pairs"
+                        .to_string(),
+                });
+            }
+        }
+        "bind" => {
+            if !child_count.is_multiple_of(2) {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset,
+                    message: "`bind` must contain name/expression pairs".to_string(),
+                });
+            }
+        }
+        _ => {}
     }
 }
 
@@ -226,5 +340,21 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::UnknownTag));
         assert!(warnings[0].message.contains("apply"));
+    }
+
+    #[test]
+    fn missing_metadata_is_reported() {
+        let node = make_list(vec![sym("if"), sym("cond"), sym("then"), sym("else")]);
+        let warnings = validate(&[node]);
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(warnings[0].kind, WarningKind::MissingMetadata));
+    }
+
+    #[test]
+    fn arity_is_validated() {
+        let node = make_list(vec![sym("if"), empty_map(), sym("cond"), sym("then")]);
+        let warnings = validate(&[node]);
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(warnings[0].kind, WarningKind::Arity));
     }
 }

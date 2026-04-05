@@ -276,20 +276,38 @@ mod tests {
             .unwrap_or(false)
     }
 
+    fn c_test_extra_flags() -> Vec<String> {
+        std::env::var("CHELIS_C_TEST_EXTRA_FLAGS")
+            .ok()
+            .map(|flags| {
+                flags
+                    .split_whitespace()
+                    .map(|flag| flag.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn apply_c_test_flags(cmd: &mut Command) {
+        let extra = c_test_extra_flags();
+        if !extra.is_empty() {
+            cmd.args(extra);
+        }
+    }
+
     fn gcc_can_link(extra_args: &[&str], source: &str) -> bool {
         if !gcc_available() {
             return false;
         }
         let tmp = tempfile::tempdir().unwrap();
         let src_path = write_temp_file(tmp.path(), "probe.c", source);
-        Command::new("gcc")
-            .arg(src_path.to_str().unwrap())
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.arg(src_path.to_str().unwrap())
             .args(extra_args)
             .arg("-o")
-            .arg(tmp.path().join("probe").to_str().unwrap())
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .arg(tmp.path().join("probe").to_str().unwrap());
+        cmd.output().map(|o| o.status.success()).unwrap_or(false)
     }
 
     fn openmp_available() -> bool {
@@ -338,13 +356,13 @@ int main(void) {
         let c_path = write_temp_file(tmp.path(), "chelis_runtime.c", &c_src);
         let o_path = tmp.path().join("chelis_runtime.o");
 
-        let out = Command::new("gcc")
-            .args(["-c", "-O2", "-lm"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-c", "-O2", "-lm"])
             .arg(c_path.to_str().unwrap())
             .arg("-o")
-            .arg(o_path.to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(o_path.to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",
@@ -382,14 +400,14 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("runtime_view");
-        let out = Command::new("gcc")
-            .args(["-O2", "-lm"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
             .arg("-o")
-            .arg(bin_path.to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(bin_path.to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",
@@ -437,15 +455,15 @@ int main() {
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_add");
 
-        let out = Command::new("gcc")
-            .args(["-O2", "-lm"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("model.c").to_str().unwrap())
             .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
             .arg("-o")
-            .arg(bin_path.to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(bin_path.to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",
@@ -505,6 +523,7 @@ int main() {{
         let bin_path = tmp.path().join("test_bin");
 
         let mut compile_cmd = Command::new("gcc");
+        apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
         compile_cmd.args(&result.compile_flags);
         compile_cmd.args(extra_args);
@@ -665,6 +684,7 @@ int main(void) {{
         let bin_path = tmp.path().join("test_cases");
 
         let mut compile_cmd = Command::new("gcc");
+        apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
         compile_cmd.args(&result.compile_flags);
         compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
@@ -1035,6 +1055,91 @@ int main(void) {{
     }
 
     #[test]
+    fn numerical_pad_with_runtime_input() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            vec_f32(3),
+        );
+        dag.add_node(
+            RiscOp::Pad {
+                padding: vec![(1, 2)],
+                fill: -1.0,
+            },
+            vec![x],
+            vec_f32(6),
+        );
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_pad_runtime",
+            CodegenOptions::default(),
+            &[vec![TestInput::new("x", &[3], &[1.0, 2.0, 3.0])]],
+        );
+        assert_eq!(
+            lines,
+            vec!["-1.000000 1.000000 2.000000 3.000000 -1.000000 -1.000000"]
+        );
+    }
+
+    #[test]
+    fn numerical_shrink_with_runtime_input() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            vec_f32(5),
+        );
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(1, 4)],
+            },
+            vec![x],
+            vec_f32(3),
+        );
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_shrink_runtime",
+            CodegenOptions::default(),
+            &[vec![TestInput::new("x", &[5], &[5.0, 6.0, 7.0, 8.0, 9.0])]],
+        );
+        assert_eq!(lines, vec!["6.000000 7.000000 8.000000"]);
+    }
+
+    #[test]
+    fn numerical_stride_with_runtime_input() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            vec_f32(5),
+        );
+        dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_stride_runtime",
+            CodegenOptions::default(),
+            &[vec![TestInput::new("x", &[5], &[1.0, 2.0, 3.0, 4.0, 5.0])]],
+        );
+        assert_eq!(lines, vec!["1.000000 3.000000 5.000000"]);
+    }
+
+    #[test]
     fn numerical_large_vector_add_then_sum() {
         if !gcc_available() {
             return;
@@ -1108,15 +1213,15 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_multi");
-        let out = Command::new("gcc")
-            .args(["-O2", "-lm"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("model.c").to_str().unwrap())
             .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
             .arg("-o")
-            .arg(bin_path.to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(bin_path.to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",
@@ -1172,15 +1277,15 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_load_copy");
-        let out = Command::new("gcc")
-            .args(["-O2", "-lm"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("model.c").to_str().unwrap())
             .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
             .arg("-o")
-            .arg(bin_path.to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(bin_path.to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",
@@ -1260,17 +1365,17 @@ int main(void) {
 }
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
-        let out = Command::new("gcc")
-            .args(["-O2"])
+        let mut cmd = Command::new("gcc");
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2"])
             .args(&result.compile_flags)
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("model.c").to_str().unwrap())
             .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
             .args(&result.link_flags)
             .arg("-o")
-            .arg(tmp.path().join("test_blas").to_str().unwrap())
-            .output()
-            .unwrap();
+            .arg(tmp.path().join("test_blas").to_str().unwrap());
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "gcc failed: {}",

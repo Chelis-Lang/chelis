@@ -364,16 +364,7 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
             node("match", children)
         }
 
-        Expr::Let(bindings, body, _) => {
-            // (let {} (bind name1 expr1 name2 expr2 ...) body)
-            let mut bind_children = Vec::new();
-            for b in bindings {
-                bind_children.push(sym(&b.name));
-                bind_children.push(desugar_expr(&b.value));
-            }
-            let bind_node = node("bind", bind_children);
-            node("let", vec![bind_node, desugar_expr(body)])
-        }
+        Expr::Let(bindings, body, _) => desugar_let_bindings(bindings, desugar_expr(body)),
 
         Expr::Lambda(params, body, _) => {
             let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
@@ -419,16 +410,76 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
             if bindings.is_empty() {
                 desugar_expr(final_expr)
             } else {
-                let mut bind_children = Vec::new();
-                for binding in bindings {
-                    bind_children.push(sym(&binding.name));
-                    bind_children.push(desugar_expr(&binding.value));
-                }
-                let bind_node = node("bind", bind_children);
-                node("let", vec![bind_node, desugar_expr(final_expr)])
+                desugar_let_bindings(bindings, desugar_expr(final_expr))
             }
         }
     }
+}
+
+fn tuple_index_expr(target: deep::Expr, index: i64) -> deep::Expr {
+    node(
+        "tuple-get",
+        vec![
+            target,
+            node_meta(
+                "lit",
+                meta_with_type(node("t-prim", vec![sym("int32")])),
+                vec![deep::Expr::Atom(deep::Atom::Int(index), sp())],
+            ),
+        ],
+    )
+}
+
+fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
+    let bind_node = node("bind", vec![sym(name), value]);
+    node("let", vec![bind_node, body])
+}
+
+fn destructure_pattern(
+    pattern: &LetPattern,
+    source_name: &str,
+    body: deep::Expr,
+    next_tmp: &mut usize,
+) -> deep::Expr {
+    match pattern {
+        LetPattern::Var(name, _) => bind_name_value(name, dvar(source_name), body),
+        LetPattern::Wildcard(_) => body,
+        LetPattern::Tuple(parts, _) => {
+            let mut out = body;
+            for (index, part) in parts.iter().enumerate().rev() {
+                let tuple_value = tuple_index_expr(dvar(source_name), index as i64);
+                let tmp_name = format!("__chelis_tmp{}", *next_tmp);
+                *next_tmp += 1;
+                out = destructure_pattern(part, &tmp_name, out, next_tmp);
+                out = bind_name_value(&tmp_name, tuple_value, out);
+            }
+            out
+        }
+    }
+}
+
+fn desugar_let_bindings(bindings: &[LetBinding], body: deep::Expr) -> deep::Expr {
+    let mut out = body;
+    let mut next_tmp = 0usize;
+    for binding in bindings.iter().rev() {
+        match &binding.pattern {
+            LetPattern::Var(name, _) => {
+                let value = desugar_expr(&binding.value);
+                if let Some(ty) = &binding.ty {
+                    out = bind_name_value(name, inject_type_metadata(value, desugar_type(ty)), out);
+                } else {
+                    out = bind_name_value(name, value, out);
+                }
+            }
+            pattern => {
+                let temp_name = format!("__chelis_tmp{}", next_tmp);
+                next_tmp += 1;
+                out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
+                out = bind_name_value(&temp_name, desugar_expr(&binding.value), out);
+            }
+        }
+    }
+    out
 }
 
 fn desugar_literal(lit: &Literal) -> deep::Expr {
@@ -830,7 +881,7 @@ mod tests {
     fn test_let() {
         let expr = Expr::Let(
             vec![LetBinding {
-                name: "x".to_string(),
+                pattern: LetPattern::Var("x".to_string(), s()),
                 ty: None,
                 value: int_lit(1),
             }],
@@ -842,6 +893,35 @@ mod tests {
             result,
             "(let {} (bind {} x (lit {type: (t-prim {} int32)} 1)) (var {} x))"
         );
+    }
+
+    #[test]
+    fn test_let_tuple_destructuring() {
+        let expr = Expr::Let(
+            vec![LetBinding {
+                pattern: LetPattern::Tuple(
+                    vec![
+                        LetPattern::Var("a".to_string(), s()),
+                        LetPattern::Wildcard(s()),
+                        LetPattern::Var("c".to_string(), s()),
+                    ],
+                    s(),
+                ),
+                ty: None,
+                value: tvar("triple"),
+            }],
+            Box::new(tvar("c")),
+            s(),
+        );
+        let result = print_expr(&desugar_expr(&expr));
+        assert!(result.contains("(bind {} __chelis_tmp0 (var {} triple))"));
+        assert!(result.contains("(lit {type: (t-prim {} int32)} 0)"));
+        assert!(result.contains("(lit {type: (t-prim {} int32)} 1)"));
+        assert!(result.contains("(lit {type: (t-prim {} int32)} 2)"));
+        assert_eq!(result.matches("(tuple-get {}").count(), 3);
+        assert!(result.contains("(bind {} a (var {} __chelis_tmp"));
+        assert!(result.contains("(bind {} c (var {} __chelis_tmp"));
+        assert!(!result.contains("(bind {} _ "));
     }
 
     // --- Lambda ---

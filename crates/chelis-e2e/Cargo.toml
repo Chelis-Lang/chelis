@@ -1,0 +1,14 @@
+[package]
+name = "chelis-e2e"
+description = "End-to-end integration tests for the Chelis compiler"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chelis-deep.workspace = true
+chelis-surf.workspace = true
+chelis-types = { path = "../chelis-types" }
+chelis-ir = { path = "../chelis-ir" }
+chelis-backend-c = { path = "../chelis-backend-c" }
