@@ -1,43 +1,94 @@
 # Chelis
 
-Chelis is a programming language for tensor computation, designed to be written by both humans and AI agents. It compiles through a minimal set of ~12 primitive operations (the RISC DAG) to efficient C code, with automatic differentiation as a first-class language feature.
+Chelis is a functional programming language for AI research.
+It is designed for a workflow where a coding agent is the primary author and a human is
+the supervisor.
+Surf is the readable syntax for humans.
+Deep is the canonical s-expression syntax for machines and the compiler.
 
-**Status:** Phase 0f (C backend codegen) in progress. Phases 0a-0e complete. All core spec documents written and reviewed.
+**Status:** Phase 0f (C backend codegen) in progress.
+Phases 0a-0e complete.
+All core spec documents written and reviewed.
+
+## Prerequisites
+
+**Rust toolchain** (stable, with rustfmt and clippy):
+```sh
+rustup default stable
+rustup component add rustfmt clippy
+```
+
+**C toolchain** (for the C backend — Phase 0f+):
+```sh
+# Fedora / RHEL
+sudo dnf install gcc openblas-devel valgrind
+
+# Ubuntu / Debian
+sudo apt-get install gcc libopenblas-dev valgrind
+
+# macOS
+brew install gcc openblas
+```
+
+Required:
+- **GCC** (or clang) — compiles generated C code
+- **OpenBLAS** — BLAS matmul path (`cblas_sgemm`)
+- **OpenMP** — ships with GCC (`-fopenmp`)
+
+Optional:
+- **Valgrind** — memory leak tests on generated C
 
 ## Build
 
-```
+```sh
 cargo build --workspace
 cargo test --workspace
 ```
 
+## Current Focus
+
+The active implementation work is the C backend:
+
+- RISC DAG to C emission
+- BLAS integration
+- OpenMP-parallel elementwise and reduction loops
+- runtime support and numerical verification
+
+Interactive execution is planned around the IR evaluator, not a JIT backend.
+
 ## Project Structure
 
-```
+```text
 crates/
-  chelis-deep/       Deep (s-expression) parser
-  chelis-surf/       Surface syntax parser + desugaring
-  chelis-types/      Type checker (HM inference, named dims, precision)
-  chelis-ir/         RISC DAG intermediate representation
-  chelis-backend-c/  C code generation backend
+  chelis-deep/       Deep parser and canonical printer
+  chelis-surf/       Surf parser, desugaring, decompilation
+  chelis-types/      Type checker, dimensions, precision, fitness
+  chelis-ir/         RISC DAG, lowering, transforms, evaluator
+  chelis-backend-c/  C backend and runtime
   chelis-cli/        CLI binary
-spec/                Language specification
-examples/            Example Chelis programs (coming soon)
+spec/                Numbered language specs and design docs
+examples/            Example Chelis programs
 ```
 
 ## Key Ideas
 
-- **Dual syntax:** Human-friendly surface syntax (Surf, `.ch`) desugars to canonical s-expressions (Deep, `.dp`)
-- **Named tensor dimensions:** `tensor[batch, hidden, f32]` — dimensions are types, not positions
-- **No implicit anything:** No silent type promotion, no implicit broadcasting, no hidden allocations
-- **Compiler as training signal:** Type errors produce fitness scores (0.0-1.0) and repair suggestions, not just error messages
-- **~12 RISC primitives:** Every operation — matmul, softmax, conv2d — decomposes to a small set of primitive ops
-- **`grad` is a language feature:** Reverse-mode AD as a DAG-to-DAG rewrite, not a library
+- **Dual syntax:** Surf (`.ch`) for supervision, Deep (`.dp`) for canonical machine-facing
+  structure
+- **Deep is canonical:** every Deep node has the form `(tag {} children...)`
+- **No implicit surprises:** no silent precision promotion, broadcasting, or hidden
+  partial application
+- **Compiler as training signal:** fitness scores, structured errors, and repair
+  suggestions
+- **Small computational core:** tensor programs lower to a compact RISC DAG
+- **First-class transforms:** `grad`, `vmap`, and `jit` are compiler-level rewrites
 
 ## Documentation
 
-- [Architecture Guide](ARCHITECTURE.md) — How the compiler works
-- [Specification](spec/) — Language spec (start with [00-context.md](spec/00-context.md))
+- [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
+- [Architecture Guide](ARCHITECTURE.md)
+- [Context](spec/00-context.md)
+- [Nomenclature](spec/01-nomenclature.md)
+- [Project Plan](spec/design/chelis_project_plan.md)
 
 ## License
 
