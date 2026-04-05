@@ -665,6 +665,7 @@ fn infer_app(
         "sigmoid",
         "softmax",
         "matmul",
+        "layer_norm",
         "max_elem",
         "normalize",
         "cmplt",
@@ -698,6 +699,45 @@ fn infer_app(
                                 vec![],
                             ));
                             return Type::Error;
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name
+                && fname == "conv2d"
+            {
+                for (index, arg_ty) in arg_tys.iter().enumerate() {
+                    let resolved = subst.apply(arg_ty);
+                    if index < 2 {
+                        match &resolved {
+                            Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!(
+                                        "conv2d expects tensor inputs for args 1-2, got {}",
+                                        resolved
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    } else {
+                        match &resolved {
+                            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!(
+                                        "conv2d expects int32 stride/padding, got {}",
+                                        resolved
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
                         }
                     }
                 }
@@ -2097,6 +2137,25 @@ mod tests {
             "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
              (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
              (def {} c (app {} (var {} matmul) (var {} a) (var {} b)))",
+        );
+    }
+
+    #[test]
+    fn builtin_layer_norm() {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+        );
+    }
+
+    #[test]
+    fn builtin_conv2d_accepts_int_stride_padding() {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
+             (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
         );
     }
 

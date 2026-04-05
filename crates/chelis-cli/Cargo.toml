@@ -11,3 +11,6 @@ name = "chelis"
 path = "src/main.rs"
 
 [dependencies]
+
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

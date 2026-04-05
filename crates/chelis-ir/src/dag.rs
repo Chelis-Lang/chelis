@@ -111,6 +111,7 @@ pub struct DagNode {
 #[derive(Debug, Clone, Default)]
 pub struct Dag {
     nodes: Vec<DagNode>,
+    roots: Vec<NodeId>,
 }
 
 impl Dag {
@@ -144,6 +145,20 @@ impl Dag {
 
     pub fn nodes(&self) -> &[DagNode] {
         &self.nodes
+    }
+
+    pub fn add_root(&mut self, id: NodeId) {
+        if !self.roots.contains(&id) {
+            self.roots.push(id);
+        }
+    }
+
+    pub fn roots(&self) -> &[NodeId] {
+        &self.roots
+    }
+
+    pub fn is_root(&self, id: NodeId) -> bool {
+        self.roots.contains(&id)
     }
 
     /// Return nodes in topological order (they already are, since we only append).
@@ -218,5 +233,15 @@ mod tests {
     fn get_nonexistent_returns_none() {
         let dag = Dag::new();
         assert!(dag.get(NodeId(99)).is_none());
+    }
+
+    #[test]
+    fn roots_can_be_registered() {
+        let mut dag = Dag::new();
+        let id = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_root(id);
+        dag.add_root(id);
+        assert_eq!(dag.roots(), &[id]);
+        assert!(dag.is_root(id));
     }
 }

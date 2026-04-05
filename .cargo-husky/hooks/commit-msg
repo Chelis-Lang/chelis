@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# commit-msg hook: reject commits with Claude/Anthropic authorship markers.
+#
+# Installed automatically by cargo-husky on `cargo test`.
+# In git worktrees, run: git config core.hooksPath .cargo-husky/hooks
+
+set -euo pipefail
+
+MSG_FILE="$1"
+
+PATTERNS=(
+    '[Cc]o-[Aa]uthored-[Bb]y:.*(claude|anthropic)'
+    '[Cc]o-[Aa]uthored-[Bb]y:.*noreply@anthropic\.com'
+    '[Aa]uthored-[Bb]y:.*(claude|anthropic)'
+    '[Gg]enerated with.*[Cc]laude'
+)
+
+for pattern in "${PATTERNS[@]}"; do
+    if grep -qiE "$pattern" "$MSG_FILE"; then
+        echo "ERROR: commit message contains a prohibited authorship marker."
+        echo "Matched pattern: $pattern"
+        echo "Remove any Co-Authored-By or Generated-with lines referencing Claude or Anthropic."
+        exit 1
+    fi
+done
+
+exit 0

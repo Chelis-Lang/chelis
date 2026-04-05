@@ -14,7 +14,9 @@ use crate::tier2;
 pub fn lower_program(exprs: &[Expr]) -> Dag {
     let mut ctx = LowerCtx::new();
     for expr in exprs {
-        ctx.lower_top_level(expr);
+        if let Some(id) = ctx.lower_top_level(expr) {
+            ctx.dag.add_root(id);
+        }
     }
     ctx.dag
 }
@@ -152,17 +154,17 @@ impl LowerCtx {
         None
     }
 
-    fn lower_top_level(&mut self, expr: &Expr) {
+    fn lower_top_level(&mut self, expr: &Expr) -> Option<NodeId> {
         if let Expr::List(list, _) = expr
             && let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
         {
             match tag.as_str() {
                 // Skip type-level declarations.
-                "defsig" | "deftype" | "typealias" => return,
+                "defsig" | "deftype" | "typealias" => return None,
                 _ => {}
             }
         }
-        self.lower_expr(expr);
+        Some(self.lower_expr(expr))
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> NodeId {
@@ -498,6 +500,68 @@ impl LowerCtx {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 tier2::lower_mean(&mut self.dag, x, axis, &x_ty)
+            }
+            "layer_norm" if args.len() == 3 => {
+                let x = self.lower_expr(&args[0]);
+                let gamma = self.lower_expr(&args[1]);
+                let beta = self.lower_expr(&args[2]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let gamma_ty = self
+                    .dag
+                    .get(gamma)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let beta_ty = self
+                    .dag
+                    .get(beta)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                tier2::lower_layer_norm(
+                    &mut self.dag,
+                    x,
+                    gamma,
+                    beta,
+                    &x_ty,
+                    &gamma_ty,
+                    &beta_ty,
+                    1e-5,
+                )
+            }
+            "conv2d" if args.len() >= 2 => {
+                let input = self.lower_expr(&args[0]);
+                let kernel = self.lower_expr(&args[1]);
+                let stride = args
+                    .get(2)
+                    .and_then(|expr| self.extract_usize_value(expr))
+                    .unwrap_or(1);
+                let padding = args
+                    .get(3)
+                    .and_then(|expr| self.extract_usize_value(expr))
+                    .unwrap_or(0);
+                let input_ty = self
+                    .dag
+                    .get(input)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let kernel_ty = self
+                    .dag
+                    .get(kernel)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                tier2::lower_conv2d(
+                    &mut self.dag,
+                    input,
+                    kernel,
+                    &input_ty,
+                    &kernel_ty,
+                    ty,
+                    stride,
+                    padding,
+                )
             }
 
             // H1: Tier 2 comparison ops
@@ -862,6 +926,11 @@ impl LowerCtx {
                 .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
         }
         let x = self.lower_expr(&elems[2]);
+        let input_ty = self
+            .dag
+            .get(x)
+            .map(|n| n.output_type.clone())
+            .unwrap_or_else(Self::default_type);
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
@@ -872,7 +941,7 @@ impl LowerCtx {
             Prim::F32
         };
         let ty = TensorType {
-            dims: vec![],
+            dims: input_ty.dims,
             precision: new_precision,
         };
         self.dag
@@ -899,56 +968,17 @@ impl LowerCtx {
 
     /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
     fn lower_if(&mut self, elems: &[Expr]) -> NodeId {
-        // elems: [tag, meta, cond, then_branch, else_branch]
-        if elems.len() < 5 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
-        }
-        let cond = self.lower_expr(&elems[2]);
-        let then_val = self.lower_expr(&elems[3]);
-        let else_val = self.lower_expr(&elems[4]);
-        let ty = Self::default_type();
-        // not_cond = cmplt(cond, const(1))
-        let one = self
-            .dag
-            .add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-        let bool_ty = TensorType {
-            dims: ty.dims.clone(),
-            precision: Prim::Bool,
-        };
-        let not_cond = self.dag.add_node(RiscOp::CmpLt, vec![cond, one], bool_ty);
-        // result = add(mul(cond, then), mul(not_cond, else))
-        let cond_then = self
-            .dag
-            .add_node(RiscOp::Mul, vec![cond, then_val], ty.clone());
-        let not_cond_else = self
-            .dag
-            .add_node(RiscOp::Mul, vec![not_cond, else_val], ty.clone());
-        self.dag
-            .add_node(RiscOp::Add, vec![cond_then, not_cond_else], ty)
+        self.lower_unrepresentable("if", elems)
     }
 
-    /// `(tuple {} elem1 elem2 ...)` -- Lower each element, return last.
+    /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple(&mut self, elems: &[Expr]) -> NodeId {
-        let mut last =
-            self.dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
-        for elem in &elems[2..] {
-            last = self.lower_expr(elem);
-        }
-        last
+        self.lower_unrepresentable("tuple", elems)
     }
 
-    /// `(par {} expr1 expr2 ...)` -- Lower each child sequentially, return last.
+    /// `(par {} expr1 expr2 ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_par(&mut self, elems: &[Expr]) -> NodeId {
-        let mut last =
-            self.dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
-        for elem in &elems[2..] {
-            last = self.lower_expr(elem);
-        }
-        last
+        self.lower_unrepresentable("par", elems)
     }
 
     /// `(realize {} expr)` or `(copy {} expr)` -- identity in Phase 0.
@@ -961,35 +991,29 @@ impl LowerCtx {
         }
     }
 
-    /// `(tuple-get {} tuple_expr index)` -- Phase 0: return the lowered tuple.
+    /// `(tuple-get {} tuple_expr index)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple_get(&mut self, elems: &[Expr]) -> NodeId {
-        if elems.len() >= 3 {
-            self.lower_expr(&elems[2])
-        } else {
-            self.dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
-        }
+        self.lower_unrepresentable("tuple-get", elems)
     }
 
-    /// `(match {} scrutinee (arm {} pattern body) ...)` -- Phase 0: lower first arm's body.
+    /// `(match {} scrutinee (arm {} pattern body) ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_match(&mut self, elems: &[Expr]) -> NodeId {
+        self.lower_unrepresentable("match", elems)
+    }
+
+    fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> NodeId {
         eprintln!(
-            "WARNING: `match` lowering is incomplete in Phase 0. \
-             Only the first arm's body is lowered."
+            "WARNING: `{tag}` is not representable in the Phase 0 RISC DAG. \
+             Producing NaN placeholder instead of a bogus lowering."
         );
-        // elems[2] = scrutinee, elems[3..] = arms
-        if elems.len() >= 3 {
-            let _ = self.lower_expr(&elems[2]); // lower scrutinee for side effects
+        for expr in elems.iter().skip(2) {
+            let _ = self.lower_expr(expr);
         }
-        // Lower first arm's body if available.
-        if elems.len() >= 4
-            && let Expr::List(arm, _) = &elems[3]
-            && arm.elements.len() >= 4
-        {
-            return self.lower_expr(&arm.elements[arm.elements.len() - 1]);
-        }
-        self.dag
-            .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+        self.dag.add_node(
+            RiscOp::Const { value: f64::NAN },
+            vec![],
+            Self::default_type(),
+        )
     }
 
     /// Unsupported Phase 2 constructs (vmap, jit).
@@ -1531,5 +1555,48 @@ mod regression_tests {
                 new_precision: Prim::F16
             }
         );
+    }
+
+    #[test]
+    fn fix9_cast_preserves_input_dims() {
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x))
+            (def {} y (cast {} (var {} x) (t-prim {} bf16)))
+        "#;
+        let dag = parse_and_lower(src);
+        let cast_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+            .expect("expected a Cast node");
+        assert_eq!(
+            cast_node.output_type.dims,
+            vec![DimInfo::Lit(2), DimInfo::Lit(3)]
+        );
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn unsupported_if_produces_nan_placeholder() {
+        let src = "(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))";
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        if let RiscOp::Const { value } = &last.op {
+            assert!(value.is_nan(), "if should produce NaN placeholder");
+        } else {
+            panic!("if should produce a Const(NaN) node, got {:?}", last.op);
+        }
+    }
+
+    #[test]
+    fn unsupported_match_produces_nan_placeholder() {
+        let src = "(match {} (var {} x) (arm {} (pat-var {} y) (var {} y)))";
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        if let RiscOp::Const { value } = &last.op {
+            assert!(value.is_nan(), "match should produce NaN placeholder");
+        } else {
+            panic!("match should produce a Const(NaN) node, got {:?}", last.op);
+        }
     }
 }

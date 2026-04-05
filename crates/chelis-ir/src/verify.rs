@@ -7,6 +7,15 @@ use chelis_types::types::Prim;
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
 pub fn verify(dag: &Dag) -> Vec<String> {
     let mut errors = Vec::new();
+    let mut consumers = vec![0usize; dag.len()];
+    for node in dag.nodes() {
+        for &input_id in &node.inputs {
+            if input_id.0 < consumers.len() {
+                consumers[input_id.0] += 1;
+            }
+        }
+    }
+
     for node in dag.nodes() {
         // Check that inputs reference valid, earlier nodes.
         for &input_id in &node.inputs {
@@ -244,6 +253,18 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 node.inputs.len()
             ));
         }
+
+        let is_implicit_root = dag.roots().is_empty() && node.id.0 + 1 == dag.len();
+        if !dag.is_root(node.id)
+            && !is_implicit_root
+            && consumers[node.id.0] == 0
+            && !matches!(node.op, RiscOp::Store { .. })
+        {
+            errors.push(format!(
+                "node {} is dangling: it has no consumers and is not a DAG root",
+                node.id.0
+            ));
+        }
     }
     errors
 }
@@ -317,7 +338,7 @@ mod tests {
         dag.add_node(RiscOp::Neg, vec![NodeId(1)], scalar_f32());
         let errs = verify(&dag);
         assert!(!errs.is_empty());
-        assert!(errs[0].contains("non-earlier node"));
+        assert!(errs.iter().any(|e| e.contains("non-earlier node")));
         let _ = a;
     }
 
@@ -564,5 +585,24 @@ mod tests {
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs.iter().any(|e| e.contains("store")));
+    }
+
+    #[test]
+    fn dangling_nonfinal_node_is_error() {
+        let mut dag = Dag::new();
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|e| e.contains("dangling")));
+    }
+
+    #[test]
+    fn root_nodes_are_not_dangling() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_root(a);
+        dag.add_root(b);
+        assert!(verify(&dag).is_empty());
     }
 }

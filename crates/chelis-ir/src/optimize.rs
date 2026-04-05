@@ -66,9 +66,15 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
         return Dag::new();
     }
 
-    // Mark live nodes: output node + all Store nodes.
+    // Mark live nodes: DAG roots + all Store nodes.
     let mut live = vec![false; n];
-    live[n - 1] = true;
+    if dag.roots().is_empty() {
+        live[n - 1] = true;
+    } else {
+        for &root in dag.roots() {
+            live[root.0] = true;
+        }
+    }
     for node in dag.nodes() {
         if matches!(node.op, RiscOp::Store { .. }) {
             live[node.id.0] = true;
@@ -100,6 +106,12 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
         }
     }
 
+    for &root in dag.roots() {
+        if let Some(&new_root) = id_map.get(&root.0) {
+            new_dag.add_root(new_root);
+        }
+    }
+
     new_dag
 }
 
@@ -127,6 +139,12 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 new_dag.add_node(node.op.clone(), remapped_inputs, node.output_type.clone());
             id_map.insert(node.id.0, new_id);
             seen.insert(cse_key, new_id);
+        }
+    }
+
+    for &root in dag.roots() {
+        if let Some(&new_root) = id_map.get(&root.0) {
+            new_dag.add_root(new_root);
         }
     }
 
@@ -186,7 +204,8 @@ mod tests {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
         // Dead const(99) should be removed; only 2 nodes remain.
@@ -199,7 +218,8 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         dag.add_node(RiscOp::Store { name: "out".into() }, vec![a], scalar_f32());
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Neg, vec![b], scalar_f32());
+        let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32());
+        dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
         // Store + its input const + second const + neg = 4 nodes all live.
@@ -211,7 +231,8 @@ mod tests {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        dag.add_root(sum);
 
         let new_dag = common_subexpr_eliminate(&dag);
 
@@ -220,5 +241,18 @@ mod tests {
         // The Add node should reference the same Const twice.
         let add_node = new_dag.get(NodeId(1)).unwrap();
         assert_eq!(add_node.inputs[0], add_node.inputs[1]);
+    }
+
+    #[test]
+    fn dce_keeps_all_roots() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_root(a);
+        dag.add_root(b);
+
+        let new_dag = dead_code_eliminate(&dag);
+        assert_eq!(new_dag.len(), 2);
+        assert_eq!(new_dag.roots().len(), 2);
     }
 }

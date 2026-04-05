@@ -108,6 +108,41 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn tensor_triop_return_first(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let t1 = vg.fresh_tvar();
+        let t2 = vg.fresh_tvar();
+        let t3 = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![t1, t2, t3],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(t1), Type::Var(t2), Type::Var(t3)],
+                Box::new(Type::Var(t1)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let kernel = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input, kernel, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(input),
+                    Type::Var(kernel),
+                    Type::Prim(Prim::Int32),
+                    Type::Prim(Prim::Int32),
+                ],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     // --- Register all built-ins ---
 
     // Tier 1: RISC Primitives
@@ -141,6 +176,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("normalize", &mut env, &mut vg);
 
     tensor_binop("matmul", &mut env, &mut vg);
+    tensor_triop_return_first("layer_norm", &mut env, &mut vg);
+    tensor_conv2d("conv2d", &mut env, &mut vg);
 
     (env, vg)
 }
@@ -164,6 +201,13 @@ mod tests {
     fn builtin_env_has_matmul() {
         let (env, _) = builtin_env();
         assert!(env.lookup("matmul").is_some());
+    }
+
+    #[test]
+    fn builtin_env_has_layer_norm_and_conv2d() {
+        let (env, _) = builtin_env();
+        assert!(env.lookup("layer_norm").is_some());
+        assert!(env.lookup("conv2d").is_some());
     }
 
     #[test]

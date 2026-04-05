@@ -34,3 +34,48 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+  no-claude-authorship:
+    name: No Claude authorship
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commits for Claude authorship markers
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            RANGE="$BASE..$HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          FOUND=0
+          for SHA in $(git rev-list "$RANGE"); do
+            MSG="$(git log -1 --format="%B" "$SHA")"
+            AUTHOR="$(git log -1 --format="%an <%ae>" "$SHA")"
+            COMMITTER="$(git log -1 --format="%cn <%ce>" "$SHA")"
+            if printf '%s\n' "$MSG" | grep -qiE '(Co-)?Authored-By:.*(claude|anthropic)'; then
+              echo "FAIL: $SHA has Claude/Anthropic authorship trailer"
+              FOUND=1
+            fi
+            if printf '%s\n' "$MSG" | grep -qiE 'Generated with.*Claude'; then
+              echo "FAIL: $SHA has Generated-with-Claude footer"
+              FOUND=1
+            fi
+            if printf '%s\n' "$AUTHOR" | grep -qiE '(claude|anthropic)'; then
+              echo "FAIL: $SHA has Claude/Anthropic author: $AUTHOR"
+              FOUND=1
+            fi
+            if printf '%s\n' "$COMMITTER" | grep -qiE '(claude|anthropic)'; then
+              echo "FAIL: $SHA has Claude/Anthropic committer: $COMMITTER"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" -ne 0 ]; then
+            echo "Remove Claude/Anthropic authorship markers from the flagged commits."
+            exit 1
+          fi
+          echo "All commits clean."

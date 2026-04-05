@@ -167,6 +167,67 @@ pub fn scalar_type(precision: Prim) -> TensorType {
     }
 }
 
+fn dim_or_fresh(dim: Option<&DimInfo>, fallback: &str) -> DimInfo {
+    dim.cloned()
+        .unwrap_or_else(|| DimInfo::Named(fallback.to_string(), None))
+}
+
+fn dim_extent(dim: &DimInfo) -> usize {
+    match dim {
+        DimInfo::Lit(n) => *n,
+        DimInfo::Named(_, Some(n)) => *n,
+        DimInfo::Named(_, None) => 1,
+    }
+}
+
+fn known_product(dims: &[DimInfo]) -> Option<usize> {
+    let mut product = 1usize;
+    for dim in dims {
+        match dim {
+            DimInfo::Lit(n) => product *= n,
+            DimInfo::Named(_, Some(n)) => product *= n,
+            DimInfo::Named(_, None) => return None,
+        }
+    }
+    Some(product)
+}
+
+fn product_dim(dims: &[DimInfo], fallback: &str) -> DimInfo {
+    known_product(dims)
+        .map(DimInfo::Lit)
+        .unwrap_or_else(|| DimInfo::Named(fallback.to_string(), None))
+}
+
+fn expand_to_match(
+    dag: &mut Dag,
+    mut node: NodeId,
+    mut ty: TensorType,
+    target_dims: &[DimInfo],
+) -> NodeId {
+    while ty.dims.len() < target_dims.len() {
+        let missing = target_dims.len() - ty.dims.len();
+        let insert_at = 0;
+        let source_dim = target_dims[missing - 1].clone();
+        let size = dim_extent(&source_dim);
+        let mut next_dims = ty.dims.clone();
+        next_dims.insert(insert_at, source_dim);
+        let next_ty = TensorType {
+            dims: next_dims,
+            precision: ty.precision,
+        };
+        node = dag.add_node(
+            RiscOp::Expand {
+                axis: insert_at,
+                size,
+            },
+            vec![node],
+            next_ty.clone(),
+        );
+        ty = next_ty;
+    }
+    node
+}
+
 // ---------------------------------------------------------------------------
 // Tier 2 higher-level decompositions (spec §3.4, §4.1–4.2)
 // ---------------------------------------------------------------------------
@@ -188,23 +249,21 @@ pub fn lower_matmul(
     b_ty: &TensorType,
 ) -> NodeId {
     // Extract dimension sizes: A is [i, j], B is [j, k].
-    let i_size = dim_size(a_ty, 0).unwrap_or(1);
-    let j_size = dim_size(a_ty, 1).or_else(|| dim_size(b_ty, 0)).unwrap_or(1);
-    let k_size = dim_size(b_ty, 1).unwrap_or(1);
+    let i_dim = dim_or_fresh(a_ty.dims.first(), "matmul_i");
+    let j_dim = dim_or_fresh(a_ty.dims.get(1).or_else(|| b_ty.dims.first()), "matmul_j");
+    let k_dim = dim_or_fresh(b_ty.dims.get(1), "matmul_k");
+    let i_size = dim_extent(&i_dim);
+    let k_size = dim_extent(&k_dim);
 
     // The intermediate expanded type is [i, j, k].
     let expanded_ty = TensorType {
-        dims: vec![
-            DimInfo::Lit(i_size),
-            DimInfo::Lit(j_size),
-            DimInfo::Lit(k_size),
-        ],
+        dims: vec![i_dim.clone(), j_dim.clone(), k_dim.clone()],
         precision: a_ty.precision,
     };
 
     // The result type is [i, k].
     let result_ty = TensorType {
-        dims: vec![DimInfo::Lit(i_size), DimInfo::Lit(k_size)],
+        dims: vec![i_dim, k_dim],
         precision: a_ty.precision,
     };
 
@@ -280,11 +339,176 @@ pub fn lower_mean(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> Nod
             value: dim_size_val,
         },
         vec![],
-        scalar_type(ty.precision),
+        red_ty.clone(),
     );
 
     // sum / dim_size
     lower_div(dag, sum_node, size_const, &red_ty)
+}
+
+/// layer_norm(x, gamma, beta) over the last axis.
+pub fn lower_layer_norm(
+    dag: &mut Dag,
+    x: NodeId,
+    gamma: NodeId,
+    beta: NodeId,
+    x_ty: &TensorType,
+    gamma_ty: &TensorType,
+    beta_ty: &TensorType,
+    eps: f64,
+) -> NodeId {
+    let axis = x_ty.dims.len().saturating_sub(1);
+    let mean = lower_mean(dag, x, axis, x_ty);
+    let mean_expanded = dag.add_node(
+        RiscOp::Expand {
+            axis,
+            size: dim_size(x_ty, axis).unwrap_or(1),
+        },
+        vec![mean],
+        x_ty.clone(),
+    );
+    let centered = lower_sub(dag, x, mean_expanded, x_ty);
+    let squared = dag.add_node(RiscOp::Mul, vec![centered, centered], x_ty.clone());
+    let var = lower_mean(dag, squared, axis, x_ty);
+    let var_expanded = dag.add_node(
+        RiscOp::Expand {
+            axis,
+            size: dim_size(x_ty, axis).unwrap_or(1),
+        },
+        vec![var],
+        x_ty.clone(),
+    );
+    let eps_const = dag.add_node(RiscOp::Const { value: eps }, vec![], x_ty.clone());
+    let denom_sq = dag.add_node(RiscOp::Add, vec![var_expanded, eps_const], x_ty.clone());
+    let denom = dag.add_node(RiscOp::Sqrt, vec![denom_sq], x_ty.clone());
+    let normed = lower_div(dag, centered, denom, x_ty);
+
+    let gamma_node = expand_to_match(dag, gamma, gamma_ty.clone(), &x_ty.dims);
+    let beta_node = expand_to_match(dag, beta, beta_ty.clone(), &x_ty.dims);
+    let scaled = dag.add_node(RiscOp::Mul, vec![normed, gamma_node], x_ty.clone());
+    dag.add_node(RiscOp::Add, vec![scaled, beta_node], x_ty.clone())
+}
+
+/// conv2d(input, kernel, stride, padding) via a coarse im2col-style decomposition.
+pub fn lower_conv2d(
+    dag: &mut Dag,
+    input: NodeId,
+    kernel: NodeId,
+    input_ty: &TensorType,
+    kernel_ty: &TensorType,
+    output_ty: &TensorType,
+    stride: usize,
+    padding: usize,
+) -> NodeId {
+    let batch = dim_or_fresh(input_ty.dims.first(), "conv_batch");
+    let in_c = dim_or_fresh(input_ty.dims.get(1), "conv_in_c");
+    let h_out = output_ty
+        .dims
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| DimInfo::Named("conv_h_out".to_string(), None));
+    let w_out = output_ty
+        .dims
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| DimInfo::Named("conv_w_out".to_string(), None));
+    let out_c = dim_or_fresh(
+        kernel_ty.dims.first().or_else(|| output_ty.dims.get(1)),
+        "conv_out_c",
+    );
+    let kh = dim_or_fresh(kernel_ty.dims.get(2), "conv_kh");
+    let kw = dim_or_fresh(kernel_ty.dims.get(3), "conv_kw");
+    let patch_dim = product_dim(&[in_c.clone(), kh.clone(), kw.clone()], "conv_patch");
+    let col_dim = product_dim(&[batch.clone(), h_out.clone(), w_out.clone()], "conv_cols");
+    let cols6_ty = TensorType {
+        dims: vec![
+            batch.clone(),
+            in_c.clone(),
+            kh.clone(),
+            kw.clone(),
+            h_out.clone(),
+            w_out.clone(),
+        ],
+        precision: input_ty.precision,
+    };
+
+    let padded_ty = input_ty.clone();
+    let padded = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(0, 0), (0, 0), (padding, padding), (padding, padding)],
+            fill: 0.0,
+        },
+        vec![input],
+        padded_ty.clone(),
+    );
+
+    let strided_ty = cols6_ty.clone();
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![1, 1, stride.max(1), stride.max(1)],
+        },
+        vec![padded],
+        strided_ty.clone(),
+    );
+    let cols6 = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: cols6_ty.dims.clone(),
+        },
+        vec![strided],
+        cols6_ty.clone(),
+    );
+
+    let permuted_ty = TensorType {
+        dims: vec![
+            in_c.clone(),
+            kh.clone(),
+            kw.clone(),
+            batch.clone(),
+            h_out.clone(),
+            w_out.clone(),
+        ],
+        precision: input_ty.precision,
+    };
+    let permuted = dag.add_node(
+        RiscOp::Permute {
+            axes: vec![1, 2, 3, 0, 4, 5],
+        },
+        vec![cols6],
+        permuted_ty.clone(),
+    );
+
+    let cols_ty = TensorType {
+        dims: vec![patch_dim.clone(), col_dim.clone()],
+        precision: input_ty.precision,
+    };
+    let cols = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: cols_ty.dims.clone(),
+        },
+        vec![permuted],
+        cols_ty.clone(),
+    );
+
+    let kernel_flat_ty = TensorType {
+        dims: vec![out_c.clone(), patch_dim],
+        precision: kernel_ty.precision,
+    };
+    let kernel_flat = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: kernel_flat_ty.dims.clone(),
+        },
+        vec![kernel],
+        kernel_flat_ty.clone(),
+    );
+
+    let product = lower_matmul(dag, kernel_flat, cols, &kernel_flat_ty, &cols_ty);
+    dag.add_node(
+        RiscOp::Reshape {
+            new_shape: output_ty.dims.clone(),
+        },
+        vec![product],
+        output_ty.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -600,5 +824,144 @@ mod tests {
         // Result is Mul (from div decomposition: mul(sum, recip(5)))
         let result_node = dag.get(result).unwrap();
         assert_eq!(result_node.op, RiscOp::Mul);
+    }
+
+    #[test]
+    fn layer_norm_produces_mean_variance_and_affine_ops() {
+        let mut dag = Dag::new();
+        let x_ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let scale_ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let gamma = dag.add_node(
+            RiscOp::Load {
+                name: "gamma".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let beta = dag.add_node(
+            RiscOp::Load {
+                name: "beta".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let result = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
+
+        let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
+        assert!(
+            ops.iter().any(|op| matches!(op, RiscOp::Sum { axis: 1 })),
+            "expected a reduction over the hidden axis"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, RiscOp::Sqrt)),
+            "expected sqrt in the denominator"
+        );
+        let expand_count = ops
+            .iter()
+            .filter(|op| matches!(op, RiscOp::Expand { .. }))
+            .count();
+        assert!(
+            expand_count >= 4,
+            "expected expansion of mean/var/gamma/beta"
+        );
+        assert_eq!(dag.get(result).unwrap().output_type, x_ty);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn layer_norm_expands_rank3_suffix_correctly() {
+        let mut dag = Dag::new();
+        let x_ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let scale_ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let gamma = dag.add_node(
+            RiscOp::Load {
+                name: "gamma".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let beta = dag.add_node(
+            RiscOp::Load {
+                name: "beta".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let _ = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
+        assert!(
+            dag.nodes().iter().any(|node| {
+                matches!(node.op, RiscOp::Expand { axis: 0, .. })
+                    && node.output_type.dims
+                        == vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)]
+            }),
+            "expected gamma/beta expansion to align with trailing hidden dim"
+        );
+    }
+
+    #[test]
+    fn conv2d_produces_im2col_style_sequence() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(3),
+                DimInfo::Lit(8),
+                DimInfo::Lit(8),
+            ],
+            precision: Prim::F32,
+        };
+        let kernel_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(16),
+                DimInfo::Lit(3),
+                DimInfo::Lit(3),
+                DimInfo::Lit(3),
+            ],
+            precision: Prim::F32,
+        };
+        let output_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(16),
+                DimInfo::Lit(8),
+                DimInfo::Lit(8),
+            ],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty.clone());
+        let kernel = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], kernel_ty.clone());
+        let result = lower_conv2d(
+            &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 1,
+        );
+
+        let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Pad { .. })));
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Stride { .. })));
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Permute { .. })));
+        assert!(
+            ops.iter()
+                .filter(|op| matches!(op, RiscOp::Reshape { .. }))
+                .count()
+                >= 3,
+            "expected im2col reshapes plus output reshape"
+        );
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Mul)));
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Sum { .. })));
+        assert_eq!(dag.get(result).unwrap().output_type, output_ty);
+        assert!(verify::verify(&dag).is_empty());
     }
 }
