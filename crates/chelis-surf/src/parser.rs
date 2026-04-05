@@ -47,35 +47,79 @@ pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
 // ---------------------------------------------------------------------------
 
 impl Parser {
-    fn peek(&self) -> &TokenKind {
+    fn raw_peek(&self) -> &TokenKind {
         self.tokens
             .get(self.pos)
             .map(|t| &t.kind)
             .unwrap_or(&TokenKind::Eof)
     }
 
+    fn peek(&self) -> &TokenKind {
+        let mut pos = self.pos;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
+        self.tokens
+            .get(pos)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
+    }
+
     fn at_eof(&self) -> bool {
-        self.pos >= self.tokens.len()
+        matches!(self.peek(), TokenKind::Eof)
     }
 
     fn current_offset(&self) -> usize {
+        let mut pos = self.pos;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
         self.tokens
-            .get(self.pos)
+            .get(pos)
             .map(|t| t.span.offset)
             .unwrap_or(self.tokens.last().map(|t| t.span.end()).unwrap_or(0))
     }
 
     fn current_span(&self) -> Span {
+        let mut pos = self.pos;
+        while matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Newline)
+        ) {
+            pos += 1;
+        }
         self.tokens
-            .get(self.pos)
+            .get(pos)
             .map(|t| t.span)
             .unwrap_or(Span::new(self.current_offset(), 0))
     }
 
-    fn advance(&mut self) -> Token {
+    fn advance_raw(&mut self) -> Token {
         let tok = self.tokens[self.pos].clone();
         self.pos += 1;
         tok
+    }
+
+    fn advance(&mut self) -> Token {
+        while matches!(self.raw_peek(), TokenKind::Newline) {
+            self.pos += 1;
+        }
+        self.advance_raw()
+    }
+
+    fn consume_block_separators(&mut self) -> usize {
+        let mut consumed = 0;
+        while matches!(self.raw_peek(), TokenKind::Semicolon | TokenKind::Newline) {
+            self.advance_raw();
+            consumed += 1;
+        }
+        consumed
     }
 
     fn expect(&mut self, kind: &TokenKind) -> Result<Token, ParseError> {
@@ -998,11 +1042,34 @@ impl Parser {
         let start = self.advance().span; // consume Par
         self.expect(&TokenKind::LBrace)?;
         let mut exprs = Vec::new();
+        while matches!(self.raw_peek(), TokenKind::Newline) {
+            self.advance_raw();
+        }
+        if *self.peek() == TokenKind::RBrace {
+            let end = self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr::Par(exprs, start.merge(end.span)));
+        }
         exprs.push(self.parse_expr(0)?);
-        while *self.peek() == TokenKind::Semicolon {
-            self.advance(); // consume ;
+        loop {
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
             if *self.peek() == TokenKind::RBrace {
-                break; // trailing semicolon
+                break;
+            }
+            if *self.raw_peek() != TokenKind::Semicolon {
+                return Err(ParseError::Expected {
+                    expected: "separator (`;`)".into(),
+                    found: format!("{:?}", self.raw_peek()),
+                    offset: self.current_offset(),
+                });
+            }
+            self.advance_raw();
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
+            if *self.peek() == TokenKind::RBrace {
+                break;
             }
             exprs.push(self.parse_expr(0)?);
         }
@@ -1013,18 +1080,20 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
+        self.consume_block_separators();
         while *self.peek() == TokenKind::Let && !self.at_eof() {
             bindings.push(self.parse_block_let_binding()?);
-            // Optional semicolon between bindings
-            if *self.peek() == TokenKind::Semicolon {
-                self.advance();
+            let sep_count = self.consume_block_separators();
+            if *self.peek() != TokenKind::RBrace && sep_count == 0 {
+                return Err(ParseError::Expected {
+                    expected: "separator (`;` or newline)".into(),
+                    found: format!("{:?}", self.raw_peek()),
+                    offset: self.current_offset(),
+                });
             }
         }
         let expr = self.parse_expr(0)?;
-        // Optional trailing semicolon before }
-        if *self.peek() == TokenKind::Semicolon {
-            self.advance();
-        }
+        self.consume_block_separators();
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
     }
@@ -1828,6 +1897,46 @@ mod tests {
                 assert!(matches!(*body, Expr::Binary(BinOp::Add, _, _, _)));
             }
             _ => panic!("expected Lambda, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_accepts_newline_separators() {
+        let e = body(
+            "def f() = {
+                let x = 1
+                let y = 2
+                y
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 2);
+                assert!(matches!(*body, Expr::Var(ref n, _) if n == "y"));
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_rejects_missing_separator_between_lets() {
+        let err = p_err("def f() = { let x = 1 let y = 2 y }");
+        assert!(matches!(err, ParseError::Expected { .. }));
+    }
+
+    #[test]
+    fn par_accepts_semicolons_with_newlines() {
+        let e = body(
+            "def f() = par {
+                a;
+                b
+            }",
+        );
+        match e {
+            Expr::Par(exprs, _) => {
+                assert_eq!(exprs.len(), 2);
+            }
+            _ => panic!("expected Par, got {e:?}"),
         }
     }
 

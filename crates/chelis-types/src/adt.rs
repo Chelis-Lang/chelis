@@ -22,10 +22,17 @@ pub struct AdtDef {
     pub variants: Vec<VariantInfo>,
 }
 
+/// A type alias definition extracted from a `typealias` node.
+pub struct TypeAliasDef {
+    pub params: Vec<String>,
+    pub param_vars: Vec<TypeVar>,
+    pub body: Type,
+}
+
 /// Registry of all ADT definitions and type aliases.
 pub struct AdtRegistry {
     pub defs: HashMap<String, AdtDef>,
-    pub aliases: HashMap<String, Type>,
+    pub aliases: HashMap<String, TypeAliasDef>,
 }
 
 impl Default for AdtRegistry {
@@ -228,14 +235,44 @@ impl AdtRegistry {
         None
     }
 
-    /// Register a type alias: `typealias Name = Type`.
-    pub fn register_alias(&mut self, name: String, ty: Type) {
-        self.aliases.insert(name, ty);
+    /// Register a type alias: `typealias Name[params] = Type`.
+    pub fn register_alias(
+        &mut self,
+        name: String,
+        params: Vec<String>,
+        param_vars: Vec<TypeVar>,
+        body: Type,
+    ) {
+        self.aliases.insert(
+            name,
+            TypeAliasDef {
+                params,
+                param_vars,
+                body,
+            },
+        );
     }
 
-    /// Resolve a type alias by name. Returns None if not an alias.
-    pub fn resolve_alias(&self, name: &str) -> Option<&Type> {
+    /// Resolve a type alias definition by name. Returns None if not an alias.
+    pub fn resolve_alias(&self, name: &str) -> Option<&TypeAliasDef> {
         self.aliases.get(name)
+    }
+
+    /// Instantiate a type alias with the given type arguments.
+    pub fn instantiate_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
+        let alias = self.aliases.get(name)?;
+        if alias.param_vars.len() != args.len() {
+            return None;
+        }
+
+        let subst: HashMap<TypeVar, Type> = alias
+            .param_vars
+            .iter()
+            .copied()
+            .zip(args.iter().cloned())
+            .collect();
+
+        Some(substitute_alias_type(&alias.body, &subst))
     }
 }
 
@@ -254,6 +291,31 @@ fn list_children(list: &deep::List) -> &[deep::Expr] {
         &list.elements[2..]
     } else {
         &[]
+    }
+}
+
+fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
+    match ty {
+        Type::Var(tv) => subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
+        Type::Fn(args, ret) => Type::Fn(
+            args.iter()
+                .map(|arg| substitute_alias_type(arg, subst))
+                .collect(),
+            Box::new(substitute_alias_type(ret, subst)),
+        ),
+        Type::Adt(name, args) => Type::Adt(
+            name.clone(),
+            args.iter()
+                .map(|arg| substitute_alias_type(arg, subst))
+                .collect(),
+        ),
+        Type::Tuple(items) => Type::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_alias_type(item, subst))
+                .collect(),
+        ),
+        _ => ty.clone(),
     }
 }
 

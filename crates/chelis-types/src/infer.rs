@@ -2,7 +2,7 @@
 //!
 //! Walks Deep AST nodes and assigns types using Hindley-Milner inference.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast as deep;
 
@@ -99,29 +99,59 @@ fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
-/// Resolve type aliases: replace Type::Adt(name, []) with the aliased type.
 fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry) -> Type {
+    let mut seen = HashSet::new();
+    resolve_type_aliases_inner(ty, adt_reg, &mut seen)
+}
+
+fn resolve_type_aliases_inner(
+    ty: &Type,
+    adt_reg: &AdtRegistry,
+    seen: &mut HashSet<String>,
+) -> Type {
     match ty {
-        Type::Adt(name, args) if args.is_empty() => {
-            if let Some(aliased) = adt_reg.resolve_alias(name) {
-                aliased.clone()
+        Type::Adt(name, args) => {
+            let resolved_args: Vec<Type> = args
+                .iter()
+                .map(|arg| resolve_type_aliases_inner(arg, adt_reg, seen))
+                .collect();
+
+            if seen.contains(name) {
+                return Type::Adt(name.clone(), resolved_args);
+            }
+
+            if let Some(expanded) = adt_reg.instantiate_alias(name, &resolved_args) {
+                seen.insert(name.clone());
+                let resolved = resolve_type_aliases_inner(&expanded, adt_reg, seen);
+                seen.remove(name);
+                resolved
             } else {
-                ty.clone()
+                Type::Adt(name.clone(), resolved_args)
             }
         }
         Type::Fn(args, ret) => Type::Fn(
             args.iter()
-                .map(|a| resolve_type_aliases(a, adt_reg))
+                .map(|a| resolve_type_aliases_inner(a, adt_reg, seen))
                 .collect(),
-            Box::new(resolve_type_aliases(ret, adt_reg)),
+            Box::new(resolve_type_aliases_inner(ret, adt_reg, seen)),
         ),
         Type::Tuple(ts) => Type::Tuple(
             ts.iter()
-                .map(|t| resolve_type_aliases(t, adt_reg))
+                .map(|t| resolve_type_aliases_inner(t, adt_reg, seen))
                 .collect(),
         ),
         _ => ty.clone(),
     }
+}
+
+fn deep_type_to_resolved_type(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    tvar_map: &mut HashMap<String, TypeVar>,
+) -> Type {
+    let ty = deep_type_to_type(expr, vg, tvar_map);
+    resolve_type_aliases(&ty, adt_reg)
 }
 
 // ── Declaration collection (first pass) ──────────────────────────
@@ -158,20 +188,36 @@ fn collect_declarations(
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let ty = deep_type_to_type(&kids[1], vg, &mut HashMap::new());
-                let ty = resolve_type_aliases(&ty, adt_reg);
+                let ty = deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new());
                 let scheme = env.generalize(&ty, subst);
                 env.bind(name.to_string(), scheme);
             }
         }
         "typealias" => {
-            // (typealias {} Name type_expr)
-            // Register as a type alias in the ADT registry
-            if kids.len() >= 2
+            // (typealias {} Name (params...) type_expr)
+            if kids.len() >= 3
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let aliased_ty = deep_type_to_type(&kids[1], vg, &mut HashMap::new());
-                adt_reg.register_alias(name.to_string(), aliased_ty);
+                let params = match &kids[1] {
+                    deep::Expr::List(list, _) => list
+                        .elements
+                        .iter()
+                        .filter_map(symbol_name)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+
+                let mut tvar_map = HashMap::new();
+                let mut param_vars = Vec::with_capacity(params.len());
+                for param in &params {
+                    let tv = vg.fresh_tvar();
+                    tvar_map.insert(param.clone(), tv);
+                    param_vars.push(tv);
+                }
+
+                let aliased_ty = deep_type_to_type(&kids[2], vg, &mut tvar_map);
+                adt_reg.register_alias(name.to_string(), params, param_vars, aliased_ty);
             }
         }
         _ => {}
@@ -280,7 +326,7 @@ fn infer_expr(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, errors),
-                Some("lit") => infer_lit(list, vg),
+                Some("lit") => infer_lit(list, vg, adt_reg),
                 Some("app") => infer_app(
                     list,
                     env,
@@ -417,8 +463,7 @@ fn infer_expr(
                     }
                     last_ty
                 }
-                Some("realize") | Some("copy") => {
-                    // realize/copy: infer the inner expression, return same type
+                Some("realize") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
                         infer_expr(
@@ -431,6 +476,35 @@ fn infer_expr(
                             typed_nodes,
                             total_nodes,
                         )
+                    } else {
+                        Type::Error
+                    }
+                }
+                Some("copy") => {
+                    let kids = children(list);
+                    if let Some(inner) = kids.first() {
+                        let inner_ty = infer_expr(
+                            inner,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            typed_nodes,
+                            total_nodes,
+                        );
+                        let resolved = subst.apply(&inner_ty);
+                        match resolved {
+                            Type::Tensor(_, _) | Type::Error => inner_ty,
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!("copy requires tensor input, got {resolved}"),
+                                    vec!["Wrap only tensor values in copy".to_string()],
+                                ));
+                                Type::Error
+                            }
+                        }
                     } else {
                         Type::Error
                     }
@@ -497,7 +571,7 @@ fn infer_var(
     }
 }
 
-fn infer_lit(list: &deep::List, vg: &mut VarGen) -> Type {
+fn infer_lit(list: &deep::List, vg: &mut VarGen, adt_reg: &AdtRegistry) -> Type {
     let meta = get_meta(list);
     let kids = children(list);
 
@@ -505,7 +579,7 @@ fn infer_lit(list: &deep::List, vg: &mut VarGen) -> Type {
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                return deep_type_to_type(val, vg, &mut HashMap::new());
+                return deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
             }
         }
     }
@@ -694,7 +768,7 @@ fn infer_fn(
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg);
+    let params = extract_params(&kids[0], vg, adt_reg);
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -728,7 +802,11 @@ fn infer_fn(
 
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
 /// Each param can be a bare symbol or `(name {type: T})` for a typed param.
-fn extract_params(expr: &deep::Expr, vg: &mut VarGen) -> Vec<(String, Option<Type>)> {
+fn extract_params(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+) -> Vec<(String, Option<Type>)> {
     match expr {
         deep::Expr::List(list, _) => {
             let tag = get_tag(list);
@@ -751,8 +829,12 @@ fn extract_params(expr: &deep::Expr, vg: &mut VarGen) -> Vec<(String, Option<Typ
                             if let Some(deep::Expr::Map(meta, _)) = plist.elements.get(1) {
                                 for (key, val) in &meta.entries {
                                     if key == "type" {
-                                        ty_ann =
-                                            Some(deep_type_to_type(val, vg, &mut HashMap::new()));
+                                        ty_ann = Some(deep_type_to_resolved_type(
+                                            val,
+                                            vg,
+                                            adt_reg,
+                                            &mut HashMap::new(),
+                                        ));
                                     }
                                 }
                             }
@@ -1312,7 +1394,7 @@ fn infer_cast(
     let resolved = subst.apply(&expr_ty);
 
     // kids[1] = (t-prim {} new_precision)
-    let new_prec = match deep_type_to_type(&kids[1], vg, &mut HashMap::new()) {
+    let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
         Type::Prim(p) => p,
         _ => return Type::Error,
     };
@@ -1813,6 +1895,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cast_accepts_alias_precision() {
+        check_ok(
+            "(typealias {} Floaty () (t-prim {} f32))
+             (def {} x (lit {type: (t-prim {} int32)} 42))
+             (def {} y (cast {} (var {} x) (t-adt {} Floaty)))",
+        );
+    }
+
+    #[test]
+    fn copy_accepts_tensor() {
+        check_ok(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} y (copy {} (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn copy_rejects_scalar() {
+        check_err(
+            "(def {} x (lit {type: (t-prim {} int32)} 42))
+             (def {} y (copy {} (var {} x)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn copy_rejects_unconstrained_generic() {
+        check_err(
+            "(def {} id (fn {} (params {} x) (copy {} (var {} x))))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
     // ── Grad tests ───────────────────────────────────────────────
 
     #[test]
@@ -1893,6 +2009,40 @@ mod tests {
                (t-fn {} (t-tensor {} (d-name {} batch) (t-prim {} f32))
                         (t-tensor {} (d-name {} batch) (t-prim {} f32))))
              (def {} normalize_fn (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn typealias_zero_param_resolves_in_defsig() {
+        check_ok(
+            "(typealias {} Scalar () (t-prim {} f32))
+             (defsig {} id (t-fn {} (t-adt {} Scalar) (t-adt {} Scalar)))
+             (def {} id (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn typealias_parameterized_resolves_in_defsig() {
+        check_ok(
+            "(typealias {} Boxed (a) (t-tuple {} (t-var {} a)))
+             (defsig {} wrap (t-fn {} (t-adt {} Boxed (t-prim {} f32)) (t-adt {} Boxed (t-prim {} f32))))
+             (def {} wrap (fn {} (params {} x) (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn typealias_resolves_in_typed_param_metadata() {
+        check_ok(
+            "(typealias {} Scalar () (t-prim {} f32))
+             (def {} id (fn {} (params {} (x {type: (t-adt {} Scalar)})) (var {} x)))",
+        );
+    }
+
+    #[test]
+    fn typealias_resolves_in_literal_metadata() {
+        check_ok(
+            "(typealias {} Scalar () (t-prim {} f32))
+             (def {} x (lit {type: (t-adt {} Scalar)} 1.0))",
         );
     }
 

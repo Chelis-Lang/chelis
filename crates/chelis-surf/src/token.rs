@@ -50,6 +50,7 @@ pub enum TokenKind {
     Dot,        // .
     At,         // @
     Semicolon,  // ;
+    Newline,    // \n
     Underscore, // _
 
     // Arithmetic operators

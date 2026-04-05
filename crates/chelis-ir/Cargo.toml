@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-deep.workspace = true
+chelis-types = { path = "../chelis-types" }
+thiserror.workspace = true

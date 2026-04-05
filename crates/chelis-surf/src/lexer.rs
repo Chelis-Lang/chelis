@@ -27,7 +27,30 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut i = 0;
 
     while i < bytes.len() {
-        // Skip whitespace
+        // Preserve newlines for block/par separator enforcement.
+        if bytes[i] == b'\n' {
+            tokens.push(Token {
+                kind: TokenKind::Newline,
+                span: Span::new(i, 1),
+            });
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\r' {
+            let len = if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                2
+            } else {
+                1
+            };
+            tokens.push(Token {
+                kind: TokenKind::Newline,
+                span: Span::new(i, len),
+            });
+            i += len;
+            continue;
+        }
+
+        // Skip other whitespace
         if bytes[i].is_ascii_whitespace() {
             i += 1;
             continue;
@@ -626,7 +649,7 @@ mod tests {
     fn line_comment() {
         assert_eq!(
             lex_kinds("42 -- this is a comment\n7"),
-            vec![TokenKind::Int(42), TokenKind::Int(7)]
+            vec![TokenKind::Int(42), TokenKind::Newline, TokenKind::Int(7)]
         );
     }
 
@@ -651,6 +674,29 @@ mod tests {
         assert_eq!(
             lex_kinds("1 {- comment -} 2"),
             vec![TokenKind::Int(1), TokenKind::Int(2)]
+        );
+    }
+
+    #[test]
+    fn newline_tokens_preserved() {
+        assert_eq!(
+            lex_kinds("let x = 1\nlet y = 2\r\nlet z = 3"),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident("x".into()),
+                TokenKind::Eq,
+                TokenKind::Int(1),
+                TokenKind::Newline,
+                TokenKind::Let,
+                TokenKind::Ident("y".into()),
+                TokenKind::Eq,
+                TokenKind::Int(2),
+                TokenKind::Newline,
+                TokenKind::Let,
+                TokenKind::Ident("z".into()),
+                TokenKind::Eq,
+                TokenKind::Int(3),
+            ]
         );
     }
 
