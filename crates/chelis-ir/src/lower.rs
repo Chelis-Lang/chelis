@@ -12,6 +12,9 @@ use crate::tier2;
 
 /// Lower a sequence of top-level Deep expressions into a RISC DAG.
 pub fn lower_program(exprs: &[Expr]) -> Dag {
+    for expr in exprs {
+        assert_phase0e_lowerable(expr);
+    }
     let mut ctx = LowerCtx::new();
     for expr in exprs {
         if let Some(id) = ctx.lower_top_level(expr) {
@@ -19,6 +22,38 @@ pub fn lower_program(exprs: &[Expr]) -> Dag {
         }
     }
     ctx.dag
+}
+
+fn assert_phase0e_lowerable(expr: &Expr) {
+    match expr {
+        Expr::List(list, _) => {
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() {
+                if matches!(
+                    tag.as_str(),
+                    "if" | "tuple" | "tuple-get" | "match" | "grad" | "par" | "vmap" | "jit"
+                ) {
+                    panic!(
+                        "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
+                    );
+                }
+            }
+            for elem in &list.elements {
+                assert_phase0e_lowerable(elem);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                assert_phase0e_lowerable(value);
+            }
+        }
+        Expr::MetaExpr(inner, _) => {
+            for (_, value) in &inner.entries {
+                assert_phase0e_lowerable(value);
+            }
+            assert_phase0e_lowerable(&inner.expr);
+        }
+        Expr::Atom(_, _) => {}
+    }
 }
 
 struct LowerCtx {
@@ -948,22 +983,9 @@ impl LowerCtx {
             .add_node(RiscOp::Cast { new_precision }, vec![x], ty)
     }
 
-    /// `(grad {} f)` -- Phase 2 feature, produce NaN warning.
+    /// `(grad {} f)` -- rejected before lowering.
     fn lower_grad(&mut self, elems: &[Expr]) -> NodeId {
-        eprintln!(
-            "WARNING: `grad` is a Phase 2 feature and is not yet supported in lowering. \
-             Producing NaN placeholder."
-        );
-        // Lower the child so its side effects (bindings) still happen,
-        // but discard the result and return NaN to signal the error.
-        if elems.len() >= 3 {
-            let _ = self.lower_expr(&elems[2]);
-        }
-        self.dag.add_node(
-            RiscOp::Const { value: f64::NAN },
-            vec![],
-            Self::default_type(),
-        )
+        self.lower_unrepresentable("grad", elems)
     }
 
     /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
@@ -1002,31 +1024,15 @@ impl LowerCtx {
     }
 
     fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> NodeId {
-        eprintln!(
-            "WARNING: `{tag}` is not representable in the Phase 0 RISC DAG. \
-             Producing NaN placeholder instead of a bogus lowering."
-        );
         for expr in elems.iter().skip(2) {
             let _ = self.lower_expr(expr);
         }
-        self.dag.add_node(
-            RiscOp::Const { value: f64::NAN },
-            vec![],
-            Self::default_type(),
-        )
+        panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
     }
 
     /// Unsupported Phase 2 constructs (vmap, jit).
     fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> NodeId {
-        eprintln!(
-            "WARNING: `{tag}` is a Phase 2 feature and is not yet supported in lowering. \
-             Producing NaN placeholder."
-        );
-        self.dag.add_node(
-            RiscOp::Const { value: f64::NAN },
-            vec![],
-            Self::default_type(),
-        )
+        panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
     }
 }
 
@@ -1461,39 +1467,21 @@ mod regression_tests {
 
     // Fix 4: Unsupported constructs.
     #[test]
-    fn fix4_grad_produces_nan() {
-        let src = "(grad {} (var {} f))";
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        if let RiscOp::Const { value } = &last.op {
-            assert!(value.is_nan(), "grad should produce NaN placeholder");
-        } else {
-            panic!("grad should produce a Const(NaN) node, got {:?}", last.op);
-        }
+    #[should_panic(expected = "`grad` is not representable in the Phase 0e RISC DAG")]
+    fn fix4_grad_is_rejected_before_lowering() {
+        let _ = parse_and_lower("(grad {} (var {} f))");
     }
 
     #[test]
-    fn fix4_vmap_produces_nan() {
-        let src = "(vmap {} (var {} f))";
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        if let RiscOp::Const { value } = &last.op {
-            assert!(value.is_nan(), "vmap should produce NaN placeholder");
-        } else {
-            panic!("vmap should produce a Const(NaN) node");
-        }
+    #[should_panic(expected = "`vmap` is not representable in the Phase 0e RISC DAG")]
+    fn fix4_vmap_is_rejected_before_lowering() {
+        let _ = parse_and_lower("(vmap {} (var {} f))");
     }
 
     #[test]
-    fn fix4_jit_produces_nan() {
-        let src = "(jit {} (var {} f))";
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        if let RiscOp::Const { value } = &last.op {
-            assert!(value.is_nan(), "jit should produce NaN placeholder");
-        } else {
-            panic!("jit should produce a Const(NaN) node");
-        }
+    #[should_panic(expected = "`jit` is not representable in the Phase 0e RISC DAG")]
+    fn fix4_jit_is_rejected_before_lowering() {
+        let _ = parse_and_lower("(jit {} (var {} f))");
     }
 
     #[test]
@@ -1577,26 +1565,14 @@ mod regression_tests {
     }
 
     #[test]
-    fn unsupported_if_produces_nan_placeholder() {
-        let src = "(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))";
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        if let RiscOp::Const { value } = &last.op {
-            assert!(value.is_nan(), "if should produce NaN placeholder");
-        } else {
-            panic!("if should produce a Const(NaN) node, got {:?}", last.op);
-        }
+    #[should_panic(expected = "`if` is not representable in the Phase 0e RISC DAG")]
+    fn unsupported_if_is_rejected_before_lowering() {
+        let _ = parse_and_lower("(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))");
     }
 
     #[test]
-    fn unsupported_match_produces_nan_placeholder() {
-        let src = "(match {} (var {} x) (arm {} (pat-var {} y) (var {} y)))";
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        if let RiscOp::Const { value } = &last.op {
-            assert!(value.is_nan(), "match should produce NaN placeholder");
-        } else {
-            panic!("match should produce a Const(NaN) node, got {:?}", last.op);
-        }
+    #[should_panic(expected = "`match` is not representable in the Phase 0e RISC DAG")]
+    fn unsupported_match_is_rejected_before_lowering() {
+        let _ = parse_and_lower("(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))");
     }
 }

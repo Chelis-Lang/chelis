@@ -682,7 +682,7 @@ fn infer_app(
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
-            let result_ty = subst.apply(&ret_tv);
+            let mut result_ty = subst.apply(&ret_tv);
 
             // Post-check: tensor ops require tensor arguments
             if let Some(ref fname) = func_name
@@ -743,6 +743,19 @@ fn infer_app(
                 }
             }
 
+            if let Some(ref fname) = func_name {
+                match fname.as_str() {
+                    "layer_norm" => {
+                        result_ty =
+                            check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
+                    }
+                    "conv2d" => {
+                        result_ty = check_conv2d_signature(&arg_tys, &result_ty, vg, subst, errors);
+                    }
+                    _ => {}
+                }
+            }
+
             // Post-check: logical ops require tensor[D, bool] arguments
             if let Some(ref fname) = func_name
                 && LOGICAL_OPS.contains(&fname.as_str())
@@ -788,6 +801,252 @@ fn infer_app(
             Type::Error
         }
     }
+}
+
+fn check_layer_norm_signature(
+    arg_tys: &[Type],
+    result_ty: &Type,
+    _vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    if arg_tys.len() != 3 {
+        return Type::Error;
+    }
+
+    let x_ty = subst.apply(&arg_tys[0]);
+    let gamma_ty = subst.apply(&arg_tys[1]);
+    let beta_ty = subst.apply(&arg_tys[2]);
+
+    let (x_dims, x_prec) = match x_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("layer_norm expects tensor input, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let (gamma_dims, gamma_prec) = match gamma_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("layer_norm expects tensor gamma, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let (beta_dims, beta_prec) = match beta_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("layer_norm expects tensor beta, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if x_dims.is_empty() {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            "layer_norm expects rank >= 1 input tensor".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if gamma_dims.len() != 1 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "layer_norm expects rank-1 gamma, got rank {}",
+                gamma_dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if beta_dims.len() != 1 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "layer_norm expects rank-1 beta, got rank {}",
+                beta_dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if x_prec != gamma_prec || x_prec != beta_prec {
+        errors.push(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "layer_norm requires matching precisions, got {}, {}, {}",
+                x_prec.name(),
+                gamma_prec.name(),
+                beta_prec.name()
+            ),
+            vec!["Insert explicit cast".to_string()],
+        ));
+        return Type::Error;
+    }
+
+    let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
+    if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    if let Err(te) = unify_dim(&hidden_dim, &beta_dims[0], subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+
+    let canonical = Type::Tensor(
+        x_dims.into_iter().map(|d| subst.apply_dim(&d)).collect(),
+        x_prec,
+    );
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+fn check_conv2d_signature(
+    arg_tys: &[Type],
+    result_ty: &Type,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    if arg_tys.len() < 2 {
+        return Type::Error;
+    }
+
+    let input_ty = subst.apply(&arg_tys[0]);
+    let kernel_ty = subst.apply(&arg_tys[1]);
+
+    let (input_dims, input_prec) = match input_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("conv2d expects tensor input, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+    let (kernel_dims, kernel_prec) = match kernel_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("conv2d expects tensor kernel, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if input_dims.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "conv2d expects rank-4 input tensor, got rank {}",
+                input_dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if kernel_dims.len() != 4 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "conv2d expects rank-4 kernel tensor, got rank {}",
+                kernel_dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if input_prec != kernel_prec {
+        errors.push(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "conv2d requires matching input/kernel precision, got {} and {}",
+                input_prec.name(),
+                kernel_prec.name()
+            ),
+            vec!["Insert explicit cast".to_string()],
+        ));
+        return Type::Error;
+    }
+    if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+
+    let output_template = Type::Tensor(
+        vec![
+            subst.apply_dim(&input_dims[0]),
+            subst.apply_dim(&kernel_dims[0]),
+            Dim::Var(vg.fresh_dvar()),
+            Dim::Var(vg.fresh_dvar()),
+        ],
+        input_prec,
+    );
+    if let Err(te) = unify(result_ty, &output_template, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+
+    let resolved_output = subst.apply(&output_template);
+    if let Type::Tensor(out_dims, out_prec) = &resolved_output {
+        if out_dims.len() != 4 {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        if *out_prec != input_prec {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "conv2d result precision must match input/kernel precision {}, got {}",
+                    input_prec.name(),
+                    out_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
+            ));
+            return Type::Error;
+        }
+        if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
+            errors.push(te.into());
+            return Type::Error;
+        }
+        if let Err(te) = unify_dim(&out_dims[1], &kernel_dims[0], subst) {
+            errors.push(te.into());
+            return Type::Error;
+        }
+    }
+
+    subst.apply(&output_template)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2151,11 +2410,53 @@ mod tests {
     }
 
     #[test]
+    fn builtin_layer_norm_rejects_rank2_gamma() {
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (d-name {} extra) (t-prim {} f32))} 0))
+             (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+            CheckErrorKind::DimensionMismatch,
+        );
+    }
+
+    #[test]
+    fn builtin_layer_norm_rejects_precision_mismatch() {
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} bf16))} 0))
+             (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+            CheckErrorKind::PrecisionMismatch,
+        );
+    }
+
+    #[test]
     fn builtin_conv2d_accepts_int_stride_padding() {
         check_ok(
             "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
              (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
              (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+        );
+    }
+
+    #[test]
+    fn builtin_conv2d_rejects_channel_mismatch() {
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_a) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
+             (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_b) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+            CheckErrorKind::DimensionMismatch,
+        );
+    }
+
+    #[test]
+    fn builtin_conv2d_rejects_kernel_precision_mismatch() {
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
+             (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} bf16))} 0))
+             (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+            CheckErrorKind::PrecisionMismatch,
         );
     }
 

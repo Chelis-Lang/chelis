@@ -167,16 +167,19 @@ pub fn scalar_type(precision: Prim) -> TensorType {
     }
 }
 
-fn dim_or_fresh(dim: Option<&DimInfo>, fallback: &str) -> DimInfo {
-    dim.cloned()
-        .unwrap_or_else(|| DimInfo::Named(fallback.to_string(), None))
+fn require_dim(dim: Option<&DimInfo>, context: &str) -> DimInfo {
+    dim.cloned().unwrap_or_else(|| {
+        panic!("{context} requires a statically known axis in Phase 0e lowering")
+    })
 }
 
-fn dim_extent(dim: &DimInfo) -> usize {
+fn require_dim_extent(dim: &DimInfo, context: &str) -> usize {
     match dim {
         DimInfo::Lit(n) => *n,
         DimInfo::Named(_, Some(n)) => *n,
-        DimInfo::Named(_, None) => 1,
+        DimInfo::Named(name, None) => {
+            panic!("{context} requires a concrete extent in Phase 0e lowering, got `{name}`")
+        }
     }
 }
 
@@ -192,10 +195,16 @@ fn known_product(dims: &[DimInfo]) -> Option<usize> {
     Some(product)
 }
 
-fn product_dim(dims: &[DimInfo], fallback: &str) -> DimInfo {
+fn require_known_product(dims: &[DimInfo], context: &str) -> DimInfo {
     known_product(dims)
         .map(DimInfo::Lit)
-        .unwrap_or_else(|| DimInfo::Named(fallback.to_string(), None))
+        .unwrap_or_else(|| panic!("{context} requires concrete extents in Phase 0e lowering"))
+}
+
+fn require_axis_size(ty: &TensorType, axis: usize, context: &str) -> usize {
+    dim_size(ty, axis).unwrap_or_else(|| {
+        panic!("{context} requires a concrete extent for axis {axis} in Phase 0e lowering")
+    })
 }
 
 fn expand_to_match(
@@ -208,7 +217,7 @@ fn expand_to_match(
         let missing = target_dims.len() - ty.dims.len();
         let insert_at = 0;
         let source_dim = target_dims[missing - 1].clone();
-        let size = dim_extent(&source_dim);
+        let size = require_dim_extent(&source_dim, "expand_to_match");
         let mut next_dims = ty.dims.clone();
         next_dims.insert(insert_at, source_dim);
         let next_ty = TensorType {
@@ -240,7 +249,6 @@ fn expand_to_match(
 ///   3. Mul the expanded tensors -> [i, j, k]
 ///   4. Sum over axis 1 (the j dimension) -> [i, k]
 ///
-/// Phase 0 limitation: if dimension sizes are unknown, placeholder size 1 is used.
 pub fn lower_matmul(
     dag: &mut Dag,
     a: NodeId,
@@ -249,11 +257,14 @@ pub fn lower_matmul(
     b_ty: &TensorType,
 ) -> NodeId {
     // Extract dimension sizes: A is [i, j], B is [j, k].
-    let i_dim = dim_or_fresh(a_ty.dims.first(), "matmul_i");
-    let j_dim = dim_or_fresh(a_ty.dims.get(1).or_else(|| b_ty.dims.first()), "matmul_j");
-    let k_dim = dim_or_fresh(b_ty.dims.get(1), "matmul_k");
-    let i_size = dim_extent(&i_dim);
-    let k_size = dim_extent(&k_dim);
+    let i_dim = require_dim(a_ty.dims.first(), "matmul lhs axis 0");
+    let j_dim = require_dim(
+        a_ty.dims.get(1).or_else(|| b_ty.dims.first()),
+        "matmul shared axis",
+    );
+    let k_dim = require_dim(b_ty.dims.get(1), "matmul rhs axis 1");
+    let i_size = require_dim_extent(&i_dim, "matmul lhs axis 0");
+    let k_size = require_dim_extent(&k_dim, "matmul rhs axis 1");
 
     // The intermediate expanded type is [i, j, k].
     let expanded_ty = TensorType {
@@ -299,7 +310,7 @@ pub fn lower_matmul(
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> NodeId {
     let red_ty = reduced_type(ty, axis);
-    let size = dim_size(ty, axis).unwrap_or(1);
+    let size = require_axis_size(ty, axis, "softmax");
 
     // 1. max_reduce(x, axis)
     let max_val = dag.add_node(RiscOp::MaxReduce { axis }, vec![x], red_ty.clone());
@@ -328,7 +339,7 @@ pub fn lower_softmax(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> 
 /// Lowering (spec §3.4): sum then divide by the axis size.
 pub fn lower_mean(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> NodeId {
     let red_ty = reduced_type(ty, axis);
-    let dim_size_val = dim_size(ty, axis).unwrap_or(1) as f64;
+    let dim_size_val = require_axis_size(ty, axis, "mean") as f64;
 
     // sum(x, axis)
     let sum_node = dag.add_node(RiscOp::Sum { axis }, vec![x], red_ty.clone());
@@ -358,11 +369,12 @@ pub fn lower_layer_norm(
     eps: f64,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
+    let axis_size = require_axis_size(x_ty, axis, "layer_norm");
     let mean = lower_mean(dag, x, axis, x_ty);
     let mean_expanded = dag.add_node(
         RiscOp::Expand {
             axis,
-            size: dim_size(x_ty, axis).unwrap_or(1),
+            size: axis_size,
         },
         vec![mean],
         x_ty.clone(),
@@ -373,7 +385,7 @@ pub fn lower_layer_norm(
     let var_expanded = dag.add_node(
         RiscOp::Expand {
             axis,
-            size: dim_size(x_ty, axis).unwrap_or(1),
+            size: axis_size,
         },
         vec![var],
         x_ty.clone(),
@@ -400,26 +412,27 @@ pub fn lower_conv2d(
     stride: usize,
     padding: usize,
 ) -> NodeId {
-    let batch = dim_or_fresh(input_ty.dims.first(), "conv_batch");
-    let in_c = dim_or_fresh(input_ty.dims.get(1), "conv_in_c");
-    let h_out = output_ty
-        .dims
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| DimInfo::Named("conv_h_out".to_string(), None));
-    let w_out = output_ty
-        .dims
-        .get(3)
-        .cloned()
-        .unwrap_or_else(|| DimInfo::Named("conv_w_out".to_string(), None));
-    let out_c = dim_or_fresh(
-        kernel_ty.dims.first().or_else(|| output_ty.dims.get(1)),
-        "conv_out_c",
+    let batch = require_dim(
+        output_ty.dims.first().or_else(|| input_ty.dims.first()),
+        "conv2d batch axis",
     );
-    let kh = dim_or_fresh(kernel_ty.dims.get(2), "conv_kh");
-    let kw = dim_or_fresh(kernel_ty.dims.get(3), "conv_kw");
-    let patch_dim = product_dim(&[in_c.clone(), kh.clone(), kw.clone()], "conv_patch");
-    let col_dim = product_dim(&[batch.clone(), h_out.clone(), w_out.clone()], "conv_cols");
+    let in_c = require_dim(input_ty.dims.get(1), "conv2d input channel axis");
+    let h_out = require_dim(output_ty.dims.get(2), "conv2d output height axis");
+    let w_out = require_dim(output_ty.dims.get(3), "conv2d output width axis");
+    let out_c = require_dim(
+        output_ty.dims.get(1).or_else(|| kernel_ty.dims.first()),
+        "conv2d output channel axis",
+    );
+    let kh = require_dim(kernel_ty.dims.get(2), "conv2d kernel height axis");
+    let kw = require_dim(kernel_ty.dims.get(3), "conv2d kernel width axis");
+    let patch_dim = require_known_product(
+        &[in_c.clone(), kh.clone(), kw.clone()],
+        "conv2d patch flattening",
+    );
+    let col_dim = require_known_product(
+        &[batch.clone(), h_out.clone(), w_out.clone()],
+        "conv2d im2col flattening",
+    );
     let cols6_ty = TensorType {
         dims: vec![
             batch.clone(),
@@ -963,5 +976,50 @@ mod tests {
         assert!(ops.iter().any(|op| matches!(op, RiscOp::Sum { .. })));
         assert_eq!(dag.get(result).unwrap().output_type, output_ty);
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "softmax requires a concrete extent")]
+    fn softmax_rejects_symbolic_axis_extent() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let _ = lower_softmax(&mut dag, x, 0, &ty);
+    }
+
+    #[test]
+    #[should_panic(expected = "conv2d output height axis requires a statically known axis")]
+    fn conv2d_rejects_missing_output_shape() {
+        let mut dag = Dag::new();
+        let input_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(3),
+                DimInfo::Lit(8),
+                DimInfo::Lit(8),
+            ],
+            precision: Prim::F32,
+        };
+        let kernel_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(16),
+                DimInfo::Lit(3),
+                DimInfo::Lit(3),
+                DimInfo::Lit(3),
+            ],
+            precision: Prim::F32,
+        };
+        let output_ty = TensorType {
+            dims: vec![DimInfo::Lit(1), DimInfo::Lit(16)],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty.clone());
+        let kernel = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], kernel_ty.clone());
+        let _ = lower_conv2d(
+            &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 1,
+        );
     }
 }
