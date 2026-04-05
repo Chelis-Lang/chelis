@@ -10,9 +10,11 @@ pub struct Token {
 pub enum TokenKind {
     // Keywords
     Def,
+    Sig,
     Let,
     In,
     Type,
+    Dim,
     Match,
     With,
     Fn,
@@ -24,9 +26,12 @@ pub enum TokenKind {
     Grad,
     Vmap,
     Jit,
+    Realize,
+    Copy,
     Tensor,
     Cast,
     Export,
+    Par,
 
     // Punctuation & Delimiters
     LParen,     // (
@@ -38,11 +43,13 @@ pub enum TokenKind {
     Comma,      // ,
     Colon,      // :
     Arrow,      // ->
+    FatArrow,   // =>
     Pipe,       // |>
     Bar,        // |
     Eq,         // =
     Dot,        // .
     At,         // @
+    Semicolon,  // ;
     Underscore, // _
 
     // Arithmetic operators

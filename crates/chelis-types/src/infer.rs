@@ -99,6 +99,31 @@ fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
+/// Resolve type aliases: replace Type::Adt(name, []) with the aliased type.
+fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry) -> Type {
+    match ty {
+        Type::Adt(name, args) if args.is_empty() => {
+            if let Some(aliased) = adt_reg.resolve_alias(name) {
+                aliased.clone()
+            } else {
+                ty.clone()
+            }
+        }
+        Type::Fn(args, ret) => Type::Fn(
+            args.iter()
+                .map(|a| resolve_type_aliases(a, adt_reg))
+                .collect(),
+            Box::new(resolve_type_aliases(ret, adt_reg)),
+        ),
+        Type::Tuple(ts) => Type::Tuple(
+            ts.iter()
+                .map(|t| resolve_type_aliases(t, adt_reg))
+                .collect(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
 // ── Declaration collection (first pass) ──────────────────────────
 
 fn collect_declarations(
@@ -134,8 +159,19 @@ fn collect_declarations(
                 && let Some(name) = symbol_name(&kids[0])
             {
                 let ty = deep_type_to_type(&kids[1], vg, &mut HashMap::new());
+                let ty = resolve_type_aliases(&ty, adt_reg);
                 let scheme = env.generalize(&ty, subst);
                 env.bind(name.to_string(), scheme);
+            }
+        }
+        "typealias" => {
+            // (typealias {} Name type_expr)
+            // Register as a type alias in the ADT registry
+            if kids.len() >= 2
+                && let Some(name) = symbol_name(&kids[0])
+            {
+                let aliased_ty = deep_type_to_type(&kids[1], vg, &mut HashMap::new());
+                adt_reg.register_alias(name.to_string(), aliased_ty);
             }
         }
         _ => {}
@@ -165,8 +201,8 @@ fn infer_top_level(
         None => return,
     };
 
-    // Skip deftype/defsig (already processed)
-    if tag == "deftype" || tag == "defsig" {
+    // Skip deftype/defsig/typealias (already processed in first pass)
+    if tag == "deftype" || tag == "defsig" || tag == "typealias" {
         return;
     }
 
@@ -359,9 +395,45 @@ fn infer_expr(
                     // Already handled in first pass
                     Type::Unit
                 }
-                Some("deftype") => {
+                Some("deftype") | Some("typealias") => {
                     // Already handled in first pass
                     Type::Unit
+                }
+                Some("par") => {
+                    // par: evaluate all children, return type of last (v1: sequential)
+                    let kids = children(list);
+                    let mut last_ty = Type::Unit;
+                    for kid in kids {
+                        last_ty = infer_expr(
+                            kid,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            typed_nodes,
+                            total_nodes,
+                        );
+                    }
+                    last_ty
+                }
+                Some("realize") | Some("copy") => {
+                    // realize/copy: infer the inner expression, return same type
+                    let kids = children(list);
+                    if let Some(inner) = kids.first() {
+                        infer_expr(
+                            inner,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            typed_nodes,
+                            total_nodes,
+                        )
+                    } else {
+                        Type::Error
+                    }
                 }
                 _ => {
                     // Unknown tag -- try to infer children

@@ -1,3 +1,3 @@
-type Option a =
-  | Some a
+type Option[a] =
+  | Some(a)
   | None

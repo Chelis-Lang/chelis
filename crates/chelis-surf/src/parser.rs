@@ -118,6 +118,58 @@ impl Parser {
         }
     }
 
+    fn expect_ident_or_type_ident(&mut self) -> Result<(String, Span), ParseError> {
+        match self.peek().clone() {
+            TokenKind::Ident(name) | TokenKind::TypeIdent(name) => {
+                let tok = self.advance();
+                Ok((name, tok.span))
+            }
+            _ => Err(ParseError::Expected {
+                expected: "identifier or type identifier".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            }),
+        }
+    }
+
+    fn parse_module_path(&mut self) -> Result<(String, Span), ParseError> {
+        let (first_seg, mut span) = self.expect_type_ident()?;
+        let mut module = first_seg;
+        while *self.peek() == TokenKind::Dot {
+            self.advance();
+            let (seg, seg_span) = self.expect_type_ident()?;
+            module.push('.');
+            module.push_str(&seg);
+            span = span.merge(seg_span);
+        }
+        Ok((module, span))
+    }
+
+    fn parse_ident_list(&mut self, terminator: TokenKind) -> Result<Vec<String>, ParseError> {
+        let mut names = Vec::new();
+        if *self.peek() == terminator {
+            return Ok(names);
+        }
+        let (name, _) = self.expect_ident_or_type_ident()?;
+        names.push(name);
+        while *self.peek() == TokenKind::Comma {
+            self.advance();
+            if *self.peek() == terminator {
+                break;
+            }
+            let (name, _) = self.expect_ident_or_type_ident()?;
+            names.push(name);
+        }
+        Ok(names)
+    }
+
+    fn parse_name_bracket_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(&TokenKind::LBracket)?;
+        let names = self.parse_ident_list(TokenKind::RBracket)?;
+        self.expect(&TokenKind::RBracket)?;
+        Ok(names)
+    }
+
     // ---------------------------------------------------------------------------
     // Top-level
     // ---------------------------------------------------------------------------
@@ -133,13 +185,15 @@ impl Parser {
     fn parse_decl(&mut self) -> Result<Decl, ParseError> {
         match self.peek() {
             TokenKind::Def => self.parse_fun_def(),
+            TokenKind::Sig => self.parse_sig_decl(),
             TokenKind::Let => self.parse_let_def(),
-            TokenKind::Type => self.parse_type_def(),
+            TokenKind::Type => self.parse_type_decl(),
+            TokenKind::Dim => self.parse_dim_decl(),
             TokenKind::Module => self.parse_module(),
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
             _ => Err(ParseError::Expected {
-                expected: "declaration (def, let, type, module, import, export)".into(),
+                expected: "declaration (def, sig, let, type, dim, module, import, export)".into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -156,26 +210,19 @@ impl Parser {
 
         // Optional dimension parameters: def f[a, b](...)
         let dim_params = if *self.peek() == TokenKind::LBracket {
-            self.advance(); // consume [
-            let mut dims = Vec::new();
-            if *self.peek() != TokenKind::RBracket {
-                let (d, _) = self.expect_ident()?;
-                dims.push(d);
-                while *self.peek() == TokenKind::Comma {
-                    self.advance();
-                    let (d, _) = self.expect_ident()?;
-                    dims.push(d);
-                }
-            }
-            self.expect(&TokenKind::RBracket)?;
-            dims
+            self.parse_name_bracket_list()?
         } else {
             Vec::new()
         };
 
-        self.expect(&TokenKind::LParen)?;
-        let params = self.parse_params()?;
-        self.expect(&TokenKind::RParen)?;
+        let params = if *self.peek() == TokenKind::LParen {
+            self.advance();
+            let params = self.parse_params()?;
+            self.expect(&TokenKind::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
 
         let ret_ty = if *self.peek() == TokenKind::Colon {
             self.advance();
@@ -195,6 +242,25 @@ impl Parser {
             ret_ty,
             body,
             span,
+        })
+    }
+
+    fn parse_sig_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.advance().span; // consume Sig
+        let (name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        let span = start.merge(type_span(&ty));
+        Ok(Decl::Sig { name, ty, span })
+    }
+
+    fn parse_dim_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.advance().span; // consume Dim
+        let names = self.parse_ident_list(TokenKind::Eof)?;
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Decl::Dim {
+            names,
+            span: start.merge(end),
         })
     }
 
@@ -247,38 +313,42 @@ impl Parser {
         })
     }
 
-    fn parse_type_def(&mut self) -> Result<Decl, ParseError> {
+    fn parse_type_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
         let (name, _) = self.expect_type_ident()?;
-
-        // Parse type params (lowercase idents until `=`)
-        let mut params = Vec::new();
-        while let TokenKind::Ident(p) = self.peek().clone() {
-            self.advance();
-            params.push(p);
-        }
+        let params = if *self.peek() == TokenKind::LBracket {
+            self.parse_name_bracket_list()?
+        } else {
+            Vec::new()
+        };
 
         self.expect(&TokenKind::Eq)?;
 
-        // Parse variants separated by |, with optional leading |
-        let mut variants = Vec::new();
-        // Skip optional leading | (allows `type T = | V1 | V2` style)
         if *self.peek() == TokenKind::Bar {
-            self.advance();
-        }
-        variants.push(self.parse_variant()?);
-        while *self.peek() == TokenKind::Bar {
+            let mut variants = Vec::new();
             self.advance();
             variants.push(self.parse_variant()?);
+            while *self.peek() == TokenKind::Bar {
+                self.advance();
+                variants.push(self.parse_variant()?);
+            }
+            let last_span = variants.last().unwrap().span;
+            Ok(Decl::TypeDef {
+                name,
+                params,
+                variants,
+                span: start.merge(last_span),
+            })
+        } else {
+            let ty = self.parse_type()?;
+            let span = start.merge(type_span(&ty));
+            Ok(Decl::TypeAlias {
+                name,
+                params,
+                ty,
+                span,
+            })
         }
-
-        let last_span = variants.last().unwrap().span;
-        Ok(Decl::TypeDef {
-            name,
-            params,
-            variants,
-            span: start.merge(last_span),
-        })
     }
 
     fn parse_variant(&mut self) -> Result<Variant, ParseError> {
@@ -304,17 +374,30 @@ impl Parser {
                 fields: VariantFields::Record(fields),
                 span: start.merge(end.span),
             })
-        } else {
-            // Positional fields: type exprs until | or end-of-variant context
+        } else if *self.peek() == TokenKind::LParen {
+            self.advance();
             let mut fields = Vec::new();
-            while self.is_type_start() {
-                fields.push(self.parse_type_atom()?);
+            if *self.peek() != TokenKind::RParen {
+                fields.push(self.parse_type()?);
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    fields.push(self.parse_type()?);
+                }
             }
-            let end = fields.last().map(type_span).unwrap_or(start);
+            let end = self.expect(&TokenKind::RParen)?;
             Ok(Variant {
                 name,
                 fields: VariantFields::Positional(fields),
-                span: start.merge(end),
+                span: start.merge(end.span),
+            })
+        } else {
+            Ok(Variant {
+                name,
+                fields: VariantFields::Positional(Vec::new()),
+                span: start,
             })
         }
     }
@@ -328,93 +411,54 @@ impl Parser {
 
     fn parse_module(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Module
-        let (name, _) = self.expect_type_ident()?;
+        let (name, _) = self.parse_module_path()?;
 
-        if *self.peek() == TokenKind::LBrace {
-            // Braced module: module Foo { ... }
-            self.advance();
-            let mut decls = Vec::new();
-            while *self.peek() != TokenKind::RBrace {
-                if self.at_eof() {
-                    return Err(ParseError::UnexpectedEof);
-                }
-                decls.push(self.parse_decl()?);
-            }
-            let end = self.expect(&TokenKind::RBrace)?;
-            Ok(Decl::Module {
-                name,
-                decls,
-                span: start.merge(end.span),
-            })
-        } else {
-            // Braceless module: rest of file belongs to this module
-            let mut decls = Vec::new();
-            while !self.at_eof() {
-                decls.push(self.parse_decl()?);
-            }
-            let end = decls.last().map(decl_span).unwrap_or(start);
-            Ok(Decl::Module {
-                name,
-                decls,
-                span: start.merge(end),
-            })
+        let mut decls = Vec::new();
+        while !self.at_eof() {
+            decls.push(self.parse_decl()?);
         }
+        let end = decls.last().map(decl_span).unwrap_or(start);
+        Ok(Decl::Module {
+            name,
+            decls,
+            span: start.merge(end),
+        })
     }
 
     fn parse_import(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Import
-        let (first_seg, mut mod_span) = self.expect_type_ident()?;
-        let mut module = first_seg;
+        let (module, mod_span) = self.parse_module_path()?;
 
-        // Parse dotted path: Foo.Bar.Baz
-        while *self.peek() == TokenKind::Dot {
-            self.advance(); // consume Dot
-            let (seg, seg_span) = self.expect_type_ident()?;
-            module.push('.');
-            module.push_str(&seg);
-            mod_span = mod_span.merge(seg_span);
-        }
-
-        let (names, end) = if *self.peek() == TokenKind::LParen {
+        let (kind, end) = if *self.peek() == TokenKind::LParen {
             self.advance();
-            let mut ns = Vec::new();
-            if *self.peek() != TokenKind::RParen {
-                let (n, _) = self.expect_ident()?;
-                ns.push(n);
-                while *self.peek() == TokenKind::Comma {
-                    self.advance();
-                    let (n, _) = self.expect_ident()?;
-                    ns.push(n);
-                }
-            }
+            let kind = if *self.peek() == TokenKind::Dot {
+                self.advance();
+                self.expect(&TokenKind::Dot)?;
+                ImportKind::All
+            } else {
+                ImportKind::Names(self.parse_ident_list(TokenKind::RParen)?)
+            };
             let end = self.expect(&TokenKind::RParen)?;
-            (Some(ns), end.span)
+            (kind, end.span)
         } else {
-            (None, mod_span)
+            (ImportKind::Qualified, mod_span)
         };
 
         Ok(Decl::Import {
             module,
-            names,
+            kind,
             span: start.merge(end),
         })
     }
 
     fn parse_export(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Export
-        let mut names = Vec::new();
-        let (first_name, first_span) = self.expect_ident()?;
-        names.push(first_name);
-        let mut end = first_span;
-        while *self.peek() == TokenKind::Comma {
-            self.advance();
-            let (n, s) = self.expect_ident()?;
-            names.push(n);
-            end = s;
-        }
+        self.expect(&TokenKind::LParen)?;
+        let names = self.parse_ident_list(TokenKind::RParen)?;
+        let end = self.expect(&TokenKind::RParen)?;
         Ok(Decl::Export {
             names,
-            span: start.merge(end),
+            span: start.merge(end.span),
         })
     }
 
@@ -428,6 +472,35 @@ impl Parser {
         loop {
             if self.at_eof() {
                 break;
+            }
+
+            if *self.peek() == TokenKind::Dot {
+                let l_bp = 15u8;
+                if l_bp < min_bp {
+                    break;
+                }
+                self.advance();
+                match self.peek().clone() {
+                    TokenKind::Ident(field) => {
+                        let tok = self.advance();
+                        let start = expr_span(&lhs);
+                        lhs = Expr::Access(Box::new(lhs), field, start.merge(tok.span));
+                        continue;
+                    }
+                    TokenKind::Int(index) => {
+                        let tok = self.advance();
+                        let start = expr_span(&lhs);
+                        lhs = Expr::TupleGet(Box::new(lhs), index, start.merge(tok.span));
+                        continue;
+                    }
+                    _ => {
+                        return Err(ParseError::Expected {
+                            expected: "field name or tuple index".into(),
+                            found: format!("{:?}", self.peek()),
+                            offset: self.current_offset(),
+                        });
+                    }
+                }
             }
 
             // Check for pipe
@@ -561,6 +634,9 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
+                if *self.peek() == TokenKind::LBrace {
+                    return self.parse_record_expr(name, tok.span);
+                }
                 let mut expr = Expr::Constructor(name, tok.span);
                 // Juxtaposition application: Foo x y
                 expr = self.parse_juxtaposition_args(expr)?;
@@ -611,6 +687,9 @@ impl Parser {
             TokenKind::Grad => self.parse_grad(),
             TokenKind::Vmap => self.parse_vmap(),
             TokenKind::Jit => self.parse_jit(),
+            TokenKind::Realize => self.parse_realize(),
+            TokenKind::Copy => self.parse_copy(),
+            TokenKind::Par => self.parse_par(),
             TokenKind::LBrace => self.parse_block(),
             _ => Err(ParseError::Expected {
                 expected: "expression".into(),
@@ -688,7 +767,11 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
-                Ok(Expr::Constructor(name, tok.span))
+                if *self.peek() == TokenKind::LBrace {
+                    self.parse_record_expr(name, tok.span)
+                } else {
+                    Ok(Expr::Constructor(name, tok.span))
+                }
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
@@ -765,11 +848,18 @@ impl Parser {
         while *self.peek() == TokenKind::Bar {
             self.advance();
             let pattern = self.parse_pattern()?;
-            self.expect(&TokenKind::Arrow)?;
+            let guard = if *self.peek() == TokenKind::If {
+                self.advance();
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::FatArrow)?;
             let body = self.parse_expr(0)?;
             let arm_span = pattern_span(&pattern).merge(expr_span(&body));
             arms.push(MatchArm {
                 pattern,
+                guard,
                 body,
                 span: arm_span,
             });
@@ -842,17 +932,24 @@ impl Parser {
         let expr = self.parse_expr(0)?;
         let axis = if *self.peek() == TokenKind::Comma {
             self.advance();
-            // expect ident "axis"
-            let (kw, _) = self.expect_ident()?;
-            if kw != "axis" {
-                return Err(ParseError::Expected {
-                    expected: "axis".into(),
-                    found: kw,
-                    offset: self.current_offset(),
-                });
-            }
-            self.expect(&TokenKind::Eq)?;
             match self.peek().clone() {
+                TokenKind::Ident(kw) if kw == "axis" => {
+                    self.advance();
+                    self.expect(&TokenKind::Eq)?;
+                    match self.peek().clone() {
+                        TokenKind::Int(n) => {
+                            self.advance();
+                            Some(n)
+                        }
+                        _ => {
+                            return Err(ParseError::Expected {
+                                expected: "integer".into(),
+                                found: format!("{:?}", self.peek()),
+                                offset: self.current_offset(),
+                            });
+                        }
+                    }
+                }
                 TokenKind::Int(n) => {
                     self.advance();
                     Some(n)
@@ -880,38 +977,101 @@ impl Parser {
         Ok(Expr::Jit(Box::new(expr), start.merge(end.span)))
     }
 
+    fn parse_realize(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LParen)?;
+        let expr = self.parse_expr(0)?;
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(Expr::Realize(Box::new(expr), start.merge(end.span)))
+    }
+
+    fn parse_copy(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LParen)?;
+        let expr = self.parse_expr(0)?;
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(Expr::Copy(Box::new(expr), start.merge(end.span)))
+    }
+
+    fn parse_par(&mut self) -> Result<Expr, ParseError> {
+        // par { e1; e2; ... }
+        let start = self.advance().span; // consume Par
+        self.expect(&TokenKind::LBrace)?;
+        let mut exprs = Vec::new();
+        exprs.push(self.parse_expr(0)?);
+        while *self.peek() == TokenKind::Semicolon {
+            self.advance(); // consume ;
+            if *self.peek() == TokenKind::RBrace {
+                break; // trailing semicolon
+            }
+            exprs.push(self.parse_expr(0)?);
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Par(exprs, start.merge(end.span)))
+    }
+
     fn parse_block(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
-        let mut decls = Vec::new();
-        while matches!(
-            self.peek(),
-            TokenKind::Def | TokenKind::Let | TokenKind::Type
-        ) && !self.at_eof()
-        {
-            // Peek ahead: is this a let-def (no `in`) or let-expr?
-            // In a block context, `let x = ...` without `in` is a decl.
-            decls.push(self.parse_decl()?);
+        let mut bindings = Vec::new();
+        while *self.peek() == TokenKind::Let && !self.at_eof() {
+            bindings.push(self.parse_block_let_binding()?);
+            // Optional semicolon between bindings
+            if *self.peek() == TokenKind::Semicolon {
+                self.advance();
+            }
         }
         let expr = self.parse_expr(0)?;
+        // Optional trailing semicolon before }
+        if *self.peek() == TokenKind::Semicolon {
+            self.advance();
+        }
         let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::Block(decls, Box::new(expr), start.merge(end.span)))
+        Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
+    }
+
+    fn parse_block_let_binding(&mut self) -> Result<LetBinding, ParseError> {
+        self.expect(&TokenKind::Let)?;
+        let (name, _) = self.expect_ident()?;
+        let ty = if *self.peek() == TokenKind::Colon {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expr(0)?;
+        Ok(LetBinding { name, ty, value })
+    }
+
+    fn parse_record_expr(&mut self, name: String, start: Span) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        if *self.peek() != TokenKind::RBrace {
+            loop {
+                let (field, field_span) = self.expect_ident()?;
+                let value = if *self.peek() == TokenKind::Colon {
+                    self.advance();
+                    self.parse_expr(0)?
+                } else {
+                    Expr::Var(field.clone(), field_span)
+                };
+                fields.push((field, value));
+                if *self.peek() != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if *self.peek() == TokenKind::RBrace {
+                    break;
+                }
+            }
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Record(name, fields, start.merge(end.span)))
     }
 
     // ---------------------------------------------------------------------------
     // Type expression parsing
     // ---------------------------------------------------------------------------
-
-    fn is_type_start(&self) -> bool {
-        matches!(
-            self.peek(),
-            TokenKind::Ident(_)
-                | TokenKind::TypeIdent(_)
-                | TokenKind::Tensor
-                | TokenKind::LParen
-                | TokenKind::Underscore
-                | TokenKind::Star
-        )
-    }
 
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
         // Parse first type, then check for ->
@@ -940,20 +1100,21 @@ impl Parser {
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
-                // Check if followed by type args
-                if self.is_type_start() && !matches!(self.peek(), TokenKind::TypeIdent(_)) {
-                    // Only simple type atoms as args (not other TypeIdents to avoid ambiguity)
+                if *self.peek() == TokenKind::LBracket {
+                    self.advance();
                     let mut args = Vec::new();
-                    // Actually, let's allow any type atom as arg
-                    while self.is_type_arg_start() {
-                        args.push(self.parse_type_atom()?);
+                    if *self.peek() != TokenKind::RBracket {
+                        args.push(self.parse_type()?);
+                        while *self.peek() == TokenKind::Comma {
+                            self.advance();
+                            if *self.peek() == TokenKind::RBracket {
+                                break;
+                            }
+                            args.push(self.parse_type()?);
+                        }
                     }
-                    if args.is_empty() {
-                        Ok(TypeExpr::Named(name, tok.span))
-                    } else {
-                        let end = type_span(args.last().unwrap());
-                        Ok(TypeExpr::App(name, args, tok.span.merge(end)))
-                    }
+                    let end = self.expect(&TokenKind::RBracket)?;
+                    Ok(TypeExpr::App(name, args, tok.span.merge(end.span)))
                 } else {
                     Ok(TypeExpr::Named(name, tok.span))
                 }
@@ -990,6 +1151,10 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(TypeExpr::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_type()?;
                 if *self.peek() == TokenKind::Comma {
                     let mut types = vec![first];
@@ -1017,20 +1182,6 @@ impl Parser {
                 offset: self.current_offset(),
             }),
         }
-    }
-
-    /// Can this token start a type argument (for App)?
-    /// More restrictive than is_type_start: we don't consume TypeIdent
-    /// to avoid greedily eating sibling variants.
-    fn is_type_arg_start(&self) -> bool {
-        matches!(
-            self.peek(),
-            TokenKind::Ident(_)
-                | TokenKind::Tensor
-                | TokenKind::LParen
-                | TokenKind::Underscore
-                | TokenKind::Star
-        )
     }
 
     // ---------------------------------------------------------------------------
@@ -1095,7 +1246,12 @@ impl Parser {
                                 });
                             }
                         };
-                        let field_pat = Pattern::Var(field_name.clone(), field_span);
+                        let field_pat = if *self.peek() == TokenKind::Colon {
+                            self.advance();
+                            self.parse_pattern()?
+                        } else {
+                            Pattern::Var(field_name.clone(), field_span)
+                        };
                         fields.push((field_name, field_pat));
                         if *self.peek() == TokenKind::Comma {
                             self.advance();
@@ -1105,6 +1261,25 @@ impl Parser {
                     }
                     let end = self.expect(&TokenKind::RBrace)?;
                     Ok(Pattern::Record(name, fields, tok.span.merge(end.span)))
+                } else if *self.peek() == TokenKind::LParen {
+                    self.advance();
+                    let mut sub_pats = Vec::new();
+                    if *self.peek() != TokenKind::RParen {
+                        sub_pats.push(self.parse_pattern()?);
+                        while *self.peek() == TokenKind::Comma {
+                            self.advance();
+                            if *self.peek() == TokenKind::RParen {
+                                break;
+                            }
+                            sub_pats.push(self.parse_pattern()?);
+                        }
+                    }
+                    let end = self.expect(&TokenKind::RParen)?;
+                    Ok(Pattern::Constructor(
+                        name,
+                        sub_pats,
+                        tok.span.merge(end.span),
+                    ))
                 } else {
                     let mut sub_pats = Vec::new();
                     while self.is_pattern_arg_start() {
@@ -1228,6 +1403,9 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Var(_, s) => *s,
         Expr::Constructor(_, s) => *s,
         Expr::Apply(_, _, s) => *s,
+        Expr::Record(_, _, s) => *s,
+        Expr::Access(_, _, s) => *s,
+        Expr::TupleGet(_, _, s) => *s,
         Expr::Binary(_, _, _, s) => *s,
         Expr::Unary(_, _, s) => *s,
         Expr::Pipe(_, _, s) => *s,
@@ -1240,6 +1418,9 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Grad(_, s) => *s,
         Expr::Vmap(_, _, s) => *s,
         Expr::Jit(_, s) => *s,
+        Expr::Realize(_, s) => *s,
+        Expr::Copy(_, s) => *s,
+        Expr::Par(_, s) => *s,
         Expr::Annotate(_, _, s) => *s,
         Expr::Block(_, _, s) => *s,
     }
@@ -1272,7 +1453,10 @@ fn decl_span(d: &Decl) -> Span {
     match d {
         Decl::Module { span, .. } => *span,
         Decl::Import { span, .. } => *span,
+        Decl::Sig { span, .. } => *span,
+        Decl::Dim { span, .. } => *span,
         Decl::TypeDef { span, .. } => *span,
+        Decl::TypeAlias { span, .. } => *span,
         Decl::FunDef { span, .. } => *span,
         Decl::LetDef { span, .. } => *span,
         Decl::Export { span, .. } => *span,
@@ -1388,7 +1572,7 @@ mod tests {
 
     #[test]
     fn adt_type_def() {
-        let decls = p("type Option a = Some a | None");
+        let decls = p("type Option[a] = | Some(a) | None");
         match &decls[0] {
             Decl::TypeDef {
                 name,
@@ -1408,7 +1592,7 @@ mod tests {
 
     #[test]
     fn type_def_no_params() {
-        let decls = p("type Shape = Scalar | Vector i64");
+        let decls = p("type Shape = | Scalar | Vector(i64)");
         match &decls[0] {
             Decl::TypeDef {
                 name,
@@ -1434,7 +1618,7 @@ mod tests {
 
     #[test]
     fn record_variant() {
-        let decls = p("type Config = Default { lr: f32, eps: f32 }");
+        let decls = p("type Config = | Default { lr: f32, eps: f32 }");
         match &decls[0] {
             Decl::TypeDef { variants, .. } => {
                 assert_eq!(variants[0].name, "Default");
@@ -1455,9 +1639,9 @@ mod tests {
     fn import_simple() {
         let decls = p("import Foo");
         match &decls[0] {
-            Decl::Import { module, names, .. } => {
+            Decl::Import { module, kind, .. } => {
                 assert_eq!(module, "Foo");
-                assert!(names.is_none());
+                assert_eq!(kind, &ImportKind::Qualified);
             }
             _ => panic!("expected Import"),
         }
@@ -1467,9 +1651,12 @@ mod tests {
     fn import_with_names() {
         let decls = p("import Foo(bar, baz)");
         match &decls[0] {
-            Decl::Import { module, names, .. } => {
+            Decl::Import { module, kind, .. } => {
                 assert_eq!(module, "Foo");
-                assert_eq!(names.as_ref().unwrap(), &["bar", "baz"]);
+                assert_eq!(
+                    kind,
+                    &ImportKind::Names(vec!["bar".to_string(), "baz".to_string()])
+                );
             }
             _ => panic!("expected Import"),
         }
@@ -1477,7 +1664,7 @@ mod tests {
 
     #[test]
     fn module_decl() {
-        let decls = p("module M { def f(x) = x }");
+        let decls = p("module M def f(x) = x");
         match &decls[0] {
             Decl::Module { name, decls, .. } => {
                 assert_eq!(name, "M");
@@ -1604,7 +1791,7 @@ mod tests {
 
     #[test]
     fn match_expr() {
-        let e = body("let x = match x with { | Some y -> y | None -> 0 }");
+        let e = body("let x = match x with { | Some y => y | None => 0 }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 2);
@@ -1689,7 +1876,7 @@ mod tests {
 
     #[test]
     fn type_app() {
-        let decls = p("let x: Option f32 = x");
+        let decls = p("let x: Option[f32] = x");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::App(name, args, _) => {
@@ -1962,9 +2149,9 @@ mod tests {
     fn import_dotted_path() {
         let decls = p("import Foo.Bar.Baz(baz)");
         match &decls[0] {
-            Decl::Import { module, names, .. } => {
+            Decl::Import { module, kind, .. } => {
                 assert_eq!(module, "Foo.Bar.Baz");
-                assert_eq!(names.as_ref().unwrap(), &["baz"]);
+                assert_eq!(kind, &ImportKind::Names(vec!["baz".to_string()]));
             }
             _ => panic!("expected Import"),
         }
@@ -1974,9 +2161,9 @@ mod tests {
     fn import_dotted_no_names() {
         let decls = p("import Foo.Bar");
         match &decls[0] {
-            Decl::Import { module, names, .. } => {
+            Decl::Import { module, kind, .. } => {
                 assert_eq!(module, "Foo.Bar");
-                assert!(names.is_none());
+                assert_eq!(kind, &ImportKind::Qualified);
             }
             _ => panic!("expected Import"),
         }
@@ -2000,7 +2187,7 @@ mod tests {
 
     #[test]
     fn export_decl() {
-        let decls = p("export foo, bar, baz");
+        let decls = p("export (foo, bar, baz)");
         match &decls[0] {
             Decl::Export { names, .. } => {
                 assert_eq!(names, &["foo", "bar", "baz"]);
@@ -2011,7 +2198,7 @@ mod tests {
 
     #[test]
     fn export_single() {
-        let decls = p("export foo");
+        let decls = p("export (foo)");
         match &decls[0] {
             Decl::Export { names, .. } => {
                 assert_eq!(names, &["foo"]);
@@ -2024,7 +2211,7 @@ mod tests {
 
     #[test]
     fn record_pattern() {
-        let e = body("let x = match x with { | Adam { lr, eps } -> lr }");
+        let e = body("let x = match x with { | Adam { lr, eps } => lr }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);
@@ -2048,7 +2235,7 @@ mod tests {
 
     #[test]
     fn as_pattern() {
-        let e = body("let x = match x with { | y @ Some z -> y }");
+        let e = body("let x = match x with { | y @ Some z => y }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);

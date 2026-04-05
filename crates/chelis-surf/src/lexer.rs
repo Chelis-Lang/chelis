@@ -195,6 +195,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                         span: Span::new(start, 2),
                     });
                     i += 2;
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    tokens.push(Token {
+                        kind: TokenKind::FatArrow,
+                        span: Span::new(start, 2),
+                    });
+                    i += 2;
                 } else {
                     tokens.push(Token {
                         kind: TokenKind::Eq,
@@ -274,6 +280,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 });
                 i += 1;
             }
+            b';' => {
+                tokens.push(Token {
+                    kind: TokenKind::Semicolon,
+                    span: Span::new(start, 1),
+                });
+                i += 1;
+            }
             b'"' => {
                 let tok = lex_string(source, &mut i)?;
                 tokens.push(tok);
@@ -331,9 +344,11 @@ fn is_ident_continue(b: u8) -> bool {
 fn classify_ident(text: &str) -> TokenKind {
     match text {
         "def" => TokenKind::Def,
+        "sig" => TokenKind::Sig,
         "let" => TokenKind::Let,
         "in" => TokenKind::In,
         "type" => TokenKind::Type,
+        "dim" => TokenKind::Dim,
         "match" => TokenKind::Match,
         "with" => TokenKind::With,
         "fn" => TokenKind::Fn,
@@ -345,9 +360,12 @@ fn classify_ident(text: &str) -> TokenKind {
         "grad" => TokenKind::Grad,
         "vmap" => TokenKind::Vmap,
         "jit" => TokenKind::Jit,
+        "realize" => TokenKind::Realize,
+        "copy" => TokenKind::Copy,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
         "export" => TokenKind::Export,
+        "par" => TokenKind::Par,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         _ => {

@@ -22,9 +22,10 @@ pub struct AdtDef {
     pub variants: Vec<VariantInfo>,
 }
 
-/// Registry of all ADT definitions.
+/// Registry of all ADT definitions and type aliases.
 pub struct AdtRegistry {
     pub defs: HashMap<String, AdtDef>,
+    pub aliases: HashMap<String, Type>,
 }
 
 impl Default for AdtRegistry {
@@ -35,7 +36,9 @@ impl Default for AdtRegistry {
 
 impl AdtRegistry {
     pub fn new() -> Self {
+        #[allow(clippy::default_constructed_unit_structs)]
         AdtRegistry {
+            aliases: HashMap::new(),
             defs: HashMap::new(),
         }
     }
@@ -223,6 +226,16 @@ impl AdtRegistry {
             }
         }
         None
+    }
+
+    /// Register a type alias: `typealias Name = Type`.
+    pub fn register_alias(&mut self, name: String, ty: Type) {
+        self.aliases.insert(name, ty);
+    }
+
+    /// Resolve a type alias by name. Returns None if not an alias.
+    pub fn resolve_alias(&self, name: &str) -> Option<&Type> {
+        self.aliases.get(name)
     }
 }
 

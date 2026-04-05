@@ -4,8 +4,8 @@ type Activation =
 
 def activate(act: Activation, x: tensor[n, f32]): tensor[n, f32] =
   match act with {
-    | Relu -> relu(x)
-    | Sigmoid -> sigmoid(x)
+    | Relu => relu(x)
+    | Sigmoid => sigmoid(x)
   }
 
 def linear(w: tensor[out, inp, f32], b: tensor[out, f32], x: tensor[inp, f32]): tensor[out, f32] =

@@ -67,6 +67,29 @@ fn bare_list(elements: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::List(deep::List { elements }, sp())
 }
 
+fn lower_module_path(path: &str) -> String {
+    path.to_ascii_lowercase()
+}
+
+fn desugar_param(param: &Param) -> deep::Expr {
+    desugar_param_with_dims(param, &HashSet::new())
+}
+
+fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
+    match &param.ty {
+        Some(ty) => deep::Expr::List(
+            deep::List {
+                elements: vec![
+                    sym(&param.name),
+                    meta_with_type(desugar_type_with_dims(ty, dim_vars)),
+                ],
+            },
+            sp(),
+        ),
+        None => sym(&param.name),
+    }
+}
+
 /// Inject a type annotation into the metadata of a desugared expression.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
@@ -134,20 +157,44 @@ fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
             ..
         } => vec![desugar_type_def(name, params, variants)],
 
+        Decl::TypeAlias {
+            name, params, ty, ..
+        } => {
+            let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+            vec![node(
+                "typealias",
+                vec![sym(name), param_list, desugar_type(ty)],
+            )]
+        }
+
+        Decl::Sig { name, ty, .. } => vec![node("defsig", vec![sym(name), desugar_type(ty)])],
+
+        Decl::Dim { names, .. } => names
+            .iter()
+            .map(|name| node("defdim", vec![sym(name)]))
+            .collect(),
+
         Decl::Module { name, decls, .. } => {
-            let mut children = vec![sym(name)];
+            let mut children = vec![sym(&lower_module_path(name))];
             for d in decls {
                 children.extend(desugar_decl(d));
             }
             vec![node("module", children)]
         }
 
-        Decl::Import { module, names, .. } => match names {
-            Some(ns) => {
+        Decl::Import { module, kind, .. } => match kind {
+            ImportKind::Names(ns) => {
                 let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
-                vec![node("import", vec![sym(module), name_list])]
+                vec![node(
+                    "import",
+                    vec![sym(&lower_module_path(module)), name_list],
+                )]
             }
-            None => vec![node("import-all", vec![sym(module)])],
+            ImportKind::Qualified => vec![node(
+                "import",
+                vec![sym(&lower_module_path(module)), bare_list(vec![])],
+            )],
+            ImportKind::All => vec![node("import-all", vec![sym(&lower_module_path(module))])],
         },
 
         Decl::Export { names, .. } => {
@@ -171,7 +218,10 @@ fn desugar_fun_def(
     // Build a set so desugar_type_with_dims treats them as d-var.
     let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
 
-    let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
+    let param_names: Vec<deep::Expr> = params
+        .iter()
+        .map(|param| desugar_param_with_dims(param, &dim_set))
+        .collect();
     let params_node = node("params", param_names);
     let fn_node = node("fn", vec![params_node, desugar_expr(body)]);
     let def_node = node("def", vec![sym(name), fn_node]);
@@ -232,6 +282,27 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
         Expr::Lit(lit, _) => desugar_literal(lit),
         Expr::Var(name, _) => dvar(name),
         Expr::Constructor(name, _) => dvar(name),
+        Expr::Record(name, fields, _) => {
+            let mut fields = fields.clone();
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut children = vec![sym(name)];
+            for (field, value) in fields {
+                children.push(node("kv", vec![sym(&field), desugar_expr(&value)]));
+            }
+            node("record", children)
+        }
+        Expr::Access(target, field, _) => node("access", vec![desugar_expr(target), sym(field)]),
+        Expr::TupleGet(target, index, _) => node(
+            "tuple-get",
+            vec![
+                desugar_expr(target),
+                node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym("int32")])),
+                    vec![deep::Expr::Atom(deep::Atom::Int(*index), sp())],
+                ),
+            ],
+        ),
 
         Expr::Apply(func, args, _) => desugar_apply(func, args),
 
@@ -276,7 +347,11 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
         Expr::Match(scrutinee, arms, _) => {
             let mut children = vec![desugar_expr(scrutinee)];
             for arm in arms {
-                let guard = bare_list(vec![]); // empty guard
+                let guard = arm
+                    .guard
+                    .as_ref()
+                    .map(desugar_expr)
+                    .unwrap_or_else(|| bare_list(vec![]));
                 children.push(node(
                     "arm",
                     vec![
@@ -301,11 +376,16 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
         }
 
         Expr::Lambda(params, body, _) => {
-            let param_names: Vec<deep::Expr> = params.iter().map(|p| sym(&p.name)).collect();
+            let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
             let params_node = node("params", param_names);
             node("fn", vec![params_node, desugar_expr(body)])
         }
 
+        Expr::Tuple(elems, _) if elems.is_empty() => node_meta(
+            "lit",
+            meta_with_type(node("t-unit", vec![])),
+            vec![bare_list(vec![])],
+        ),
         Expr::Tuple(elems, _) => node("tuple", elems.iter().map(desugar_expr).collect()),
 
         Expr::Cast(e, prec, _) => node(
@@ -316,14 +396,18 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
         Expr::Grad(f, _) => node("grad", vec![desugar_expr(f)]),
 
         Expr::Vmap(f, axis, _) => {
-            let axis_node = node(
-                "d-var",
+            let axis_node = node_meta(
+                "lit",
+                meta_with_type(node("t-prim", vec![sym("int32")])),
                 vec![deep::Expr::Atom(deep::Atom::Int(axis.unwrap_or(0)), sp())],
             );
             node("vmap", vec![desugar_expr(f), axis_node])
         }
 
         Expr::Jit(f, _) => node("jit", vec![desugar_expr(f)]),
+        Expr::Realize(f, _) => node("realize", vec![desugar_expr(f)]),
+        Expr::Copy(f, _) => node("copy", vec![desugar_expr(f)]),
+        Expr::Par(exprs, _) => node("par", exprs.iter().map(desugar_expr).collect()),
 
         Expr::Annotate(e, ty, _) => {
             // Type annotation pushed into metadata of the desugared expression
@@ -331,10 +415,18 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
             inject_type_metadata(desugared, desugar_type(ty))
         }
 
-        Expr::Block(decls, final_expr, _) => {
-            let mut children: Vec<deep::Expr> = decls.iter().flat_map(desugar_decl).collect();
-            children.push(desugar_expr(final_expr));
-            node("block", children)
+        Expr::Block(bindings, final_expr, _) => {
+            if bindings.is_empty() {
+                desugar_expr(final_expr)
+            } else {
+                let mut bind_children = Vec::new();
+                for binding in bindings {
+                    bind_children.push(sym(&binding.name));
+                    bind_children.push(desugar_expr(&binding.value));
+                }
+                let bind_node = node("bind", bind_children);
+                node("let", vec![bind_node, desugar_expr(final_expr)])
+            }
         }
     }
 }
@@ -348,7 +440,7 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
         ),
         Literal::Float(f) => node_meta(
             "lit",
-            meta_with_type(node("t-prim", vec![sym("f64")])),
+            meta_with_type(node("t-prim", vec![sym("f32")])),
             vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
         ),
         Literal::Bool(b) => node_meta(
@@ -469,6 +561,7 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
             node("t-adt", children)
         }
 
+        TypeExpr::Tuple(elems, _) if elems.is_empty() => node("t-unit", vec![]),
         TypeExpr::Tuple(elems, _) => node(
             "t-tuple",
             elems
@@ -504,19 +597,15 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
             children.extend(sub_pats.iter().map(desugar_pattern));
             node("pat-ctor", children)
         }
-        Pattern::Tuple(pats, _) => {
-            // Tuple patterns use pat-ctor with synthetic Tuple constructor
-            // (pat-tuple is NOT in the 53-tag vocabulary)
-            let mut children = vec![sym("Tuple")];
-            children.extend(pats.iter().map(desugar_pattern));
-            node("pat-ctor", children)
-        }
+        Pattern::Tuple(pats, _) => node("pat-tuple", pats.iter().map(desugar_pattern).collect()),
         Pattern::Record(name, fields, _) => {
+            let mut fields = fields.clone();
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
             let mut children = vec![sym(name)];
             for (field_name, field_pat) in fields {
                 children.push(node(
                     "kv",
-                    vec![sym(field_name), desugar_pattern(field_pat)],
+                    vec![sym(&field_name), desugar_pattern(&field_pat)],
                 ));
             }
             node("pat-record", children)
@@ -578,7 +667,7 @@ mod tests {
     #[test]
     fn test_float_literal() {
         let result = print_expr(&desugar_expr(&float_lit(3.125)));
-        assert_eq!(result, "(lit {type: (t-prim {} f64)} 3.125)");
+        assert_eq!(result, "(lit {type: (t-prim {} f32)} 3.125)");
     }
 
     #[test]
@@ -715,11 +804,13 @@ mod tests {
                         vec![Pattern::Var("y".to_string(), s())],
                         s(),
                     ),
+                    guard: None,
                     body: tvar("y"),
                     span: s(),
                 },
                 MatchArm {
                     pattern: Pattern::Constructor("None".to_string(), vec![], s()),
+                    guard: None,
                     body: int_lit(0),
                     span: s(),
                 },
@@ -800,7 +891,10 @@ mod tests {
             nodes[0],
             "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))"
         );
-        assert_eq!(nodes[1], "(def {} f (fn {} (params {} x) (var {} x)))");
+        assert_eq!(
+            nodes[1],
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))"
+        );
     }
 
     // --- Fun def with dim params ---
@@ -864,7 +958,7 @@ mod tests {
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0], "(defsig {} x (t-prim {} f32))");
-        assert_eq!(nodes[1], "(def {} x (lit {type: (t-prim {} f64)} 1.0))");
+        assert_eq!(nodes[1], "(def {} x (lit {type: (t-prim {} f32)} 1.0))");
     }
 
     // --- Let def (no type) produces just def ---
@@ -1060,7 +1154,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_pattern(&pat)),
-            "(pat-ctor {} Tuple (pat-var {} a) (pat-var {} b))"
+            "(pat-tuple {} (pat-var {} a) (pat-var {} b))"
         );
     }
 
@@ -1070,24 +1164,24 @@ mod tests {
     fn test_import_all() {
         let decl = Decl::Import {
             module: "Foo".to_string(),
-            names: None,
+            kind: ImportKind::All,
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import-all {} Foo)");
+        assert_eq!(nodes[0], "(import-all {} foo)");
     }
 
     #[test]
     fn test_import_selective() {
         let decl = Decl::Import {
             module: "Foo".to_string(),
-            names: Some(vec!["a".to_string(), "b".to_string()]),
+            kind: ImportKind::Names(vec!["a".to_string(), "b".to_string()]),
             span: s(),
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import {} Foo (a b))");
+        assert_eq!(nodes[0], "(import {} foo (a b))");
     }
 
     // --- Record pattern ---
@@ -1104,7 +1198,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_pattern(&pat)),
-            "(pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} eps (pat-var {} eps)))"
+            "(pat-record {} Adam (kv {} eps (pat-var {} eps)) (kv {} lr (pat-var {} lr)))"
         );
     }
 

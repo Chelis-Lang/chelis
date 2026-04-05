@@ -6,10 +6,11 @@ const VALID_TAGS: &[&str] = &[
     "import",
     "import-all",
     "export",
-    // Declarations (6)
+    // Declarations (7)
     "def",
     "defsig",
     "deftype",
+    "typealias",
     "variant",
     "field",
     "defdim",
@@ -29,13 +30,16 @@ const VALID_TAGS: &[&str] = &[
     "tuple",
     "tuple-get",
     "par",
-    // Patterns (6)
+    // Patterns (7)
     "pat-var",
     "pat-lit",
     "pat-ctor",
+    "pat-tuple",
     "pat-record",
     "pat-wild",
     "pat-as",
+    // Reserved / Phase 1 (1)
+    "record-update",
     // Types (7)
     "t-prim",
     "t-fn",
@@ -106,12 +110,15 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
 
             if is_tagged_node
                 && let Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) = list.elements.first()
+                // Typed helper forms like `(x {type: ...})` are structural children inside
+                // `(params {} ...)`, not top-level tagged Deep nodes.
+                && (list.elements.len() != 2 || VALID_TAGS.contains(&tag.as_str()))
                 && !VALID_TAGS.contains(&tag.as_str())
             {
                 warnings.push(ValidationWarning {
                     kind: WarningKind::UnknownTag,
                     offset: span.offset,
-                    message: format!("unknown tag '{tag}' — not in the 53-tag vocabulary"),
+                    message: format!("unknown tag '{tag}' — not in the 56-tag vocabulary"),
                 });
             }
 

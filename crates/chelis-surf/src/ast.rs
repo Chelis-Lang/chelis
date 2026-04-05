@@ -11,13 +11,28 @@ pub enum Decl {
     },
     Import {
         module: String,
-        names: Option<Vec<String>>,
+        kind: ImportKind,
+        span: Span,
+    },
+    Sig {
+        name: String,
+        ty: TypeExpr,
+        span: Span,
+    },
+    Dim {
+        names: Vec<String>,
         span: Span,
     },
     TypeDef {
         name: String,
         params: Vec<String>,
         variants: Vec<Variant>,
+        span: Span,
+    },
+    TypeAlias {
+        name: String,
+        params: Vec<String>,
+        ty: TypeExpr,
         span: Span,
     },
     FunDef {
@@ -38,6 +53,13 @@ pub enum Decl {
         names: Vec<String>,
         span: Span,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportKind {
+    Qualified,
+    All,
+    Names(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +90,9 @@ pub enum Expr {
     Var(String, Span),
     Constructor(String, Span),         // Uppercase name
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
+    Record(String, Vec<(String, Expr)>, Span),
+    Access(Box<Expr>, String, Span),
+    TupleGet(Box<Expr>, i64, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Unary(UnaryOp, Box<Expr>, Span),
     Pipe(Box<Expr>, Vec<Expr>, Span), // x |> f |> g
@@ -80,8 +105,11 @@ pub enum Expr {
     Grad(Box<Expr>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),
-    Annotate(Box<Expr>, TypeExpr, Span), // expr : Type
-    Block(Vec<Decl>, Box<Expr>, Span),   // { decls; expr }
+    Realize(Box<Expr>, Span),
+    Copy(Box<Expr>, Span),
+    Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
+    Annotate(Box<Expr>, TypeExpr, Span),     // expr : Type
+    Block(Vec<LetBinding>, Box<Expr>, Span), // { let ...; expr }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +153,7 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }

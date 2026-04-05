@@ -6,7 +6,7 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 
 /// Parse Surf source, desugar to Deep, print Deep, re-parse Deep with strict
-/// tag validation. Verifies the generated Deep uses only canonical 53-tag
+/// tag validation. Verifies the generated Deep uses only canonical 56-tag
 /// vocabulary and round-trips through the Deep parser.
 fn roundtrip(surf_source: &str) {
     // 1. Parse Surf
@@ -161,7 +161,7 @@ fn typed_def_emits_defsig() {
 
 #[test]
 fn type_var_not_prim() {
-    let decls = surf_parse("type Option a = | Some a | None").unwrap();
+    let decls = surf_parse("type Option[a] = | Some(a) | None").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
@@ -184,7 +184,7 @@ fn annotation_in_metadata() {
 #[test]
 fn pat_lit_raw_value() {
     let decls =
-        surf_parse("type B = | T | F\ndef f(x: f32): f32 = match x with { | 0 -> 1 | _ -> x }")
+        surf_parse("type B = | T | F\ndef f(x: f32): f32 = match x with { | 0 => 1 | _ => x }")
             .unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);

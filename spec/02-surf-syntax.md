@@ -179,14 +179,13 @@ No `where` clauses. Use `let...in` or blocks.
 
 ### P6: Records
 
-Braces for construction. Punning allowed. Dot-chaining for access. Functional update with `with`.
+Braces for construction. Punning allowed. Dot-chaining for access. Functional update with `with` is reserved for Phase 1 and not part of the Phase 0 parser/desugarer.
 
 ```
 let lr = 0.01
 let opt = Adam { lr, eps: 1.0e-8 }      -- punning: lr: lr
 let rate = opt.lr                         -- field access
 let chain = model.layer1.weight           -- chained access
-let opt2 = { opt with lr: 0.001 }        -- functional update
 ```
 
 **⟹**
@@ -194,7 +193,6 @@ let opt2 = { opt with lr: 0.001 }        -- functional update
 Adam { lr, eps: 1.0e-8 }     ⟹  (record {} Adam (kv {} eps ...) (kv {} lr (var {} lr)))
 opt.lr                        ⟹  (access {} (var {} opt) lr)
 model.layer1.weight           ⟹  (access {} (access {} (var {} model) layer1) weight)
-{ opt with lr: 0.001 }       ⟹  (record-update {} (var {} opt) (kv {} lr ...))
 ```
 
 Record `kv` pairs are alphabetized by key in canonical Deep.
@@ -484,7 +482,6 @@ AtomExpr      <- '(' S ')'
                / BlockExpr
                / TransformExpr
                / RecordExpr
-               / RecordUpdate
                / Literal
                / Ident
                / TypeIdent
@@ -503,9 +500,6 @@ TransformArg  <- PrecType / Expr
 RecordExpr    <- TypeIdent S '{' S RecordField
                   (S ',' S RecordField)* (S ',')? S '}'
 RecordField   <- Ident S ':' S Expr / Ident
-
-RecordUpdate  <- '{' S Expr S 'with' S RecordField
-                  (S ',' S RecordField)* (S ',')? S '}'
 
 # ═══════════════════════════════════════════════════
 #  PATTERNS
@@ -601,12 +595,12 @@ sig f: f32 -> f32 -> f32
 
 def f(x: f32, y: f32): f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
-    (def {} f (fn {} (params (x {type: (t-prim {} f32)})
+    (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})
                              (y {type: (t-prim {} f32)}))
                 (app {} (var {} add) (var {} x) (var {} y))))
 
 def f(x, y) = add(x, y)
-⟹  (def {} f (fn {} (params x y) (app {} (var {} add) (var {} x) (var {} y))))
+⟹  (def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))
 
 type Option[a] = | None | Some { value: a }
 ⟹  (deftype {} Option (a)
@@ -659,7 +653,7 @@ x |> f |> g                       ⟹  (pipe {} x' (var {} f) (var {} g))
 -- Control flow
 if c then a else b                ⟹  (if {} c' a' b')
 let x = e in body                 ⟹  (let {} (bind x e') body')
-fn (x, y) -> body                 ⟹  (fn {} (params x y) body')
+fn (x, y) -> body                 ⟹  (fn {} (params {} x y) body')
 
 -- Block (sequential let)
 {                                 ⟹  (let {} (bind x e1' y e2') body')
@@ -682,7 +676,6 @@ pair.0                            ⟹  (tuple-get {} (var {} pair) (lit {type: (
 Foo { x: e1, y: e2 }             ⟹  (record {} Foo (kv {} x e1') (kv {} y e2'))
 Foo { x, y }                      ⟹  (record {} Foo (kv {} x (var {} x)) (kv {} y (var {} y)))
 e.field                           ⟹  (access {} e' field)
-{ e with x: e1 }                 ⟹  (record-update {} e' (kv {} x e1'))
 
 -- Transforms
 grad(f)                           ⟹  (grad {} f')
@@ -758,12 +751,12 @@ After `type Name =`, the parser checks if the next non-whitespace token is `|`. 
 
 ## 7. Deep Tag Additions
 
-This spec introduces two tags beyond the Deep syntax spec v0.2:
+This spec requires two new Deep tags in addition to the post-sprint baseline, and it reserves one more for the deferred Phase 1 record-update surface:
 
 | Tag | Form | Semantics |
 |-----|------|-----------|
 | `typealias` | `(typealias {} Name (params...) type-expr)` | Transparent type alias |
-| `record-update` | `(record-update {} base-expr (kv {} field expr) ...)` | Functional record update |
+| `record-update` | `(record-update {} base-expr (kv {} field expr) ...)` | Functional record update (reserved; Phase 1) |
 
 Additionally, `pat-tuple` is needed for tuple destructuring patterns:
 
@@ -771,7 +764,7 @@ Additionally, `pat-tuple` is needed for tuple destructuring patterns:
 |-----|------|-----------|
 | `pat-tuple` | `(pat-tuple {} pat₁ pat₂ ...)` | Tuple pattern |
 
-**Revised Deep tag total: 56** (53 original + `typealias` + `record-update` + `pat-tuple`).
+**Revised Deep tag total: 56** (baseline + `typealias` + `record-update` + `pat-tuple`).
 
 ---
 
@@ -867,10 +860,10 @@ def transpose[a, b](x: tensor[a, b, f32]): tensor[b, a, f32] =
   permute(x, [1, 0])
 
 def dot[n](x: tensor[n, f32], y: tensor[n, f32]): f32 =
-  sum_reduce(mul(x, y), 0)
+  sum(mul(x, y))
 
 def normalize[d](x: tensor[d, f32]): tensor[d, f32] = {
-  let norm = sqrt(sum_reduce(mul(x, x), 0))
+  let norm = sqrt(sum(mul(x, x)))
   div(x, expand(norm, 0))
 }
 ```
@@ -881,6 +874,7 @@ def normalize[d](x: tensor[d, f32]): tensor[d, f32] = {
 module Train
 
 import Std.Io (println)
+import Std.Iter (fold, range)   -- stdlib helpers, not built-ins
 
 def train(model_w, model_b, data_x, data_y, lr, epochs) = {
   let step = fn (wb, i) -> {

@@ -66,6 +66,7 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | `def` | `(def {} name expr)` | Value/function binding |
 | `defsig` | `(defsig {} name type-expr)` | Type signature (precedes `def`) |
 | `deftype` | `(deftype {} name (type-params...) variant...)` | ADT declaration |
+| `typealias` | `(typealias {} name (type-params...) type-expr)` | Transparent type alias |
 | `variant` | `(variant {} Name field...)` | Sum type constructor (fields optional) |
 | `field` | `(field {} name type-expr)` | Named field in variant |
 | `defdim` | `(defdim {} name)` | Dimension name declaration |
@@ -88,6 +89,7 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
 | `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
+| `record-update` | `(record-update {} expr (kv {} k v) ...)` | Functional record update (reserved; Phase 1) |
 | `par` | `(par {} expr₁ expr₂ ...)` | Parallel evaluation (v1: sequential) |
 
 ### 2.4 Patterns
@@ -97,6 +99,7 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | `pat-var` | `(pat-var {} name)` | Bind to name |
 | `pat-lit` | `(pat-lit {} value)` | Match literal |
 | `pat-ctor` | `(pat-ctor {} CtorName pat...)` | Deconstruct variant |
+| `pat-tuple` | `(pat-tuple {} pat₁ pat₂ ...)` | Tuple destructuring pattern |
 | `pat-record` | `(pat-record {} TypeName (kv {} k₁ pat₁) ...)` | Deconstruct record |
 | `pat-wild` | `(pat-wild {})` | Wildcard |
 | `pat-as` | `(pat-as {} name pattern)` | Bind name, then match |
@@ -155,15 +158,15 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | Category | Count | Tags |
 |---|---|---|
 | Module | 4 | module, import, import-all, export |
-| Declarations | 6 | def, defsig, deftype, variant, field, defdim |
-| Expressions | 15 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, par |
-| Patterns | 6 | pat-var, pat-lit, pat-ctor, pat-record, pat-wild, pat-as |
+| Declarations | 7 | def, defsig, deftype, typealias, variant, field, defdim |
+| Expressions | 16 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par |
+| Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 7 | t-prim, t-fn, t-tensor, t-adt, t-var, t-unit, t-tuple |
 | Dimensions | 3 | d-name, d-var, d-lit |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
 | Helpers | 3 | params, bind, kv |
-| **Total** | **53** | |
+| **Total** | **56** | |
 
 ---
 
