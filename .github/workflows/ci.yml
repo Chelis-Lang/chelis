@@ -35,15 +35,15 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-  no-claude-authorship:
-    name: No Claude authorship
+  no-ai-authorship:
+    name: No AI authorship markers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check commits for Claude authorship markers
+      - name: Check commits for AI authorship markers
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
@@ -53,29 +53,37 @@ jobs:
             RANGE="HEAD~1..HEAD"
           fi
           FOUND=0
+          # Patterns covering Claude, OpenAI, Codex, ChatGPT, Copilot, generic AI
+          AI_MSG_PATTERNS=(
+            '(Co-)?Authored-By:.*(claude|anthropic|openai|codex|chatgpt|copilot)'
+            'Generated (with|by).*(claude|openai|codex|chatgpt|copilot|gpt-[0-9]|ai|llm)'
+          )
+          AI_IDENTITY_PATTERNS=(
+            '(claude|anthropic|openai|codex|chatgpt|copilot)'
+          )
           for SHA in $(git rev-list "$RANGE"); do
             MSG="$(git log -1 --format="%B" "$SHA")"
             AUTHOR="$(git log -1 --format="%an <%ae>" "$SHA")"
             COMMITTER="$(git log -1 --format="%cn <%ce>" "$SHA")"
-            if printf '%s\n' "$MSG" | grep -qiE '(Co-)?Authored-By:.*(claude|anthropic)'; then
-              echo "FAIL: $SHA has Claude/Anthropic authorship trailer"
-              FOUND=1
-            fi
-            if printf '%s\n' "$MSG" | grep -qiE 'Generated with.*Claude'; then
-              echo "FAIL: $SHA has Generated-with-Claude footer"
-              FOUND=1
-            fi
-            if printf '%s\n' "$AUTHOR" | grep -qiE '(claude|anthropic)'; then
-              echo "FAIL: $SHA has Claude/Anthropic author: $AUTHOR"
-              FOUND=1
-            fi
-            if printf '%s\n' "$COMMITTER" | grep -qiE '(claude|anthropic)'; then
-              echo "FAIL: $SHA has Claude/Anthropic committer: $COMMITTER"
-              FOUND=1
-            fi
+            for pat in "${AI_MSG_PATTERNS[@]}"; do
+              if printf '%s\n' "$MSG" | grep -qiE "$pat"; then
+                echo "FAIL: $SHA commit message matches: $pat"
+                FOUND=1
+              fi
+            done
+            for pat in "${AI_IDENTITY_PATTERNS[@]}"; do
+              if printf '%s\n' "$AUTHOR" | grep -qiE "$pat"; then
+                echo "FAIL: $SHA author matches: $AUTHOR"
+                FOUND=1
+              fi
+              if printf '%s\n' "$COMMITTER" | grep -qiE "$pat"; then
+                echo "FAIL: $SHA committer matches: $COMMITTER"
+                FOUND=1
+              fi
+            done
           done
           if [ "$FOUND" -ne 0 ]; then
-            echo "Remove Claude/Anthropic authorship markers from the flagged commits."
+            echo "Remove AI authorship markers from the flagged commits."
             exit 1
           fi
           echo "All commits clean."
