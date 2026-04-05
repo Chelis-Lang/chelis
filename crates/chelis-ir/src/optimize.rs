@@ -1,6 +1,6 @@
 //! Basic DAG optimization passes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 
@@ -55,87 +55,82 @@ pub fn constant_fold(dag: &mut Dag) {
     }
 }
 
-/// Dead code elimination: mark nodes reachable from the last node, remove the rest.
+/// Dead code elimination: build a new DAG with only reachable nodes.
 ///
-/// Note: Since the DAG is a flat vector with index-based IDs, "removing" nodes
-/// means replacing them with no-op Const(0) nodes. A full compaction would
-/// require rewriting all NodeId references, which we skip for Phase 0.
-pub fn dead_code_eliminate(dag: &mut Dag) {
-    if dag.is_empty() {
-        return;
+/// Marks the last node and all Store nodes as live, propagates liveness
+/// backward through inputs, then rebuilds the DAG with only live nodes
+/// and remapped NodeIds.
+pub fn dead_code_eliminate(dag: &Dag) -> Dag {
+    let n = dag.len();
+    if n == 0 {
+        return Dag::new();
     }
-    // The "output" is the last node.
-    let output = NodeId(dag.len() - 1);
-    let mut reachable = HashSet::new();
-    mark_reachable(dag, output, &mut reachable);
 
-    for i in 0..dag.len() {
-        let id = NodeId(i);
-        if !reachable.contains(&id) {
-            let ty = dag.get(id).unwrap().output_type.clone();
-            dag.replace_node(id, RiscOp::Const { value: 0.0 }, vec![], ty);
-        }
-    }
-}
-
-fn mark_reachable(dag: &Dag, id: NodeId, visited: &mut HashSet<NodeId>) {
-    if !visited.insert(id) {
-        return;
-    }
-    if let Some(node) = dag.get(id) {
-        for &input in &node.inputs {
-            mark_reachable(dag, input, visited);
-        }
-    }
-}
-
-/// Common subexpression elimination: hash nodes by (op_discriminant, inputs),
-/// merge duplicates by rewriting references.
-///
-/// Phase 0: simple version that detects duplicate Const nodes with the same value.
-pub fn common_subexpr_eliminate(dag: &mut Dag) {
-    // Map from (op-as-string, inputs) to the first NodeId with that signature.
-    let mut seen: HashMap<(String, Vec<usize>), NodeId> = HashMap::new();
-    // Map from old NodeId -> canonical NodeId.
-    let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
-
-    for i in 0..dag.len() {
-        let id = NodeId(i);
-        let node = dag.get(id).unwrap();
-
-        // Remap inputs through existing remaps.
-        let canonical_inputs: Vec<usize> = node
-            .inputs
-            .iter()
-            .map(|inp| remap.get(inp).unwrap_or(inp).0)
-            .collect();
-
-        let key = (format!("{:?}", node.op), canonical_inputs.clone());
-
-        if let Some(&canonical) = seen.get(&key) {
-            remap.insert(id, canonical);
-        } else {
-            seen.insert(key, id);
+    // Mark live nodes: output node + all Store nodes.
+    let mut live = vec![false; n];
+    live[n - 1] = true;
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Store { .. }) {
+            live[node.id.0] = true;
         }
     }
 
-    // Rewrite inputs to use canonical IDs.
-    if !remap.is_empty() {
-        for i in 0..dag.len() {
-            let id = NodeId(i);
-            let node = dag.get(id).unwrap();
-            let new_inputs: Vec<NodeId> = node
-                .inputs
-                .iter()
-                .map(|inp| *remap.get(inp).unwrap_or(inp))
-                .collect();
-            if new_inputs != dag.get(id).unwrap().inputs {
-                let op = dag.get(id).unwrap().op.clone();
-                let ty = dag.get(id).unwrap().output_type.clone();
-                dag.replace_node(id, op, new_inputs, ty);
+    // Propagate liveness backward.
+    for i in (0..n).rev() {
+        if live[i] {
+            for &input in &dag.nodes()[i].inputs {
+                live[input.0] = true;
             }
         }
     }
+
+    // Rebuild with only live nodes, remapping IDs.
+    let mut new_dag = Dag::new();
+    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+
+    for (old_id, node) in dag.nodes().iter().enumerate() {
+        if live[old_id] {
+            let new_inputs: Vec<NodeId> = node
+                .inputs
+                .iter()
+                .map(|&old| *id_map.get(&old.0).unwrap())
+                .collect();
+            let new_id = new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone());
+            id_map.insert(old_id, new_id);
+        }
+    }
+
+    new_dag
+}
+
+/// Common subexpression elimination: build a new DAG, merging nodes
+/// that have identical (op, remapped_inputs) keys.
+pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
+    let mut new_dag = Dag::new();
+    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+    let mut seen: HashMap<(String, Vec<NodeId>), NodeId> = HashMap::new();
+
+    for node in dag.nodes() {
+        let remapped_inputs: Vec<NodeId> = node
+            .inputs
+            .iter()
+            .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
+            .collect();
+
+        let op_key = format!("{:?}", node.op);
+        let cse_key = (op_key, remapped_inputs.clone());
+
+        if let Some(&existing) = seen.get(&cse_key) {
+            id_map.insert(node.id.0, existing);
+        } else {
+            let new_id =
+                new_dag.add_node(node.op.clone(), remapped_inputs, node.output_type.clone());
+            id_map.insert(node.id.0, new_id);
+            seen.insert(cse_key, new_id);
+        }
+    }
+
+    new_dag
 }
 
 #[cfg(test)]
@@ -187,16 +182,43 @@ mod tests {
     }
 
     #[test]
+    fn dce_removes_dead_nodes() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+
+        let new_dag = dead_code_eliminate(&dag);
+        // Dead const(99) should be removed; only 2 nodes remain.
+        assert_eq!(new_dag.len(), 2);
+    }
+
+    #[test]
+    fn dce_keeps_store_nodes() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Store { name: "out".into() }, vec![a], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Neg, vec![b], scalar_f32());
+
+        let new_dag = dead_code_eliminate(&dag);
+        // Store + its input const + second const + neg = 4 nodes all live.
+        assert_eq!(new_dag.len(), 4);
+    }
+
+    #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
 
-        common_subexpr_eliminate(&mut dag);
+        let new_dag = common_subexpr_eliminate(&dag);
 
-        // The Add node should now reference the same Const twice.
-        let add_node = dag.get(NodeId(2)).unwrap();
+        // CSE merges the two identical Consts, so only 2 nodes (1 Const + 1 Add).
+        assert_eq!(new_dag.len(), 2);
+        // The Add node should reference the same Const twice.
+        let add_node = new_dag.get(NodeId(1)).unwrap();
         assert_eq!(add_node.inputs[0], add_node.inputs[1]);
     }
 }

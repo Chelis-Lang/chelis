@@ -8,6 +8,7 @@
 //! - [`verify`]: Structural verification of DAG invariants.
 
 pub mod dag;
+pub mod eval;
 pub mod lower;
 pub mod optimize;
 pub mod tier2;

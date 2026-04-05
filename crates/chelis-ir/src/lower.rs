@@ -69,14 +69,27 @@ impl LowerCtx {
     }
 
     fn try_extract_tensor_type(expr: &Expr) -> Option<TensorType> {
-        // (t-tensor {} (t-dims {} ...) (t-prim {} p))
+        // Flat format: (t-tensor {} dim1 dim2 ... (t-prim {} p))
+        // Children after tag+meta: dimension nodes followed by a t-prim node as the last child.
         if let Expr::List(list, _) = expr
-            && list.elements.len() >= 4
+            && list.elements.len() >= 3
             && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
             && tag == "t-tensor"
         {
-            let dims = Self::try_extract_dims(&list.elements[2])?;
-            let prim = Self::try_extract_prim(&list.elements[3])?;
+            // elements[0] = tag, elements[1] = meta, elements[2..] = children
+            let children = &list.elements[2..];
+            if children.is_empty() {
+                return None;
+            }
+            // Last child is the precision (t-prim {} name).
+            let prim = Self::try_extract_prim(children.last()?)?;
+            // All children before the last are dimension nodes.
+            let mut dims = Vec::new();
+            for child in &children[..children.len() - 1] {
+                if let Some(dim) = Self::try_extract_dim(child) {
+                    dims.push(dim);
+                }
+            }
             return Some(TensorType {
                 dims,
                 precision: prim,
@@ -85,27 +98,56 @@ impl LowerCtx {
         None
     }
 
+    /// Extract a single dimension from a dimension node.
+    fn try_extract_dim(expr: &Expr) -> Option<DimInfo> {
+        if let Expr::List(list, _) = expr
+            && list.elements.len() >= 3
+            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+        {
+            match tag.as_str() {
+                "d-name" => {
+                    if let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2] {
+                        return Some(DimInfo::Named(name.clone(), None));
+                    }
+                }
+                "d-var" => {
+                    if let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2] {
+                        return Some(DimInfo::Named(name.clone(), None));
+                    }
+                }
+                "d-lit" => {
+                    if let Expr::Atom(Atom::Int(n), _) = &list.elements[2] {
+                        return Some(DimInfo::Lit(*n as usize));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Also handle bare symbols/ints for backward compat.
+        match expr {
+            Expr::Atom(Atom::Symbol(name), _) => Some(DimInfo::Named(name.clone(), None)),
+            Expr::Atom(Atom::Int(n), _) => Some(DimInfo::Lit(*n as usize)),
+            _ => None,
+        }
+    }
+
+    /// Extract a list of dimensions from a `(t-dims {} dim1 dim2 ...)` expression.
     fn try_extract_dims(expr: &Expr) -> Option<Vec<DimInfo>> {
-        // (t-dims {} dim1 dim2 ...)
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 2
             && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
             && tag == "t-dims"
         {
+            // Skip element [0] (tag) and [1] (empty map / metadata), parse remaining as dims.
             let mut dims = Vec::new();
-            // Skip tag and meta (elements[0] and [1]).
-            for elem in &list.elements[2..] {
-                match elem {
-                    Expr::Atom(Atom::Symbol(name), _) => {
-                        dims.push(DimInfo::Named(name.clone(), None));
-                    }
-                    Expr::Atom(Atom::Int(n), _) => {
-                        dims.push(DimInfo::Lit(*n as usize));
-                    }
-                    _ => {}
+            for elem in list.elements.iter().skip(2) {
+                if let Some(d) = Self::try_extract_dim(elem) {
+                    dims.push(d);
                 }
             }
-            return Some(dims);
+            if !dims.is_empty() {
+                return Some(dims);
+            }
         }
         None
     }
@@ -200,7 +242,14 @@ impl LowerCtx {
             "fn" => self.lower_fn(elems),
             "pipe" => self.lower_pipe(elems),
             "cast" => self.lower_cast(elems),
+            "if" => self.lower_if(elems),
+            "tuple" => self.lower_tuple(elems),
+            "par" => self.lower_par(elems),
+            "realize" | "copy" => self.lower_identity(elems),
+            "tuple-get" => self.lower_tuple_get(elems),
+            "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
+            "vmap" | "jit" => self.lower_unsupported(tag, elems),
             "defsig" | "deftype" | "typealias" => {
                 self.dag
                     .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
@@ -235,21 +284,32 @@ impl LowerCtx {
         body_id
     }
 
-    /// `(let {} (bind {} name expr) body)`
+    /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, elems: &[Expr]) -> NodeId {
         if elems.len() < 4 {
             return self
                 .dag
                 .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
         }
-        if let Expr::List(bind_list, _) = &elems[2]
-            && bind_list.elements.len() >= 4
-            && let Expr::Atom(Atom::Symbol(name), _) = &bind_list.elements[2]
-        {
-            let val_id = self.lower_expr(&bind_list.elements[3]);
-            self.bindings.insert(name.clone(), val_id);
+        let saved = self.bindings.clone();
+
+        // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
+        if let Expr::List(bind_list, _) = &elems[2] {
+            // Skip tag and meta (elements[0] and [1]).
+            let bind_kids = &bind_list.elements[2..];
+            let mut i = 0;
+            while i + 1 < bind_kids.len() {
+                if let Expr::Atom(Atom::Symbol(name), _) = &bind_kids[i] {
+                    let val_id = self.lower_expr(&bind_kids[i + 1]);
+                    self.bindings.insert(name.clone(), val_id);
+                }
+                i += 2;
+            }
         }
-        self.lower_expr(&elems[3])
+
+        let result = self.lower_expr(&elems[3]);
+        self.bindings = saved; // Restore scope
+        result
     }
 
     /// `(lit {type: T} value)`
@@ -403,6 +463,43 @@ impl LowerCtx {
                 tier2::lower_div(&mut self.dag, a, b, ty)
             }
 
+            // Tier 2 higher-level ops (spec §3.4, §4.1–4.2)
+            "matmul" if args.len() == 2 => {
+                let a = self.lower_expr(&args[0]);
+                let b = self.lower_expr(&args[1]);
+                let a_ty = self
+                    .dag
+                    .get(a)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let b_ty = self
+                    .dag
+                    .get(b)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty)
+            }
+            "softmax" if args.len() == 2 => {
+                let x = self.lower_expr(&args[0]);
+                let axis = self.extract_axis(&args[1]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                tier2::lower_softmax(&mut self.dag, x, axis, &x_ty)
+            }
+            "mean" if args.len() == 2 => {
+                let x = self.lower_expr(&args[0]);
+                let axis = self.extract_axis(&args[1]);
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|n| n.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                tier2::lower_mean(&mut self.dag, x, axis, &x_ty)
+            }
+
             // H1: Tier 2 comparison ops
             "gt" if args.len() == 2 => {
                 let a = self.lower_expr(&args[0]);
@@ -464,49 +561,75 @@ impl LowerCtx {
                     .add_node(RiscOp::MaxReduce { axis }, vec![x], ty.clone())
             }
 
-            // H3: Movement op stubs -- recognized but passthrough for Phase 0.
+            // H3: Movement ops -- extract parameters from Deep AST args where possible.
             "reshape" if !args.is_empty() => {
                 let x = self.lower_expr(&args[0]);
-                self.dag.add_node(
-                    RiscOp::Reshape {
-                        new_shape: ty.dims.clone(),
-                    },
-                    vec![x],
-                    ty.clone(),
-                )
+                // Try to extract new_shape from the second arg; fall back to output type dims.
+                let new_shape = if args.len() >= 2 {
+                    self.extract_dim_list(&args[1])
+                        .unwrap_or_else(|| ty.dims.clone())
+                } else {
+                    ty.dims.clone()
+                };
+                let out_ty = TensorType {
+                    dims: new_shape.clone(),
+                    precision: ty.precision,
+                };
+                self.dag
+                    .add_node(RiscOp::Reshape { new_shape }, vec![x], out_ty)
             }
             "permute" if args.len() >= 2 => {
                 let x = self.lower_expr(&args[0]);
-                // Extract axes from remaining args (stub: empty for now).
-                let axes = vec![];
+                // Extract axes ordering from remaining args.
+                let axes = self.extract_usize_list(&args[1..]);
                 self.dag
                     .add_node(RiscOp::Permute { axes }, vec![x], ty.clone())
             }
             "expand" if args.len() >= 2 => {
                 let x = self.lower_expr(&args[0]);
+                let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
+                let size = if args.len() >= 3 {
+                    self.extract_usize_value(&args[2]).unwrap_or(1)
+                } else {
+                    1
+                };
                 self.dag
-                    .add_node(RiscOp::Expand { axis: 0, size: 1 }, vec![x], ty.clone())
+                    .add_node(RiscOp::Expand { axis, size }, vec![x], ty.clone())
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr(&args[0]);
-                self.dag.add_node(
-                    RiscOp::Pad {
-                        padding: vec![],
-                        fill: 0.0,
-                    },
-                    vec![x],
-                    ty.clone(),
-                )
+                let padding = if args.len() >= 2 {
+                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                let fill = if args.len() >= 3 {
+                    self.extract_f64_value(&args[2]).unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                self.dag
+                    .add_node(RiscOp::Pad { padding, fill }, vec![x], ty.clone())
             }
             "shrink" if !args.is_empty() => {
                 let x = self.lower_expr(&args[0]);
+                let bounds = if args.len() >= 2 {
+                    self.extract_pair_list(&args[1]).unwrap_or_default()
+                } else {
+                    vec![]
+                };
                 self.dag
-                    .add_node(RiscOp::Shrink { bounds: vec![] }, vec![x], ty.clone())
+                    .add_node(RiscOp::Shrink { bounds }, vec![x], ty.clone())
             }
             "stride" if !args.is_empty() => {
                 let x = self.lower_expr(&args[0]);
+                let strides = if args.len() >= 2 {
+                    self.extract_usize_list(&args[1..])
+                } else {
+                    vec![]
+                };
                 self.dag
-                    .add_node(RiscOp::Stride { strides: vec![] }, vec![x], ty.clone())
+                    .add_node(RiscOp::Stride { strides }, vec![x], ty.clone())
             }
 
             // Fallback: unknown function.
@@ -541,6 +664,106 @@ impl LowerCtx {
         }
     }
 
+    /// Extract a single usize value from an expression.
+    fn extract_usize_value(&self, expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
+            Expr::List(list, _) => {
+                if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
+                    Some(*n as usize)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract an f64 value from an expression.
+    fn extract_f64_value(&self, expr: &Expr) -> Option<f64> {
+        match expr {
+            Expr::Atom(Atom::Float(f), _) => Some(*f),
+            Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
+            Expr::List(list, _) => {
+                if let Some(Expr::Atom(Atom::Float(f), _)) = list.elements.get(2) {
+                    Some(*f)
+                } else if let Some(Expr::Atom(Atom::Int(n), _)) = list.elements.get(2) {
+                    Some(*n as f64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a list of usize values from a slice of expressions.
+    fn extract_usize_list(&self, exprs: &[Expr]) -> Vec<usize> {
+        let mut result = Vec::new();
+        for expr in exprs {
+            if let Some(v) = self.extract_usize_value(expr) {
+                result.push(v);
+            }
+        }
+        result
+    }
+
+    /// Extract dimension info list from an expression (e.g., for reshape).
+    fn extract_dim_list(&self, expr: &Expr) -> Option<Vec<DimInfo>> {
+        // Handle (t-dims {} dim1 dim2 ...) form.
+        if let Expr::List(list, _) = expr {
+            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+                && tag == "t-dims"
+            {
+                return Self::try_extract_dims(expr);
+            }
+            // Try as a plain list of integers.
+            let mut dims = Vec::new();
+            for elem in &list.elements {
+                match elem {
+                    Expr::Atom(Atom::Int(n), _) => dims.push(DimInfo::Lit(*n as usize)),
+                    Expr::Atom(Atom::Symbol(name), _) => {
+                        dims.push(DimInfo::Named(name.clone(), None));
+                    }
+                    _ => {}
+                }
+            }
+            if !dims.is_empty() {
+                return Some(dims);
+            }
+        }
+        None
+    }
+
+    /// Extract a list of (usize, usize) pairs from an expression (for pad/shrink bounds).
+    fn extract_pair_list(&self, expr: &Expr) -> Option<Vec<(usize, usize)>> {
+        if let Expr::List(list, _) = expr {
+            let mut pairs = Vec::new();
+            for elem in &list.elements {
+                if let Expr::List(pair_list, _) = elem {
+                    let vals: Vec<usize> = pair_list
+                        .elements
+                        .iter()
+                        .filter_map(|e| {
+                            if let Expr::Atom(Atom::Int(n), _) = e {
+                                Some(*n as usize)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if vals.len() >= 2 {
+                        pairs.push((vals[0], vals[1]));
+                    }
+                }
+            }
+            if !pairs.is_empty() {
+                return Some(pairs);
+            }
+        }
+        None
+    }
+
     /// C4: Enforce float-only for transcendental ops (exp, log, sin, sqrt).
     /// If the input is not float, produce a Const(0) error placeholder.
     fn lower_transcendental(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
@@ -565,6 +788,8 @@ impl LowerCtx {
                 .dag
                 .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
         }
+        let saved = self.bindings.clone();
+
         // Register params as Load nodes.
         if let Expr::List(params_list, _) = &elems[2] {
             for param in &params_list.elements[2..] {
@@ -590,7 +815,10 @@ impl LowerCtx {
                 }
             }
         }
-        self.lower_expr(&elems[3])
+
+        let result = self.lower_expr(&elems[3]);
+        self.bindings = saved; // Restore scope
+        result
     }
 
     /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
@@ -626,7 +854,7 @@ impl LowerCtx {
         current
     }
 
-    /// `(cast {} expr prec)` -- precision cast.
+    /// `(cast {} expr (t-prim {} name))` -- precision cast.
     fn lower_cast(&mut self, elems: &[Expr]) -> NodeId {
         if elems.len() < 4 {
             return self
@@ -634,7 +862,11 @@ impl LowerCtx {
                 .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
         }
         let x = self.lower_expr(&elems[2]);
-        let new_precision = if let Expr::Atom(Atom::Symbol(pname), _) = &elems[3] {
+        let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
+            // Handle (t-prim {} name) form.
+            prim
+        } else if let Expr::Atom(Atom::Symbol(pname), _) = &elems[3] {
+            // Fallback: bare symbol for backward compat.
             Prim::parse_name(pname).unwrap_or(Prim::F32)
         } else {
             Prim::F32
@@ -647,14 +879,130 @@ impl LowerCtx {
             .add_node(RiscOp::Cast { new_precision }, vec![x], ty)
     }
 
-    /// `(grad {} f)` -- placeholder: just lower f for now.
+    /// `(grad {} f)` -- Phase 2 feature, produce NaN warning.
     fn lower_grad(&mut self, elems: &[Expr]) -> NodeId {
+        eprintln!(
+            "WARNING: `grad` is a Phase 2 feature and is not yet supported in lowering. \
+             Producing NaN placeholder."
+        );
+        // Lower the child so its side effects (bindings) still happen,
+        // but discard the result and return NaN to signal the error.
+        if elems.len() >= 3 {
+            let _ = self.lower_expr(&elems[2]);
+        }
+        self.dag.add_node(
+            RiscOp::Const { value: f64::NAN },
+            vec![],
+            Self::default_type(),
+        )
+    }
+
+    /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
+    fn lower_if(&mut self, elems: &[Expr]) -> NodeId {
+        // elems: [tag, meta, cond, then_branch, else_branch]
+        if elems.len() < 5 {
+            return self
+                .dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+        }
+        let cond = self.lower_expr(&elems[2]);
+        let then_val = self.lower_expr(&elems[3]);
+        let else_val = self.lower_expr(&elems[4]);
+        let ty = Self::default_type();
+        // not_cond = cmplt(cond, const(1))
+        let one = self
+            .dag
+            .add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
+        let bool_ty = TensorType {
+            dims: ty.dims.clone(),
+            precision: Prim::Bool,
+        };
+        let not_cond = self.dag.add_node(RiscOp::CmpLt, vec![cond, one], bool_ty);
+        // result = add(mul(cond, then), mul(not_cond, else))
+        let cond_then = self
+            .dag
+            .add_node(RiscOp::Mul, vec![cond, then_val], ty.clone());
+        let not_cond_else = self
+            .dag
+            .add_node(RiscOp::Mul, vec![not_cond, else_val], ty.clone());
+        self.dag
+            .add_node(RiscOp::Add, vec![cond_then, not_cond_else], ty)
+    }
+
+    /// `(tuple {} elem1 elem2 ...)` -- Lower each element, return last.
+    fn lower_tuple(&mut self, elems: &[Expr]) -> NodeId {
+        let mut last =
+            self.dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+        for elem in &elems[2..] {
+            last = self.lower_expr(elem);
+        }
+        last
+    }
+
+    /// `(par {} expr1 expr2 ...)` -- Lower each child sequentially, return last.
+    fn lower_par(&mut self, elems: &[Expr]) -> NodeId {
+        let mut last =
+            self.dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+        for elem in &elems[2..] {
+            last = self.lower_expr(elem);
+        }
+        last
+    }
+
+    /// `(realize {} expr)` or `(copy {} expr)` -- identity in Phase 0.
+    fn lower_identity(&mut self, elems: &[Expr]) -> NodeId {
         if elems.len() >= 3 {
             self.lower_expr(&elems[2])
         } else {
             self.dag
                 .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
         }
+    }
+
+    /// `(tuple-get {} tuple_expr index)` -- Phase 0: return the lowered tuple.
+    fn lower_tuple_get(&mut self, elems: &[Expr]) -> NodeId {
+        if elems.len() >= 3 {
+            self.lower_expr(&elems[2])
+        } else {
+            self.dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+        }
+    }
+
+    /// `(match {} scrutinee (arm {} pattern body) ...)` -- Phase 0: lower first arm's body.
+    fn lower_match(&mut self, elems: &[Expr]) -> NodeId {
+        eprintln!(
+            "WARNING: `match` lowering is incomplete in Phase 0. \
+             Only the first arm's body is lowered."
+        );
+        // elems[2] = scrutinee, elems[3..] = arms
+        if elems.len() >= 3 {
+            let _ = self.lower_expr(&elems[2]); // lower scrutinee for side effects
+        }
+        // Lower first arm's body if available.
+        if elems.len() >= 4
+            && let Expr::List(arm, _) = &elems[3]
+            && arm.elements.len() >= 4
+        {
+            return self.lower_expr(&arm.elements[arm.elements.len() - 1]);
+        }
+        self.dag
+            .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+    }
+
+    /// Unsupported Phase 2 constructs (vmap, jit).
+    fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> NodeId {
+        eprintln!(
+            "WARNING: `{tag}` is a Phase 2 feature and is not yet supported in lowering. \
+             Producing NaN placeholder."
+        );
+        self.dag.add_node(
+            RiscOp::Const { value: f64::NAN },
+            vec![],
+            Self::default_type(),
+        )
     }
 }
 
@@ -992,5 +1340,196 @@ mod tests {
         let dag = parse_and_lower(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.precision, Prim::F64);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::dag::{DimInfo, NodeId, RiscOp};
+    use crate::verify;
+    use chelis_types::types::Prim;
+
+    fn parse_and_lower(src: &str) -> Dag {
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        lower_program(&exprs)
+    }
+
+    // Fix 1: Tensor type metadata with flat Deep shape format.
+    #[test]
+    fn fix1_tensor_type_flat_dims() {
+        let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))";
+        let dag = parse_and_lower(src);
+        let node = dag.get(NodeId(0)).unwrap();
+        assert_eq!(
+            node.output_type.dims,
+            vec![DimInfo::Named("batch".to_string(), None)]
+        );
+        assert_eq!(node.output_type.precision, Prim::F32);
+    }
+
+    #[test]
+    fn fix1_tensor_type_multiple_dims() {
+        let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))";
+        let dag = parse_and_lower(src);
+        let node = dag.get(NodeId(0)).unwrap();
+        assert_eq!(
+            node.output_type.dims,
+            vec![
+                DimInfo::Named("batch".to_string(), None),
+                DimInfo::Named("hidden".to_string(), None),
+            ]
+        );
+        assert_eq!(node.output_type.precision, Prim::F32);
+    }
+
+    #[test]
+    fn fix1_tensor_type_lit_dim() {
+        let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} f64))} 0))";
+        let dag = parse_and_lower(src);
+        let node = dag.get(NodeId(0)).unwrap();
+        assert_eq!(node.output_type.dims, vec![DimInfo::Lit(512)]);
+        assert_eq!(node.output_type.precision, Prim::F64);
+    }
+
+    // Fix 3: Lexical scoping -- let restores bindings.
+    #[test]
+    fn fix3_let_multiple_bindings() {
+        let src = r#"
+            (let {} (bind {} x (lit {} 1.0) y (lit {} 2.0))
+                (app {} (var {} add) (var {} x) (var {} y)))
+        "#;
+        let dag = parse_and_lower(src);
+        assert_eq!(dag.len(), 3);
+        let add_node = dag.get(NodeId(2)).unwrap();
+        assert_eq!(add_node.op, RiscOp::Add);
+        assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn fix3_let_scope_does_not_leak() {
+        let src = r#"
+            (let {} (bind {} x (lit {} 1.0)) (var {} x))
+            (var {} x)
+        "#;
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        assert!(
+            matches!(&last.op, RiscOp::Load { name } if name == "x"),
+            "x should not be visible after let scope"
+        );
+    }
+
+    #[test]
+    fn fix3_fn_scope_does_not_leak() {
+        let src = r#"
+            (fn {} (params {} p) (var {} p))
+            (var {} p)
+        "#;
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        assert!(
+            matches!(&last.op, RiscOp::Load { name } if name == "p"),
+            "fn param p should not be visible after fn scope"
+        );
+    }
+
+    // Fix 4: Unsupported constructs.
+    #[test]
+    fn fix4_grad_produces_nan() {
+        let src = "(grad {} (var {} f))";
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        if let RiscOp::Const { value } = &last.op {
+            assert!(value.is_nan(), "grad should produce NaN placeholder");
+        } else {
+            panic!("grad should produce a Const(NaN) node, got {:?}", last.op);
+        }
+    }
+
+    #[test]
+    fn fix4_vmap_produces_nan() {
+        let src = "(vmap {} (var {} f))";
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        if let RiscOp::Const { value } = &last.op {
+            assert!(value.is_nan(), "vmap should produce NaN placeholder");
+        } else {
+            panic!("vmap should produce a Const(NaN) node");
+        }
+    }
+
+    #[test]
+    fn fix4_jit_produces_nan() {
+        let src = "(jit {} (var {} f))";
+        let dag = parse_and_lower(src);
+        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+        if let RiscOp::Const { value } = &last.op {
+            assert!(value.is_nan(), "jit should produce NaN placeholder");
+        } else {
+            panic!("jit should produce a Const(NaN) node");
+        }
+    }
+
+    #[test]
+    fn fix4_realize_is_identity() {
+        let src = "(realize {} (lit {} 42.0))";
+        let dag = parse_and_lower(src);
+        assert_eq!(dag.len(), 1);
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::Const { value: 42.0 }
+        );
+    }
+
+    #[test]
+    fn fix4_copy_is_identity() {
+        let src = "(copy {} (lit {} 7.0))";
+        let dag = parse_and_lower(src);
+        assert_eq!(dag.len(), 1);
+        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
+    }
+
+    // Fix 9: Cast with (t-prim {} bf16) node.
+    #[test]
+    fn fix9_cast_with_tprim_node() {
+        let src = r#"
+            (def {} x (lit {} 1.0))
+            (def {} y (cast {} (var {} x) (t-prim {} bf16)))
+        "#;
+        let dag = parse_and_lower(src);
+        let cast_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+            .expect("expected a Cast node");
+        assert_eq!(
+            cast_node.op,
+            RiscOp::Cast {
+                new_precision: Prim::Bf16
+            }
+        );
+        assert_eq!(cast_node.output_type.precision, Prim::Bf16);
+    }
+
+    #[test]
+    fn fix9_cast_bare_symbol_still_works() {
+        let src = r#"
+            (def {} x (lit {} 1.0))
+            (def {} y (cast {} (var {} x) f16))
+        "#;
+        let dag = parse_and_lower(src);
+        let cast_node = dag
+            .nodes()
+            .iter()
+            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+            .expect("expected a Cast node");
+        assert_eq!(
+            cast_node.op,
+            RiscOp::Cast {
+                new_precision: Prim::F16
+            }
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! DAG structural verification.
 
 use crate::dag::{Dag, DimInfo, RiscOp};
+#[allow(unused_imports)]
 use chelis_types::types::Prim;
 
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
@@ -89,6 +90,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
+            RiscOp::Store { .. } => {
+                if arity != 1 {
+                    errors.push(format!(
+                        "store op at node {} has {} inputs (expected 1)",
+                        node.id.0, arity
+                    ));
+                }
+            }
             RiscOp::Const { .. } | RiscOp::Load { .. } => {
                 if arity != 0 {
                     errors.push(format!(
@@ -140,8 +149,116 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 node.id.0, node.output_type.precision
             ));
         }
+
+        // C6: Permute validation.
+        if let RiscOp::Permute { axes } = &node.op
+            && arity == 1
+        {
+            let input = dag.get(node.inputs[0]).unwrap();
+            let rank = input.output_type.dims.len();
+            if axes.len() != rank {
+                errors.push(format!(
+                    "permute at node {}: axes len {} != input rank {}",
+                    node.id.0,
+                    axes.len(),
+                    rank
+                ));
+            }
+            let mut seen = vec![false; rank];
+            for &a in axes {
+                if a >= rank {
+                    errors.push(format!(
+                        "permute at node {}: axis {} >= rank {}",
+                        node.id.0, a, rank
+                    ));
+                } else if seen[a] {
+                    errors.push(format!(
+                        "permute at node {}: duplicate axis {}",
+                        node.id.0, a
+                    ));
+                } else {
+                    seen[a] = true;
+                }
+            }
+        }
+
+        // C7: Reshape validation — product of dims must match.
+        if let RiscOp::Reshape { new_shape } = &node.op
+            && arity == 1
+        {
+            let input = dag.get(node.inputs[0]).unwrap();
+            let old_product = dim_product(&input.output_type.dims);
+            let new_product = dim_product(new_shape);
+            if let (Some(old), Some(new)) = (old_product, new_product)
+                && old != new
+            {
+                errors.push(format!(
+                    "reshape at node {}: product mismatch {} vs {}",
+                    node.id.0, old, new
+                ));
+            }
+        }
+
+        // C8: Cast validation — dims must not change, output precision must match target.
+        if let RiscOp::Cast { new_precision } = &node.op
+            && arity == 1
+        {
+            let input = dag.get(node.inputs[0]).unwrap();
+            if input.output_type.dims != node.output_type.dims {
+                errors.push(format!("cast at node {}: dims changed", node.id.0));
+            }
+            if node.output_type.precision != *new_precision {
+                errors.push(format!(
+                    "cast at node {}: output precision doesn't match cast target",
+                    node.id.0
+                ));
+            }
+        }
+
+        // C9: Reduction output rank check.
+        match &node.op {
+            RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
+                if arity == 1 {
+                    let input = dag.get(node.inputs[0]).unwrap();
+                    let expected_rank = input.output_type.dims.len().saturating_sub(1);
+                    if node.output_type.dims.len() != expected_rank {
+                        errors.push(format!(
+                            "reduction at node {}: output rank {} != expected {}",
+                            node.id.0,
+                            node.output_type.dims.len(),
+                            expected_rank
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // C10: Store arity (already checked above, but explicit message).
+        if let RiscOp::Store { .. } = &node.op
+            && node.inputs.len() != 1
+        {
+            errors.push(format!(
+                "store at node {} has {} inputs (expected 1)",
+                node.id.0,
+                node.inputs.len()
+            ));
+        }
     }
     errors
+}
+
+/// Compute the product of known dimension sizes. Returns None if any dim is unknown.
+fn dim_product(dims: &[DimInfo]) -> Option<usize> {
+    let mut product = 1usize;
+    for d in dims {
+        match d {
+            DimInfo::Lit(n) => product *= n,
+            DimInfo::Named(_, Some(n)) => product *= n,
+            DimInfo::Named(_, None) => return None,
+        }
+    }
+    Some(product)
 }
 
 /// Check if two dimension descriptors are compatible.
@@ -340,8 +457,12 @@ mod tests {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], scalar_f32());
+        let out_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty);
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty);
         assert!(verify(&dag).is_empty());
     }
 
@@ -395,5 +516,53 @@ mod tests {
         };
         dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty);
         assert!(verify(&dag).is_empty());
+    }
+
+    // --- C10: Store arity ---
+
+    #[test]
+    fn store_correct_arity() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(
+            RiscOp::Store {
+                name: "out".to_string(),
+            },
+            vec![x],
+            scalar_f32(),
+        );
+        assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn store_wrong_arity_zero_inputs() {
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Store {
+                name: "out".to_string(),
+            },
+            vec![],
+            scalar_f32(),
+        );
+        let errs = verify(&dag);
+        assert!(!errs.is_empty());
+        assert!(errs.iter().any(|e| e.contains("store")));
+    }
+
+    #[test]
+    fn store_wrong_arity_two_inputs() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_node(
+            RiscOp::Store {
+                name: "out".to_string(),
+            },
+            vec![a, b],
+            scalar_f32(),
+        );
+        let errs = verify(&dag);
+        assert!(!errs.is_empty());
+        assert!(errs.iter().any(|e| e.contains("store")));
     }
 }

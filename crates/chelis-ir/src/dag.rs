@@ -88,6 +88,9 @@ pub enum RiscOp {
     Load {
         name: String,
     },
+    Store {
+        name: String,
+    },
 
     // --- Cast ---
     Cast {
