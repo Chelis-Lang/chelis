@@ -47,11 +47,17 @@ pub struct FitnessComponents {
 impl FitnessReport {
     /// Compute fitness from an inference result.
     ///
-    /// `parse` and `structure` are always 1.0 when called from the type checker,
-    /// since parsing and structural validation happen upstream.
+    /// `parse` is 1.0 (we only reach the checker if parsing succeeded).
+    /// `structure` is 1.0 by default ��� use `with_structure` to override
+    /// if the Deep tag validator was run upstream.
     pub fn from_infer_result(result: &InferResult) -> FitnessReport {
+        Self::from_infer_result_with_structure(result, 1.0)
+    }
+
+    /// Compute fitness with an explicit structure score (from tag validator).
+    pub fn from_infer_result_with_structure(result: &InferResult, structure: f64) -> FitnessReport {
         let parse = 1.0;
-        let structure = 1.0;
+        // structure comes from parameter (tag validator score)
 
         // Names: count UnboundVariable errors relative to total nodes.
         let unbound_count = result
@@ -105,9 +111,48 @@ impl FitnessReport {
 }
 
 /// Type-check a Deep program and produce a fitness report.
+/// Runs tag validation to compute the structure component.
 pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
+    // Compute structure score from tag validator
+    let warnings = chelis_deep::validate::validate(exprs);
+    let structure = if exprs.is_empty() {
+        1.0
+    } else {
+        // Count nodes, subtract warning count
+        let node_count = count_nodes(exprs).max(1);
+        let valid = node_count.saturating_sub(warnings.len());
+        valid as f64 / node_count as f64
+    };
+
     let result = crate::infer::infer_program(exprs);
-    FitnessReport::from_infer_result(&result)
+    FitnessReport::from_infer_result_with_structure(&result, structure)
+}
+
+/// Count total AST nodes for structure scoring.
+fn count_nodes(exprs: &[chelis_deep::Expr]) -> usize {
+    exprs.iter().map(count_node).sum()
+}
+
+fn count_node(expr: &chelis_deep::Expr) -> usize {
+    match expr {
+        chelis_deep::Expr::Atom(_, _) => 1,
+        chelis_deep::Expr::List(list, _) => 1 + list.elements.iter().map(count_node).sum::<usize>(),
+        chelis_deep::Expr::Map(map, _) => {
+            1 + map
+                .entries
+                .iter()
+                .map(|(_, v)| count_node(v))
+                .sum::<usize>()
+        }
+        chelis_deep::Expr::MetaExpr(meta, _) => {
+            1 + count_node(&meta.expr)
+                + meta
+                    .entries
+                    .iter()
+                    .map(|(_, v)| count_node(v))
+                    .sum::<usize>()
+        }
+    }
 }
 
 #[cfg(test)]

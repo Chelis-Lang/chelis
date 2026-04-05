@@ -865,6 +865,7 @@ fn infer_match(
                     vg,
                     subst,
                     adt_reg,
+                    errors,
                     &mut covered_variants,
                     &mut has_wildcard,
                 );
@@ -925,6 +926,7 @@ fn pattern_bindings(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
@@ -968,6 +970,7 @@ fn pattern_bindings(
                                             vg,
                                             subst,
                                             adt_reg,
+                                            errors,
                                             covered_variants,
                                             has_wildcard,
                                         );
@@ -996,6 +999,7 @@ fn pattern_bindings(
                         vg,
                         subst,
                         adt_reg,
+                        errors,
                         covered_variants,
                         has_wildcard,
                     );
@@ -1025,10 +1029,29 @@ fn pattern_bindings(
                             let kv_kids = children(kv_list);
                             if kv_kids.len() >= 2 {
                                 let field_name = symbol_name(&kv_kids[0]);
-                                // Use declared field type if available, else fresh var
-                                let field_ty = field_name
-                                    .and_then(|n| declared_fields.get(n).cloned().cloned())
-                                    .unwrap_or_else(|| vg.fresh_type());
+                                // Look up declared field type — reject unknown fields
+                                let field_ty = match field_name {
+                                    Some(n) => match declared_fields.get(n) {
+                                        Some(ty) => (*ty).clone(),
+                                        None if !declared_fields.is_empty() => {
+                                            // Unknown field name — error
+                                            errors.push(CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                format!(
+                                                    "unknown record field '{}' in pattern for {}",
+                                                    n, ctor_name
+                                                ),
+                                                vec![format!(
+                                                    "known fields: {:?}",
+                                                    declared_fields.keys().collect::<Vec<_>>()
+                                                )],
+                                            ));
+                                            Type::Error
+                                        }
+                                        None => vg.fresh_type(), // no ADT info available
+                                    },
+                                    None => vg.fresh_type(),
+                                };
                                 pattern_bindings(
                                     &kv_kids[1],
                                     &field_ty,
@@ -1036,6 +1059,7 @@ fn pattern_bindings(
                                     vg,
                                     subst,
                                     adt_reg,
+                                    errors,
                                     covered_variants,
                                     has_wildcard,
                                 );
@@ -2150,6 +2174,48 @@ mod tests {
         assert!(
             report.errors.iter().all(|e| e.severity > 0.0),
             "all errors should have severity > 0"
+        );
+    }
+
+    // ── Round 4 regression tests ──────────────────────────────────
+
+    #[test]
+    fn fix11_pat_record_rejects_unknown_field() {
+        // Define Adam with field lr, then match on nonexistent field 'nope'
+        check_err(
+            "(deftype {} Optimizer () \
+               (variant {} Adam (field {} lr (t-prim {} f32)))) \
+             (def {} x (lit {type: (t-adt {} Optimizer)} 0)) \
+             (def {} r \
+               (match {} (var {} x) \
+                 (arm {} (pat-record {} Adam (kv {} nope (pat-var {} v))) () (var {} v))))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn fix11b_pat_record_accepts_valid_field() {
+        // Match on actual field lr — should pass
+        check_ok(
+            "(deftype {} Optimizer () \
+               (variant {} Adam (field {} lr (t-prim {} f32)))) \
+             (def {} x (lit {type: (t-adt {} Optimizer)} 0)) \
+             (def {} r \
+               (match {} (var {} x) \
+                 (arm {} (pat-record {} Adam (kv {} lr (pat-var {} v))) () (var {} v))))",
+        );
+    }
+
+    #[test]
+    fn fix12_structure_score_measured() {
+        // check_program runs tag validator — structure should be 1.0 for valid programs
+        let exprs = chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} int32)} 42))")
+            .unwrap();
+        let report = crate::fitness::check_program(&exprs);
+        assert!(
+            (report.components.structure - 1.0).abs() < 0.01,
+            "valid program structure should be ~1.0, got {}",
+            report.components.structure
         );
     }
 }
