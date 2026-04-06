@@ -1,0 +1,31 @@
+# Accelerated Financial Algorithms: Derivative Pricing and Risk Management Applications
+
+## Metadata
+- **Authors:** Wojciech Michal Pawlak
+- **Venue/Year:** Industrial Ph.D. Thesis, University of Copenhagen, January 2021
+
+## Summary
+This thesis investigates the acceleration of compute-intensive financial algorithms—specifically derivative pricing and portfolio risk management—using high-performance computing (HPC) techniques on modern parallel hardware like GPUs. The research focuses on three key financial workloads: (1) pricing fixed-income derivatives via the Hull-White One-Factor Lattice Method (HW1F), (2) pricing American equity options using Least Squares Monte Carlo (LSMC), and (3) calculating portfolio market risk measures (VaR/ES) via nested Monte Carlo simulations (MCVaR). The core thesis is that high-level, functional programming languages (exemplified by Futhark) can express complex financial algorithms with sufficient parallelism for efficient GPU execution while maintaining modularity and maintainability. Through aggressive compiler optimizations (e.g., flattening, data reordering, inspector-executor patterns), the implementations achieve performance competitive with hand-tuned CUDA code, demonstrating that high-level abstractions need not sacrifice efficiency for financial HPC workloads.
+
+## Key Contributions
+- **HW1F Acceleration:** Introduced two CUDA implementations for the Hull-White trinomial tree method: (i) `GPU-OUTER` (outer-level parallelism only) with optimizations for coalesced memory access and thread divergence via sorting/padding, and (ii) `GPU-FLAT` (flattened two-level parallelism) using bin-packing and shared memory. Demonstrated up to 6.7× speedup over optimized CPU (OpenMP+AVX2) and 3–4 orders of magnitude over QuantLib.
+- **LSMC Implementation:** Provided a high-level Futhark implementation of the Longstaff-Schwartz algorithm for American option pricing, achieving performance comparable to NVIDIA's hand-optimized CUDA benchmark (within 11% on average) and up to 2.5× faster on smaller cases. Showed that functional data-parallel constructs can express complex sequential-regression logic efficiently.
+- **MCVaR Framework:** Implemented a complete risk workflow (market scenario generation + portfolio repricing + VaR/ES calculation) in Futhark, handling heterogeneous portfolios (European/American options). Identified portfolio repricing as the dominant bottleneck (30–747× slower than scenario generation) and demonstrated up to 18.7× GPU speedup over 32-core CPU for large workloads, despite memory constraints limiting parallelization of nested simulations.
+- **Compiler Insights:** Highlighted gaps in current compiler support for irregular nested parallelism (e.g., automatic flattening, inspector-executor transformations) and showed that manual optimizations in CUDA outperform auto-generated Futhark code by 6.3× on average, motivating further compiler research.
+
+## Technical Approach
+- **HW1F:** Addressed irregular tree dimensions (width/height variance across instruments) causing thread divergence. `GPU-OUTER` sequentializes inner parallelism, optimizes memory via block/warp-level padding and transposition, and sorts instruments by width to reduce divergence. `GPU-FLAT` flattens both parallelism levels: instruments are binned by summed width (≤1024), then inner width-parallelism is mapped to thread blocks using segmented scans and indirect indexing, enabling shared memory usage.
+- **LSMC:** Reformulated the sequential regression step using QR decomposition: precomputed small (3×3) R⁻¹ matrices for all timesteps in parallel, then computed continuation values as `R⁻¹Qᵀb` on-the-fly. This separated the parallelizable SVD preparation from the sequential backward induction, reducing global memory traffic and enabling efficient GPU mapping.
+- **MCVaR:** Built a modular Futhark pipeline: (1) generate market scenarios (GBM) with PRNG/QRNG, (2) price portfolio holdings (BSMC for European, LSMC for American) reusing normalized paths across scenarios, (3) aggregate P/Ls and compute VaR/ES/component risks. Optimizations included grouping instruments by pricing complexity to reduce divergence and sequentializing outer levels (MSs/holdings) to fit GPU memory.
+
+## Results
+- **HW1F:** On NVIDIA V100 (FP64), `GPU-FLAT` achieved 669–904 GFLOP/s vs. `GPU-OUTER`'s 59–859 GFLOP/s across datasets. Speedups over CPU: up to 6.7× (U2 dataset). Over Futhark auto-code: up to 29.8×. Over QuantLib: 3–4 orders of magnitude.
+- **LSMC:** On V100, Futhark implementation priced a put option (1M paths, 100 steps) in 17 ms, matching CUDA within 11% and beating it by 2.5× on small path counts. Validation against binomial tree showed sub-cent accuracy.
+- **MCVaR:** For a 10-instrument mixed portfolio (10k MSs, 102.4k paths), GPU took 5.9 s vs. CPU's 22.4 s (3.8× speedup). Largest single-instrument case (10k MSs, 1.024M paths) took 41 s on GPU (11.2× speedup). Memory limited parallelization: LSMC's 2D path storage (1.12 GB for 1M×150) prevented pricing multiple holdings in parallel.
+
+## Relevance
+This work directly informs **language design** and **compiler technology** for HPC in finance:
+- **High-level expressivity:** Demonstrates that Futhark's data-parallel combinators (`map`, `reduce`, `scan`) can capture irregular financial algorithms (e.g., nested tree traversals, regression loops) while letting the compiler handle low-level GPU mapping.
+- **Compiler gaps:** Identifies need for advanced transformations: automatic flattening of irregular nested parallelism, inspector-executor for data reordering, and multi-versioning for dataset-sensitive kernels. Current Futhark compiler requires manual intervention for optimal performance.
+- **ML systems synergy:** The nested simulation structure (MCVaR) and regression (LSMC) mirror patterns in scientific ML (e.g., ensemble methods, differentiable programming). The work suggests that functional array languages could bridge finance and ML workloads on accelerators.
+- **Practical impact:** Provides a blueprint for accelerating real-world financial systems (e.g., SimCorp Dimension) by modularizing pricing engines and risk workflows, enabling on-demand analytics previously infeasible due to runtime constraints.

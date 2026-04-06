@@ -1,0 +1,29 @@
+# Towards Size-Dependent Types for Array Programming
+
+## Metadata
+- **Authors:** Troels Henriksen, Martin Elsman
+- **Venue/Year:** ARRAY '21 (7th ACM SIGPLAN International Workshop on Libraries, Languages and Compilers for Array Programming), 2021
+
+## Summary
+Array programming frequently requires functions to satisfy strict shape constraints (e.g., matching matrix dimensions), yet most mainstream languages defer these checks to runtime, causing preventable crashes. While full dependent types can statically verify shapes, they introduce significant complexity, steep learning curves, and potential performance overheads that are undesirable in performance-critical array code. This paper introduces a pragmatic, size-dependent type system for ML-style languages that catches shape mismatches at compile time while deliberately restricting expressiveness to maintain simplicity and compilation efficiency.
+
+The system limits size expressions in types to variables and integer constants, automatically manages existential sizes produced by operations like filtering, and guarantees that all multidimensional arrays remain regular (rectangular). The authors formalize a core calculus, prove its type soundness, and integrate the system into Futhark, a high-performance parallel functional language. By balancing static verification with practical escape hatches, the approach enables reliable, high-performance array programming without requiring programmers to master advanced type theory.
+
+## Key Contributions
+- A simplified size-dependent type system that restricts size terms in types to variables and constants, avoiding the complexity of full dependent types.
+- Formalization of a core language ($F$) with a machine-checked soundness proof guaranteeing the absence of runtime shape errors.
+- Automatic handling of existential sizes via implicit/explicit `let` constructs and compiler-driven Administrative Normal Form (ANF) rewriting.
+- Extension of Hindley-Damas-Milner type inference to support size unification, implicit size parameters, and "size-lifted" type parameters for higher-order functions.
+- Full integration into the Futhark compiler, demonstrating that the system does not hinder optimization passes or high-performance code generation.
+- Empirical validation on a 44-program benchmark suite showing minimal need for dynamic coercions and high usability in both research and educational settings.
+
+## Technical Approach
+The core technical foundation is a small typed lambda calculus ($F$) where array types take the form `[d]τ`, with size sorts `d` restricted to integer constants or variables. Function types can depend on integer parameters, and return types support existential quantification (`∃x.μ`) to model operations that produce unknown sizes (e.g., `filter`). The type system uses a Hindley-Damas-Milner style inference engine extended with size variables; during instantiation, size parameters become non-rigid variables that unify with term-level integers or other size variables.
+
+To maintain the variable/constant restriction without burdening programmers, the compiler automatically rewrites complex size expressions into ANF, binding intermediate results to fresh variables. Existential sizes are managed through two `let` forms: an implicit version for meta-level reasoning and an explicit version that extracts sizes as `int` variables. To support higher-order functions that accept arguments returning existential sizes, the authors introduce "size-lifted" type parameters (`~a`), which can be instantiated with return types containing existential sizes but are forbidden from appearing as array elements to prevent irregular arrays. The system intentionally does not eliminate out-of-bounds indexing; instead, it provides a dynamic type coercion operator (`e ⊲ τ`) as an explicit escape hatch for cases the static system cannot express. Type erasure is straightforward because array shapes are already tracked at runtime for memory layout.
+
+## Results
+The type system was implemented in Futhark v0.15.1 and evaluated on the Futhark benchmark suite, comprising 44 representative programs (~12,000 LOC) ported from Rodinia, FinPar, Parboil, and Accelerate. Across the entire suite, only 66 dynamic size coercions were required, and the vast majority appeared in initialization or input-validation code rather than computational kernels. Programmers adapted to the restrictions by hoisting size computations or using small helper functions (e.g., `tabulate_2d`, `indices`), which often improved code clarity. The system was also successfully used to teach parallel programming to students with minimal friction, demonstrating that the simplified rules and explicit escape hatches are accessible to non-experts. Crucially, the addition of size types did not complicate Futhark's frontend transformations or degrade generated code performance.
+
+## Relevance
+This paper offers a highly practical blueprint for integrating lightweight dependent typing into performance-oriented languages. For **language design**, it demonstrates how restricting size expressions to variables/constants, combined with automatic ANF rewriting and size-lifted polymorphism, yields a tractable inference algorithm that still covers real-world array patterns. For **compilers**, it shows how static shape information can be leveraged to eliminate runtime compatibility checks without complicating IR transformations or optimization passes. For **ML systems and tensor libraries** (e.g., JAX, PyTorch, NumPy), the approach is directly applicable to static shape verification, which could prevent common runtime dimension mismatches, enable more aggressive compile-time kernel fusion, and improve the developer experience in data-parallel workloads without requiring full dependent type machinery.

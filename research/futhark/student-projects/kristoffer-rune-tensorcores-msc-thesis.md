@@ -1,0 +1,35 @@
+# Utilizing Tensor Cores in Futhark: A case study in programming new heterogeneous hardware
+
+## Metadata
+- **Authors:** Kristoffer August Kortbæk and Rune Ejnar Bang Lejbølle
+- **Venue/Year:** Master’s Thesis, University of Copenhagen, Department of Mathematical Sciences, 2024
+
+## Summary
+Modern GPUs increasingly rely on specialized hardware like NVIDIA Tensor Cores to accelerate matrix multiplication, a foundational operation in AI and scientific computing. However, programming these units directly requires low-level CUDA/PTX code, strict adherence to architecture-specific memory layouts, and complex optimizations such as swizzling, vectorized loads, and pipelining. This thesis investigates how to make Tensor Cores accessible through Futhark, a high-level, purely functional data-parallel array language with a highly optimizing compiler. The authors modify the Futhark compiler to automatically detect matrix multiplication patterns within intragroup kernels and replace them with optimized, architecture-specific function calls that leverage Tensor Cores, abstracting away the low-level complexity from the programmer.
+
+The approach centers on a two-pass compiler transformation: a high-level IR pass that pattern-matches suitable matrix multiplications and emits opaque function calls, and a memory-aware IR pass that corrects suboptimal memory allocations and eliminates redundant copies. The actual Tensor Core operations are implemented in a CUDA header library using NVIDIA’s CuTe templates, which handle register layouts, shared memory swizzling, and warp-level `mma.sync` instructions. Evaluated on an NVIDIA A100, the modified compiler achieves speedups of 1.9× to 60× over the stock Futhark compiler across various benchmarks. While still trailing hand-tuned CUDA and cuBLAS, the work demonstrates a viable, minimally invasive path for integrating specialized hardware into high-level functional compilers without sacrificing programmer productivity or language semantics.
+
+## Key Contributions
+- Integration of NVIDIA Tensor Core support into the Futhark compiler via a new `cudatc` compilation pipeline.
+- A two-pass compiler transformation strategy: high-level pattern matching for intragroup matrix multiplication and a memory-fixup pass to handle opaque function allocations.
+- A CuTe-based CUDA header library implementing three specialized functions (`copyGlobalShared`, `tensorMMM`, `copyRegistersShared`) that encapsulate Tensor Core operations, swizzling, vectorized loads, and bank-conflict avoidance.
+- Comprehensive benchmarking on an A100 GPU showing 1.9×–60× speedups over the stock Futhark compiler across multiple workloads (batched matmul, attention-like, Rodinia LUD, large matmul).
+- Identification of key performance bottlenecks and a roadmap for future work, including register accumulation across loop iterations, pipelining/double-buffering, and deeper integration with Futhark’s incremental flattening and autotuning.
+
+## Technical Approach
+- **Prototyping & Optimization Analysis:** Initial hand-written CUDA and CuTe prototypes established the necessary low-level optimizations: coalesced global memory access, shared memory bank conflict avoidance via XOR-based swizzling, vectorized/async loads, and block/warp/register tiling.
+- **Compiler Pass 1 (`extractTensorCores`):** Operates on Futhark’s high-level GPU IR. Pattern-matches `SegRed` operations at the thread-block level that correspond to matrix multiplication with statically known dimensions (multiples of 16, ≤128) and f16/f32 types. Replaces the matched IR with calls to three opaque template functions and dynamically adjusts CUDA block sizes to align with Tensor Core warp requirements.
+- **Compiler Pass 2 (`tensorCoreMemFixup`):** Operates on the memory-annotated GPUMem IR. Fixes conservative global memory allocations for the opaque functions, forces shared memory placement where appropriate, and eliminates redundant `manifest` (copy) operations by tracking memory aliases and rewriting function arguments.
+- **CUDA Header Library:** Implements the three special functions using CuTe’s template abstractions. Handles architecture-specific register layouts, swizzled shared memory layouts, asynchronous global-to-shared copies, and warp-level `mma.sync` PTX instructions. The functions are parameterized by matrix sizes, warp layouts, and data types, allowing compile-time specialization without modifying the Haskell-based compiler backend.
+- **Opaque Function Strategy:** By emitting opaque function calls rather than adding new IR operations, the authors isolate Tensor Core logic from the rest of the compiler, minimizing invasive changes while still enabling targeted memory and layout optimizations.
+
+## Results
+- **Hardware & Setup:** Benchmarks run on an NVIDIA A100 GPU using `futhark bench`. The stock `cuda` backend was pre-autotuned for fair comparison.
+- **Performance Gains:** The `cudatc` backend achieves 1.9× to 60× speedups over the stock compiler, depending on the workload. The attention-like benchmark even exceeds the A100’s theoretical FP16 peak without Tensor Cores (78 TFLOPS), demonstrating the necessity of specialized hardware for such compute-bound patterns.
+- **Comparison to Hand-Tuned Code:** The generated code remains slower than handwritten CuTe/CUDA implementations and cuBLAS. Primary bottlenecks include: (1) lack of register accumulation across sequential loop iterations (results are repeatedly written to and read from shared memory), (2) absence of pipelining/double-buffering for global memory transfers, and (3) bank conflicts when writing f32 results back to shared memory.
+- **Correctness:** All benchmarks pass validation against sequential C outputs, except one attention variant that exposed a pre-existing bug in Futhark’s memory block merging pass (unrelated to the Tensor Core modifications). Disabling the pass restores correctness with minimal performance impact.
+
+## Relevance
+- **Language Design & Compilers:** Demonstrates a practical, minimally invasive strategy for integrating highly restrictive, architecture-specific hardware intrinsics into a high-level functional array language. The use of opaque function calls combined with targeted IR transformations offers a reusable template for other DSLs targeting heterogeneous accelerators.
+- **ML Systems & Heterogeneous Computing:** Matrix multiplication is foundational to deep learning. Automating Tensor Core usage in a compiler like Futhark reduces the expertise barrier for high-performance ML kernel development and shows how scheduling/tiling decisions can be partially offloaded to template libraries (CuTe) while keeping the high-level IR clean and portable.
+- **Compiler Optimization Trade-offs:** Highlights the tension between compiler automation and hardware-specific tuning. The work identifies critical missing optimizations (register reuse across iterations, pipelining, autotuning integration) that are essential for closing the performance gap with hand-tuned libraries, providing a concrete roadmap for next-generation ML compilers and scheduling languages.
