@@ -119,7 +119,7 @@ pub fn init_params(rng_seed: u64) -> HashMap<String, TensorValue> {
 /// Run one training step: forward + backward + SGD update
 pub fn train_step(
     grad_result: &GradResult,
-    loss_node: NodeId,
+    _loss_node: NodeId,
     param_nodes: &[(String, NodeId)],
     params: &mut HashMap<String, TensorValue>,
     x_batch: &TensorValue,
@@ -134,7 +134,7 @@ pub fn train_step(
     .map_err(|e| format!("eval error: {e}"))?;
 
     let loss = vals
-        .get(&loss_node)
+        .get(&grad_result.output_node)
         .ok_or("loss node not in eval results")?
         .data[0];
 

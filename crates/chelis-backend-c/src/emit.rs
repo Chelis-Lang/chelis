@@ -1,6 +1,8 @@
 //! RISC DAG to C source code emission.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{
+    Dag, DagNode, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
+};
 use chelis_types::types::Prim;
 
 /// Emits C source code from a RISC DAG.
@@ -8,6 +10,8 @@ pub struct CEmitter {
     lines: Vec<String>,
     indent: usize,
     use_blas: bool,
+    /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
+    reduction_inlined: std::collections::HashSet<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,10 +36,12 @@ impl CEmitter {
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
 
+        let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
             use_blas: options.use_blas,
+            reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -94,6 +100,10 @@ impl CEmitter {
         }
 
         for node in dag.nodes() {
+            // Skip FusedElem nodes inlined into a trailing reduction.
+            if e.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name)
@@ -127,12 +137,14 @@ impl CEmitter {
             }
         }
 
-        let cleanup = crate::memory::emit_cleanup(
+        let skip_ids: Vec<NodeId> = e.reduction_inlined.iter().map(|&id| NodeId(id)).collect();
+        let cleanup = crate::memory::emit_cleanup_with_skip(
             dag,
             &output_specs
                 .iter()
                 .map(|output| output.id)
                 .collect::<Vec<_>>(),
+            &skip_ids,
         );
         for line in cleanup {
             e.lines.push(line);
@@ -160,10 +172,38 @@ impl CEmitter {
             RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
             RiscOp::Sum { axis } => {
-                self.emit_reduce_sum(id, *axis, &node.inputs, &node.output_type, dag);
+                let input_id = node.inputs[0];
+                if self.reduction_inlined.contains(&input_id.0) {
+                    let fused_node = dag.get(input_id).unwrap();
+                    self.emit_fused_reduce(
+                        id,
+                        *axis,
+                        &fused_node.inputs.clone(),
+                        &fused_node.op.clone(),
+                        &fused_node.output_type.clone(),
+                        &node.output_type,
+                        "sum",
+                    );
+                } else {
+                    self.emit_reduce_sum(id, *axis, &node.inputs, &node.output_type, dag);
+                }
             }
             RiscOp::MaxReduce { axis } => {
-                self.emit_reduce_max(id, *axis, &node.inputs, &node.output_type, dag);
+                let input_id = node.inputs[0];
+                if self.reduction_inlined.contains(&input_id.0) {
+                    let fused_node = dag.get(input_id).unwrap();
+                    self.emit_fused_reduce(
+                        id,
+                        *axis,
+                        &fused_node.inputs.clone(),
+                        &fused_node.op.clone(),
+                        &fused_node.output_type.clone(),
+                        &node.output_type,
+                        "max",
+                    );
+                } else {
+                    self.emit_reduce_max(id, *axis, &node.inputs, &node.output_type, dag);
+                }
             }
             RiscOp::Reshape { .. } => {
                 self.emit_reshape(id, &node.inputs, &node.output_type, dag);
@@ -183,8 +223,12 @@ impl CEmitter {
             RiscOp::Stride { strides } => {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type);
             }
+            RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type),
             RiscOp::Store { name } => self.emit_store(id, name, &node.inputs),
+            RiscOp::FusedElem { ops } => {
+                self.emit_fused_elem(id, ops, &node.inputs, &node.output_type);
+            }
         }
     }
 
@@ -497,6 +541,100 @@ impl CEmitter {
         self.line("}");
     }
 
+    // ---- Fused elementwise ----
+    fn emit_fused_elem(
+        &mut self,
+        id: usize,
+        ops: &[FusedStep],
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+
+        // Compute strided index for each external input.
+        for (ext_idx, ext_node) in inputs.iter().enumerate() {
+            let ext_id = ext_node.0;
+            self.line(&format!(
+                "int idx_ext{ext_idx} = chelis_indices_to_flat(indices, t{ext_id}->strides, t{ext_id}->ndim);"
+            ));
+        }
+
+        // Emit each fused step.
+        let resolve = |fi: &FusedInput| -> String {
+            match fi {
+                FusedInput::External(i) => {
+                    let ext_id = inputs[*i].0;
+                    format!("t{ext_id}->data[idx_ext{i}]")
+                }
+                FusedInput::PreviousStep(j) => format!("v{j}"),
+            }
+        };
+
+        for (s, step) in ops.iter().enumerate() {
+            let expr = match &step.op {
+                FusedStepOp::Add => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} + {b}")
+                }
+                FusedStepOp::Mul => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} * {b}")
+                }
+                FusedStepOp::MaxElem => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("fmaxf({a}, {b})")
+                }
+                FusedStepOp::CmpLt => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("({a} < {b}) ? 1.0f : 0.0f")
+                }
+                FusedStepOp::Neg => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("-{a}")
+                }
+                FusedStepOp::Exp => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("expf({a})")
+                }
+                FusedStepOp::Log => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("logf({a})")
+                }
+                FusedStepOp::Sin => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("sinf({a})")
+                }
+                FusedStepOp::Sqrt => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("sqrtf({a})")
+                }
+            };
+            self.line(&format!("float v{s} = {expr};"));
+        }
+
+        // Store last step's result.
+        let last = ops.len() - 1;
+        self.line(&format!("t{id}->data[i] = v{last};"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ---- BLAS matmul ----
     fn emit_blas_matmul(&mut self, id: usize, info: &crate::blas::MatmulInfo, ty: &TensorType) {
         let a = info.a.0;
@@ -643,6 +781,148 @@ impl CEmitter {
             "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
         ));
         self.line(&format!("acc = fmaxf(acc, t{a}->data[src_idx]);"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ---- Fused elementwise→reduction ----
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fused_reduce(
+        &mut self,
+        id: usize,
+        axis: usize,
+        ext_inputs: &[NodeId],
+        fused_op: &RiscOp,
+        fused_input_type: &TensorType,
+        out_ty: &TensorType,
+        reduce_kind: &str,
+    ) {
+        let ops = match fused_op {
+            RiscOp::FusedElem { ops } => ops,
+            _ => panic!("expected FusedElem op"),
+        };
+        let axis_size = Self::dim_size(&fused_input_type.dims[axis]);
+        // ndim of the fused input (pre-reduction shape)
+        let fused_ndim = fused_input_type.dims.len();
+
+        let ndim = Self::ndim(out_ty);
+        let shape = Self::shape_literal(out_ty);
+        let dtype = Self::dtype_macro(out_ty);
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        if reduce_kind == "sum" {
+            self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
+        }
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        let init = if reduce_kind == "sum" {
+            "0.0f"
+        } else {
+            "-INFINITY"
+        };
+        self.line(&format!("float acc = {init};"));
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < {fused_ndim}; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = k;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+
+        // Compute strided index for each external input using full_indices
+        for (ext_idx, ext_node) in ext_inputs.iter().enumerate() {
+            let ext_id = ext_node.0;
+            self.line(&format!(
+                "int idx_ext{ext_idx} = chelis_indices_to_flat(full_indices, t{ext_id}->strides, t{ext_id}->ndim);"
+            ));
+        }
+
+        // Emit each fused step
+        let resolve = |fi: &FusedInput| -> String {
+            match fi {
+                FusedInput::External(i) => {
+                    let ext_id = ext_inputs[*i].0;
+                    format!("t{ext_id}->data[idx_ext{i}]")
+                }
+                FusedInput::PreviousStep(j) => format!("v{j}"),
+            }
+        };
+
+        for (s, step) in ops.iter().enumerate() {
+            let expr = match &step.op {
+                FusedStepOp::Add => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} + {b}")
+                }
+                FusedStepOp::Mul => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} * {b}")
+                }
+                FusedStepOp::MaxElem => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("fmaxf({a}, {b})")
+                }
+                FusedStepOp::CmpLt => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("({a} < {b}) ? 1.0f : 0.0f")
+                }
+                FusedStepOp::Neg => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("-{a}")
+                }
+                FusedStepOp::Exp => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("expf({a})")
+                }
+                FusedStepOp::Log => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("logf({a})")
+                }
+                FusedStepOp::Sin => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("sinf({a})")
+                }
+                FusedStepOp::Sqrt => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("sqrtf({a})")
+                }
+            };
+            self.line(&format!("float v{s} = {expr};"));
+        }
+
+        // Accumulate the last step's result
+        let last = ops.len() - 1;
+        if reduce_kind == "sum" {
+            self.line(&format!("acc += v{last};"));
+        } else {
+            self.line(&format!("acc = fmaxf(acc, v{last});"));
+        }
         self.indent -= 1;
         self.line("}");
         self.line(&format!("t{id}->data[outer] = acc;"));
@@ -830,6 +1110,30 @@ impl CEmitter {
             }
             self.line(&format!("t{id}->strides[{d}] = t{a}->strides[{d}] * {s};"));
         }
+    }
+
+    // ---- Realize ----
+    fn emit_realize(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!("t{id}->data[i] = t{a}->data[idx];"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Cast ----
@@ -1070,6 +1374,19 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("memcpy"));
+    }
+
+    #[test]
+    fn realize_emits_materialization_loop() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6));
+        let s = dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
+        dag.add_node(RiscOp::Realize, vec![s], vec_f32(3));
+
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("chelis_tensor *t2 = chelis_alloc("));
+        assert!(c.contains("chelis_indices_to_flat(indices, t1->strides, t1->ndim)"));
+        assert!(!c.contains("chelis_alloc_view(1, (int[]){ 3 }, CHELIS_F32, t1->data)"));
     }
 
     #[test]

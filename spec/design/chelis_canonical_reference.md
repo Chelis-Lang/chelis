@@ -22,7 +22,8 @@ workloads.
 
 **Current status:** Phase 0 is complete.
 Phases 0a-0i are complete.
-Phase 1 is next.
+Phase 1a is complete.
+Phase 1b and later GPU optimization/tooling work remain.
 
 ---
 
@@ -162,12 +163,14 @@ This list is the intended stable surface for project-level documentation.
 - linear types
 - borrowing rules
 - effect handlers
+- lightweight uniqueness / alias tracking should be considered before a full heavy linear-ownership model
 
 ### Deferred to Phase 3
 
 - distribution types
 - equivariance constraints
 - optimization-property annotations
+- ILP/AUTOMAP-style rank-polymorphism remains a research idea, not a committed feature
 
 ---
 

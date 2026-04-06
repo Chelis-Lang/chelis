@@ -1,6 +1,6 @@
 use chelis_e2e::data::*;
 use chelis_e2e::train::*;
-use chelis_ir::grad::grad_dag;
+use chelis_ir::grad_then_fuse;
 
 #[test]
 fn mnist_surf_pipeline_builds_trainable_program() {
@@ -20,7 +20,7 @@ fn mnist_surf_pipeline_builds_trainable_program() {
 #[test]
 fn mnist_synthetic_loss_decreases() {
     let program = build_mnist_program().expect("MNIST Surf example should compile");
-    let grad_result = grad_dag(
+    let grad_result = grad_then_fuse(
         &program.dag,
         program.loss_node,
         &program
@@ -80,7 +80,7 @@ fn mnist_subset_full_pipeline() {
 
     let program = build_mnist_program().expect("MNIST Surf example should compile");
     let wrt: Vec<_> = program.param_nodes.iter().map(|(_, id)| *id).collect();
-    let grad_result = grad_dag(&program.dag, program.loss_node, &wrt).unwrap();
+    let grad_result = grad_then_fuse(&program.dag, program.loss_node, &wrt).unwrap();
     let mut params = init_params(42);
 
     for epoch in 0..10 {
@@ -132,7 +132,7 @@ fn mnist_real_over_90_percent() {
 
     let program = build_mnist_program().expect("MNIST Surf example should compile");
     let wrt: Vec<_> = program.param_nodes.iter().map(|(_, id)| *id).collect();
-    let grad_result = grad_dag(&program.dag, program.loss_node, &wrt).unwrap();
+    let grad_result = grad_then_fuse(&program.dag, program.loss_node, &wrt).unwrap();
 
     let mut params = init_params(42);
 

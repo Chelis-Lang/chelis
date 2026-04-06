@@ -14,6 +14,8 @@ use chelis_types::types::Prim;
 pub struct GradResult {
     /// Combined forward + backward DAG.
     pub dag: Dag,
+    /// The remapped forward output node inside `dag`.
+    pub output_node: NodeId,
     /// Maps each requested forward input `NodeId` to its gradient `NodeId` in the combined DAG.
     pub grad_nodes: HashMap<NodeId, NodeId>,
 }
@@ -70,13 +72,17 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
         dag.add_root(grad);
     }
 
-    let (dag, grad_nodes) = prune_to_requested_outputs(&dag, &grad_nodes);
+    let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
     if !crate::verify::verify(&dag).is_empty() {
         return None;
     }
 
-    Some(GradResult { dag, grad_nodes })
+    Some(GradResult {
+        dag,
+        output_node,
+        grad_nodes,
+    })
 }
 
 fn is_scalar_float(ty: &TensorType) -> bool {
@@ -85,10 +91,11 @@ fn is_scalar_float(ty: &TensorType) -> bool {
 
 fn prune_to_requested_outputs(
     dag: &Dag,
+    output: NodeId,
     grad_nodes: &HashMap<NodeId, NodeId>,
-) -> (Dag, HashMap<NodeId, NodeId>) {
+) -> (Dag, NodeId, HashMap<NodeId, NodeId>) {
     if dag.is_empty() {
-        return (Dag::new(), HashMap::new());
+        return (Dag::new(), NodeId(0), HashMap::new());
     }
 
     let mut live = vec![false; dag.len()];
@@ -138,7 +145,11 @@ fn prune_to_requested_outputs(
         })
         .collect();
 
-    (new_dag, new_grad_nodes)
+    let new_output = *id_map
+        .get(&output.0)
+        .unwrap_or_else(|| panic!("output node {output:?} missing after grad pruning"));
+
+    (new_dag, new_output, new_grad_nodes)
 }
 
 /// Compute adjoint contributions for each input of the given node.
@@ -371,6 +382,10 @@ fn compute_adjoints(
             let x = node.inputs[0];
             Some(vec![(x, g)])
         }
+        RiscOp::Realize => {
+            let x = node.inputs[0];
+            Some(vec![(x, g)])
+        }
 
         // --- Cast ---
         RiscOp::Cast { .. } => {
@@ -389,6 +404,11 @@ fn compute_adjoints(
                 let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], input_ty);
                 Some(vec![(x, zero)])
             }
+        }
+        RiscOp::FusedElem { .. } => {
+            // Fused nodes should be un-fused before AD; gradient through fusion
+            // is not yet supported.
+            None
         }
     }
 }

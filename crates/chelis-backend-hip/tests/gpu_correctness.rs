@@ -9,6 +9,7 @@
 use chelis_backend_hip::codegen_hip;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
+use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::collections::HashMap;
 use std::fs;
@@ -283,6 +284,13 @@ fn assert_close_vec(actual: &[f32], expected: &[f32]) {
 
 fn assert_gpu_matches_eval(dag: &Dag, func_name: &str, inputs: &[TestInput]) {
     let actual = compile_and_run_single_output(dag, func_name, inputs);
+    let expected = expected_single_output(dag, inputs);
+    assert_close_vec(&actual, &expected);
+}
+
+fn assert_fused_gpu_matches_unfused_eval(dag: &Dag, func_name: &str, inputs: &[TestInput]) {
+    let fused = fuse(dag);
+    let actual = compile_and_run_single_output(&fused, func_name, inputs);
     let expected = expected_single_output(dag, inputs);
     assert_close_vec(&actual, &expected);
 }
@@ -603,6 +611,74 @@ fn g9_load_mapping() {
         &[
             TestInput::new("x", &[], &[2.0]),
             TestInput::new("y", &[], &[5.0]),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g10_realize_materializes_view_on_gpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5));
+    let s = dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
+    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3));
+    dag.add_root(r);
+
+    assert_gpu_matches_eval(
+        &dag,
+        "g10_realize_materializes_view",
+        &[TestInput::new("x", &[5], &[1.0, 2.0, 3.0, 4.0, 5.0])],
+    );
+}
+
+// ===========================================================================
+// GF1: Fused add→neg on GPU matches CPU
+// ===========================================================================
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn gf1_fused_add_neg_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
+    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
+    let out = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4));
+    dag.add_root(out);
+
+    assert_fused_gpu_matches_unfused_eval(
+        &dag,
+        "gf1_fused_add_neg",
+        &[
+            TestInput::new("x", &[4], &[1.0, -2.0, 3.5, -4.25]),
+            TestInput::new("y", &[4], &[0.5, 4.0, -1.5, 2.25]),
+        ],
+    );
+}
+
+// ===========================================================================
+// GF2: Fused 3-way chain on GPU matches CPU
+// ===========================================================================
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn gf2_fused_three_way_chain_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
+    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(4));
+    let sum = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
+    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4));
+    let relu = dag.add_node(RiscOp::MaxElem, vec![sum, zero], vec_f32(4));
+    let out = dag.add_node(RiscOp::Mul, vec![relu, z], vec_f32(4));
+    dag.add_root(out);
+
+    assert_fused_gpu_matches_unfused_eval(
+        &dag,
+        "gf2_fused_add_relu_mul",
+        &[
+            TestInput::new("x", &[4], &[1.0, -2.0, 3.0, -4.0]),
+            TestInput::new("y", &[4], &[-0.5, 0.5, 2.0, 1.0]),
+            TestInput::new("z", &[4], &[2.0, 3.0, -1.5, 4.0]),
         ],
     );
 }

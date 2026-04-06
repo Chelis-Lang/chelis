@@ -13,9 +13,21 @@ fn is_borrowed(op: &RiscOp) -> bool {
 /// Phase 0f uses allocate-per-node and frees everything at function end.
 /// The runtime tracks ownership, so aliasing views can be freed directly.
 pub fn emit_cleanup(dag: &Dag, output_ids: &[NodeId]) -> Vec<String> {
+    emit_cleanup_with_skip(dag, output_ids, &[])
+}
+
+/// Like [`emit_cleanup`] but also skips the given node IDs (never-allocated nodes).
+pub fn emit_cleanup_with_skip(
+    dag: &Dag,
+    output_ids: &[NodeId],
+    skip_ids: &[NodeId],
+) -> Vec<String> {
     let mut lines = Vec::new();
     for n in dag.nodes() {
         if output_ids.contains(&n.id) {
+            continue;
+        }
+        if skip_ids.contains(&n.id) {
             continue;
         }
         if is_borrowed(&n.op) {

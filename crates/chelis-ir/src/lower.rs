@@ -364,7 +364,8 @@ impl LowerCtx {
             "if" => self.lower_if(elems),
             "tuple" => self.lower_tuple(elems),
             "par" => self.lower_par(elems),
-            "realize" | "copy" => self.lower_identity(elems),
+            "realize" => self.lower_realize(elems),
+            "copy" => self.lower_identity(elems),
             "tuple-get" => self.lower_tuple_get(elems),
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
@@ -1093,7 +1094,23 @@ impl LowerCtx {
         self.lower_unrepresentable("par", elems)
     }
 
-    /// `(realize {} expr)` or `(copy {} expr)` -- identity in Phase 0.
+    /// `(realize {} expr)` -- explicit materialization barrier.
+    fn lower_realize(&mut self, elems: &[Expr]) -> NodeId {
+        if elems.len() >= 3 {
+            let input = self.lower_expr(&elems[2]);
+            let output_type = self
+                .dag
+                .get(input)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(Self::default_type);
+            self.dag.add_node(RiscOp::Realize, vec![input], output_type)
+        } else {
+            self.dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+        }
+    }
+
+    /// `(copy {} expr)` -- identity in Phase 0/1.
     fn lower_identity(&mut self, elems: &[Expr]) -> NodeId {
         if elems.len() >= 3 {
             self.lower_expr(&elems[2])
@@ -1620,14 +1637,15 @@ mod regression_tests {
     }
 
     #[test]
-    fn fix4_realize_is_identity() {
+    fn fix4_realize_lowers_to_materialization_barrier() {
         let src = "(realize {} (lit {} 42.0))";
         let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 1);
+        assert_eq!(dag.len(), 2);
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
             RiscOp::Const { value: 42.0 }
         );
+        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Realize);
     }
 
     #[test]

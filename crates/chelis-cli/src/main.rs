@@ -6,9 +6,18 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-const RUNTIME_H: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.h");
-const RUNTIME_C: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.c");
-const HIP_RUNTIME_H: &str = include_str!("../../chelis-backend-hip/runtime/chelis_hip_runtime.h");
+const RUNTIME_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-c/runtime/chelis_runtime.h"
+));
+const RUNTIME_C: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-c/runtime/chelis_runtime.c"
+));
+const HIP_RUNTIME_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
+));
 
 #[derive(Parser)]
 #[command(
@@ -226,8 +235,17 @@ fn cmd_build(
         .unwrap_or("chelis_main");
 
     match target {
-        "c" => cmd_build_c(&dag, func_name, file, output),
-        "hip" => cmd_build_hip(&dag, func_name, file, output),
+        "c" => {
+            let fused = chelis_ir::fuse::fuse(&dag);
+            cmd_build_c(&fused, func_name, file, output)
+        }
+        "hip" => {
+            // GPU pipeline (Phase 1b): lower → fuse → codegen.
+            // Full target pipeline: lower → optimize → grad → optimize → fuse → codegen.
+            // optimize and grad integration is Phase 1e work.
+            let fused = chelis_ir::fuse::fuse(&dag);
+            cmd_build_hip(&fused, func_name, file, output)
+        }
         other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
     }
 }

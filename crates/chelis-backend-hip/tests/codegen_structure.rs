@@ -5,6 +5,7 @@
 
 use chelis_backend_hip::codegen_hip;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -274,6 +275,27 @@ fn s5_expand_no_kernel_launch() {
     );
 }
 
+#[test]
+fn s5_realize_materializes_with_kernel_not_view() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6));
+    let s = dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
+    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3));
+    dag.add_root(r);
+
+    let result = codegen_hip(&dag, "test_realize");
+    assert!(
+        result.c_source.contains("kernel_cast"),
+        "Realize must materialize through a copy-style kernel launch"
+    );
+    assert!(
+        !result.c_source.contains(
+            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_F32, d_t1->data, d_t1->storage_size)"
+        ),
+        "Realize must not lower to a metadata-only view"
+    );
+}
+
 // ===========================================================================
 // S6: Kernel launch uses correct grid/block (ceil(size/256))
 // ===========================================================================
@@ -385,6 +407,14 @@ fn s10_device_helpers_present() {
         result.c_source.contains("chelis_indices_to_flat"),
         "Device helper chelis_indices_to_flat must be in kernel source"
     );
+    assert!(
+        result.c_source.contains("chelis_gpu_failure = 0"),
+        "Kernel source must declare the debug failure flag"
+    );
+    assert!(
+        result.c_source.contains("CHELIS_GUARD_INDEX"),
+        "Kernel source must include bounds-guard instrumentation"
+    );
 }
 
 // ===========================================================================
@@ -398,6 +428,38 @@ fn s11_static_module_caching() {
     assert!(
         result.c_source.contains("static hipModule_t"),
         "Kernel modules must be cached with 'static hipModule_t'"
+    );
+}
+
+#[test]
+fn s11_launches_reset_and_check_failure_flag() {
+    let dag = dag_add_consts();
+    let result = codegen_hip(&dag, "test_failure_checks");
+    let src = &result.c_source;
+    let launch_count = src.matches("chelis_launch_kernel").count();
+    assert_eq!(
+        src.matches("chelis_prepare_kernel_launch").count(),
+        launch_count,
+        "Every kernel launch must reset the debug failure flag"
+    );
+    assert_eq!(
+        src.matches("chelis_finalize_kernel_launch").count(),
+        launch_count,
+        "Every kernel launch must check the debug failure flag"
+    );
+
+    let prepare_pos = src
+        .find("chelis_prepare_kernel_launch(mod_kernel_fill)")
+        .expect("fill reset present");
+    let launch_pos = src
+        .find("chelis_launch_kernel(mod_kernel_fill")
+        .expect("fill launch present");
+    let finalize_pos = src
+        .find("chelis_finalize_kernel_launch(mod_kernel_fill")
+        .expect("fill finalize present");
+    assert!(
+        prepare_pos < launch_pos && launch_pos < finalize_pos,
+        "Failure flag reset/check must bracket the kernel launch"
     );
 }
 
@@ -554,5 +616,221 @@ int main(void) {
         "hipcc failed:\nstderr: {}\nsource:\n{}",
         String::from_utf8_lossy(&output.stderr),
         result.c_source
+    );
+}
+
+// ===========================================================================
+// SF1: FusedElem emits single kernel launch
+// ===========================================================================
+
+#[test]
+fn sf1_fused_elem_single_kernel_launch() {
+    // Build a DAG with add→neg, fuse it, codegen_hip, count kernel launches.
+    // The fused chain should produce exactly 1 kernel launch for the fused ops
+    // (plus 2 fill launches for the constants).
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    dag.add_root(d);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sf1");
+
+    // Count kernel launches: should be 2 fills + 1 fused = 3 total
+    let launch_count = result.c_source.matches("chelis_launch_kernel").count();
+    // Without fusion we'd have 2 fills + add + neg = 4 launches.
+    // With fusion: 2 fills + 1 fused = 3.
+    assert_eq!(
+        launch_count, 3,
+        "Fused add→neg should produce 3 kernel launches (2 fill + 1 fused), got {launch_count}"
+    );
+}
+
+// ===========================================================================
+// SF2: Fused kernel has chained computation in body
+// ===========================================================================
+
+#[test]
+fn sf2_fused_kernel_chained_computation() {
+    // The generated fused kernel source should contain chained register operations.
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    dag.add_root(d);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sf2");
+    let src = &result.c_source;
+
+    // The embedded kernel source (escaped in a C string literal) should contain
+    // chained register variables: float v0 = ... and float v1 = ...
+    assert!(
+        src.contains("float v0 ="),
+        "Fused kernel must contain 'float v0 =' for first step"
+    );
+    assert!(
+        src.contains("float v1 ="),
+        "Fused kernel must contain 'float v1 =' for second step"
+    );
+}
+
+// ===========================================================================
+// SF3: No intermediate GPU allocation for fused chain
+// ===========================================================================
+
+#[test]
+fn sf3_no_intermediate_alloc_in_fused_chain() {
+    // Between the fused kernel alloc and its launch, there should be no extra
+    // chelis_gpu_alloc calls (the intermediate is computed in registers).
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    dag.add_root(d);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sf3");
+
+    // Without fusion: 2 const allocs + add alloc + neg alloc = 4 allocs.
+    // With fusion: 2 const allocs + 1 fused output alloc = 3 allocs.
+    let alloc_count = result.c_source.matches("chelis_gpu_alloc(").count();
+    assert_eq!(
+        alloc_count, 3,
+        "Fused chain should have 3 GPU allocs (2 const + 1 fused output), got {alloc_count}"
+    );
+}
+
+// ===========================================================================
+// SFR1: Elementwise→reduction fusion eliminates intermediate buffer
+// ===========================================================================
+
+#[test]
+fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
+    // add(x, const) → neg → sum should fuse: add→neg becomes FusedElem,
+    // then the FusedElem feeds sum as sole consumer → inlined into reduction.
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    dag.add_root(summed);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sfr1");
+    let src = &result.c_source;
+
+    // With elem→elem fusion: add→neg becomes FusedElem.
+    // With elem→reduction fusion: the FusedElem is inlined into the sum kernel.
+    // Result: 1 const fill + 1 fused reduction = 2 kernel launches.
+    let launch_count = src.matches("chelis_launch_kernel").count();
+    assert_eq!(
+        launch_count, 2,
+        "Fused add→neg→sum should produce 2 kernel launches (1 fill + 1 fused reduce), got {launch_count}"
+    );
+
+    // The fused reduction kernel name should appear in the source
+    assert!(
+        src.contains("kernel_fused_sum_"),
+        "Should contain a fused sum kernel name"
+    );
+
+    // The fused reduction kernel should read from external inputs (ext0, ext1)
+    // embedded in the kernel string
+    assert!(
+        src.contains("ext0") && src.contains("ext1"),
+        "Fused reduction kernel should reference external inputs ext0, ext1"
+    );
+}
+
+// ===========================================================================
+// SFR2: Fused reduction with max_reduce
+// ===========================================================================
+
+#[test]
+fn sfr2_fused_elem_into_max_reduce() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
+    let maxed = dag.add_node(RiscOp::MaxReduce { axis: 1 }, vec![negated], vec_f32(3));
+    dag.add_root(maxed);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sfr2");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("kernel_fused_maxred_"),
+        "Should contain a fused max-reduce kernel name"
+    );
+
+    let launch_count = src.matches("chelis_launch_kernel").count();
+    assert_eq!(
+        launch_count, 2,
+        "Fused add→neg→max_reduce should produce 2 launches (1 fill + 1 fused reduce), got {launch_count}"
+    );
+}
+
+// ===========================================================================
+// SFR3: Multi-consumer FusedElem is NOT inlined into reduction
+// ===========================================================================
+
+#[test]
+fn sfr3_multi_consumer_fused_elem_not_inlined() {
+    // If the FusedElem has multiple consumers, it must be materialized.
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
+    // Two consumers of the fused chain output:
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    dag.add_root(negated); // negated is also a root → 2 consumers
+    dag.add_root(summed);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_sfr3");
+    let src = &result.c_source;
+
+    // Since the FusedElem output is both a root and consumed by the sum,
+    // it should NOT be inlined — we should see a normal sum kernel.
+    assert!(
+        !src.contains("kernel_fused_sum_"),
+        "Multi-consumer FusedElem should NOT be inlined into reduction"
+    );
+    assert!(
+        src.contains("kernel_sum_ax"),
+        "Should use standard reduction kernel for multi-consumer case"
+    );
+}
+
+#[test]
+fn sfr4_realize_blocks_fused_kernel_emission() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
+    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
+    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4));
+    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4));
+    dag.add_root(negated);
+
+    let fused = fuse(&dag);
+    let result = codegen_hip(&fused, "test_realize_barrier");
+    let src = &result.c_source;
+
+    assert!(
+        !src.contains("kernel_fused_"),
+        "realize() must prevent fused kernel emission across the barrier"
+    );
+    assert!(
+        src.matches("chelis_launch_kernel").count() >= 2,
+        "realize() barrier should leave separate launches for add/copy/neg"
     );
 }

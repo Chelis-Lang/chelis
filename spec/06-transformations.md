@@ -540,13 +540,24 @@ The compiler applies transformations in the following order:
 
 1. **Type checking** -- Verify the program is well-typed (spec/04).
 2. **Lowering** -- Convert typed AST to RISC DAG (spec/01 pipeline).
-3. **`grad` expansion** -- Expand all `grad` nodes into backward DAGs.
-4. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs (Phase 2).
-5. **Optimization passes** -- Apply simplification, CSE, DCE, fusion.
-6. **`jit` boundary insertion** -- Mark compilation boundaries for jit (Phase 2).
-7. **Code generation** -- Emit target code.
+3. **Early optimization passes** -- Apply local simplification, CSE, and DCE that do not depend on later transform expansion.
+4. **`grad` expansion** -- Expand all `grad` nodes into backward DAGs.
+5. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs (Phase 2).
+6. **Post-transform optimization passes** -- Re-run simplification, CSE, and DCE on the transformed DAG.
+7. **Fusion** -- Fuse eligible post-transform DAG regions for target backends that benefit from fused kernels.
+8. **`jit` boundary insertion** -- Mark compilation boundaries for jit (Phase 2).
+9. **Code generation** -- Emit target code.
 
 Steps 3 and 4 are the core "transformation" steps. After expansion, all grad and vmap constructs have been rewritten away, and the DAG consists entirely of RISC primitives.
+
+For the GPU backend specifically, this means:
+
+```text
+lower -> optimize -> grad -> optimize again -> fuse -> codegen
+```
+
+Do not differentiate a fused DAG. `grad` should operate on the unfused RISC DAG, and the
+resulting forward/backward graph should then be fused using the ordinary fusion pass.
 
 ---
 

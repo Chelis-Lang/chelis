@@ -13,6 +13,24 @@
 
 /// Device-side helper functions included at the top of every kernel source.
 pub const DEVICE_HELPERS: &str = "\
+#if CHELIS_DEBUG_BOUNDS
+__device__ int chelis_gpu_failure = 0;
+__device__ void chelis_record_failure(int code) {
+    if (code != 0) {
+        atomicCAS(&chelis_gpu_failure, 0, code);
+    }
+}
+__device__ int chelis_bounds_guard(int idx, int size, int code) {
+    if (idx < 0 || idx >= size) {
+        chelis_record_failure(code);
+        return 0;
+    }
+    return idx;
+}
+#define CHELIS_GUARD_INDEX(idx, size, code) chelis_bounds_guard((idx), (size), (code))
+#else
+#define CHELIS_GUARD_INDEX(idx, size, code) (idx)
+#endif
 __device__ void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {
     for (int d = ndim - 1; d >= 0; d--) {
         out[d] = flat % shape[d];
@@ -60,18 +78,18 @@ pub fn binary_elementwise(kernel_name: &str, op: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    const float *b, {b_strides}, int b_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    const float *b, {b_strides}, int b_ndim, int b_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx_a = chelis_indices_to_flat(indices, a_s, a_ndim);
-  int idx_b = chelis_indices_to_flat(indices, b_s, b_ndim);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = a[idx_a] {op} b[idx_b];
 }}
 ",
@@ -89,18 +107,18 @@ pub fn binary_func(kernel_name: &str, func: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    const float *b, {b_strides}, int b_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    const float *b, {b_strides}, int b_ndim, int b_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx_a = chelis_indices_to_flat(indices, a_s, a_ndim);
-  int idx_b = chelis_indices_to_flat(indices, b_s, b_ndim);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = {func}(a[idx_a], b[idx_b]);
 }}
 ",
@@ -118,18 +136,18 @@ pub fn cmplt(kernel_name: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    const float *b, {b_strides}, int b_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    const float *b, {b_strides}, int b_ndim, int b_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx_a = chelis_indices_to_flat(indices, a_s, a_ndim);
-  int idx_b = chelis_indices_to_flat(indices, b_s, b_ndim);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = (a[idx_a] < b[idx_b]) ? 1.0f : 0.0f;
 }}
 ",
@@ -147,15 +165,15 @@ pub fn unary_prefix(kernel_name: &str, op: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx = chelis_indices_to_flat(indices, a_s, a_ndim);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = {op}a[idx];
 }}
 ",
@@ -171,15 +189,15 @@ pub fn unary_func(kernel_name: &str, func: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx = chelis_indices_to_flat(indices, a_s, a_ndim);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = {func}(a[idx]);
 }}
 ",
@@ -195,7 +213,7 @@ pub fn reduce_sum(kernel_name: &str, axis: usize, axis_size: usize) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
+    const float *a, {a_strides}, int a_ndim, int a_size,
     float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_out_sh}
@@ -215,7 +233,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int src_idx = chelis_indices_to_flat(full_indices, a_s, a_ndim);
+    int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc += a[src_idx];
   }}
   out[outer] = acc;
@@ -233,7 +251,7 @@ pub fn reduce_max(kernel_name: &str, axis: usize, axis_size: usize) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
+    const float *a, {a_strides}, int a_ndim, int a_size,
     float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_out_sh}
@@ -253,7 +271,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int src_idx = chelis_indices_to_flat(full_indices, a_s, a_ndim);
+    int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc = fmaxf(acc, a[src_idx]);
   }}
   out[outer] = acc;
@@ -266,10 +284,284 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Generate a fused reduction kernel: elementwise chain inlined into the reduction inner loop.
+///
+/// Instead of reading `a[src_idx]` in the reduction loop, this kernel applies
+/// the elementwise chain's steps to compute the value from external inputs before
+/// accumulating.
+pub fn reduce_fused(
+    kernel_name: &str,
+    axis: usize,
+    axis_size: usize,
+    steps: &[chelis_ir::dag::FusedStep],
+    n_external: usize,
+    reduce_kind: ReduceKind,
+) -> String {
+    use chelis_ir::dag::{FusedInput, FusedStepOp};
+
+    // Build parameter list: external inputs (with strides), output (with shape)
+    let mut params = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        params.push(format!("const float *{pfx}"));
+        params.push(stride_params(&pfx));
+        params.push(format!("int {pfx}_ndim"));
+        params.push(format!("int {pfx}_size"));
+    }
+    params.push("float *out".into());
+    params.push(shape_params("out"));
+    params.push("int out_ndim".into());
+    params.push("int out_size".into());
+
+    // Build local array constructions for external input strides
+    let mut body_arrays = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        body_arrays.push(build_array(&format!("{pfx}_s"), &pfx, "s"));
+    }
+    body_arrays.push(build_array("out_sh", "out", "sh"));
+
+    // Resolve a FusedInput to a C expression
+    let resolve = |input: &FusedInput| -> String {
+        match input {
+            FusedInput::External(i) => format!("ext{i}[idx_ext{i}]"),
+            FusedInput::PreviousStep(j) => format!("v{j}"),
+        }
+    };
+
+    // Build step computation lines
+    let mut step_lines = Vec::new();
+    for (si, step) in steps.iter().enumerate() {
+        let expr = match step.op {
+            FusedStepOp::Add => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} + {b}")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} * {b}")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("fmaxf({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("({a} < {b}) ? 1.0f : 0.0f")
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&step.input_indices[0]);
+                format!("-{a}")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&step.input_indices[0]);
+                format!("expf({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&step.input_indices[0]);
+                format!("logf({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sinf({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sqrtf({a})")
+            }
+        };
+        step_lines.push(format!("      float v{si} = {expr};"));
+    }
+
+    let last_step = steps.len() - 1;
+    let (init, accumulate) = match reduce_kind {
+        ReduceKind::Sum => ("0.0f".to_string(), format!("acc += v{last_step};")),
+        ReduceKind::Max => (
+            "-3.402823466e+38F".to_string(),
+            format!("acc = fmaxf(acc, v{last_step});"),
+        ),
+    };
+
+    // Build index computation for each external input (inside the inner loop)
+    let mut index_lines = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        index_lines.push(format!(
+            "      int idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+        ));
+    }
+
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    {params}) {{
+{arrays}
+  int outer = blockIdx.x * blockDim.x + threadIdx.x;
+  if (outer >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
+  float acc = {init};
+  for (int k = 0; k < {axis_size}; k++) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < out_ndim + 1; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+{index_lines}
+{step_lines}
+    {accumulate}
+  }}
+  out[outer] = acc;
+}}
+",
+        params = params.join(",\n    "),
+        arrays = body_arrays.join("\n"),
+        index_lines = index_lines.join("\n"),
+        step_lines = step_lines.join("\n"),
+    )
+}
+
+/// Kind of reduction for fused reduce kernels.
+#[derive(Debug, Clone, Copy)]
+pub enum ReduceKind {
+    Sum,
+    Max,
+}
+
+/// Generate kernel source for a fused elementwise chain.
+///
+/// Each step computes into a register `float v{step_idx}`, resolving inputs
+/// from either external input arrays or previous step outputs.
+pub fn fused_elementwise(
+    kernel_name: &str,
+    steps: &[chelis_ir::dag::FusedStep],
+    n_external: usize,
+) -> String {
+    use chelis_ir::dag::{FusedInput, FusedStepOp};
+
+    // Build parameter list
+    let mut params = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        params.push(format!("const float *{pfx}"));
+        params.push(stride_params(&pfx));
+        params.push(format!("int {pfx}_ndim"));
+        params.push(format!("int {pfx}_size"));
+    }
+    params.push("float *out".into());
+    params.push(shape_params("out"));
+    params.push("int out_ndim".into());
+    params.push("int out_size".into());
+
+    // Build local array constructions
+    let mut body_arrays = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        body_arrays.push(build_array(&format!("{pfx}_s"), &pfx, "s"));
+    }
+    body_arrays.push(build_array("out_sh", "out", "sh"));
+
+    // Build index computation for each external input
+    let mut index_lines = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        index_lines.push(format!(
+            "  int idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+        ));
+    }
+
+    // Resolve a FusedInput to a C expression
+    let resolve = |input: &FusedInput| -> String {
+        match input {
+            FusedInput::External(i) => format!("ext{i}[idx_ext{i}]"),
+            FusedInput::PreviousStep(j) => format!("v{j}"),
+        }
+    };
+
+    // Build step computation lines
+    let mut step_lines = Vec::new();
+    for (si, step) in steps.iter().enumerate() {
+        let expr = match step.op {
+            FusedStepOp::Add => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} + {b}")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} * {b}")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("fmaxf({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("({a} < {b}) ? 1.0f : 0.0f")
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&step.input_indices[0]);
+                format!("-{a}")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&step.input_indices[0]);
+                format!("expf({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&step.input_indices[0]);
+                format!("logf({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sinf({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sqrtf({a})")
+            }
+        };
+        step_lines.push(format!("  float v{si} = {expr};"));
+    }
+
+    let last_step = steps.len() - 1;
+
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    {params}) {{
+{arrays}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+{index_lines}
+{step_lines}
+  out[i] = v{last_step};
+}}
+",
+        params = params.join(",\n    "),
+        arrays = body_arrays.join("\n"),
+        index_lines = index_lines.join("\n"),
+        step_lines = step_lines.join("\n"),
+    )
+}
+
 /// Generate kernel source for filling a tensor with a constant value.
 pub fn fill(kernel_name: &str) -> String {
     format!(
-        "\
+        "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(float *data, float value, int size) {{
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= size) return;
@@ -284,15 +576,15 @@ pub fn cast(kernel_name: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const float *a, {a_strides}, int a_ndim,
-    float *out, {out_shape}, int out_ndim, int size) {{
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
 {build_a_s}
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= size) return;
+  if (i >= out_size) return;
   int indices[{MAX_DIM}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int idx = chelis_indices_to_flat(indices, a_s, a_ndim);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = a[idx];
 }}
 ",
@@ -386,9 +678,12 @@ mod tests {
         let add = binary_elementwise("k", "+");
         let neg = unary_prefix("k", "-");
         let sum = reduce_sum("k", 0, 1);
-        for src in [&add, &neg, &sum] {
+        let fill_src = fill("k");
+        for src in [&add, &neg, &sum, &fill_src] {
             assert!(src.contains("__device__ void chelis_flat_to_indices"));
             assert!(src.contains("__device__ int chelis_indices_to_flat"));
+            assert!(src.contains("__device__ int chelis_gpu_failure = 0;"));
+            assert!(src.contains("CHELIS_GUARD_INDEX"));
         }
     }
 }

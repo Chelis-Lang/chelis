@@ -61,16 +61,37 @@ Current implementation:
 
 - kernel source strings for the Phase 1a execution surface:
   elementwise ops, reductions, fill, and cast
+- `chelis-ir::grad_then_fuse` preserves the required Phase 1b ordering:
+  differentiate the ordinary DAG first, then fuse the resulting gradient DAG
 - shapes/strides passed as individual int kernel parameters (not device pointers)
+- debug builds reset/check a per-module `chelis_gpu_failure` flag after every kernel launch
+- views preserve backing allocation size so debug index guards validate against real storage
 - movement ops (reshape, permute, expand, stride) are host-side metadata operations
 - naive reductions (one thread per output element, inner loop over axis)
 - `chelis_gpu_free` for allocations, `chelis_gpu_free_view` for views
 - `chelis build app.ch --target hip` emits compilable `*_hip.cpp` host output
 - `pad` and `shrink` remain deferred to a later Phase 1 iteration
 
+### Phase 1b: Kernel Fusion
+
+Greedy elementwise fusion: adjacent single-consumer elementwise ops are merged into
+`FusedElem` nodes that emit as single GPU kernels. MNIST drops from 27 to 19 kernel
+launches.
+
+- fusion pass in `chelis-ir/src/fuse.rs` (DAG-to-DAG rewrite, shared by all backends)
+- `FusedElem` variant in `RiscOp` with `FusedStep`/`FusedStepOp`/`FusedInput` types
+- elementwise→reduction fusion: when a FusedElem's sole consumer is a reduction,
+  the elementwise chain is inlined into the reduction kernel's inner loop
+- HIP emitter generates fused kernel source strings (register-chained computation)
+- C backend emits fused `#pragma omp parallel for` loops (wired into CLI for both targets)
+- evaluator decomposes `FusedElem` back to individual ops for testing
+- multi-consumer split fusion: per spec, multi-consumer nodes are materialized and serve
+  as external inputs to downstream chains
+- `realize()` lowers to a real DAG materialization barrier and blocks fusion across it
+- `egg` evaluation skipped; greedy heuristic sufficient for Phase 1b scope
+
 Key work remaining in Phase 1:
 
-- kernel fusion (Phase 1b)
 - GPU memory planning with buffer reuse (Phase 1c)
 - optimized reductions + hipBLAS (Phase 1d)
 - benchmark and correctness validation against the C backend (Phase 1e)

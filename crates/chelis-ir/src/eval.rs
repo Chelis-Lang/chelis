@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TensorValue {
@@ -288,7 +288,7 @@ where
                 }
                 None => default_value(&node.output_type),
             },
-            RiscOp::Store { .. } => values[&node.inputs[0]].clone(),
+            RiscOp::Store { .. } | RiscOp::Realize => values[&node.inputs[0]].clone(),
             RiscOp::Add => binary_map(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
@@ -341,6 +341,59 @@ where
             RiscOp::Pad { padding, fill } => pad(&values[&node.inputs[0]], padding, *fill),
             RiscOp::Shrink { bounds } => shrink(&values[&node.inputs[0]], bounds),
             RiscOp::Stride { strides } => stride(&values[&node.inputs[0]], strides),
+            RiscOp::FusedElem { ops } => {
+                // Collect external input TensorValues from the node's DAG inputs.
+                let externals: Vec<&TensorValue> =
+                    node.inputs.iter().map(|id| &values[id]).collect();
+
+                // Walk the fused steps sequentially, building up intermediate results.
+                let mut intermediates: Vec<TensorValue> = Vec::with_capacity(ops.len());
+
+                for step in ops {
+                    let resolve = |fi: &FusedInput| -> &TensorValue {
+                        match fi {
+                            FusedInput::External(idx) => externals[*idx],
+                            FusedInput::PreviousStep(idx) => &intermediates[*idx],
+                        }
+                    };
+
+                    let result = match step.op {
+                        // Binary ops
+                        FusedStepOp::Add => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| a + b,
+                        ),
+                        FusedStepOp::Mul => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| a * b,
+                        ),
+                        FusedStepOp::MaxElem => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            f64::max,
+                        ),
+                        FusedStepOp::CmpLt => binary_map(
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                            |a, b| if a < b { 1.0 } else { 0.0 },
+                        ),
+                        // Unary ops
+                        FusedStepOp::Neg => unary_map(resolve(&step.input_indices[0]), |x| -x),
+                        FusedStepOp::Exp => unary_map(resolve(&step.input_indices[0]), f64::exp),
+                        FusedStepOp::Log => unary_map(resolve(&step.input_indices[0]), f64::ln),
+                        FusedStepOp::Sin => unary_map(resolve(&step.input_indices[0]), f64::sin),
+                        FusedStepOp::Sqrt => unary_map(resolve(&step.input_indices[0]), f64::sqrt),
+                    };
+                    intermediates.push(result);
+                }
+
+                // The last step's output is the node's result.
+                intermediates
+                    .pop()
+                    .expect("FusedElem must have at least one step")
+            }
             RiscOp::Cast { .. } => values[&node.inputs[0]].clone(),
         };
         values.insert(node.id, value);

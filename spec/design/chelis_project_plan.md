@@ -198,6 +198,17 @@ It is not a proposal to rewrite the Surf parser.
 - explicit copy points
 - compiler-enabled safe buffer reuse
 
+**Phase 2b starting point:** begin with lightweight uniqueness / alias tracking rather
+than a full Rust-style ownership-and-lifetimes model. Chelis's fixed tensor primitive
+surface and DAG-based execution may allow the simpler rule of thumb that a tensor
+consumed by an op is dead unless it is explicitly `copy()`'d. Treat heavier borrowing
+machinery as an escalation only if the lightweight model proves insufficient.
+
+**GPU AD refinement note:** a later AD refinement can add recomputation-oriented backward
+generation for GPU workloads, where replaying cheap forward work is often better than
+storing every intermediate. The likely endpoint is selective checkpointing rather than
+pure tape-only or pure full-recompute AD.
+
 ### 2c: Macro System
 
 - hygienic Deep macros
@@ -258,6 +269,12 @@ provenance annotation format — not whether LLMs interact with macros (they don
 
 - DAG to PyTorch FX graph export
 - interoperability with TorchInductor and export flows
+
+### 3d: Research Notes
+
+- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit `expand`
+  operations during inference while preserving Chelis's no-implicit-broadcasting rule
+- keep this as a research direction, not a committed language feature
 
 ### 3d: Python FFI
 

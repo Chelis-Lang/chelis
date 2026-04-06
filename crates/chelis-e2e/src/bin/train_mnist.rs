@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use chelis_e2e::data::{default_mnist_dir, load_mnist};
 use chelis_e2e::train::{accuracy, build_mnist_program, init_params, train_step};
-use chelis_ir::grad::grad_dag;
+use chelis_ir::grad_then_fuse;
 
 struct Config {
     mnist_dir: PathBuf,
@@ -104,7 +104,7 @@ fn main() -> Result<(), String> {
 
     let program = build_mnist_program()?;
     let wrt: Vec<_> = program.param_nodes.iter().map(|(_, id)| *id).collect();
-    let grad_result = grad_dag(&program.dag, program.loss_node, &wrt)
+    let grad_result = grad_then_fuse(&program.dag, program.loss_node, &wrt)
         .ok_or_else(|| "failed to build gradient DAG".to_string())?;
     let mut params = init_params(config.seed);
 

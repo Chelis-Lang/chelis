@@ -16,6 +16,25 @@ Phase 2: A second kernel reduces the partial results.
 
 This is a standard GPU programming pattern, well-documented in the NVIDIA/AMD reduction tutorials. The agent can follow the pattern directly.
 
+**Segmented reductions are a first-class target in Phase 1d:**
+
+Softmax-style workloads depend on repeated segmented reductions over rows or row-like
+segments:
+
+- `max(x, axis)` for numerical stabilization
+- `sum(exp(x - max(x, axis)), axis)` for normalization
+- the broadcast/divide path that consumes those segmented results
+
+Phase 1d should implement three segmented-reduction strategies with runtime dispatch by
+segment size:
+
+1. large segments -> one block per segment
+2. small segments -> multiple segments per block
+3. tiny segments -> sequential loop per segment
+
+This is the concrete optimization target for variable sequence lengths and other
+real-model row reductions, not just a generic future idea.
+
 **Thread block sizing:**
 
 Phase 1a uses `blockDim = 256` for everything. This is reasonable for elementwise ops but suboptimal for reductions and operations with specific memory access patterns.
@@ -42,10 +61,17 @@ Note: hipBLAS uses column-major by default. The argument order differs from cbla
 
 - [ ] Optimized reduction matches naive reduction output
 - [ ] Optimized reduction is measurably faster than naive on large tensors (>100K elements)
+- [ ] Segmented reduction dispatch picks the intended strategy for large/small/tiny segments
+- [ ] Softmax-like segmented reductions match the naive path across varied row lengths
 - [ ] hipBLAS matmul matches CPU BLAS matmul (within tolerance)
 - [ ] hipBLAS path is taken for matmul (check generated C for `hipblasSgemm`)
 - [ ] Block size selection: elementwise uses 256, reduction uses power-of-2 ≤ axis_size
 - [ ] Memory access is coalesced for elementwise ops (can verify via profiler or structurally in generated code)
+
+**Future enhancement note:** Once the segmented-reduction and kernel-selection surfaces are
+stable, `chelis build --tune` can grow a monotonic-threshold autotuning mode that chooses
+between kernel variants at runtime. That is explicitly post-1d work, not part of the
+initial optimized-reduction deliverable.
 
 ### Execution Strategy
 

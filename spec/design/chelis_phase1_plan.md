@@ -10,6 +10,12 @@ Phase 1 extends the Chelis compiler to target GPUs via HIP. The architecture fol
 
 **What does NOT change:** The RISC DAG, the type checker, the Surf/Deep parsers, the desugarer, the AD engine. Phase 1 adds a new backend alongside the existing C backend. Both coexist. The C backend remains the test oracle — every GPU result must match it numerically.
 
+**Implemented boundary note:** The currently shipped surface reaches Phase 1a plus the
+Phase 1b AD-ordering helper. `grad` from Phase 0g still runs on the unfused DAG, and
+`chelis-ir::grad_then_fuse` now re-fuses the resulting forward+backward graph. Full
+fusion/codegen integration beyond that helper, optimized reductions (1d), and later
+memory/layout refinements are still planned work.
+
 ---
 
 ## Crate Structure
@@ -48,6 +54,19 @@ crates/
 
 The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a DAG optimization that future backends (StableHLO, FX) would also use. The HIP backend consumes the fused DAG.
 
+## Accepted Update Tracking
+
+| Proposal | Disposition | Owning area | Touches implemented surface? | Current boundary impacted |
+|---|---|---|---|---|
+| GPU failure variable for bounds/debug checking | Adopt now | Phase 1a runtime | Yes | 1a |
+| AD before fusion, then re-fuse | Adopt now | Transform ordering + Phase 1b | Yes | 0g semantics now, 1b pipeline later |
+| Segmented reduction strategies | Adopt now | Phase 1d | No | future 1d |
+| Lightweight uniqueness over full linear types | Defer note | Phase 2b | No | future 2b |
+| Recomputation-based AD for GPU execution | Defer note | Phase 2 AD refinement | No | future |
+| Monotonicity-based autotuning | Defer note | Phase 1d+ kernel selection | No | future |
+| LMAD-based memory analysis | Defer note | Phase 1c+ memory/layout optimization | No | future |
+| Rank polymorphism via ILP (AUTOMAP) | Research note | Phase 3 | No | future 3 |
+
 ---
 
 ## Sub-Phase Plans
@@ -82,6 +101,18 @@ After all sub-phases, before declaring Phase 1 complete:
 ---
 
 ## Overall Execution Order
+
+### Phase 1 GPU Pipeline Ordering
+
+For the GPU path, the intended ordering is:
+
+```text
+lower -> optimize -> grad -> optimize again -> fuse -> codegen
+```
+
+This makes `grad` operate on the pre-fusion RISC DAG, then lets the same fusion pass run
+over both the forward and backward graphs. Do not fuse before `grad`; otherwise the
+adjoint rules would need to understand fused kernel nodes directly.
 
 The sub-phases have dependencies:
 

@@ -154,6 +154,35 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
 }
 
 #[test]
+fn build_hip_mnist_emits_fused_kernels_and_launches() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            mnist_example().to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("mnist_hip.cpp")).expect("hip source");
+    assert!(
+        hip_src.contains("kernel_fused_") || hip_src.contains("kernel_fused_sum_"),
+        "MNIST HIP build should emit fused kernels on the real CLI path"
+    );
+    assert!(
+        hip_src.contains("chelis_launch_kernel"),
+        "MNIST HIP build should emit kernel launches on the real CLI path"
+    );
+}
+
+#[test]
 fn tide_quit_exits_cleanly() {
     Command::cargo_bin("chelis")
         .expect("binary")

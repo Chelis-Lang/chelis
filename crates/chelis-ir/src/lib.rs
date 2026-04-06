@@ -9,11 +9,14 @@
 
 pub mod dag;
 pub mod eval;
+pub mod fuse;
 pub mod grad;
 pub mod lower;
 pub mod optimize;
+pub mod pipeline;
 pub mod tier2;
 pub mod verify;
 
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use lower::lower_program;
+pub use pipeline::grad_then_fuse;

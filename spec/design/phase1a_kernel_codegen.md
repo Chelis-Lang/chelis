@@ -16,7 +16,8 @@ typedef struct {
     int strides[CHELIS_MAX_DIM];
     int ndim;
     int dtype;
-    int size;
+    int size;             // logical tensor elements
+    int storage_size;     // backing allocation elements (views inherit this)
 } chelis_gpu_tensor;
 
 chelis_gpu_tensor* chelis_gpu_alloc(int ndim, int *shape, int dtype);
@@ -35,6 +36,23 @@ Key differences from CPU runtime:
 - Explicit host↔device transfer functions
 - JIT compilation via `hiprtc` — takes kernel source string, returns compiled module
 - Kernel launch wrapper that handles grid/block configuration
+
+**Debug failure flag for GPU bounds/runtime checking:**
+
+Because GPUs do not trap out-of-bounds accesses in a developer-friendly way, Phase 1a
+also carries a debug-only global failure flag in the HIP runtime:
+
+```c
+__device__ int chelis_gpu_failure;  // 0 = ok, nonzero = error code
+```
+
+- In debug builds, kernels set this flag instead of relying on hardware exceptions.
+- Each kernel receives input backing sizes and guards derived indices before reads.
+- The host resets it before launch, synchronizes after launch, and checks it after each
+  kernel completion.
+- In release builds, this check is compiled out so there is no steady-state runtime cost.
+- This is primarily a debugging feature for chained and later fused kernels, where a bad
+  index would otherwise silently corrupt outputs.
 
 **Kernel string emission (`kernels.rs`):**
 
@@ -98,6 +116,7 @@ The generated host `*.cpp` file contains:
      - Compiles the kernel (first call) or reuses cached module
      - Configures grid/block dimensions
      - Launches the kernel
+     - In debug builds, checks `chelis_gpu_failure` after completion
    - Transfers outputs from device to host
    - Frees GPU tensors
 

@@ -34,6 +34,11 @@ The transfer plan is a list of `(tensor, direction, timing)` triples emitted alo
 
 Given a VRAM budget, estimate peak memory usage from the buffer plan. If it exceeds the budget, insert recomputation points — trade compute for memory by recomputing an intermediate result instead of keeping it in VRAM. This is activation checkpointing. For Phase 1c, implement the estimation and warning ("this model needs N MB VRAM, you have M MB") but not automatic checkpointing insertion.
 
+**Deferred optimization note:** LMAD-style algebraic memory-layout analysis may later help
+reason about coalescing, transposes, and layout-sensitive kernel selection. That is not a
+Phase 1c correctness requirement. Implement buffer lifetime analysis and reuse first; only
+escalate to LMAD-style reasoning if profiling shows memory layout is the bottleneck.
+
 ### Test Strategy (~8 tests)
 
 - [ ] Buffer reuse: a DAG with non-overlapping lifetimes reuses memory (inspect allocation count)

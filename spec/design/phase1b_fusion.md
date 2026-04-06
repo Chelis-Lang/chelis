@@ -14,6 +14,19 @@ For a transformer block, the unfused version might launch 30+ kernels with 30+ m
 
 A DAG-to-DAG rewrite that identifies fusible subgraphs and merges them into `FusedOp` nodes. The fused DAG has fewer nodes, each representing a compound kernel.
 
+**AD ordering requirement:**
+
+Fusion runs after `grad`, not before it. The intended pipeline is:
+
+```text
+lower -> optimize -> grad -> optimize again -> fuse -> codegen
+```
+
+This keeps adjoint rules defined only on the ordinary RISC DAG. The backward pass produced
+by `grad` is then fused using the same pass as the forward DAG. The adjoint of a fused
+kernel should itself be fusible; it should not require special `FusedOp`-aware gradient
+rules.
+
 **Fusibility rules:**
 
 | Pattern | Fusible? | Reason |
@@ -72,6 +85,21 @@ No intermediate memory allocation. All operations happen in registers.
 - [ ] MNIST model: count kernel launches with and without fusion, verify reduction
 - [ ] If `egg` is adopted: `egg` result matches greedy on simple cases
 - [ ] If `egg` is adopted: `egg` finds better strategy on at least one complex case
+
+### Acceptance Oracle
+
+Phase 1b is complete when this oracle passes:
+
+```sh
+cargo test --workspace
+```
+
+Supporting manual evidence:
+
+- rerun the Phase 1a HIP manual oracle:
+  `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`
+- verify the real CLI build path still emits fused HIP kernels for MNIST:
+  `cargo test -p chelis-cli build_hip_mnist_emits_fused_kernels_and_launches -- --exact`
 
 ### Execution Strategy
 

@@ -35,6 +35,38 @@ pub enum DimInfo {
     Lit(usize),
 }
 
+/// One step in a fused elementwise chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FusedStep {
+    pub op: FusedStepOp,
+    /// Indices into the fused node's inputs: either an external input index
+    /// or a previous step's output index (offset by external input count).
+    pub input_indices: Vec<FusedInput>,
+}
+
+/// The operation performed by a single fusion step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FusedStepOp {
+    Add,
+    Mul,
+    MaxElem,
+    CmpLt,
+    Neg,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+}
+
+/// Input reference within a fused chain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FusedInput {
+    /// Index into the FusedElem node's `inputs` vec (external inputs from the DAG).
+    External(usize),
+    /// Output of a previous step in the chain (index into the `ops` vec).
+    PreviousStep(usize),
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RiscOp {
@@ -91,10 +123,17 @@ pub enum RiscOp {
     Store {
         name: String,
     },
+    Realize,
 
     // --- Cast ---
     Cast {
         new_precision: Prim,
+    },
+
+    // --- Fusion ---
+    /// A sequence of elementwise ops fused into a single kernel.
+    FusedElem {
+        ops: Vec<FusedStep>,
     },
 }
 

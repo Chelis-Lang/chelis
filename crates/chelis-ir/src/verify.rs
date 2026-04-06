@@ -97,6 +97,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::Realize
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
             | RiscOp::Reshape { .. }
@@ -127,6 +128,11 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         "memory op at node {} has {} inputs (expected 0)",
                         node.id.0, arity
                     ));
+                }
+            }
+            RiscOp::FusedElem { ops } => {
+                if ops.is_empty() {
+                    errors.push(format!("fused elem at node {} has no steps", node.id.0));
                 }
             }
         }
