@@ -5,6 +5,10 @@ this repository today.
 This is not the language spec.
 It is a compact teaching document optimized for compiler-in-the-loop generation.
 
+If the task is to work on this repository rather than generate Chelis source, use
+`AGENTS.md` plus the shared local skills in `agent-skills/` instead. This file is for
+language generation, not repo governance.
+
 ## 1. What Chelis Is
 
 Chelis is a functional language for AI and tensor programs.

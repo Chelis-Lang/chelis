@@ -1,0 +1,1 @@
+../../agent-skills/example-corpus/SKILL.md

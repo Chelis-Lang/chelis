@@ -117,6 +117,7 @@ examples/illustrative/  Non-executable syntax/design examples
 
 ## Documentation
 
+- [Agent Contract](AGENTS.md)
 - [LLM Skill File](SKILL.md)
 - [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
 - [Ecosystem Context](spec/design/chelis_ecosystem_context.md)
@@ -124,6 +125,21 @@ examples/illustrative/  Non-executable syntax/design examples
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
 - [Project Plan](spec/design/chelis_project_plan.md)
+
+## Agent Tooling
+
+This repo keeps shared agent guidance in:
+
+- `AGENTS.md`: canonical coding-agent instructions
+- `CLAUDE.md`: should resolve to `AGENTS.md`
+- `SKILL.md`: compact Chelis code-generation teaching document
+- `agent-skills/`: project-local reusable workflows for red teaming, phase gating, spec sync,
+  backend numerics, and example policy
+
+Tool-specific skill entry points should resolve to the same local skill library:
+
+- `.claude/skills` -> `agent-skills/`
+- `.codex/skills` -> `agent-skills/`
 
 ## License
 

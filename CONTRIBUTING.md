@@ -21,6 +21,15 @@ When updating docs, treat these as the owning sources:
 
 If two active docs disagree, fix the disagreement instead of adding a third explanation.
 
+## Agent Guidance
+
+Shared agent instructions live in `AGENTS.md`.
+`CLAUDE.md` should resolve to the same content so Claude-style and Codex-style workflows
+use one canonical rule set.
+
+Project-local reusable agent skills live in `agent-skills/`.
+`.claude/skills` and `.codex/skills` should resolve to that same directory.
+
 ## Doc Authoring Rules
 
 - Prefer current-state descriptions over pathfinding history.
