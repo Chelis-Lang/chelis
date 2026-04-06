@@ -12,6 +12,8 @@ Use this skill whenever touching `examples/` or tests/docs that reference exampl
 - `examples/` is the executable corpus.
 - `examples/illustrative/` is for syntax/design examples that are not on the executable
   phase path.
+- Make this split explicit early in the phase instead of retrofitting it after examples
+  have already been used as proof.
 
 ## Rules
 
@@ -32,4 +34,3 @@ For illustrative examples:
 
 - parsing/round-trip expectations may still apply
 - docs and tests must not imply they are executable phase proof
-

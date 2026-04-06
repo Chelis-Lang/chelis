@@ -29,6 +29,8 @@ use one canonical rule set.
 
 Project-local reusable agent skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory.
+`.claude/commands/` should resolve to the same canonical skill content rather than
+hand-maintained copies.
 
 ## Doc Authoring Rules
 

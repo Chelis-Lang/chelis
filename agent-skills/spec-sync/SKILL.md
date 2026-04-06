@@ -21,6 +21,8 @@ Use this skill whenever a change affects public language/compiler behavior.
 - Do not treat `spec/design/archive/` as current guidance.
 - If the change invalidates an example, either rewrite it to remain executable or move it
   to `examples/illustrative/`.
+- If the change affects a completion claim, update the phase oracle docs and any current
+  phase-status summary in the same change set.
 
 ## Verification
 
@@ -32,4 +34,3 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
-

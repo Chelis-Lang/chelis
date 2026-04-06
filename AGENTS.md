@@ -32,6 +32,15 @@ not drift.
   the red team can only find minor residual issues.
 - Budget for at least one adversarial validation pass that runs code, not just source review.
 
+### One Acceptance Oracle Per Phase
+
+- Every phase must name one authoritative completion oracle.
+- That oracle may be a single command, a named suite, or a documented manual runner, but
+  it must be explicit.
+- Supporting evidence may exist, but it does not replace the oracle.
+- If the oracle is manual or long-running, document it in the owning phase plan and the
+  current-state docs.
+
 ## Red Team Protocol
 
 ### Baseline
@@ -68,6 +77,20 @@ change set:
 - executable examples in `examples/`
 - active specs and current-state docs
 
+## Contract Invariants
+
+Machine-facing contracts should be expressed as invariants and locked with tests.
+
+Examples:
+
+- if a command reports perfect success, its error list must be empty
+- formatter output must remain parseable on the supported corpus
+- decompiler output must round-trip through the supported parser path
+- executable examples must remain executable after canonical formatting
+- status docs must not claim a stronger guarantee than the repo actually proves
+
+When a public surface has an implicit invariant, make it explicit and test it.
+
 ## Example Corpus Policy
 
 - `examples/` means executable Phase 0 examples that should survive `chelis fmt` and
@@ -75,6 +98,8 @@ change set:
 - `examples/illustrative/` is for syntax or design examples that are useful but not on
   the executable Phase 0 path.
 - Do not mix those meanings in tests or docs.
+- Decide the executable-vs-illustrative split early in a phase, not after examples have
+  already been used as proof artifacts.
 
 ## Build And Gate Commands
 
@@ -89,6 +114,23 @@ cargo fmt --all -- --check
 
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
+
+## Manual Gates
+
+- Every manual acceptance gate must have a documented command, expected success condition,
+  and owning phase.
+- If default CI does not run the gate, the docs must say so directly.
+- Ignored tests are allowed only when they clearly mirror a documented manual gate or an
+  environment-dependent prerequisite.
+- Phase summaries must not imply that a manual gate is part of the default workspace pass
+  when it is not.
+
+## CLI Surface Discipline
+
+- CLI commands are part of the product surface, not wrappers around library tests.
+- Formatter, decompiler, evaluator, checker, and build-command behavior should be tested
+  against a corpus, not only single happy-path examples.
+- For machine-facing CLI output, test both shape and semantic invariants.
 
 ## Chelis-Specific Rules
 
@@ -125,4 +167,4 @@ Current shared skill set:
 - `phase-gate`
 - `backend-numerics`
 - `example-corpus`
-
+- `cli-surface`

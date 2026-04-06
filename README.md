@@ -134,7 +134,7 @@ This repo keeps shared agent guidance in:
 - `CLAUDE.md`: should resolve to `AGENTS.md`
 - `SKILL.md`: compact Chelis code-generation teaching document
 - `agent-skills/`: project-local reusable workflows for red teaming, phase gating, spec sync,
-  backend numerics, and example policy
+  backend numerics, CLI surface validation, and example policy
 
 Tool-specific skill entry points should resolve to the same local skill library:
 

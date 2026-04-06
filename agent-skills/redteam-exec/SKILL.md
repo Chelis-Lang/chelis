@@ -22,10 +22,11 @@ find issues in an implementation.
 - Check whether phase claims depend on ignored tests or manual runners.
 - Verify `chelis check` semantics, formatter/decompiler round-trips, and executable examples.
 - Cross-check active docs against actual shipped behavior.
+- Identify the authoritative phase oracle and verify it directly.
+- Look for machine-facing invariant violations, not just test failures.
 
 ## Output Standard
 
 - Findings first.
 - Include exact file/test/command evidence.
 - Treat "no findings" as suspicious unless you exercised multiple surfaces.
-
