@@ -84,6 +84,7 @@ examples/            Example Chelis programs
 
 ## Documentation
 
+- [LLM Skill File](SKILL.md)
 - [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
 - [Architecture Guide](ARCHITECTURE.md)
 - [Context](spec/00-context.md)

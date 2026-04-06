@@ -143,6 +143,13 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | `cross_entropy(logits, labels)` | See §4.3 |
 | `min_elem(a, b)` | `neg(max_elem(neg(a), neg(b)))` |
 
+**Current implementation note:** the type checker currently also accepts a
+`normalize(x)` convenience name.
+It is **not** part of the stable Tier 2 surface yet because its lowering semantics are
+not specified here and there is no corresponding Phase 0e lowering rule.
+Do not treat `normalize` as a stable specified built-in until this document and the IR
+lowering are aligned.
+
 ### 3.5 Lowering Helpers (NOT Tier 1 or Tier 2)
 
 The following names appear in lowering narratives (§4) as pseudocode or pattern-matched operations. They are NOT RISC primitives and NOT Tier 2 built-ins. They decompose into Tier 1 primitives:

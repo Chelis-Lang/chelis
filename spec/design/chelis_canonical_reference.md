@@ -175,6 +175,15 @@ Core transforms remain first-class:
 - `vmap(f)` for vectorization
 - `jit(f)` as a future compilation boundary marker
 
+Implementation-surface note:
+
+- `min_elem` is part of the specified derived built-in surface.
+- `block` is part of the Deep syntax vocabulary and Surf block desugaring.
+- `normalize` currently exists in the type checker built-in environment, but it is not
+  yet a stable specified/lowered built-in.
+  Treat it as provisional implementation surface until `spec/05` and the IR lowering
+  are aligned.
+
 The language is built around programs-as-data, but mutation and evolution operators are
 left to user space rather than embedded as special language primitives.
 
