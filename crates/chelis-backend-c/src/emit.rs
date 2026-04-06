@@ -104,7 +104,12 @@ impl CEmitter {
             }
         }
 
+        // Copy outputs to contiguous buffers owned by the caller
         for (slot, output) in output_specs.iter().enumerate() {
+            let is_load = dag
+                .get(output.id)
+                .map(|n| matches!(n.op, RiscOp::Load { .. }))
+                .unwrap_or(false);
             if output.is_store {
                 e.line(&format!("outputs[{slot}] = t{};", output.id.0));
             } else {
@@ -112,6 +117,13 @@ impl CEmitter {
                     "outputs[{slot}] = chelis_contiguous(t{});",
                     output.id.0
                 ));
+                // Free the original if contiguous made a copy (but not Loads — they're borrowed)
+                if !is_load {
+                    e.line(&format!(
+                        "if (outputs[{slot}] != t{id}) chelis_free(t{id});",
+                        id = output.id.0
+                    ));
+                }
             }
         }
 
