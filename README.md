@@ -6,9 +6,9 @@ the supervisor.
 Surf is the readable syntax for humans.
 Deep is the canonical s-expression syntax for machines and the compiler.
 
-**Status:** Phase 0h complete.
-Phases 0a-0h complete.
-Phase 0i is next.
+**Status:** Phase 0 complete.
+Phases 0a-0i complete.
+Phase 1 is next.
 
 ## Prerequisites
 
@@ -57,7 +57,17 @@ Phase 0 is now complete through:
 - executable spec-suite coverage by language behavior
 - end-to-end MNIST training on CPU
 
-Next up is Phase 0i: the first Tide workflow and evaluator/backend agreement tooling.
+Phase 0i shipped:
+
+- `chelis deep`
+- `chelis surf`
+- `chelis fmt`
+- `chelis eval`
+- `chelis check`
+- `chelis build`
+- `chelis tide`
+
+Next up is Phase 1: the first GPU/backend expansion and executable grammar tooling.
 AI assistance planning is split cleanly:
 
 - Phase 2: `SKILL.md` + Tide MCP for frontier models
@@ -89,7 +99,8 @@ crates/
   chelis-backend-c/  C backend and runtime
   chelis-cli/        CLI binary
 spec/                Numbered language specs and design docs
-examples/            Example Chelis programs
+examples/            Executable Phase 0 example programs
+examples/illustrative/  Non-executable syntax/design examples
 ```
 
 ## Key Ideas

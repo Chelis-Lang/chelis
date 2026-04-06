@@ -1,6 +1,6 @@
 # Tide: Interactive Mode
 
-**Status:** Planned for Phase 0i.
+**Status:** Implemented in Phase 0i.
 This document records the intended architecture so the rest of the docs stay aligned
 while implementation catches up.
 

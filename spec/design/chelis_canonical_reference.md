@@ -20,9 +20,9 @@ and not a Python replacement.
 It targets model authoring, training, deployment, and program synthesis for AI
 workloads.
 
-**Current status:** Phase 0h is complete.
-Phases 0a-0h are complete.
-Phase 0i is next.
+**Current status:** Phase 0 is complete.
+Phases 0a-0i are complete.
+Phase 1 is next.
 
 ---
 

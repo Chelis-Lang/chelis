@@ -89,12 +89,14 @@ fn roundtrip_match() {
 
 #[test]
 fn roundtrip_example_pattern_matching() {
-    roundtrip(include_str!("../../../examples/pattern_matching.ch"));
+    roundtrip(include_str!(
+        "../../../examples/illustrative/pattern_matching.ch"
+    ));
 }
 
 #[test]
 fn roundtrip_example_pipeline() {
-    roundtrip(include_str!("../../../examples/pipeline.ch"));
+    roundtrip(include_str!("../../../examples/illustrative/pipeline.ch"));
 }
 
 #[test]
@@ -104,12 +106,14 @@ fn roundtrip_example_hello_tensor() {
 
 #[test]
 fn roundtrip_example_linear_regression() {
-    roundtrip(include_str!("../../../examples/linear_regression.ch"));
+    roundtrip(include_str!(
+        "../../../examples/illustrative/linear_regression.ch"
+    ));
 }
 
 #[test]
 fn roundtrip_example_mlp() {
-    roundtrip(include_str!("../../../examples/mlp.ch"));
+    roundtrip(include_str!("../../../examples/illustrative/mlp.ch"));
 }
 
 // === Dim param desugaring ===

@@ -80,6 +80,27 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
 }
 
 pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+    let type_env = build_phase0e_type_env(exprs);
+    let mut result = infer_phase0e_program_with_env(exprs, &type_env);
+    validate_phase0e_program(exprs, &type_env, &mut result.errors);
+    if result.errors.is_empty() {
+        Ok(CheckedProgram {
+            exprs: exprs.to_vec(),
+            type_env,
+        })
+    } else {
+        Err(result)
+    }
+}
+
+pub fn infer_phase0e_program(exprs: &[deep::Expr]) -> InferResult {
+    let type_env = build_phase0e_type_env(exprs);
+    let mut result = infer_phase0e_program_with_env(exprs, &type_env);
+    validate_phase0e_program(exprs, &type_env, &mut result.errors);
+    result
+}
+
+fn infer_phase0e_program_with_env(exprs: &[deep::Expr], _type_env: &Phase0eTypeEnv) -> InferResult {
     let mut result = infer_program(exprs);
     result
         .errors
@@ -94,16 +115,7 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
             vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
         ));
     }
-    let type_env = build_phase0e_type_env(exprs);
-    validate_phase0e_program(exprs, &type_env, &mut result.errors);
-    if result.errors.is_empty() {
-        Ok(CheckedProgram {
-            exprs: exprs.to_vec(),
-            type_env,
-        })
-    } else {
-        Err(result)
-    }
+    result
 }
 
 type Phase0eTypeEnv = HashMap<String, deep::Expr>;

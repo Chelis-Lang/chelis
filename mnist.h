@@ -1,0 +1,1 @@
+void mnist(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);

@@ -22,8 +22,8 @@ PROMPTS = [
     ("surf", "Write a sigmoid transform over tensor[n, f32]."),
     ("surf", "Write a dimension-polymorphic identity function."),
     ("surf", "Write a type alias plus a passthrough function."),
-    ("surf", "Write an optimizer ADT and extract the learning rate."),
-    ("surf", "Write an activation ADT and branch between relu and sigmoid."),
+    ("surf", "Write a bias-add helper using expand over tensor[batch, hidden, f32]."),
+    ("surf", "Write a two-layer feed-forward helper using relu and matmul."),
     ("deep", "Rewrite one of the validated patterns as canonical Deep."),
 ]
 

@@ -16,7 +16,7 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **0f** | C backend codegen (host + BLAS + OpenMP) | ✅ Complete |
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
-| **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) |  |
+| **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) |  |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |

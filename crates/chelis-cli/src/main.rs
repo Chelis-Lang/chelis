@@ -143,7 +143,7 @@ fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-    let report = chelis_types::fitness::check_program(&deep_exprs);
+    let report = chelis_types::check_phase0e_fitness(&deep_exprs);
     // Format as JSON manually
     let errors_json: Vec<String> = report
         .errors
@@ -226,6 +226,9 @@ fn cmd_build(
         out_dir.join(format!("{func_name}.c"))
     };
     let h_path = c_path.with_extension("h");
+    if let Some(parent) = c_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
 
     fs::write(&c_path, &result.c_source)?;
     fs::write(&h_path, &result.h_header)?;
@@ -307,8 +310,9 @@ fn try_eval(source: &str) -> Result<String, String> {
         return Err("empty program".into());
     }
 
-    let inputs = HashMap::new();
-    let vals = chelis_ir::eval::eval_tensor(&dag, &inputs).map_err(|e| e.to_string())?;
+    let inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
+    let vals = chelis_ir::eval::eval_tensor_with_strict(&dag, |name| inputs.get(name).cloned())
+        .map_err(|e| e.to_string())?;
 
     // Get the last root's value, or the last node's value
     let roots = dag.roots();

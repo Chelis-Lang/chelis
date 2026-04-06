@@ -4,7 +4,7 @@
 //! is. This is the training signal for AI agents (see spec section 6).
 
 use crate::errors::{CheckError, CheckErrorKind};
-use crate::infer::InferResult;
+use crate::infer::{InferResult, infer_phase0e_program};
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -48,7 +48,7 @@ impl FitnessReport {
     /// Compute fitness from an inference result.
     ///
     /// `parse` is 1.0 (we only reach the checker if parsing succeeded).
-    /// `structure` is 1.0 by default ��� use `with_structure` to override
+    /// `structure` is 1.0 by default; use `with_structure` to override
     /// if the Deep tag validator was run upstream.
     pub fn from_infer_result(result: &InferResult) -> FitnessReport {
         Self::from_infer_result_with_structure(result, 1.0)
@@ -113,9 +113,61 @@ impl FitnessReport {
 /// Type-check a Deep program and produce a fitness report.
 /// Runs tag validation to compute the structure component.
 pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
-    // Compute structure score from tag validator
+    let structure = structure_score(exprs);
+    let result = crate::infer::infer_program(exprs);
+    FitnessReport::from_infer_result_with_structure(&result, structure)
+}
+
+/// Phase 0e/0h-aware fitness report that treats typed self-loads as valid
+/// program inputs, matching the executable compiler pipeline.
+pub fn check_phase0e_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
+    let structure = structure_score(exprs);
+    let result = infer_phase0e_program(exprs);
+    if result.errors.is_empty() {
+        let total_nodes = count_nodes(exprs);
+        return FitnessReport {
+            score: 1.0,
+            components: FitnessComponents {
+                parse: 1.0,
+                structure,
+                names: 1.0,
+                types: 1.0,
+            },
+            errors: Vec::new(),
+            typed_nodes: total_nodes,
+            untyped_nodes: 0,
+            total_nodes,
+            unresolved_names: Vec::new(),
+        };
+    }
+
+    let mut report = FitnessReport::from_infer_result_with_structure(&result, structure);
+
+    // Phase 0e adds executable-pipeline validation after type inference. Ensure
+    // those failures reduce the fitness score as well, so score 1.0 always means
+    // error-free on the executable Phase 0 path.
+    let min_untyped = result.errors.len().min(report.total_nodes);
+    let effective_untyped = report.untyped_nodes.max(min_untyped);
+    let effective_typed = report.total_nodes.saturating_sub(effective_untyped);
+
+    report.typed_nodes = effective_typed;
+    report.untyped_nodes = effective_untyped;
+    report.components.types = if report.total_nodes == 0 {
+        1.0
+    } else {
+        effective_typed as f64 / report.total_nodes as f64
+    };
+    report.score = W_PARSE * report.components.parse
+        + W_STRUCTURE * report.components.structure
+        + W_NAMES * report.components.names
+        + W_TYPES * report.components.types;
+
+    report
+}
+
+fn structure_score(exprs: &[chelis_deep::Expr]) -> f64 {
     let warnings = chelis_deep::validate::validate(exprs);
-    let structure = if exprs.is_empty() {
+    if exprs.is_empty() {
         1.0
     } else {
         let node_count = count_nodes(exprs).max(1);
@@ -126,10 +178,7 @@ pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
             .len();
         let valid = node_count.saturating_sub(invalid_nodes);
         valid as f64 / node_count as f64
-    };
-
-    let result = crate::infer::infer_program(exprs);
-    FitnessReport::from_infer_result_with_structure(&result, structure)
+    }
 }
 
 /// Count total AST nodes for structure scoring.
@@ -240,5 +289,28 @@ mod tests {
             .unwrap();
         let r = check_program(&exprs);
         assert!((r.score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn phase0e_check_accepts_typed_self_loads() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} x (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))",
+        )
+        .unwrap();
+        let r = check_phase0e_program(&exprs);
+        assert!((r.score - 1.0).abs() < 1e-9, "{}", r.score);
+        assert!(r.errors.is_empty());
+    }
+
+    #[test]
+    fn phase0e_check_never_reports_perfect_score_with_errors() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} f (match {} (lit {type: (t-prim {} int32)} 1) (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 1))))",
+        )
+        .unwrap();
+        let r = check_phase0e_program(&exprs);
+        assert!(!r.errors.is_empty(), "{r:?}");
+        assert!(r.score < 1.0, "{r:?}");
+        assert!(r.untyped_nodes > 0, "{r:?}");
     }
 }

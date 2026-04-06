@@ -51,6 +51,13 @@ fn children(list: &List) -> &[Expr] {
     }
 }
 
+fn meta(list: &List) -> Option<&MetaMap> {
+    match list.elements.get(1) {
+        Some(Expr::Map(map, _)) => Some(map),
+        _ => None,
+    }
+}
+
 fn sym_str(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
@@ -111,7 +118,7 @@ fn decompile_defsig(list: &List) -> String {
     }
     let name = sym_str(&kids[0]).unwrap_or("_");
     let ty = decompile_type_expr(&kids[1]);
-    format!("-- sig: {name} : {ty}")
+    format!("sig {name} : {ty}")
 }
 
 fn decompile_deftype(list: &List) -> String {
@@ -258,9 +265,29 @@ fn decompile_expr(expr: &Expr) -> String {
         }
         Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
         Expr::Map(_, _) => "()".to_string(),
-        Expr::MetaExpr(meta, _) => decompile_expr(&meta.expr),
-        Expr::List(list, _) => decompile_list_expr(list),
+        Expr::MetaExpr(meta, _) => {
+            let inner = decompile_expr(&meta.expr);
+            if let Some((_, ty)) = meta.entries.iter().find(|(key, _)| key == "type") {
+                format!("({inner} : {})", decompile_type_expr(ty))
+            } else {
+                inner
+            }
+        }
+        Expr::List(list, _) => {
+            let inner = decompile_list_expr(list);
+            if should_render_type_annotation(list)
+                && let Some(ty) = extract_type_meta_from_list(list)
+            {
+                format!("({inner} : {})", decompile_type_expr(&ty))
+            } else {
+                inner
+            }
+        }
     }
+}
+
+fn should_render_type_annotation(list: &List) -> bool {
+    !matches!(tag(list), Some("cast"))
 }
 
 fn decompile_list_expr(list: &List) -> String {
@@ -371,11 +398,15 @@ fn decompile_list_expr(list: &List) -> String {
         Some("vmap") => {
             let kids = children(list);
             if kids.len() >= 2 {
-                format!(
-                    "vmap({}, {})",
-                    decompile_expr(&kids[0]),
-                    decompile_expr(&kids[1])
-                )
+                if let Some(axis) = extract_int_literal(&kids[1]) {
+                    format!("vmap({}, axis={axis})", decompile_expr(&kids[0]))
+                } else {
+                    format!(
+                        "vmap({}, {})",
+                        decompile_expr(&kids[0]),
+                        decompile_expr(&kids[1])
+                    )
+                }
             } else if kids.len() == 1 {
                 format!("vmap({})", decompile_expr(&kids[0]))
             } else {
@@ -688,6 +719,32 @@ fn extract_type_meta(expr: &Expr) -> Option<Expr> {
         }
     }
     None
+}
+
+fn extract_type_meta_from_list(list: &List) -> Option<Expr> {
+    meta(list).and_then(|meta| {
+        meta.entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value.clone())
+    })
+}
+
+fn extract_int_literal(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(value), _) => Some(*value),
+        Expr::MetaExpr(meta, _) => extract_int_literal(&meta.expr),
+        Expr::List(list, _) if tag(list) == Some("lit") => {
+            children(list).first().and_then(|child| {
+                if let Expr::Atom(Atom::Int(value), _) = child {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
+    }
 }
 
 fn capitalize(s: &str) -> String {

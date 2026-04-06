@@ -74,7 +74,7 @@ fn spec_deep_strict_validates_desugared() {
 }
 
 #[test]
-fn spec_all_examples_parse() {
+fn spec_all_executable_examples_parse_and_check() {
     let examples_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples")
         .canonicalize()
@@ -100,18 +100,31 @@ fn spec_all_examples_parse() {
                 "{} desugared to empty",
                 path.display()
             );
+            let report = chelis_types::check_phase0e_fitness(&deep_exprs);
+            assert!(
+                report.errors.is_empty(),
+                "{} must remain executable in Phase 0: {:?}",
+                path.display(),
+                report.errors
+            );
+            assert!(
+                (report.score - 1.0).abs() < 1e-9,
+                "{} must keep score 1.0, got {}",
+                path.display(),
+                report.score
+            );
             count += 1;
         }
     }
     assert!(
-        count >= 4,
-        "expected at least 4 .ch example files, found {count}"
+        count >= 2,
+        "expected at least 2 executable .ch example files, found {count}"
     );
 }
 
 #[test]
 fn spec_deep_3tuple_format() {
-    let src = include_str!("../../../examples/linear_regression.ch");
+    let src = include_str!("../../../examples/hello_tensor.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
 

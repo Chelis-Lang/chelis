@@ -128,9 +128,9 @@ This glossary defines the names, not their implementation status.
 
 ### `chelis build`
 
-Run the production compilation path.
+Run the production compilation path through code generation.
 Today that means Surf or Deep input through type checking, lowering, C emission, and
-native compilation.
+runtime artifact generation for external native compilation.
 
 ### `chelis check`
 
