@@ -53,7 +53,9 @@ the current compiler surface.
 
 Ship a local model with the toolchain.
 This is the Phase 3 story: SSD for distributional shaping, trajectory collection with
-compiler feedback, LoRA fine-tune, then quantize and ship as GGUF.
+compiler feedback, empirically chosen fine-tuning, then quantize and ship as GGUF.
+LoRA is the default starting point, SDFT is the anti-forgetting fallback if forgetting
+is measured, and RLVR is optional final polish if needed.
 
 The important change is that the local model is a required deliverable, not optional
 hedging.
@@ -72,6 +74,14 @@ Those programs serve as:
 - few-shot examples
 - trajectory seeds
 - evaluation anchors
+
+Before local-model training starts, measure the ICL effect by running the SKILL
+evaluation with and without the spec in context.
+That tells us whether distillation-style methods are even worth attempting.
+
+Anti-forgetting is the hard constraint for Track 2:
+
+- Chelis training must not erase PyTorch/JAX semantic knowledge
 
 ---
 

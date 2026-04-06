@@ -316,7 +316,7 @@ Training pipeline:
 
 1. **SSD for distributional shaping**
 2. **Trajectory collection with compiler feedback**
-3. **LoRA fine-tune**
+3. **Fine-tune, method chosen empirically**
 4. **Quantize and ship as GGUF**
 
 SSD matters because it is the cheap bridge between "model has never seen Deep" and
@@ -324,6 +324,17 @@ SSD matters because it is the cheap bridge between "model has never seen Deep" a
 It uses the model's own outputs and directly targets the structural-validity gap seen
 in SKILL evaluation, where smaller or local models may reason correctly about Deep yet
 still fail to emit the canonical form.
+
+Step 3 starts with LoRA as the default.
+If forgetting is measured, switch to SDFT instead.
+RLVR remains available as an optional final polish step if the quality bar still is not
+met.
+Anti-forgetting is a hard constraint: the model must preserve PyTorch/JAX semantic
+knowledge through training.
+Before any training, measure the ICL effect by running the SKILL evaluation with and
+without the spec in context.
+That quick measurement gates whether distillation-style methods are worth trying at
+all.
 
 Product framing:
 

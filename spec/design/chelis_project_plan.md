@@ -333,8 +333,11 @@ Training pipeline:
    something the compiler can score."
 2. **Trajectory collection with compiler feedback**
    Collect full attempt traces, including failures, from compiler-in-the-loop runs.
-3. **LoRA fine-tune**
-   Fine-tune on trajectories, seed programs, spec tests, and curated examples.
+3. **Fine-tune, method chosen empirically**
+   Start with LoRA on trajectories, seed programs, spec tests, and curated examples.
+   If forgetting is measured, switch to SDFT instead.
+   RLVR is available as an optional final polish step if the quality bar still is not
+   met.
 4. **Quantize and ship as GGUF**
    Package the local model as a standard toolchain artifact.
 
@@ -345,6 +348,28 @@ Why SSD is explicit:
 - it directly addresses the structural validity gap seen in SKILL validation, where
   small and local models may reason correctly about Deep but fail to execute the
   canonical syntax in their emitted output
+
+Prerequisite measurement:
+
+- before any training, measure the ICL effect by running the SKILL evaluation with and
+  without the spec in context
+- if the spec meaningfully improves output quality, distillation-style methods are
+  viable
+- if it does not, stick with the simplest supervised path first
+
+Hard constraint:
+
+- anti-forgetting is mandatory; the trained model must preserve PyTorch/JAX semantic
+  knowledge through Chelis training
+
+Decision protocol:
+
+1. Try LoRA first and measure both Chelis fitness and forgetting on a PyTorch/JAX
+   comprehension benchmark.
+2. If fitness is good and forgetting is minimal, ship it.
+3. If forgetting is measured, replace LoRA with SDFT.
+4. If quality still plateaus after the chosen fine-tuning method, use RLVR as final
+   polish.
 
 Phase 3 success condition:
 
