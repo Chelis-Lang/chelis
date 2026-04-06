@@ -70,6 +70,9 @@ def main():
 
     print(f"Extracting text from {pdf_path}...", file=sys.stderr)
     text = extract_text(pdf_path)
+    if not text.strip():
+        print(f"Error: no text extracted from {pdf_path}", file=sys.stderr)
+        sys.exit(1)
     print(f"Extracted {len(text)} characters from {pdf_path}", file=sys.stderr)
 
     messages = [

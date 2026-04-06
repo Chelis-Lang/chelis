@@ -47,8 +47,16 @@ def load_api_key(env_path=None):
         if p.is_file():
             for line in p.read_text().splitlines():
                 line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:]
                 if line.startswith("OPENROUTER_API_KEY="):
-                    return line.split("=", 1)[1].strip()
+                    val = line.split("=", 1)[1].strip()
+                    # Strip surrounding quotes
+                    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                        val = val[1:-1]
+                    return val
     raise RuntimeError(
         "OPENROUTER_API_KEY not found in environment or .env file"
     )

@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlunparse
 
-from chelis_tools.openrouter import chat
+from chelis_tools.openrouter import MODELS, chat
 from chelis_tools.summarize_pdf import SYSTEM_PROMPT, extract_text
 
 
@@ -119,7 +119,6 @@ def main():
                 ]
                 kwargs = {}
                 if args.model:
-                    from chelis_tools.openrouter import MODELS
                     kwargs["model"] = MODELS.get(args.model, args.model)
                 result = chat(messages, **kwargs)
 
