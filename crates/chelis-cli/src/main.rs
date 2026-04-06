@@ -6,6 +6,9 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+const RUNTIME_H: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.h");
+const RUNTIME_C: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.c");
+
 #[derive(Parser)]
 #[command(
     name = "chelis",
@@ -103,10 +106,10 @@ fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Erro
         let deep_exprs = chelis_deep::parser::parse_str(&source)?;
         chelis_deep::printer::print_canonical(&deep_exprs)
     } else {
-        // .ch: parse Surf -> desugar -> print canonical Deep
+        // .ch: parse Surf -> desugar -> decompile back to Surf (idempotent)
         let decls = chelis_surf::parser::parse_str(&source)?;
         let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-        chelis_deep::printer::print_canonical(&deep_exprs)
+        chelis_surf::decompile::decompile_program(&deep_exprs)
     };
     if inplace {
         fs::write(file, &output)?;
@@ -227,13 +230,24 @@ fn cmd_build(
     fs::write(&c_path, &result.c_source)?;
     fs::write(&h_path, &result.h_header)?;
 
+    let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
+    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
+
     println!("Wrote {} and {}", c_path.display(), h_path.display());
-    let flags: Vec<&str> = result
+    println!(
+        "Wrote {} and {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("chelis_runtime.c").display()
+    );
+    let mut flags: Vec<&str> = result
         .compile_flags
         .iter()
         .chain(result.link_flags.iter())
         .map(|s| s.as_str())
         .collect();
+    flags.sort();
+    flags.dedup();
     println!(
         "Compile: gcc -O2 {} {} chelis_runtime.c -o {}",
         flags.join(" "),

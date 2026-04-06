@@ -129,7 +129,7 @@ fn decompile_deftype(list: &List) -> String {
     let param_str = if params.is_empty() {
         String::new()
     } else {
-        format!(" {params}")
+        format!("[{}]", params.replace(' ', ", "))
     };
 
     let variants: Vec<String> = kids.iter().skip(2).map(decompile_variant).collect();
@@ -137,7 +137,8 @@ fn decompile_deftype(list: &List) -> String {
     if variants.is_empty() {
         format!("type {name}{param_str}")
     } else {
-        format!("type {name}{param_str} =\n  {}", variants.join("\n  | "))
+        let variant_lines: Vec<String> = variants.iter().map(|v| format!("| {v}")).collect();
+        format!("type {name}{param_str} =\n  {}", variant_lines.join("\n  "))
     }
 }
 
@@ -151,7 +152,7 @@ fn decompile_variant(expr: &Expr) -> String {
         }
         let name = sym_str(&kids[0]).unwrap_or("_");
         if kids.len() == 1 {
-            return format!("| {name}");
+            return name.to_string();
         }
         let fields: Vec<String> = kids[1..]
             .iter()
@@ -169,7 +170,7 @@ fn decompile_variant(expr: &Expr) -> String {
                 decompile_type_expr(f)
             })
             .collect();
-        return format!("| {name}({})", fields.join(", "));
+        return format!("{name}({})", fields.join(", "));
     }
     "-- unknown variant".to_string()
 }
@@ -185,7 +186,7 @@ fn decompile_typealias(list: &List) -> String {
     let param_str = if params.is_empty() {
         String::new()
     } else {
-        format!(" {params}")
+        format!("[{}]", params.replace(' ', ", "))
     };
     format!("type {name}{param_str} = {ty}")
 }
@@ -469,10 +470,10 @@ fn decompile_arm(expr: &Expr) -> String {
             let pat = decompile_pattern(&kids[0]);
             let _guard = &kids[1];
             let body = decompile_expr(&kids[2]);
-            return format!("| {pat} -> {body}");
+            return format!("| {pat} => {body}");
         }
     }
-    "| _ -> ()".to_string()
+    "| _ => ()".to_string()
 }
 
 fn decompile_bind(expr: &Expr) -> String {
@@ -639,7 +640,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                     return name.to_string();
                 }
                 let args: Vec<String> = kids[1..].iter().map(decompile_type_expr).collect();
-                return format!("{name}({})", args.join(", "));
+                return format!("{name}[{}]", args.join(", "));
             }
             Some("t-tuple") => {
                 let kids = children(list);
