@@ -11,6 +11,13 @@ name = "chelis"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+chelis-deep.workspace = true
+chelis-surf.workspace = true
+chelis-types = { path = "../chelis-types" }
+chelis-ir = { path = "../chelis-ir" }
+chelis-backend-c = { path = "../chelis-backend-c" }
+serde_json = "1"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

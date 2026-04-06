@@ -63,7 +63,7 @@ fn check_surf(source: &str) {
         Ok(decls) => {
             let deep = desugar_program(&decls);
             let report = check_program(&deep);
-            json.push_str("{");
+            json.push('{');
             json.push_str("\"lang\":\"surf\",");
             json.push_str("\"parse_error\":null,");
             json.push_str(&format!("\"fitness\":{},", report.score));
@@ -82,9 +82,12 @@ fn check_surf(source: &str) {
             json.push_str("]}");
         }
         Err(error) => {
-            json.push_str("{");
+            json.push('{');
             json.push_str("\"lang\":\"surf\",");
-            json.push_str(&format!("\"parse_error\":\"{}\",", json_escape(&error.to_string())));
+            json.push_str(&format!(
+                "\"parse_error\":\"{}\",",
+                json_escape(&error.to_string())
+            ));
             json.push_str("\"fitness\":0.0,");
             json.push_str("\"warnings\":[],");
             json.push_str("\"errors\":[]}");
@@ -100,7 +103,7 @@ fn check_deep(source: &str) {
         Ok(exprs) => {
             let warnings = validate(&exprs);
             let report = check_program(&exprs);
-            json.push_str("{");
+            json.push('{');
             json.push_str("\"lang\":\"deep\",");
             json.push_str("\"parse_error\":null,");
             json.push_str(&format!("\"fitness\":{},", report.score));
@@ -130,9 +133,12 @@ fn check_deep(source: &str) {
             json.push_str("]}");
         }
         Err(error) => {
-            json.push_str("{");
+            json.push('{');
             json.push_str("\"lang\":\"deep\",");
-            json.push_str(&format!("\"parse_error\":\"{}\",", json_escape(&error.to_string())));
+            json.push_str(&format!(
+                "\"parse_error\":\"{}\",",
+                json_escape(&error.to_string())
+            ));
             json.push_str("\"fitness\":0.0,");
             json.push_str("\"warnings\":[],");
             json.push_str("\"errors\":[]}");

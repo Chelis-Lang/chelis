@@ -240,13 +240,39 @@ fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
     }
 }
 
-pub fn eval_tensor(
+fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
+    let mut live = vec![false; dag.len()];
+    let mut stack: Vec<NodeId> = roots.to_vec();
+    while let Some(id) = stack.pop() {
+        if live[id.0] {
+            continue;
+        }
+        live[id.0] = true;
+        if let Some(node) = dag.get(id) {
+            stack.extend(node.inputs.iter().copied());
+        }
+    }
+    live
+}
+
+fn eval_tensor_internal<F>(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-) -> Result<HashMap<NodeId, TensorValue>, String> {
+    live: Option<&[bool]>,
+    strict_loads: bool,
+    mut load_input: F,
+) -> Result<HashMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
     let mut values: HashMap<NodeId, TensorValue> = HashMap::new();
 
     for node in dag.nodes() {
+        if let Some(mask) = live
+            && !mask[node.id.0]
+        {
+            continue;
+        }
+
         let value = match &node.op {
             RiscOp::Const { value } => {
                 let shape = concrete_shape(&node.output_type).unwrap_or_default();
@@ -255,10 +281,13 @@ pub fn eval_tensor(
                     shape,
                 }
             }
-            RiscOp::Load { name } => inputs
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| default_value(&node.output_type)),
+            RiscOp::Load { name } => match load_input(name) {
+                Some(value) => value,
+                None if strict_loads => {
+                    return Err(format!("missing required input `{name}`"));
+                }
+                None => default_value(&node.output_type),
+            },
             RiscOp::Store { .. } => values[&node.inputs[0]].clone(),
             RiscOp::Add => binary_map(
                 &values[&node.inputs[0]],
@@ -318,6 +347,60 @@ pub fn eval_tensor(
     }
 
     Ok(values)
+}
+
+pub fn eval_tensor_with<F>(dag: &Dag, load_input: F) -> Result<HashMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal(dag, None, false, load_input)
+}
+
+pub fn eval_tensor_with_strict<F>(
+    dag: &Dag,
+    load_input: F,
+) -> Result<HashMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal(dag, None, true, load_input)
+}
+
+pub fn eval_tensor_roots_with<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    load_input: F,
+) -> Result<HashMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    if roots.is_empty() {
+        return eval_tensor_internal(dag, None, false, load_input);
+    }
+    let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal(dag, Some(&live), false, load_input)
+}
+
+pub fn eval_tensor_roots_with_strict<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    load_input: F,
+) -> Result<HashMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    if roots.is_empty() {
+        return eval_tensor_internal(dag, None, true, load_input);
+    }
+    let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal(dag, Some(&live), true, load_input)
+}
+
+pub fn eval_tensor(
+    dag: &Dag,
+    inputs: &HashMap<String, TensorValue>,
+) -> Result<HashMap<NodeId, TensorValue>, String> {
+    eval_tensor_with(dag, |name| inputs.get(name).cloned())
 }
 
 /// Evaluate a DAG on scalar inputs. Each node produces a single f64.
@@ -403,6 +486,62 @@ mod tests {
         assert_eq!(
             vals[&y],
             TensorValue::from_vec(vec![4], vec![2.5, 2.5, 2.5, 2.5])
+        );
+    }
+
+    #[test]
+    fn eval_root_scoped_does_not_require_unrelated_inputs() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone());
+        let sum = dag.add_node(RiscOp::Add, vec![x, x], ty.clone());
+        let dead = dag.add_node(RiscOp::Add, vec![y, y], ty.clone());
+        dag.add_root(sum);
+        dag.add_root(dead);
+
+        let vals = eval_tensor_roots_with(&dag, &[sum], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            vals[&sum],
+            TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
+        );
+        assert!(
+            !vals.contains_key(&dead),
+            "dead branch should not be evaluated in root-scoped mode"
+        );
+    }
+
+    #[test]
+    fn eval_strict_missing_input_is_error() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32());
+        let err = eval_tensor_with_strict(&dag, |_| None).unwrap_err();
+        assert!(err.contains("missing required input `x`"));
+        assert_eq!(x, NodeId(0));
+    }
+
+    #[test]
+    fn eval_root_scoped_strict_only_requires_live_inputs() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone());
+        let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone());
+        let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty);
+
+        let vals = eval_tensor_roots_with_strict(&dag, &[live], |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            vals[&live],
+            TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
         );
     }
 

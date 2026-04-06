@@ -30,6 +30,10 @@ fn sym(s: &str) -> deep::Expr {
     deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), sp())
 }
 
+fn int(n: i64) -> deep::Expr {
+    deep::Expr::Atom(deep::Atom::Int(n), sp())
+}
+
 fn meta_empty() -> deep::Expr {
     deep::Expr::Map(deep::MetaMap::default(), sp())
 }
@@ -577,6 +581,9 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
             let mut children: Vec<deep::Expr> = dims
                 .iter()
                 .map(|d| match d {
+                    TypeExpr::Named(n, _) if n.parse::<i64>().is_ok() => {
+                        node("d-lit", vec![int(n.parse::<i64>().unwrap())])
+                    }
                     TypeExpr::Named(n, _) if n == "*" => node("d-name", vec![sym("*")]),
                     // Declared dim param → always d-var (polymorphic)
                     TypeExpr::Named(n, _) if dim_vars.contains(n.as_str()) => {
@@ -1130,6 +1137,19 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_type(&ty)),
             "(t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))"
+        );
+    }
+
+    #[test]
+    fn test_type_tensor_with_literal_dims() {
+        let ty = TypeExpr::Tensor(
+            vec![named_ty("32"), named_ty("784")],
+            "f32".to_string(),
+            s(),
+        );
+        assert_eq!(
+            print_expr(&desugar_type(&ty)),
+            "(t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))"
         );
     }
 

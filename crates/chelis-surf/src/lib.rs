@@ -1,6 +1,7 @@
 //! Surface syntax parser and desugaring for the Chelis language.
 
 pub mod ast;
+pub mod decompile;
 pub mod desugar;
 pub mod lexer;
 pub mod parser;

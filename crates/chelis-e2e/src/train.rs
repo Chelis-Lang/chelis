@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use chelis_ir::dag::*;
-use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict, eval_tensor_with_strict};
 use chelis_ir::grad::GradResult;
-use chelis_types::types::Prim;
+
+use crate::pipeline::compile_surf;
 
 pub struct TrainConfig {
     pub lr: f64,
@@ -11,118 +12,71 @@ pub struct TrainConfig {
     pub batch_size: usize,
 }
 
-/// Build a simple forward DAG programmatically for an MLP.
-/// x[batch,784] -> matmul(w1[784,128]) + b1[128] -> relu -> matmul(w2[128,10]) + b2[10]
-/// Then: softmax -> log -> mul(labels) -> neg -> sum (cross-entropy loss)
-/// Returns (dag, loss_node, logits_node, param_nodes)
-pub fn build_mnist_dag() -> (Dag, NodeId, NodeId, Vec<(String, NodeId)>) {
-    let mut dag = Dag::new();
-    let f32_ty = |dims: Vec<DimInfo>| TensorType {
-        dims,
-        precision: Prim::F32,
-    };
-    let named = |n: &str, s: usize| DimInfo::Named(n.to_string(), Some(s));
-    let lit = |s: usize| DimInfo::Lit(s);
+pub struct MnistProgram {
+    pub dag: Dag,
+    pub loss_node: NodeId,
+    pub logits_node: NodeId,
+    pub param_nodes: Vec<(String, NodeId)>,
+}
 
-    // Inputs
-    let x = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        f32_ty(vec![named("batch", 32), lit(784)]),
-    );
-    let labels = dag.add_node(
-        RiscOp::Load {
-            name: "labels".into(),
-        },
-        vec![],
-        f32_ty(vec![named("batch", 32), lit(10)]),
-    );
+const MNIST_PARAM_NAMES: &[&str] = &["w1", "b1", "w2", "b2"];
 
-    // Parameters
-    let w1 = dag.add_node(
-        RiscOp::Load { name: "w1".into() },
-        vec![],
-        f32_ty(vec![lit(784), lit(128)]),
-    );
-    let b1 = dag.add_node(
-        RiscOp::Load { name: "b1".into() },
-        vec![],
-        f32_ty(vec![lit(128)]),
-    );
-    let w2 = dag.add_node(
-        RiscOp::Load { name: "w2".into() },
-        vec![],
-        f32_ty(vec![lit(128), lit(10)]),
-    );
-    let b2 = dag.add_node(
-        RiscOp::Load { name: "b2".into() },
-        vec![],
-        f32_ty(vec![lit(10)]),
-    );
+/// Compile the checked-in Surf MNIST example through the real frontend pipeline.
+pub fn build_mnist_program() -> Result<MnistProgram, String> {
+    let src = include_str!("../../../examples/mnist.ch");
+    let compiled = compile_surf(src)?;
 
-    // Layer 1: matmul(x, w1) + b1
-    let x_ty = dag.get(x).unwrap().output_type.clone();
-    let w1_ty = dag.get(w1).unwrap().output_type.clone();
-    let mm1 = chelis_ir::tier2::lower_matmul(&mut dag, x, w1, &x_ty, &w1_ty);
+    let loss_node = *compiled
+        .root_nodes
+        .get("loss")
+        .ok_or("compiled MNIST program is missing `loss` root")?;
+    let logits_node = *compiled
+        .root_nodes
+        .get("logits")
+        .ok_or("compiled MNIST program is missing `logits` root")?;
 
-    let mm1_ty = f32_ty(vec![named("batch", 32), lit(128)]);
-    let b1_exp = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 32 },
-        vec![b1],
-        mm1_ty.clone(),
-    );
-    let h1 = dag.add_node(RiscOp::Add, vec![mm1, b1_exp], mm1_ty.clone());
+    let reachable = reachable_nodes(&compiled.dag, loss_node);
+    let param_nodes = MNIST_PARAM_NAMES
+        .iter()
+        .map(|name| {
+            let node = find_reachable_load(&compiled.dag, &reachable, name)
+                .ok_or_else(|| format!("missing parameter load `{name}` in loss subgraph"))?;
+            Ok(((*name).to_string(), node))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
-    // ReLU
-    let relu_out = chelis_ir::tier2::lower_relu(&mut dag, h1, &mm1_ty);
+    Ok(MnistProgram {
+        dag: compiled.dag,
+        loss_node,
+        logits_node,
+        param_nodes,
+    })
+}
 
-    // Layer 2: matmul(relu_out, w2) + b2
-    let relu_ty = dag.get(relu_out).unwrap().output_type.clone();
-    let w2_ty = dag.get(w2).unwrap().output_type.clone();
-    let mm2 = chelis_ir::tier2::lower_matmul(&mut dag, relu_out, w2, &relu_ty, &w2_ty);
+fn reachable_nodes(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = dag.get(id) {
+            stack.extend(node.inputs.iter().copied());
+        }
+    }
+    seen
+}
 
-    let mm2_ty = f32_ty(vec![named("batch", 32), lit(10)]);
-    let b2_exp = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 32 },
-        vec![b2],
-        mm2_ty.clone(),
-    );
-    let logits = dag.add_node(RiscOp::Add, vec![mm2, b2_exp], mm2_ty.clone());
-
-    // Softmax cross-entropy loss
-    let softmax_out = chelis_ir::tier2::lower_softmax(&mut dag, logits, 1, &mm2_ty);
-
-    // log(softmax)
-    let log_probs = dag.add_node(RiscOp::Log, vec![softmax_out], mm2_ty.clone());
-
-    // mul(log_probs, labels) -- select correct class
-    let selected = dag.add_node(RiscOp::Mul, vec![log_probs, labels], mm2_ty.clone());
-
-    // neg
-    let neg_selected = dag.add_node(RiscOp::Neg, vec![selected], mm2_ty.clone());
-
-    // sum over classes (axis=1)
-    let per_sample_ty = f32_ty(vec![named("batch", 32)]);
-    let per_sample = dag.add_node(
-        RiscOp::Sum { axis: 1 },
-        vec![neg_selected],
-        per_sample_ty.clone(),
-    );
-
-    // mean over batch (sum / batch_size)
-    let scalar_ty = f32_ty(vec![]);
-    let batch_sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![per_sample], scalar_ty.clone());
-    let batch_size_const = dag.add_node(RiscOp::Const { value: 32.0 }, vec![], scalar_ty.clone());
-    let loss = chelis_ir::tier2::lower_div(&mut dag, batch_sum, batch_size_const, &scalar_ty);
-
-    let params = vec![
-        ("w1".to_string(), w1),
-        ("b1".to_string(), b1),
-        ("w2".to_string(), w2),
-        ("b2".to_string(), b2),
-    ];
-
-    (dag, loss, logits, params)
+fn find_reachable_load(dag: &Dag, reachable: &HashSet<NodeId>, name: &str) -> Option<NodeId> {
+    dag.nodes().iter().find_map(|node| {
+        if reachable.contains(&node.id)
+            && matches!(&node.op, RiscOp::Load { name: load } if load == name)
+        {
+            Some(node.id)
+        } else {
+            None
+        }
+    })
 }
 
 /// Initialize random parameters
@@ -172,11 +126,12 @@ pub fn train_step(
     y_batch: &TensorValue,
     lr: f64,
 ) -> Result<f64, String> {
-    let mut inputs = params.clone();
-    inputs.insert("x".to_string(), x_batch.clone());
-    inputs.insert("labels".to_string(), y_batch.clone());
-
-    let vals = eval_tensor(&grad_result.dag, &inputs).map_err(|e| format!("eval error: {e}"))?;
+    let vals = eval_tensor_with_strict(&grad_result.dag, |name| match name {
+        "x" => Some(x_batch.clone()),
+        "labels" => Some(y_batch.clone()),
+        _ => params.get(name).cloned(),
+    })
+    .map_err(|e| format!("eval error: {e}"))?;
 
     let loss = vals
         .get(&loss_node)
@@ -207,15 +162,20 @@ pub fn accuracy(
     data: &[(TensorValue, TensorValue)],
     logits_node: NodeId,
 ) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("accuracy requires non-empty evaluation data".to_string());
+    }
+
     let mut correct = 0;
     let mut total = 0;
 
     for (x_batch, y_batch) in data {
-        let mut inputs = params.clone();
-        inputs.insert("x".to_string(), x_batch.clone());
-        inputs.insert("labels".to_string(), y_batch.clone());
-
-        let vals = eval_tensor(dag, &inputs).map_err(|e| format!("eval error: {e}"))?;
+        let vals = eval_tensor_roots_with_strict(dag, &[logits_node], |name| match name {
+            "x" => Some(x_batch.clone()),
+            "labels" => Some(y_batch.clone()),
+            _ => params.get(name).cloned(),
+        })
+        .map_err(|e| format!("eval error: {e}"))?;
 
         let logits = vals.get(&logits_node).ok_or("logits node not found")?;
 

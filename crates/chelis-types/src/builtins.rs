@@ -123,6 +123,50 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn tensor_binop_to_out(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let t1 = vg.fresh_tvar();
+        let t2 = vg.fresh_tvar();
+        let out = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![t1, t2, out],
+            dvars: vec![],
+            body: Type::Fn(vec![Type::Var(t1), Type::Var(t2)], Box::new(Type::Var(out))),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn tensor_reduce_to_out(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let out = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input, out],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(input), Type::Prim(Prim::Int32)],
+                Box::new(Type::Var(out)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn tensor_expand_to_out(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let out = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input, out],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(input),
+                    Type::Prim(Prim::Int32),
+                    Type::Prim(Prim::Int32),
+                ],
+                Box::new(Type::Var(out)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let kernel = vg.fresh_tvar();
@@ -188,17 +232,17 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("sigmoid", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
     tensor_unop("normalize", &mut env, &mut vg);
-    tensor_reduce("mean", &mut env, &mut vg);
+    tensor_reduce_to_out("mean", &mut env, &mut vg);
 
-    tensor_binop("matmul", &mut env, &mut vg);
+    tensor_binop_to_out("matmul", &mut env, &mut vg);
     tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
-    tensor_reduce("sum", &mut env, &mut vg);
-    tensor_reduce("max_reduce", &mut env, &mut vg);
+    tensor_reduce_to_out("sum", &mut env, &mut vg);
+    tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
-    tensor_unop("expand", &mut env, &mut vg);
+    tensor_expand_to_out("expand", &mut env, &mut vg);
     tensor_unop("pad", &mut env, &mut vg);
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);

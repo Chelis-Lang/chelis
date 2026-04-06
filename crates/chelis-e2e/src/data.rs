@@ -1,7 +1,7 @@
 use chelis_ir::eval::TensorValue;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A batch of (input, label) tensor pairs.
 pub type BatchVec = Vec<(TensorValue, TensorValue)>;
@@ -51,6 +51,17 @@ pub fn load_mnist(dir: &Path) -> Result<(BatchVec, BatchVec), String> {
     let test = batch_data(&test_images, &test_labels, 32);
 
     Ok((train, test))
+}
+
+pub fn default_mnist_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MNIST_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/mnist")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("data/mnist"))
 }
 
 fn load_idx_images(path: &Path) -> Result<Vec<Vec<f64>>, String> {

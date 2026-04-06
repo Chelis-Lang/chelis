@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use chelis_deep::parser::{parse_str as parse_deep, parse_str_strict as parse_deep_strict};
 use chelis_deep::printer::print_canonical;
-use chelis_deep::validate::{validate, WarningKind};
+use chelis_deep::validate::{WarningKind, validate};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 

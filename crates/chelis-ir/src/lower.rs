@@ -989,14 +989,17 @@ impl LowerCtx {
                 }
                 // Handle (param {} name) form.
                 if let Expr::List(param_list, _) = param
-                    && param_list.elements.len() >= 3
-                    && let Expr::Atom(Atom::Symbol(name), _) = &param_list.elements[2]
+                    && !param_list.elements.is_empty()
+                    && let Expr::Atom(Atom::Symbol(name), _) = &param_list.elements[0]
                 {
-                    let load_id = self.dag.add_node(
-                        RiscOp::Load { name: name.clone() },
-                        vec![],
-                        Self::default_type(),
-                    );
+                    let ty = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
+                        Self::type_from_meta(&meta.entries)
+                    } else {
+                        Self::default_type()
+                    };
+                    let load_id =
+                        self.dag
+                            .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
                     self.bindings.insert(name.clone(), load_id);
                 }
             }
@@ -1411,14 +1414,14 @@ mod tests {
     fn lower_max_reduce_reduction() {
         let src = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
-            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} max_reduce) (var {} x) (lit {} 1)))
+            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} max_reduce) (var {} x) (lit {} 0)))
         "#;
         let dag = parse_and_lower(src);
         let found = dag
             .nodes()
             .iter()
-            .any(|n| matches!(n.op, RiscOp::MaxReduce { axis: 1 }));
-        assert!(found, "expected a MaxReduce{{axis:1}} node");
+            .any(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }));
+        assert!(found, "expected a MaxReduce{{axis:0}} node");
     }
 
     // --- C5: CmpLt lowering produces Bool ---
@@ -1555,6 +1558,45 @@ mod regression_tests {
         assert!(
             matches!(&last.op, RiscOp::Load { name } if name == "p"),
             "fn param p should not be visible after fn scope"
+        );
+    }
+
+    #[test]
+    fn typed_fn_params_preserve_tensor_shape_for_lowering() {
+        let exprs = chelis_deep::parser::parse_str(
+            r#"
+                (fn {}
+                    (params {}
+                        (x {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))})
+                        (w {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))}))
+                    (app {type: (t-tensor {} (d-lit {} 32) (d-lit {} 128) (t-prim {} f32))}
+                        (var {} matmul)
+                        (var {} x)
+                        (var {} w)))
+            "#,
+        )
+        .expect("parse failed");
+        let mut ctx = LowerCtx::new(HashMap::new());
+        let _ = ctx.lower_expr(&exprs[0]);
+        let load_x = ctx
+            .dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "x"))
+            .expect("typed x param should lower to a Load");
+        assert_eq!(
+            load_x.output_type.dims,
+            vec![DimInfo::Lit(32), DimInfo::Lit(784)]
+        );
+        let load_w = ctx
+            .dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "w"))
+            .expect("typed w param should lower to a Load");
+        assert_eq!(
+            load_w.output_type.dims,
+            vec![DimInfo::Lit(784), DimInfo::Lit(128)]
         );
     }
 

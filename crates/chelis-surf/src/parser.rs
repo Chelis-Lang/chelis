@@ -1221,6 +1221,10 @@ impl Parser {
 
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek().clone() {
+            TokenKind::Int(n) => {
+                let tok = self.advance();
+                Ok(TypeExpr::Named(n.to_string(), tok.span))
+            }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
                 Ok(TypeExpr::Named(name, tok.span))
@@ -2039,6 +2043,23 @@ mod tests {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::Tensor(dims, prec, _) => {
                     assert_eq!(dims.len(), 2);
+                    assert_eq!(prec, "f32");
+                }
+                _ => panic!("expected Tensor type, got {ty:?}"),
+            },
+            _ => panic!("expected typed let"),
+        }
+    }
+
+    #[test]
+    fn type_tensor_with_literal_dims() {
+        let decls = p("let x: tensor[32, 784, f32] = x");
+        match &decls[0] {
+            Decl::LetDef { ty: Some(ty), .. } => match ty {
+                TypeExpr::Tensor(dims, prec, _) => {
+                    assert_eq!(dims.len(), 2);
+                    assert!(matches!(&dims[0], TypeExpr::Named(n, _) if n == "32"));
+                    assert!(matches!(&dims[1], TypeExpr::Named(n, _) if n == "784"));
                     assert_eq!(prec, "f32");
                 }
                 _ => panic!("expected Tensor type, got {ty:?}"),

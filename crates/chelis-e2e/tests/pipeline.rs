@@ -10,17 +10,16 @@ fn pipeline_smoke_test_relu() {
 }
 
 #[test]
-fn pipeline_mnist_model_parses() {
-    // The MNIST model uses polymorphic tensor dimensions (batch, features, etc.)
-    // which Phase 0e cannot lower to concrete DAG nodes yet.
-    // Verify that parsing and desugaring succeed.
+fn pipeline_mnist_model_lowers() {
     let src = include_str!("../../../examples/mnist.ch");
-    let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let result = compile_surf(src).expect("full MNIST example should compile");
+    let dag = result.dag;
     assert!(
-        !deep_exprs.is_empty(),
-        "MNIST model desugared to empty program"
+        !dag.is_empty(),
+        "MNIST example should lower to a non-empty DAG"
     );
+    assert!(result.root_nodes.contains_key("logits"));
+    assert!(result.root_nodes.contains_key("loss"));
 }
 
 #[test]

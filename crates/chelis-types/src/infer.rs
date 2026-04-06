@@ -1060,6 +1060,23 @@ fn infer_app(
 
             if let Some(ref fname) = func_name {
                 match fname.as_str() {
+                    "matmul" => {
+                        result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
+                    }
+                    "sum" | "max_reduce" | "mean" => {
+                        result_ty = check_reduction_signature(
+                            fname,
+                            &kids[1..],
+                            &arg_tys,
+                            &result_ty,
+                            subst,
+                            errors,
+                        );
+                    }
+                    "expand" => {
+                        result_ty =
+                            check_expand_signature(&kids[1..], &arg_tys, &result_ty, subst, errors);
+                    }
                     "layer_norm" => {
                         result_ty =
                             check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
@@ -1362,6 +1379,285 @@ fn check_conv2d_signature(
     }
 
     subst.apply(&output_template)
+}
+
+fn check_matmul_signature(
+    arg_tys: &[Type],
+    result_ty: &Type,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    if arg_tys.len() != 2 {
+        return Type::Error;
+    }
+
+    let lhs = subst.apply(&arg_tys[0]);
+    let rhs = subst.apply(&arg_tys[1]);
+
+    let (lhs_dims, lhs_prec) = match lhs {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("matmul expects tensor lhs, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+    let (rhs_dims, rhs_prec) = match rhs {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("matmul expects tensor rhs, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if lhs_prec != rhs_prec {
+        errors.push(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "matmul requires matching precisions, got {} and {}",
+                lhs_prec.name(),
+                rhs_prec.name()
+            ),
+            vec!["Insert explicit cast".to_string()],
+        ));
+        return Type::Error;
+    }
+    if lhs_dims.len() != 2 || rhs_dims.len() != 2 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "matmul expects rank-2 tensors, got rank {} and {}",
+                lhs_dims.len(),
+                rhs_dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+    if let Err(te) = unify_dim(&lhs_dims[1], &rhs_dims[0], subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+
+    let canonical = Type::Tensor(
+        vec![subst.apply_dim(&lhs_dims[0]), subst.apply_dim(&rhs_dims[1])],
+        lhs_prec,
+    );
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+fn check_reduction_signature(
+    name: &str,
+    arg_exprs: &[deep::Expr],
+    arg_tys: &[Type],
+    result_ty: &Type,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    if arg_tys.len() != 2 {
+        return Type::Error;
+    }
+
+    let input_ty = subst.apply(&arg_tys[0]);
+    let (dims, prec) = match input_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("{name} expects tensor input, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+        Some(axis) if axis >= 0 => axis as usize,
+        Some(axis) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("{name} requires non-negative axis, got {axis}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        None => return subst.apply(result_ty),
+    };
+
+    if axis >= dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "{name} axis {axis} is out of bounds for rank {} tensor",
+                dims.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut out_dims = dims;
+    out_dims.remove(axis);
+    let canonical = Type::Tensor(out_dims, prec);
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+fn check_expand_signature(
+    arg_exprs: &[deep::Expr],
+    arg_tys: &[Type],
+    result_ty: &Type,
+    subst: &mut Subst,
+    errors: &mut Vec<CheckError>,
+) -> Type {
+    if arg_tys.len() != 3 {
+        return Type::Error;
+    }
+
+    let input_ty = subst.apply(&arg_tys[0]);
+    let (input_dims, input_prec) = match input_ty {
+        Type::Tensor(dims, prec) => (dims, prec),
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("expand expects tensor input, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    let axis = match arg_exprs.get(1).and_then(extract_int_literal) {
+        Some(axis) if axis >= 0 => axis as usize,
+        Some(axis) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("expand requires non-negative axis, got {axis}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        None => return subst.apply(result_ty),
+    };
+    let size = match arg_exprs.get(2).and_then(extract_int_literal) {
+        Some(size) if size > 0 => Dim::Lit(size),
+        Some(size) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("expand requires positive size, got {size}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        None => return subst.apply(result_ty),
+    };
+
+    let resolved_result = subst.apply(result_ty);
+    let canonical = match resolved_result {
+        Type::Tensor(out_dims, out_prec) => {
+            if out_prec != input_prec {
+                errors.push(CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "expand output precision {} does not match input precision {}",
+                        out_prec.name(),
+                        input_prec.name()
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+            if out_dims.len() == input_dims.len() + 1 {
+                if axis > input_dims.len() {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand insert axis {axis} is out of bounds for rank {} tensor",
+                            input_dims.len()
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                let mut expected = input_dims.clone();
+                expected.insert(axis, size.clone());
+                Type::Tensor(expected, input_prec)
+            } else if out_dims.len() == input_dims.len() {
+                if axis >= input_dims.len() {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand axis {axis} is out of bounds for rank {} tensor",
+                            input_dims.len()
+                        ),
+                        vec![],
+                    ));
+                    return Type::Error;
+                }
+                let mut expected = input_dims.clone();
+                expected[axis] = size.clone();
+                Type::Tensor(expected, input_prec)
+            } else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "expand output rank {} must equal input rank {} or {}",
+                        out_dims.len(),
+                        input_dims.len(),
+                        input_dims.len() + 1
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        }
+        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("expand expects tensor output, got {other}"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+    };
+
+    if let Err(te) = unify(result_ty, &canonical, subst) {
+        errors.push(te.into());
+        return Type::Error;
+    }
+    subst.apply(&canonical)
+}
+
+fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => {
+            children(list).first().and_then(|child| match child {
+                deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2772,9 +3068,10 @@ mod tests {
     #[test]
     fn builtin_matmul() {
         check_ok(
-            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-             (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-             (def {} c (app {} (var {} matmul) (var {} a) (var {} b)))",
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} b (lit {type: (t-tensor {} (d-name {} hidden) (d-name {} classes) (t-prim {} f32))} 0))
+             (def {} c (app {type: (t-tensor {} (d-name {} batch) (d-name {} classes) (t-prim {} f32))}
+                 (var {} matmul) (var {} a) (var {} b)))",
         );
     }
 
