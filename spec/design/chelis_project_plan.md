@@ -456,7 +456,7 @@ depends on it.
 
 | Design Task | Produces | Consumed By | Priority |
 |---|---|---|---|
-| **Effect system design** | effect typing rules, handler syntax, HM interaction | Phase 2a | **HIGH** |
+| **Effect system design** | effect typing rules, handler syntax, HM interaction; investigate Dex's Accum effect for parallelism-preserving gradient accumulation, and distinguish parallelism-preserving effects from sequentializing ones | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
 | **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 56-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
