@@ -57,7 +57,9 @@ When tradeoffs appear, Chelis applies these in order:
 4. **Machine generation first**
 5. **Additive sugar only**
 6. **Explicit over implicit**
-7. **Small language, big library**
+7. **Small language, big library** — the compiler knows about ~12 RISC primitives and
+   their derived built-ins; everything else is a library.
+   See `spec/design/chelis_canonical_reference.md` §8.5 for the full core/standard-library/external-library taxonomy.
 8. **Future-proof without over-building**
 
 These principles lead directly to several current rules:

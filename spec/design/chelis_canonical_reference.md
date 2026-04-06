@@ -189,6 +189,100 @@ left to user space rather than embedded as special language primitives.
 
 ---
 
+## 8.5. Scope Boundaries
+
+The cut line between core language and library is whether the compiler needs to know
+about it.
+
+### Core (ships with the compiler)
+
+Everything the compiler has special knowledge of.
+The ~12 Tier 1 RISC primitives (`add`, `mul`, `exp`, etc.) are language-native because
+the compiler decomposes them, the AD engine has adjoint rules for them, and the C/HIP
+backends emit specialized code for them.
+The Tier 2 derived built-ins (`relu`, `sigmoid`, `softmax`, `matmul`, `layer_norm`,
+`conv2d`) are in the core because the compiler recognizes them by name and decomposes
+them to RISC primitives during IR lowering.
+The type checker knows their signatures.
+The optimizer can fuse them.
+They cannot be defined as user-space library functions because a user-space function
+cannot teach the AD engine its adjoint or the GPU backend its kernel fusion strategy.
+
+The core transforms (`grad`, `vmap`, `jit`) are also compiler-intrinsic for the same
+reason: they require compiler cooperation to implement.
+
+This is roughly the scope of PyTorch's `torch` namespace — the fundamental tensor
+operations, basic neural network layers, loss functions, and optimizers that are
+implemented in C++/CUDA underneath.
+In Chelis, they are implemented as compiler-recognized patterns that lower to RISC DAG
+subgraphs.
+
+### Standard library (`Std.*`)
+
+Ships with Chelis but is implemented in Chelis itself.
+The compiler does not know these names.
+They ship as Shells (Chelis packages) in the `Std` namespace.
+
+Expected contents:
+
+- common initializers (Xavier, Kaiming, normal, uniform)
+- standard optimizers beyond SGD (Adam, AdamW, LAMB — update rules composed from
+  primitives)
+- learning rate schedulers
+- data loading utilities
+- metric computation (accuracy, F1, AUC)
+- common loss functions that are compositions of primitives (focal loss, hinge loss)
+- basic I/O (tensor serialization, checkpoint save/load)
+
+### External libraries
+
+Anything that expresses an opinion about model architecture, training methodology, or
+domain.
+These are Chelis programs that depend on the core and standard library but add domain
+knowledge the compiler does not need.
+
+Examples by analogy:
+
+- **scikit-learn equivalent** (`chelis-ml`): classical ML algorithms, preprocessing
+  pipelines — compositions of tensor ops with specific algorithmic structure
+- **HuggingFace Transformers equivalent** (`chelis-transformers`): pre-built
+  architectures (GPT, BERT, LLaMA, ViT) and pretrained weight loaders
+- **torchvision/torchaudio equivalents**: domain-specific dataset loaders, augmentation
+  pipelines, and model architectures
+- **Probabilistic modeling** (`chelis-diffusion`): denoising schedules, noise prediction
+  architectures, sampling algorithms
+
+### The decision principle
+
+If removing it would make the compiler produce worse code (cannot optimize, cannot
+differentiate, cannot fuse), it belongs in the core.
+If removing it just means the user has to write it themselves from the primitives, it
+belongs in a library.
+
+### Grey area: Phase 2 effects
+
+The Phase 2 effect system (`Diff`, `Random`, `Resource(Device)`) will make some
+currently library-level constructs interact with the type system.
+When `Random` is an effect, a probabilistic sampling library declares the `Random`
+effect and the compiler tracks it — but the effect mechanism is designed to be open
+(user-defined effects in Phase 3), so the compiler knows about the effect mechanism,
+not about specific libraries that use it.
+The sampling library declares `Random` effect; the compiler tracks it; neither needs to
+know the other's internals.
+
+### Phase 1–2 practical note
+
+Everything currently lives in the core repo.
+External libraries do not exist yet because there is no package manager (Reef is Phase
+3a).
+The standard library grows organically as the MNIST model and subsequent models demand
+common utilities.
+The first external library will likely be an architecture zoo (`chelis-models`) once
+someone wants to ship a pretrained transformer, which requires the package system to
+exist.
+
+---
+
 ## 9. Backend Strategy
 
 ### Phase 0
