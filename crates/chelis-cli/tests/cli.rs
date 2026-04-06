@@ -126,6 +126,34 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
+fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("nested/hip-output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            mnist_example().to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            out_dir.join("chelis_runtime.c").display().to_string(),
+        ));
+
+    assert!(out_dir.join("mnist_hip.cpp").exists());
+    assert!(out_dir.join("mnist_hip.h").exists());
+    assert!(out_dir.join("chelis_runtime.c").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("chelis_hip_runtime.h").exists());
+}
+
+#[test]
 fn tide_quit_exits_cleanly() {
     Command::cargo_bin("chelis")
         .expect("binary")

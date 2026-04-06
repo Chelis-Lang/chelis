@@ -1,0 +1,12 @@
+[package]
+name = "chelis-backend-hip"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chelis-ir = { path = "../chelis-ir" }
+chelis-types = { path = "../chelis-types" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -181,12 +181,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-backend-hip"
+version = "0.1.0"
+dependencies = [
+ "chelis-ir",
+ "chelis-types",
+ "tempfile",
+]
+
+[[package]]
 name = "chelis-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "cargo-husky",
  "chelis-backend-c",
+ "chelis-backend-hip",
  "chelis-deep",
  "chelis-ir",
  "chelis-surf",

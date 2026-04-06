@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 const RUNTIME_H: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.h");
 const RUNTIME_C: &str = include_str!("../../chelis-backend-c/runtime/chelis_runtime.c");
+const HIP_RUNTIME_H: &str = include_str!("../../chelis-backend-hip/runtime/chelis_hip_runtime.h");
 
 #[derive(Parser)]
 #[command(
@@ -42,11 +43,14 @@ enum Command {
     },
     /// Type-check and report fitness score
     Check { file: PathBuf },
-    /// Compile to C
+    /// Compile to C (default) or HIP GPU code
     Build {
         file: PathBuf,
         #[arg(long, short)]
         output: Option<PathBuf>,
+        /// Backend target: "c" (default) or "hip" (GPU)
+        #[arg(long, default_value = "c")]
+        target: String,
     },
     /// Interactive REPL
     Tide,
@@ -60,7 +64,11 @@ fn main() {
         Some(Command::Fmt { file, inplace }) => cmd_fmt(&file, inplace),
         Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
         Some(Command::Check { file }) => cmd_check(&file),
-        Some(Command::Build { file, output }) => cmd_build(&file, output.as_deref()),
+        Some(Command::Build {
+            file,
+            output,
+            target,
+        }) => cmd_build(&file, output.as_deref(), &target),
         Some(Command::Tide) => run_tide(),
         None => {
             println!("chelis 0.1.0 -- use --help for commands");
@@ -202,8 +210,9 @@ fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_build(
-    file: &PathBuf,
+    file: &std::path::Path,
     output: Option<&std::path::Path>,
+    target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
@@ -215,7 +224,21 @@ fn cmd_build(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("chelis_main");
-    let result = chelis_backend_c::codegen(&dag, func_name);
+
+    match target {
+        "c" => cmd_build_c(&dag, func_name, file, output),
+        "hip" => cmd_build_hip(&dag, func_name, file, output),
+        other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
+    }
+}
+
+fn cmd_build_c(
+    dag: &chelis_ir::dag::Dag,
+    func_name: &str,
+    _file: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = chelis_backend_c::codegen(dag, func_name);
 
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -255,6 +278,62 @@ fn cmd_build(
         "Compile: gcc -O2 {} {} chelis_runtime.c -o {}",
         flags.join(" "),
         c_path.display(),
+        c_path.with_extension("").display()
+    );
+    Ok(())
+}
+
+fn cmd_build_hip(
+    dag: &chelis_ir::dag::Dag,
+    func_name: &str,
+    _file: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = chelis_backend_hip::codegen_hip(dag, func_name);
+
+    let out_dir = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let c_path = if matches!(
+        out_dir.extension().and_then(|e| e.to_str()),
+        Some("c") | Some("cc") | Some("cpp") | Some("cxx")
+    ) {
+        out_dir.clone()
+    } else {
+        out_dir.join(format!("{func_name}_hip.cpp"))
+    };
+    let h_path = c_path.with_extension("h");
+    if let Some(parent) = c_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&c_path, &result.c_source)?;
+    fs::write(&h_path, &result.h_header)?;
+
+    // HIP runtime includes the CPU runtime (for chelis_tensor host struct)
+    let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
+    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
+    fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+
+    println!("Wrote {} and {}", c_path.display(), h_path.display());
+    println!(
+        "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
+        runtime_dir.display()
+    );
+    let mut flags: Vec<&str> = result
+        .compile_flags
+        .iter()
+        .chain(result.link_flags.iter())
+        .map(|s| s.as_str())
+        .collect();
+    flags.sort();
+    flags.dedup();
+    println!(
+        "Compile: hipcc {} {} {} -o {}",
+        flags.join(" "),
+        c_path.display(),
+        runtime_dir.join("chelis_runtime.c").display(),
         c_path.with_extension("").display()
     );
     Ok(())

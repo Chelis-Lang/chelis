@@ -17,6 +17,7 @@ chelis-surf.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-ir = { path = "../chelis-ir" }
 chelis-backend-c = { path = "../chelis-backend-c" }
+chelis-backend-hip = { path = "../chelis-backend-hip" }
 serde_json = "1"
 
 [dev-dependencies]

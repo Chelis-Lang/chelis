@@ -151,8 +151,9 @@ default workspace run.
 
 ### Build Reality
 
-- `chelis build` currently emits C, header, and runtime artifacts plus compile flags
-- It does not itself invoke the native compiler yet
+- `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
+- `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
+- Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
 
 ## Shared Local Skills
 

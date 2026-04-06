@@ -22,6 +22,10 @@ typedef struct {
     int owns_data;
 } chelis_tensor;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 chelis_tensor* chelis_alloc(int ndim, const int *shape, int dtype);
 chelis_tensor* chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
 void chelis_free(chelis_tensor *t);
@@ -54,5 +58,9 @@ static inline int chelis_is_contiguous(const chelis_tensor *t) {
 
 chelis_tensor* chelis_contiguous(const chelis_tensor *t);
 void chelis_print_f32(const chelis_tensor *t);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

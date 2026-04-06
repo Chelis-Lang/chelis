@@ -46,13 +46,35 @@ This is the only planned native GPU path.
 Chelis does **not** plan separate CUDA and OpenCL backend implementations.
 HIP is the vendor-facing abstraction layer.
 
-Key work in Phase 1:
+### Phase 1a: Kernel Code Generation (complete)
 
-- kernel emission
-- kernel fusion
-- GPU memory planning
-- flattening and parallelization strategy
-- benchmark and correctness validation against the C backend
+The `chelis-backend-hip` crate generates HIP host source with embedded HIP kernel strings.
+Same ABI as the C backend (`chelis_tensor **inputs/outputs`).
+
+Authoritative Phase 1a oracle:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Current implementation:
+
+- kernel source strings for the Phase 1a execution surface:
+  elementwise ops, reductions, fill, and cast
+- shapes/strides passed as individual int kernel parameters (not device pointers)
+- movement ops (reshape, permute, expand, stride) are host-side metadata operations
+- naive reductions (one thread per output element, inner loop over axis)
+- `chelis_gpu_free` for allocations, `chelis_gpu_free_view` for views
+- `chelis build app.ch --target hip` emits compilable `*_hip.cpp` host output
+- `pad` and `shrink` remain deferred to a later Phase 1 iteration
+
+Key work remaining in Phase 1:
+
+- kernel fusion (Phase 1b)
+- GPU memory planning with buffer reuse (Phase 1c)
+- optimized reductions + hipBLAS (Phase 1d)
+- benchmark and correctness validation against the C backend (Phase 1e)
+- executable grammar / `chelis validate` (Phase 1f)
 
 ## 4. Later Integration Backends
 
