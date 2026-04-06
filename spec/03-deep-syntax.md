@@ -35,6 +35,16 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 | `eff` | effect-set | Algebraic effects |
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
+| `source` | macro invocation | Provenance: the macro call this node expanded from |
+
+**Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
+form may carry a `source` key in its metadata map indicating the macro invocation it
+originated from.
+Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0))`.
+Provenance is informational — it does not affect parsing, type checking, or evaluation.
+The node is a standard `app` node; the `source` key is ignored by all compiler passes
+except error reporting.
+The provenance format will be fully specified in Phase 2c.
 
 ### 1.2 Rationale
 

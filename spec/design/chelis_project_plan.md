@@ -204,6 +204,15 @@ It is not a proposal to rewrite the Surf parser.
 - type-aware expansion hooks
 - explicit phase separation
 
+**LLM representation constraint:** The macro system must produce clean expanded Deep
+with provenance metadata in the `{}` slot.
+Macro expansion is a compilation step that happens before any LLM-facing operation.
+The expanded form uses only the base 56-tag vocabulary.
+LLMs never see, generate, or reason about unexpanded macro invocations.
+This is a settled design decision, not an open question for Phase 2c.
+The Phase 2c design task is: expansion rules, hygiene, phase separation, and the
+provenance annotation format — not whether LLMs interact with macros (they don't).
+
 ### 2d: `vmap`
 
 - DAG rewrite for automatic vectorization
@@ -331,6 +340,11 @@ Training pipeline:
    any expensive supervised fine-tuning.
    This is the bridge between "model has never seen Deep" and "model can produce
    something the compiler can score."
+   If macros exist by the time the local model is trained, all training data uses
+   expanded forms.
+   Macro invocations are expanded before inclusion in any training dataset.
+   The model never learns to generate macro calls — it generates the expanded pattern
+   directly.
 2. **Trajectory collection with compiler feedback**
    Collect full attempt traces, including failures, from compiler-in-the-loop runs.
 3. **Fine-tune, method chosen empirically**
@@ -444,7 +458,7 @@ depends on it.
 |---|---|---|---|
 | **Effect system design** | effect typing rules, handler syntax, HM interaction | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
-| **Macro system design** | macro expansion order, hygiene, type-awareness | Phase 2c | **MEDIUM** |
+| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 56-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
 | **GPU memory model** | device-memory semantics and ownership model | Phase 1 / 2a | **MEDIUM** |
 | **Effect handler syntax** | Surf and Deep syntax for handling effects | Phase 2a | **MEDIUM** |

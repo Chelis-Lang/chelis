@@ -84,6 +84,15 @@ Deep is the single source of truth.
 Surf desugars losslessly to Deep.
 Deep decompiles back to Surf on a best-effort basis.
 
+**Macro expansion boundary:** LLMs interact exclusively with expanded Deep.
+Macro invocations are expanded before any LLM-facing operation (generation, training,
+fitness scoring, error reporting).
+Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
+(e.g., `{source: (relu input)}`).
+The 56-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+exist in the ecosystem.
+Macros are a human authoring convenience that compiles away before LLMs touch the code.
+
 ### Serialization
 
 Chelis currently has three named artifact forms:
@@ -186,6 +195,9 @@ Implementation-surface note:
 
 The language is built around programs-as-data, but mutation and evolution operators are
 left to user space rather than embedded as special language primitives.
+Programs-as-data operations (`quote`, `unquote`, `splice`) work on expanded Deep.
+Macros have already been resolved — the AST an agent inspects or transforms contains
+only base tags.
 
 ---
 
@@ -429,6 +441,10 @@ Before any training, measure the ICL effect by running the SKILL evaluation with
 without the spec in context.
 That quick measurement gates whether distillation-style methods are worth trying at
 all.
+
+The local model generates and is trained on expanded Deep exclusively.
+Macro invocations never appear in training data, generation targets, or compiler
+feedback sent to models.
 
 Product framing:
 

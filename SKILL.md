@@ -167,6 +167,9 @@ validated automatically.
 | `bind` | even | `name expr` pairs | `(bind {} x (var {} y) z (var {} x))` |
 | `kv` | 2 | key, value | `(kv {} lr (var {} lr))` |
 
+This vocabulary is complete and closed. User-defined macros do not add new tags — macros
+expand to combinations of these 56 tags before any LLM interaction.
+
 ### 2c. Built-in Scope
 
 The safest rule is: only use names listed here.
