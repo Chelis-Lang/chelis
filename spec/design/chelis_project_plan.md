@@ -6,9 +6,9 @@ Build the Chelis programming language from zero to MNIST-on-CPU and beyond.
 This plan is written for a small team working with coding agents.
 Each phase has a concrete deliverable, verification target, and red-team checkpoint.
 
-**Current status:** Phase 0f (C backend codegen) in progress.
-Phases 0a-0e complete.
-All core spec documents written and reviewed.
+**Current status:** Phase 0h complete.
+Phases 0a-0h complete.
+Phase 0i is next.
 
 **Repo:** `chelis-lang/chelis` (Rust workspace)
 **Domain:** `chelis.ch`
@@ -25,13 +25,13 @@ All core spec documents written and reviewed.
 | **0c** | Surf parser + Surf→Deep desugaring | ✅ Complete |
 | **0d** | Type checker (ADTs, HM inference, precision, named dims) | ✅ Complete |
 | **0e** | RISC DAG construction from typed AST | ✅ Complete |
-| **0f** | C backend codegen (host + BLAS + OpenMP) | 🔨 In progress |
-| **0g** | `grad` transformation (reverse-mode AD on DAG) |  |
-| **0h** | End-to-end: MNIST on CPU + spec test suite |  |
+| **0f** | C backend codegen (host + BLAS + OpenMP) | ✅ Complete |
+| **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
+| **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) |  |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) |  |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), first-party coding model |  |
+| **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
 A red team round means adversarial review of design decisions, test coverage, spec
@@ -103,6 +103,13 @@ Acceptance criteria:
 - Surf source goes through the full pipeline to execution
 - MNIST trains successfully on CPU
 - the spec suite becomes the machine-checkable language baseline
+
+Validation note:
+
+- release runner: `cargo run --release -p chelis-e2e --bin train_mnist -- --epochs 5 --min-acc 0.90`
+- measured result on the checked-in path: `0.9272` final test accuracy
+- `cargo test --workspace` remains the fast regression suite; it does not, by itself,
+  run the full long real-data MNIST milestone
 
 ### 0i: Tide v0.1
 
@@ -260,79 +267,89 @@ It is not a proposal to rewrite the Surf parser.
 - mechanize the core type system only
 - prove soundness for the stable Phase 0 core
 
-### 3g: Chelis Coding Model
+### 3g: Chelis Coding Assistance
 
-A first-party AI capability for generating Chelis code in both Surf and Deep.
-This follows a staged, cheapest-first strategy rather than assuming up front that
-fine-tuning is required.
+Chelis has two explicit first-party tracks for AI code generation.
+Track 1 is the Phase 2 frontier-model workflow.
+Track 2 is the Phase 3 shipped local-model deliverable.
 
-**Stage A: Skill File + Compiler-in-the-Loop (Phase 2, near-zero cost)**
+**Key product framing:** a language for AIs that does not include an AI is an
+incomplete product.
 
-Write a `SKILL.md` containing:
+#### Track 1: SKILL.md + Frontier Models (Phase 2)
+
+Ship a first-party `SKILL.md` alongside the Tide MCP server.
+This is the compiler-in-the-loop workflow for frontier models such as Claude and GPT-5.
+
+What ships:
 
 - the 56-tag Deep grammar and arity rules
 - the Surf→Deep desugaring table
 - canonical form rules
 - built-in scope and core type signatures
-- 20-30 worked examples
+- worked examples over the current compiler surface
 - common error patterns and fixes
 
-Use that skill file with frontier models and the Chelis compiler through the Tide MCP
-server.
-No training.
-Pure in-context learning plus compiler feedback.
+Validation status:
 
-Success test:
+- current skill validation result: **9/10** tasks passed against the compiler on a local
+  Qwen 35B MoE setup
+- the remaining failure is a Deep repair execution issue in the local model, not a spec
+  or skill-content gap
 
-- can a frontier model with `SKILL.md` + MCP produce valid Deep programs?
-- if pass@5-with-feedback exceeds 50%, later stages are optimization, not necessity
+Critical dependency:
 
-**Stage B: Trajectory Collection (Phase 2-3, modest budget)**
+- the Tide MCP server from Phase 2e
 
-Wrap the compiler as a GEPA-style evaluator.
-Prompt frontier models with Chelis programming tasks, collect full attempt trajectories,
-and retain failures as well as successes.
+Non-negotiable prerequisite:
 
-Why this matters:
+- 50-100 hand-written or supervised-interaction seed programs covering core Chelis
+  patterns
+- these serve as few-shot examples, trajectory seeds, and evaluation anchors
 
-- failed trajectories still contain useful skills
-- compiler feedback becomes training data, not only a runtime repair loop
-- 50-100 trajectories over core patterns should be enough to seed a narrow-language
-  corpus
+Phase 2 success condition:
 
-Outputs:
+- frontier models can write useful Chelis through `SKILL.md` + MCP
+- the workflow is documented, tested, and repeatable
 
-- seed corpus of successful programs
-- SFT-style data from full trajectories
-- paired Surf↔Deep examples
-- PyTorch→Chelis translation examples where useful
+#### Track 2: Local Model Ships With Toolchain (Phase 3)
 
-**Stage C: Fine-Tune If Needed (Phase 3, fallback only)**
+Phase 3 requires a local Chelis coding model that ships with the toolchain.
+This is not a fallback and not optional.
 
-LoRA fine-tune a strong coding base model only if Stages A and B fail to meet the
-quality bar.
+Target deliverable:
 
-Training data:
+- a 4B-8B-class local model distributed with the Chelis toolchain
+- quantized GGUF artifacts for consumer hardware
+- integrated into `chelis cove --assist` and related local workflows
+- no API key or internet requirement for baseline coding assistance
 
-- trajectories from Stage B
-- spec test suite
-- examples
-- curated seed programs
+Training pipeline:
 
-Evaluation:
+1. **SSD for distributional shaping**
+   Use the base model's own outputs to cheaply bias it toward Chelis structure before
+   any expensive supervised fine-tuning.
+   This is the bridge between "model has never seen Deep" and "model can produce
+   something the compiler can score."
+2. **Trajectory collection with compiler feedback**
+   Collect full attempt traces, including failures, from compiler-in-the-loop runs.
+3. **LoRA fine-tune**
+   Fine-tune on trajectories, seed programs, spec tests, and curated examples.
+4. **Quantize and ship as GGUF**
+   Package the local model as a standard toolchain artifact.
 
-- compiler fitness score remains the primary evaluator
-- target is high-fitness generation rather than benchmark overfitting
+Why SSD is explicit:
 
-**Important constraint:** Stage C is explicitly a fallback.
-The default assumption is that frontier models with a strong skill file and compiler
-feedback may already be sufficient.
+- it is cheap relative to API-driven data generation
+- it uses the model's own outputs
+- it directly addresses the structural validity gap seen in SKILL validation, where
+  small and local models may reason correctly about Deep but fail to execute the
+  canonical syntax in their emitted output
 
-**Critical dependency:** the Tide MCP server from Phase 2e.
+Phase 3 success condition:
 
-**Non-negotiable prerequisite:** 50-100 hand-written or supervised-interaction seed
-programs covering core Chelis patterns.
-These serve triple duty as few-shot examples, trajectory seeds, and evaluation anchors.
+- Chelis ships with a local coding model as part of the product, not as an optional
+  research extra
 
 ---
 

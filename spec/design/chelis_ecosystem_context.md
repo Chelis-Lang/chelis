@@ -40,32 +40,29 @@ pressures taken together.
 
 ## How to Talk About the Coding Capability
 
-Do **not** describe the Chelis coding strategy as "train a fine-tuned model" by default.
-The current strategy is staged:
+Do **not** describe the Chelis coding strategy as "just fine-tune a model."
+The current strategy has two explicit tracks:
 
-### Stage A
+### Track 1
 
 Use a first-party `SKILL.md` plus the Tide MCP server with frontier models.
-This is compiler-in-the-loop, in-context learning first.
+This is the Phase 2 story: compiler-in-the-loop, in-context learning, validated against
+the current compiler surface.
 
-### Stage B
+### Track 2
 
-Collect trajectories from models attempting Chelis tasks with compiler feedback.
-Failures are useful training data, not waste.
+Ship a local model with the toolchain.
+This is the Phase 3 story: SSD for distributional shaping, trajectory collection with
+compiler feedback, LoRA fine-tune, then quantize and ship as GGUF.
 
-### Stage C
-
-Fine-tune only if the earlier stages do not meet the quality bar.
-
-This keeps the story aligned with both the project plan and the evidence that
-frontier-model in-context learning may already be sufficient for a narrow, highly
-structured language like Chelis.
+The important change is that the local model is a required deliverable, not optional
+hedging.
 
 ---
 
 ## Dependencies and Prerequisites
 
-The critical dependency for first-party AI generation is the Tide MCP server.
+The critical dependency for Track 1 is the Tide MCP server.
 That is the interface where the compiler-as-teacher loop runs.
 
 A second non-negotiable prerequisite is a seed corpus of 50-100 hand-written or
@@ -84,19 +81,14 @@ Those programs serve as:
 
 Frontier models can write useful Chelis through `SKILL.md` + MCP, and that workflow is
 documented, tested, and repeatable.
+The skill path has already validated at 9/10 tasks on a local Qwen 35B MoE setup.
 
 ### Longer-Term
 
-Chelis has a first-party coding capability, delivered through the cheapest mechanism
-that works:
-
-- skill file
-- trajectory collection
-- or a fine-tuned model if needed
-
-The point is not to force a specific ML strategy.
-The point is to make AI generation of correct Chelis code reliable enough to be part of
-the language's core value proposition.
+Chelis ships a first-party local coding model as part of the toolchain.
+The point is not only to prove frontier-model usability.
+The point is to make AI generation of correct Chelis code a standard product capability,
+including offline/local use.
 
 ---
 
@@ -104,5 +96,7 @@ the language's core value proposition.
 
 - "First-party coding capability" is the right umbrella phrase.
 - "Compiler-as-teacher" is more accurate than "compiler-as-evaluator only."
-- "Fine-tuned Chelis model" is a possible later outcome, not the default present-tense
-  description.
+- "SKILL.md + MCP" is the Phase 2 story.
+- "Local model ships with toolchain" is the Phase 3 story.
+- "A language for AIs that doesn't include an AI is an incomplete product" is now part
+  of the core framing.

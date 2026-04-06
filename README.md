@@ -6,9 +6,9 @@ the supervisor.
 Surf is the readable syntax for humans.
 Deep is the canonical s-expression syntax for machines and the compiler.
 
-**Status:** Phase 0f (C backend codegen) in progress.
-Phases 0a-0e complete.
-All core spec documents written and reviewed.
+**Status:** Phase 0h complete.
+Phases 0a-0h complete.
+Phase 0i is next.
 
 ## Prerequisites
 
@@ -45,16 +45,38 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+`cargo test --workspace` covers the compiler, evaluator, backend, and spec regressions.
+It does not run the full release-mode real-MNIST milestone by default.
+
 ## Current Focus
 
-The active implementation work is the C backend:
+Phase 0 is now complete through:
 
-- RISC DAG to C emission
-- BLAS integration
-- OpenMP-parallel elementwise and reduction loops
-- runtime support and numerical verification
+- Surf -> Deep -> typecheck -> lower -> grad -> eval execution
+- C backend codegen with BLAS and OpenMP validation
+- executable spec-suite coverage by language behavior
+- end-to-end MNIST training on CPU
 
-Interactive execution is planned around the IR evaluator, not a JIT backend.
+Next up is Phase 0i: the first Tide workflow and evaluator/backend agreement tooling.
+AI assistance planning is split cleanly:
+
+- Phase 2: `SKILL.md` + Tide MCP for frontier models
+- Phase 3: a local coding model that ships with the toolchain
+
+## Phase 0h Validation
+
+Release-mode MNIST validation is checked in as:
+
+```sh
+cargo run --release -p chelis-e2e --bin train_mnist -- --epochs 5 --min-acc 0.90
+```
+
+Measured on the checked-in path:
+- 5 epochs on real MNIST
+- final test accuracy: `0.9272`
+
+This release runner is the authoritative 0h gate.
+The ignored MNIST tests mirror it for manual test-harness use, but the normal workspace test run does not attempt the full long real-data training job.
 
 ## Project Structure
 
@@ -86,6 +108,7 @@ examples/            Example Chelis programs
 
 - [LLM Skill File](SKILL.md)
 - [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
+- [Ecosystem Context](spec/design/chelis_ecosystem_context.md)
 - [Architecture Guide](ARCHITECTURE.md)
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)

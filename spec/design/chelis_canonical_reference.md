@@ -20,9 +20,9 @@ and not a Python replacement.
 It targets model authoring, training, deployment, and program synthesis for AI
 workloads.
 
-**Current status:** Phase 0f (C backend codegen) is in progress.
-Phases 0a-0e are complete.
-All core spec documents are written and reviewed.
+**Current status:** Phase 0h is complete.
+Phases 0a-0h are complete.
+Phase 0i is next.
 
 ---
 
@@ -280,37 +280,56 @@ To keep a future `salsa` migration cheap:
 
 ---
 
-## 12. AI Integration
+## 12. AI Coding Assistance
 
-### Coding model strategy
+Chelis has two explicit first-party tracks for AI code generation.
 
-Chelis uses a staged first-party coding-capability strategy rather than assuming a
-fine-tuned model from the start.
+### Track 1: SKILL.md + Frontier Models
 
-**Stage A (Phase 2, near-zero cost):** write a `SKILL.md` covering the Deep tag
-vocabulary, desugaring rules, canonical form, and worked examples, then use frontier
-models with the compiler through the Tide MCP server.
-No training.
-Pure in-context learning plus compiler feedback.
+Chelis ships a first-party `SKILL.md` for frontier models operating through the Tide MCP
+server.
+This is the Phase 2 coding-assistance story: compiler-in-the-loop generation, no local
+training requirement, and immediate usefulness for agents that already have strong
+general coding ability.
 
-**Stage B (Phase 2-3):** wrap the compiler as a trajectory-generating evaluator.
-Collect model attempts, repair loops, and failures as training data.
-The compiler-as-teacher loop is both an inference-time tool and a data-generation
-mechanism.
+Current validation result:
 
-**Stage C (Phase 3, only if needed):** fine-tune on trajectories, spec tests, and
-examples only if the earlier stages do not meet the quality bar.
+- the checked-in SKILL workflow validated at **9/10** tasks against the compiler on a
+  local Qwen 35B MoE setup
+- the remaining miss was a Deep repair execution failure, not a language-design or
+  skill-content failure
 
-Non-negotiable prerequisite:
+This means the skill file is real project infrastructure, not aspirational promptware.
 
-- 50-100 seed programs covering core Chelis patterns
+### Track 2: Local Model Ships With Toolchain
 
-Critical dependency:
+Chelis also requires a local coding model as a Phase 3 deliverable.
+This is not optional and not a speculative fallback.
 
-- Tide MCP server in Phase 2e
+Target shape:
 
-The default assumption is **skill file + compiler-in-the-loop first, fine-tune only if
-necessary**.
+- a local 4B-8B-class coding model
+- quantized GGUF artifacts that run on consumer hardware
+- integration with `chelis cove --assist` and related local workflows
+
+Training pipeline:
+
+1. **SSD for distributional shaping**
+2. **Trajectory collection with compiler feedback**
+3. **LoRA fine-tune**
+4. **Quantize and ship as GGUF**
+
+SSD matters because it is the cheap bridge between "model has never seen Deep" and
+"model can emit something the compiler can score."
+It uses the model's own outputs and directly targets the structural-validity gap seen
+in SKILL evaluation, where smaller or local models may reason correctly about Deep yet
+still fail to emit the canonical form.
+
+Product framing:
+
+- a language for AIs that does not include an AI is an incomplete product
+- Track 1 is the frontier-model path
+- Track 2 is the shipped local-model path
 
 ---
 
