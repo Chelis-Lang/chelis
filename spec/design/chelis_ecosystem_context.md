@@ -52,8 +52,9 @@ the current compiler surface.
 ### Track 2
 
 Ship a local model with the toolchain.
-This is the Phase 3 story: SSD for distributional shaping, trajectory collection with
-compiler feedback, empirically chosen fine-tuning, then quantize and ship as GGUF.
+This is the Phase 3 story: SSD for distributional shaping, complexity-aware trajectory
+collection with compiler feedback, empirically chosen fine-tuning, then quantize and
+ship as GGUF.
 LoRA is the default starting point, SDFT is the anti-forgetting fallback if forgetting
 is measured, and RLVR is optional final polish if needed.
 
@@ -74,6 +75,10 @@ Those programs serve as:
 - few-shot examples
 - trajectory seeds
 - evaluation anchors
+
+The corpus should be deliberately stratified by problem complexity (~20 single-op, ~40
+single-layer, ~30 multi-layer, ~10 full models) so that all bands are represented as
+controls when measuring the ICL effect across complexity levels.
 
 Before local-model training starts, measure the ICL effect by running the SKILL
 evaluation with and without the spec in context.

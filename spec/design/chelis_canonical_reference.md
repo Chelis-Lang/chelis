@@ -425,6 +425,10 @@ Training pipeline:
 
 1. **SSD for distributional shaping**
 2. **Trajectory collection with compiler feedback**
+   Compute `nesting_depth × operation_count` as a complexity proxy for each generated
+   program and log it.
+   Stratify by complexity band post-collection; let the ICL prerequisite measurement
+   determine the effective band rather than pre-committing.
 3. **Fine-tune, method chosen empirically**
 4. **Quantize and ship as GGUF**
 

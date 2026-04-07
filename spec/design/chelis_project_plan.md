@@ -332,6 +332,12 @@ Non-negotiable prerequisite:
 - 50-100 hand-written or supervised-interaction seed programs covering core Chelis
   patterns
 - these serve as few-shot examples, trajectory seeds, and evaluation anchors
+- stratified by problem complexity as controls for ICL measurement:
+  - ~20 single-operation programs
+  - ~40 single-layer programs (5-15 ops)
+  - ~30 multi-layer programs (15-40 ops)
+  - ~10 full models (40+ ops)
+- all bands are included; do not filter out simple or complex programs
 
 Phase 2 success condition:
 
@@ -364,6 +370,12 @@ Training pipeline:
    directly.
 2. **Trajectory collection with compiler feedback**
    Collect full attempt traces, including failures, from compiler-in-the-loop runs.
+   For each generated program, compute `nesting_depth × operation_count` as a
+   complexity proxy and log it alongside the trace.
+   After collection, analyze the complexity distribution and stratify by band.
+   Do not pre-commit to a specific complexity band — the ICL prerequisite experiment
+   (step below) should measure across complexity levels and let the data determine
+   where the sweet spot is for Deep specifically.
 3. **Fine-tune, method chosen empirically**
    Start with LoRA on trajectories, seed programs, spec tests, and curated examples.
    If forgetting is measured, switch to SDFT instead.
@@ -384,6 +396,9 @@ Prerequisite measurement:
 
 - before any training, measure the ICL effect by running the SKILL evaluation with and
   without the spec in context
+- stratify this measurement by seed-corpus complexity band to determine whether the
+  intermediate-complexity peak from the literature holds for Deep or whether the
+  zero-data regime has a different curve
 - if the spec meaningfully improves output quality, distillation-style methods are
   viable
 - if it does not, stick with the simplest supervised path first
