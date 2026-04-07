@@ -1,0 +1,377 @@
+{
+  "oracle": "cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json",
+  "models": [
+    {
+      "name": "linreg",
+      "workload": {
+        "summary": "Synthetic linear regression training",
+        "batch_size": 64,
+        "train_batches": 16,
+        "test_batches": 4,
+        "epochs": 12,
+        "seq_len": null,
+        "d_model": null,
+        "n_heads": null,
+        "head_dim": null,
+        "d_ff": null,
+        "iterations": null
+      },
+      "cpu": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 460.415672,
+        "run_ms": 34.896974,
+        "peak_device_bytes_estimate": null,
+        "loss_history": [
+          0.14306396,
+          0.02363023,
+          0.00500434,
+          0.00122585,
+          0.00032665,
+          0.00009615,
+          0.00003527,
+          0.00001898,
+          0.00001459,
+          0.00001338,
+          0.00001303,
+          0.00001292
+        ],
+        "final_loss": 0.00001292,
+        "final_accuracy": null,
+        "output_len": 256,
+        "output_checksum": 75.15679116826504,
+        "output_sample": [
+          0.19570468,
+          0.7484628,
+          0.94697857,
+          0.6623375,
+          0.08120656,
+          -0.41589108,
+          -0.5033498,
+          -0.1231412
+        ]
+      },
+      "hip": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 1890.1841450000002,
+        "run_ms": 6765.684194,
+        "peak_device_bytes_estimate": 50440,
+        "loss_history": [
+          0.14306395,
+          0.02363023,
+          0.00500434,
+          0.00122585,
+          0.00032665,
+          0.00009615,
+          0.00003527,
+          0.00001898,
+          0.00001459,
+          0.00001338,
+          0.00001303,
+          0.00001292
+        ],
+        "final_loss": 0.00001292,
+        "final_accuracy": null,
+        "output_len": 256,
+        "output_checksum": 75.1567926905118,
+        "output_sample": [
+          0.19570461,
+          0.7484628,
+          0.94697857,
+          0.66233754,
+          0.08120644,
+          -0.41589108,
+          -0.5033498,
+          -0.1231412
+        ]
+      },
+      "pytorch": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 1313.3702030000002,
+        "run_ms": 68.41263314709067,
+        "peak_device_bytes_estimate": null,
+        "loss_history": [
+          0.14306395,
+          0.023630226,
+          0.0050043385,
+          0.001225854,
+          0.00032664818,
+          0.00009614785,
+          0.000035270205,
+          0.000018984727,
+          0.000014587839,
+          0.000013381131,
+          0.000013034827,
+          0.0000129224445
+        ],
+        "final_loss": 0.0000129224445,
+        "final_accuracy": null,
+        "output_len": 256,
+        "output_checksum": 75.15679068863392,
+        "output_sample": [
+          0.1957047,
+          0.74846274,
+          0.94697845,
+          0.6623375,
+          0.08120665,
+          -0.4158912,
+          -0.50334966,
+          -0.12314114
+        ]
+      },
+      "comparisons": [
+        {
+          "name": "cpu_vs_hip",
+          "status": "ok",
+          "note": "both runs decreased training loss",
+          "max_abs_diff": 6.556511e-7,
+          "mean_abs_diff": 9.6502845e-8
+        },
+        {
+          "name": "cpu_vs_pytorch",
+          "status": "ok",
+          "note": "both runs decreased training loss",
+          "max_abs_diff": 5.5134296e-7,
+          "mean_abs_diff": 1.0414442e-7
+        },
+        {
+          "name": "hip_vs_pytorch",
+          "status": "ok",
+          "note": "both runs decreased training loss",
+          "max_abs_diff": 5.9604645e-7,
+          "mean_abs_diff": 1.00711986e-7
+        }
+      ]
+    },
+    {
+      "name": "mnist",
+      "workload": {
+        "summary": "MNIST MLP training on a fixed subset",
+        "batch_size": 32,
+        "train_batches": 32,
+        "test_batches": 8,
+        "epochs": 5,
+        "seq_len": null,
+        "d_model": null,
+        "n_heads": null,
+        "head_dim": null,
+        "d_ff": null,
+        "iterations": null
+      },
+      "cpu": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 1081.799958,
+        "run_ms": 21626.314385,
+        "peak_device_bytes_estimate": null,
+        "loss_history": [
+          2.101071,
+          1.3299351,
+          0.8007292,
+          0.5911485,
+          0.4830164
+        ],
+        "final_loss": 0.4830164,
+        "final_accuracy": 0.82421875,
+        "output_len": 2560,
+        "output_checksum": -267.7151902570622,
+        "output_sample": [
+          -0.77744067,
+          -3.331248,
+          -0.4466547,
+          1.2867985,
+          -0.5772593,
+          -1.4923216,
+          -4.6768456,
+          7.672342
+        ]
+      },
+      "hip": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 1754.9293320000002,
+        "run_ms": 8344.741728,
+        "peak_device_bytes_estimate": 14291116,
+        "loss_history": [
+          2.101071,
+          1.329935,
+          0.80072916,
+          0.59114844,
+          0.48301637
+        ],
+        "final_loss": 0.48301637,
+        "final_accuracy": 0.82421875,
+        "output_len": 2560,
+        "output_checksum": -267.7150645807269,
+        "output_sample": [
+          -0.7774404,
+          -3.3312478,
+          -0.44665462,
+          1.2867986,
+          -0.5772594,
+          -1.4923213,
+          -4.676846,
+          7.672342
+        ]
+      },
+      "pytorch": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 2211.8154959999997,
+        "run_ms": 386.210692115128,
+        "peak_device_bytes_estimate": null,
+        "loss_history": [
+          2.101071,
+          1.329935,
+          0.8007292,
+          0.5911485,
+          0.48301637
+        ],
+        "final_loss": 0.48301637,
+        "final_accuracy": 0.82421875,
+        "output_len": 2560,
+        "output_checksum": -267.71860468154773,
+        "output_sample": [
+          -0.7774414,
+          -3.3312488,
+          -0.44665548,
+          1.2867978,
+          -0.5772602,
+          -1.4923226,
+          -4.676847,
+          7.6723413
+        ]
+      },
+      "comparisons": [
+        {
+          "name": "cpu_vs_hip",
+          "status": "ok",
+          "note": "loss trends decrease; final accuracy gap = 0.0000",
+          "max_abs_diff": 0.00000333786,
+          "mean_abs_diff": 3.1812968e-7
+        },
+        {
+          "name": "cpu_vs_pytorch",
+          "status": "ok",
+          "note": "loss trends decrease; final accuracy gap = 0.0000",
+          "max_abs_diff": 0.000005722046,
+          "mean_abs_diff": 0.000001335436
+        },
+        {
+          "name": "hip_vs_pytorch",
+          "status": "ok",
+          "note": "loss trends decrease; final accuracy gap = 0.0000",
+          "max_abs_diff": 0.00000667572,
+          "mean_abs_diff": 0.0000013845282
+        }
+      ]
+    },
+    {
+      "name": "transformer",
+      "workload": {
+        "summary": "Sequence-only transformer-block-style forward pass",
+        "batch_size": null,
+        "train_batches": null,
+        "test_batches": null,
+        "epochs": null,
+        "seq_len": 128,
+        "d_model": 256,
+        "n_heads": 4,
+        "head_dim": 64,
+        "d_ff": 1024,
+        "iterations": 5
+      },
+      "cpu": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 3366.714126,
+        "run_ms": 3928.862651,
+        "peak_device_bytes_estimate": null,
+        "loss_history": null,
+        "final_loss": null,
+        "final_accuracy": null,
+        "output_len": 32768,
+        "output_checksum": 11035.434085853558,
+        "output_sample": [
+          0.03536912,
+          0.03722384,
+          0.03914129,
+          0.04113903,
+          0.04322677,
+          0.04541059,
+          0.04771318,
+          0.05013134
+        ]
+      },
+      "hip": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 2278.165547,
+        "run_ms": 8109.791705,
+        "peak_device_bytes_estimate": 280629248,
+        "loss_history": null,
+        "final_loss": null,
+        "final_accuracy": null,
+        "output_len": 32768,
+        "output_checksum": 11035.43377243057,
+        "output_sample": [
+          0.03536917,
+          0.03722392,
+          0.03914138,
+          0.04113911,
+          0.04322686,
+          0.0454107,
+          0.04771327,
+          0.05013146
+        ]
+      },
+      "pytorch": {
+        "status": "ok",
+        "reason": null,
+        "compile_ms": 1412.950395,
+        "run_ms": 92.55781397223473,
+        "peak_device_bytes_estimate": null,
+        "loss_history": null,
+        "final_loss": null,
+        "final_accuracy": null,
+        "output_len": 32768,
+        "output_checksum": 11035.433818202931,
+        "output_sample": [
+          0.03536916,
+          0.0372239,
+          0.039141353,
+          0.041139103,
+          0.043226838,
+          0.045410678,
+          0.04771325,
+          0.050131455
+        ]
+      },
+      "comparisons": [
+        {
+          "name": "cpu_vs_hip",
+          "status": "ok",
+          "note": "forward tolerance target 1.0e-4",
+          "max_abs_diff": 0.000001475215,
+          "mean_abs_diff": 1.4904754e-7
+        },
+        {
+          "name": "cpu_vs_pytorch",
+          "status": "ok",
+          "note": "forward tolerance target 1.0e-4",
+          "max_abs_diff": 0.00000166893,
+          "mean_abs_diff": 1.4775907e-7
+        },
+        {
+          "name": "hip_vs_pytorch",
+          "status": "ok",
+          "note": "forward tolerance target 1.0e-4",
+          "max_abs_diff": 0.0000014454126,
+          "mean_abs_diff": 1.11504306e-7
+        }
+      ]
+    }
+  ]
+}

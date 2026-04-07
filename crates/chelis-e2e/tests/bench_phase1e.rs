@@ -1,0 +1,96 @@
+use assert_cmd::Command;
+use serde_json::Value;
+use tempfile::tempdir;
+
+fn run_bench(model: &str) -> Value {
+    run_bench_with_env(model, &[])
+}
+
+fn run_bench_with_env(model: &str, envs: &[(&str, &str)]) -> Value {
+    let dir = tempdir().expect("tempdir");
+    let out = dir.path().join("report.json");
+    let mut cmd = Command::cargo_bin("bench_phase1e").expect("bench_phase1e binary");
+    cmd.args(["--model", model, "--emit-json", out.to_str().unwrap()]);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.assert().success();
+    let text = std::fs::read_to_string(&out).expect("report json");
+    serde_json::from_str(&text).expect("valid report json")
+}
+
+#[test]
+fn bench_phase1e_rejects_unknown_model() {
+    Command::cargo_bin("bench_phase1e")
+        .expect("bench_phase1e binary")
+        .args(["--model", "unknown"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown model"));
+}
+
+#[test]
+fn bench_phase1e_all_emits_structured_json_for_real_scope() {
+    let json = run_bench("all");
+    let models = json["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 3, "expected all benchmark models");
+    let names: Vec<_> = models
+        .iter()
+        .map(|model| model["name"].as_str().expect("model name"))
+        .collect();
+    assert_eq!(names, vec!["linreg", "mnist", "transformer"]);
+
+    for model in models {
+        assert!(model["cpu"].is_object(), "cpu backend report missing");
+        assert!(model["hip"].is_object(), "hip backend report missing");
+        assert!(
+            model["pytorch"].is_object(),
+            "pytorch backend report missing"
+        );
+        let comparisons = model["comparisons"].as_array().expect("comparisons array");
+        assert!(
+            !comparisons.is_empty(),
+            "expected at least one comparison entry"
+        );
+    }
+}
+
+#[test]
+fn bench_phase1e_mnist_missing_data_emits_structured_skip_report() {
+    let json = run_bench_with_env(
+        "mnist",
+        &[("MNIST_DIR", "/tmp/chelis-phase1e-missing-mnist")],
+    );
+    let model = &json["models"][0];
+    assert_eq!(model["name"].as_str(), Some("mnist"));
+    for backend_name in ["cpu", "hip", "pytorch"] {
+        let backend = &model[backend_name];
+        let status = backend["status"].as_str().expect("status string");
+        assert_eq!(status, "skipped", "expected missing-MNIST structured skip");
+        let reason = backend["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("MNIST benchmark data unavailable"),
+            "unexpected skip reason for `{backend_name}`: {reason}"
+        );
+    }
+}
+
+#[test]
+fn bench_phase1e_missing_pytorch_interpreter_emits_structured_skip_report() {
+    let json = run_bench_with_env(
+        "linreg",
+        &[(
+            "CHELIS_BENCH_PYTHON",
+            "/tmp/chelis-phase1e-missing-python-interpreter",
+        )],
+    );
+    let model = &json["models"][0];
+    assert_eq!(model["name"].as_str(), Some("linreg"));
+    let pytorch = &model["pytorch"];
+    assert_eq!(pytorch["status"].as_str(), Some("skipped"));
+    let reason = pytorch["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("CHELIS_BENCH_PYTHON points to a missing interpreter"),
+        "unexpected PyTorch skip reason: {reason}"
+    );
+}

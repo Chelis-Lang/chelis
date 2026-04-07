@@ -131,7 +131,36 @@ Current implementation:
 
 Key work remaining in Phase 1:
 
-- benchmark and correctness validation against the C backend (Phase 1e)
+### Phase 1e: Benchmarks and Reference Comparison (complete)
+
+Authoritative Phase 1e oracle:
+
+```sh
+cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json
+```
+
+Current implementation:
+
+- fixed-workload benchmark runner in `chelis-e2e`, not a general-purpose harness
+- real compiled-backend execution for Chelis CPU and Chelis HIP benchmark lanes
+- executable benchmark examples for linear regression and a transformer-block-style forward path
+- checked-in PyTorch reference scripts under `benchmarks/pytorch/`
+- benchmark PyTorch lane resolves through `CHELIS_BENCH_PYTHON` or the repo-local `py/.venv`
+  prepared with the gfx1151 ROCm nightly install command documented in `benchmarks/RESULTS.md`
+- PyTorch benchmark invocations strip stale `HSA_OVERRIDE_GFX_VERSION` shell overrides and
+  export the ROCm SDK library path needed by the nightly wheel set
+- checked-in benchmark artifacts:
+  - `benchmarks/results/latest.json`
+  - `benchmarks/RESULTS.md`
+- benchmark scope constrained to the shipped op surface:
+  - `linreg` training
+  - `mnist` training + inference on a fixed subset
+  - `transformer` forward pass
+- missing HIP, PyTorch, or MNIST dataset prerequisites are surfaced as explicit skips in the emitted JSON rather than aborting the oracle
+- CI keeps PyTorch out of the default gate; the local checked-in artifact is the PyTorch comparison proof
+
+Key work remaining in Phase 1:
+
 - executable grammar / `chelis validate` (Phase 1f)
 
 ## 4. Later Integration Backends

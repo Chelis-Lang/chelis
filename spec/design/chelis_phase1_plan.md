@@ -6,18 +6,19 @@ Phase 1 extends the Chelis compiler to target GPUs via HIP. The architecture fol
 
 **Prerequisite:** Phase 0 complete. MNIST trains on CPU. Full pipeline proven (Surf → Deep → type check → lower → DAG → grad → eval/codegen → train). All tests pass. CLI works.
 
-**Deliverable:** The same MNIST program (and harder models — transformer block, CNN) compiles to GPU via `chelis build --target hip` and produces correct results. Performance within 2-5x of PyTorch on equivalent models (proving the architecture works, not winning benchmarks).
+**Deliverable:** fixed benchmark workloads (`mnist`, `linreg`, `transformer_block`) compile to GPU via `chelis build --target hip`, run through the Phase 1e benchmark oracle, and produce recorded correctness/performance results. PyTorch remains a local/manual comparison backend through the repo `py/` environment; correctness against Chelis CPU remains primary.
 
 **What does NOT change:** The RISC DAG, the type checker, the Surf/Deep parsers, the desugarer, the AD engine. Phase 1 adds a new backend alongside the existing C backend. Both coexist. The C backend remains the test oracle — every GPU result must match it numerically.
 
-**Implemented boundary note:** The currently shipped surface reaches Phase 1a through
-Phase 1d. `grad` from Phase 0g still runs on the unfused DAG, and
+**Implemented boundary note:** The currently shipped surface reaches Phase 1e. `grad`
+from Phase 0g still runs on the unfused DAG, and
 `chelis-ir::grad_then_fuse` re-fuses the resulting forward+backward graph. The HIP
 backend now reuses backing slots, deduplicates repeated input transfers, reports
 estimated peak device bytes through codegen/CLI output, emits segmented reduction
 strategies, uses staged scratch buffers for safe scalar reductions, and specializes
-contiguous rank-2 `f32` matmul patterns to hipBLAS. Benchmarks (1e) and executable
-grammar work (1f) remain planned work.
+contiguous rank-2 `f32` matmul patterns to hipBLAS. Phase 1e now ships a fixed
+benchmark oracle plus checked-in local PyTorch comparison artifacts; executable grammar
+work (1f) remains planned work.
 
 ---
 
@@ -78,7 +79,7 @@ The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a D
 | 1b: Fusion | [phase1b_fusion.md](phase1b_fusion.md) | Adjacent DAG nodes → single kernel launches |
 | 1c: Memory Planning | [phase1c_memory_planning.md](phase1c_memory_planning.md) | Buffer reuse, minimize host↔device transfers |
 | 1d: Optimized Reductions + hipBLAS | [phase1d_flattening.md](phase1d_flattening.md) | Optimized reductions, hipBLAS, thread block sizing (no flattening needed) |
-| 1e: Benchmarks | [phase1e_benchmarks.md](phase1e_benchmarks.md) | MNIST + transformer + CNN on GPU, perf characterization |
+| 1e: Benchmarks | [phase1e_benchmarks.md](phase1e_benchmarks.md) | Fixed MNIST + linreg + transformer workloads, recorded perf/correctness |
 | 1f: Executable Grammar | [phase1f_executable_grammar.md](phase1f_executable_grammar.md) | PEG-based `chelis validate` conformance tool |
 
 ---
@@ -91,7 +92,7 @@ After all sub-phases, before declaring Phase 1 complete:
 - [ ] Fusion preserves correctness in all tested cases. Adversarial fusion tests: multi-consumer nodes, reduction boundaries, realize() barriers.
 - [ ] Memory planning: peak VRAM for MNIST is reasonable (not 10x the tensor sizes). No leaks.
 - [ ] MNIST trains on GPU to >90% accuracy
-- [ ] At least one model beyond MNIST (LeNet or transformer block) runs correctly on GPU
+- [ ] At least one model beyond MNIST (linreg or transformer block) runs correctly on GPU
 - [ ] GPU is faster than CPU for batch ≥ 32 (if not, profile and explain why)
 - [ ] Wall-clock within 2-5x of PyTorch (if not, profile and document bottlenecks)
 - [ ] `chelis validate` agrees with the compiler on 100% of the spec test suite

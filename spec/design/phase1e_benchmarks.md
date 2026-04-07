@@ -1,61 +1,104 @@
-## Phase 1e: Benchmarking and Real Models
+## Phase 1e: Fixed-Workload Benchmarking and Reference Comparison
 
-**Goal:** Prove the GPU backend works on real models and characterize performance.
+**Goal:** prove the shipped Phase 1 GPU backend on a small fixed workload set, record real numbers, and compare Chelis CPU, Chelis HIP, and PyTorch through the repo-local Python benchmark environment when it is prepared.
 
-### Benchmark Suite
+### Authoritative Oracle
 
-| Model | Surf file | Purpose | Key ops exercised |
+```sh
+cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json
+```
+
+This command is the Phase 1e completion oracle. It emits a single machine-readable report covering:
+
+- `linreg` training
+- `mnist` training + inference on a fixed subset
+- `transformer` forward pass
+
+If HIP, PyTorch, or the local MNIST IDX subset prerequisite are missing, the report must
+record an explicit `skipped` status and reason. Silent fallback is not acceptable.
+
+Local/manual prerequisite for real PyTorch numbers:
+
+```sh
+uv venv --python 3.12 py/.venv
+uv pip install --python py/.venv/bin/python --index-url https://rocm.nightlies.amd.com/v2/gfx1151/ --prerelease allow torch torchaudio torchvision
+```
+
+CI does **not** install PyTorch. In CI, the oracle is still expected to emit structured
+PyTorch `skipped` reports rather than fail or silently downgrade.
+
+### Benchmark Surface
+
+Phase 1e is intentionally a **thin fixed runner**, not a general benchmarking framework.
+The only public CLI surface is:
+
+```sh
+cargo run -p chelis-e2e --bin bench_phase1e -- --model <linreg|mnist|transformer|all> --emit-json <path>
+```
+
+No suite composition, tuning flags, arbitrary epochs, or backend selectors are exposed.
+The benchmark configuration is fixed in code and documented in `benchmarks/RESULTS.md`.
+
+### Fixed Workloads
+
+| Model | Chelis example | Scope | Notes |
 |---|---|---|---|
-| MNIST MLP | `examples/mnist.ch` | Already exists, baseline | matmul, relu, softmax, cross-entropy, grad |
-| CNN (LeNet-5) | `examples/lenet.ch` | Tests conv2d on GPU | conv2d, max_pool, relu, matmul |
-| Transformer block | `examples/transformer_block.ch` | Tests attention, layer norm | matmul, softmax, layer_norm, add, mul |
-| Linear regression | `examples/linreg.ch` | Simplest possible, sanity check | matmul, add, sum, grad |
+| Linear regression | `examples/linreg.ch` | train | synthetic dense regression with fixed data |
+| MNIST MLP | `examples/mnist.ch` | train + inference | fixed subset, fixed seed/init; requires local MNIST IDX files for a real run |
+| Transformer-block-style forward | `examples/transformer_block.ch` | forward only | sequence-only block within current rank-2 matmul support |
 
-Each model exists as a `.ch` file in `examples/`. Each has:
-- A reference PyTorch implementation in `benchmarks/pytorch/` for numerical comparison
-- A training script that runs on CPU (via C backend) and GPU (via HIP backend) and reports: accuracy/loss, wall-clock time, peak memory
+Transformer benchmark shapes:
 
-### Performance Targets
+- `seq_len = 128`
+- `d_model = 256`
+- `n_heads = 4`
+- `head_dim = 64`
+- `d_ff = 1024`
 
-| Metric | Target | Rationale |
-|---|---|---|
-| Correctness | GPU output matches CPU within 1e-5 | Non-negotiable. If they don't match, the backend has a bug. |
-| MNIST training | Completes, >90% accuracy | Same milestone as Phase 0h but on GPU |
-| Wall-clock vs CPU | GPU faster than CPU for batch ≥ 32 | If GPU is slower than CPU, something is fundamentally wrong |
-| Wall-clock vs PyTorch | Within 2-5x | Proving the architecture works, not winning benchmarks |
-| Peak VRAM | Fits in 8GB for MNIST, 16GB for transformer block | Consumer GPU target |
+The benchmark remains within the currently shipped op surface.
+**CNN / LeNet / max-pool are excluded from Phase 1e** because they are not yet part of the
+implemented executable benchmark path.
 
-### Performance is NOT the Phase 1 priority
+### Comparison Policy
 
-Correctness is. If the GPU backend produces wrong results fast, that's a failure. If it produces correct results slowly, that's Phase 1 success with optimization work remaining. Do not optimize at the expense of correctness testing time.
+- Chelis CPU is the in-repo semantic oracle for the benchmark runner
+- Chelis HIP is the Phase 1 target backend under test
+- PyTorch is the local/manual comparison backend, but not the primary oracle
+- the benchmark runner selects PyTorch via `CHELIS_BENCH_PYTHON` or the repo-local
+  `py/.venv`; it does not fall back to an ambient global `python3`
+- the benchmark runner removes stale shell `HSA_OVERRIDE_GFX_VERSION` values before invoking PyTorch so local ROCm probing reflects the actual hardware
 
-### Profiling
+Acceptance expectations:
 
-Use `rocprof` (AMD) or equivalent to identify:
-- Kernel launch overhead (are we launching too many small kernels? → fusion helps)
-- Memory transfer overhead (are we transferring too often? → memory planning helps)
-- Kernel execution time (are individual kernels slow? → thread block sizing, memory coalescing)
-- hipBLAS utilization (is matmul actually using the hardware GEMM units?)
+- forward-only comparisons use direct tensor tolerances (`f32`, target `1e-5` to `1e-4`
+  depending on the path)
+- training trajectories are compared by **trend**, not by exact stepwise equality
+- MNIST and linear-regression comparisons require loss to decrease on both sides
+- MNIST comparison uses final-accuracy band agreement, not exact floating-point matching
 
-Document findings in a `benchmarks/RESULTS.md` with reproducible commands.
+### Deliverables
 
-### Test Strategy (~10 tests)
+- `crates/chelis-e2e/src/bin/bench_phase1e.rs`
+- benchmark support in `crates/chelis-e2e/src/bench.rs`
+- executable examples in `examples/linreg.ch` and `examples/transformer_block.ch`
+- PyTorch references under `benchmarks/pytorch/`
+- checked-in report artifacts:
+  - `benchmarks/results/latest.json`
+  - `benchmarks/RESULTS.md`
+- documented local Python benchmark environment in `py/.venv`, prepared manually with the
+  ROCm gfx1151 nightly PyTorch install command above
 
-- [ ] MNIST trains on GPU to >90% accuracy
-- [ ] MNIST GPU results match CPU results (numerical comparison per batch)
-- [ ] LeNet trains on GPU (if conv2d is implemented)
-- [ ] Transformer block forward pass matches CPU
-- [ ] Linear regression trains correctly on GPU
-- [ ] GPU is faster than CPU for MNIST with batch=64 (basic sanity)
-- [ ] Peak VRAM for MNIST fits in 8GB
-- [ ] No numerical divergence over multiple training epochs (accumulated precision errors)
+Missing-MNIST behavior:
 
-### Execution Strategy
+- `--model mnist` and `--model all` must still emit structured JSON when MNIST data is absent
+- the `mnist` model report must become an explicit skip with the dataset reason, not a process abort
 
-```
-Commit 1: Benchmark scaffold — examples/*.ch files, PyTorch references, timing harness
-Commit 2: MNIST on GPU — train, verify accuracy, compare to CPU
-Commit 3: Additional models (LeNet, transformer block, linreg)
-Commit 4: Performance profiling with rocprof
-Commit 5: RESULTS.md with findings and bottleneck analysis
-```
+### Tests
+
+- [ ] `bench_phase1e` rejects invalid `--model`
+- [ ] `bench_phase1e --model all` exercises the real fixed benchmark scope
+- [ ] skipped backends always carry explicit reasons
+- [ ] missing MNIST data becomes a structured skip, not a CLI failure
+- [ ] missing benchmark Python interpreter becomes a structured PyTorch skip
+- [ ] new executable examples compile through the full Surf pipeline
+- [ ] release oracle produces a report with CPU results and explicit backend statuses

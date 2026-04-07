@@ -165,8 +165,10 @@ validation tooling.
 
 ### 1e: Benchmarks and Real Models
 
-- benchmark MLP, CNN, transformer-block-scale workloads
+- benchmark fixed executable workloads already supported by the shipped surface
+- current benchmark set: MNIST MLP, linear regression, transformer-block-style forward pass
 - compare against the reference C backend for correctness
+- keep PyTorch as a local/manual comparison dependency through the repo `py/` env, not a CI requirement
 - target credibility, not premature parity with PyTorch
 
 ### 1f: Executable Grammar

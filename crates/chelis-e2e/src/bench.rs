@@ -1,0 +1,1867 @@
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
+
+use chelis_backend_c::CodegenResult as CCodegenResult;
+use chelis_backend_hip::HipCodegenResult;
+use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use chelis_ir::eval::TensorValue;
+use chelis_ir::{fuse, grad_then_fuse};
+use serde::Serialize;
+
+use crate::data::{default_mnist_dir, load_mnist};
+use crate::pipeline::compile_surf;
+use crate::train::{build_mnist_program, init_params};
+
+const LINREG_TRAIN_BATCHES: usize = 16;
+const LINREG_TEST_BATCHES: usize = 4;
+const LINREG_BATCH_SIZE: usize = 64;
+const LINREG_FEATURES: usize = 64;
+const LINREG_EPOCHS: usize = 12;
+const LINREG_LR: f32 = 0.02;
+
+const MNIST_TRAIN_BATCHES: usize = 32;
+const MNIST_TEST_BATCHES: usize = 8;
+const MNIST_BATCH_SIZE: usize = 32;
+const MNIST_EPOCHS: usize = 5;
+const MNIST_LR: f32 = 0.1;
+const MNIST_SEED: u64 = 42;
+
+const TRANSFORMER_SEQ_LEN: usize = 128;
+const TRANSFORMER_D_MODEL: usize = 256;
+const TRANSFORMER_HEADS: usize = 4;
+const TRANSFORMER_HEAD_DIM: usize = 64;
+const TRANSFORMER_D_FF: usize = 1024;
+const TRANSFORMER_ITERS: usize = 5;
+const FORWARD_TOL: f32 = 1e-4;
+const PYTORCH_SETUP_HINT: &str = "run `uv venv --python 3.12 py/.venv` and `uv pip install --python py/.venv/bin/python --index-url https://rocm.nightlies.amd.com/v2/gfx1151/ --prerelease allow torch torchaudio torchvision`";
+
+#[derive(Clone, Copy)]
+pub enum Model {
+    Linreg,
+    Mnist,
+    Transformer,
+}
+
+impl Model {
+    pub fn parse(arg: &str) -> Result<Vec<Self>, String> {
+        match arg {
+            "linreg" => Ok(vec![Self::Linreg]),
+            "mnist" => Ok(vec![Self::Mnist]),
+            "transformer" => Ok(vec![Self::Transformer]),
+            "all" => Ok(vec![Self::Linreg, Self::Mnist, Self::Transformer]),
+            other => Err(format!(
+                "unknown model `{other}`: expected linreg, mnist, transformer, or all"
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Linreg => "linreg",
+            Self::Mnist => "mnist",
+            Self::Transformer => "transformer",
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct BenchmarkReport {
+    pub oracle: &'static str,
+    pub models: Vec<ModelReport>,
+}
+
+#[derive(Serialize)]
+pub struct ModelReport {
+    pub name: String,
+    pub workload: WorkloadReport,
+    pub cpu: BackendReport,
+    pub hip: BackendReport,
+    pub pytorch: BackendReport,
+    pub comparisons: Vec<ComparisonReport>,
+}
+
+#[derive(Serialize)]
+pub struct WorkloadReport {
+    pub summary: String,
+    pub batch_size: Option<usize>,
+    pub train_batches: Option<usize>,
+    pub test_batches: Option<usize>,
+    pub epochs: Option<usize>,
+    pub seq_len: Option<usize>,
+    pub d_model: Option<usize>,
+    pub n_heads: Option<usize>,
+    pub head_dim: Option<usize>,
+    pub d_ff: Option<usize>,
+    pub iterations: Option<usize>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct BackendReport {
+    pub status: &'static str,
+    pub reason: Option<String>,
+    pub compile_ms: Option<f64>,
+    pub run_ms: Option<f64>,
+    pub peak_device_bytes_estimate: Option<usize>,
+    pub loss_history: Option<Vec<f32>>,
+    pub final_loss: Option<f32>,
+    pub final_accuracy: Option<f32>,
+    pub output_len: Option<usize>,
+    pub output_checksum: Option<f64>,
+    pub output_sample: Option<Vec<f32>>,
+}
+
+#[derive(Serialize)]
+pub struct ComparisonReport {
+    pub name: String,
+    pub status: &'static str,
+    pub note: String,
+    pub max_abs_diff: Option<f32>,
+    pub mean_abs_diff: Option<f32>,
+}
+
+struct RunArtifacts {
+    report: BackendReport,
+    output: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+enum Backend {
+    Cpu,
+    Hip,
+}
+
+impl Backend {
+    fn tool(self) -> &'static str {
+        match self {
+            Self::Cpu => "gcc",
+            Self::Hip => "hipcc",
+        }
+    }
+}
+
+struct TrainingPrograms {
+    train_c: CCodegenResult,
+    train_hip: HipCodegenResult,
+    train_labels: HashMap<String, usize>,
+}
+
+struct ForwardPrograms {
+    cpu: CCodegenResult,
+    hip: HipCodegenResult,
+    output_index: usize,
+}
+
+pub fn run_phase1e(models: &[Model]) -> Result<BenchmarkReport, String> {
+    let mut reports = Vec::new();
+    for model in models {
+        reports.push(match model {
+            Model::Linreg => run_linreg()?,
+            Model::Mnist => run_mnist()?,
+            Model::Transformer => run_transformer()?,
+        });
+    }
+    Ok(BenchmarkReport {
+        oracle: "cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json",
+        models: reports,
+    })
+}
+
+fn run_linreg() -> Result<ModelReport, String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+    let data_path = temp.path().join("linreg.bin");
+    write_linreg_data(&data_path)?;
+    let programs = build_linreg_programs()?;
+
+    let cpu = run_training_backend(Backend::Cpu, "linreg_train", &data_path, &programs, false);
+    let hip = run_training_backend(Backend::Hip, "linreg_train", &data_path, &programs, false);
+    let pytorch = run_pytorch("benchmarks/pytorch/linreg.py", &data_path, None, "linreg");
+
+    Ok(ModelReport {
+        name: "linreg".to_string(),
+        workload: WorkloadReport {
+            summary: "Synthetic linear regression training".to_string(),
+            batch_size: Some(LINREG_BATCH_SIZE),
+            train_batches: Some(LINREG_TRAIN_BATCHES),
+            test_batches: Some(LINREG_TEST_BATCHES),
+            epochs: Some(LINREG_EPOCHS),
+            seq_len: None,
+            d_model: None,
+            n_heads: None,
+            head_dim: None,
+            d_ff: None,
+            iterations: None,
+        },
+        comparisons: build_training_comparisons(&cpu, &hip, &pytorch, false),
+        cpu: cpu.report,
+        hip: hip.report,
+        pytorch: pytorch.report,
+    })
+}
+
+fn run_mnist() -> Result<ModelReport, String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+    let data_path = temp.path().join("mnist.bin");
+    if let Err(err) = write_mnist_data(&data_path) {
+        return Ok(skipped_model_report(
+            "mnist",
+            mnist_workload(),
+            format!("MNIST benchmark data unavailable: {err}"),
+        ));
+    }
+    let programs = build_mnist_programs()?;
+
+    let cpu = run_training_backend(Backend::Cpu, "mnist_train", &data_path, &programs, true);
+    let hip = run_training_backend(Backend::Hip, "mnist_train", &data_path, &programs, true);
+    let pytorch = run_pytorch("benchmarks/pytorch/mnist.py", &data_path, None, "mnist");
+
+    Ok(ModelReport {
+        name: "mnist".to_string(),
+        workload: mnist_workload(),
+        comparisons: build_training_comparisons(&cpu, &hip, &pytorch, true),
+        cpu: cpu.report,
+        hip: hip.report,
+        pytorch: pytorch.report,
+    })
+}
+
+fn run_transformer() -> Result<ModelReport, String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+    let data_path = temp.path().join("transformer.bin");
+    write_transformer_data(&data_path)?;
+    let programs = build_transformer_programs()?;
+
+    let cpu = run_forward_backend(Backend::Cpu, "transformer_block", &data_path, &programs);
+    let hip = run_forward_backend(Backend::Hip, "transformer_block", &data_path, &programs);
+    let pytorch = run_pytorch(
+        "benchmarks/pytorch/transformer_block.py",
+        &data_path,
+        Some("--iterations"),
+        "transformer",
+    );
+
+    Ok(ModelReport {
+        name: "transformer".to_string(),
+        workload: WorkloadReport {
+            summary: "Sequence-only transformer-block-style forward pass".to_string(),
+            batch_size: None,
+            train_batches: None,
+            test_batches: None,
+            epochs: None,
+            seq_len: Some(TRANSFORMER_SEQ_LEN),
+            d_model: Some(TRANSFORMER_D_MODEL),
+            n_heads: Some(TRANSFORMER_HEADS),
+            head_dim: Some(TRANSFORMER_HEAD_DIM),
+            d_ff: Some(TRANSFORMER_D_FF),
+            iterations: Some(TRANSFORMER_ITERS),
+        },
+        comparisons: build_forward_comparisons(&cpu, &hip, &pytorch),
+        cpu: cpu.report,
+        hip: hip.report,
+        pytorch: pytorch.report,
+    })
+}
+
+fn build_training_comparisons(
+    cpu: &RunArtifacts,
+    hip: &RunArtifacts,
+    pytorch: &RunArtifacts,
+    uses_accuracy: bool,
+) -> Vec<ComparisonReport> {
+    vec![
+        compare_training("cpu_vs_hip", cpu, hip, uses_accuracy),
+        compare_training("cpu_vs_pytorch", cpu, pytorch, uses_accuracy),
+        compare_training("hip_vs_pytorch", hip, pytorch, uses_accuracy),
+    ]
+}
+
+fn mnist_workload() -> WorkloadReport {
+    WorkloadReport {
+        summary: "MNIST MLP training on a fixed subset".to_string(),
+        batch_size: Some(MNIST_BATCH_SIZE),
+        train_batches: Some(MNIST_TRAIN_BATCHES),
+        test_batches: Some(MNIST_TEST_BATCHES),
+        epochs: Some(MNIST_EPOCHS),
+        seq_len: None,
+        d_model: None,
+        n_heads: None,
+        head_dim: None,
+        d_ff: None,
+        iterations: None,
+    }
+}
+
+fn skipped_model_report(name: &str, workload: WorkloadReport, reason: String) -> ModelReport {
+    let cpu = skipped(reason.clone());
+    let hip = skipped(reason.clone());
+    let pytorch = skipped(reason);
+    ModelReport {
+        name: name.to_string(),
+        workload,
+        comparisons: build_training_comparisons(&cpu, &hip, &pytorch, name == "mnist"),
+        cpu: cpu.report,
+        hip: hip.report,
+        pytorch: pytorch.report,
+    }
+}
+
+fn build_forward_comparisons(
+    cpu: &RunArtifacts,
+    hip: &RunArtifacts,
+    pytorch: &RunArtifacts,
+) -> Vec<ComparisonReport> {
+    vec![
+        compare_forward("cpu_vs_hip", cpu, hip),
+        compare_forward("cpu_vs_pytorch", cpu, pytorch),
+        compare_forward("hip_vs_pytorch", hip, pytorch),
+    ]
+}
+
+fn compare_training(
+    name: &str,
+    left: &RunArtifacts,
+    right: &RunArtifacts,
+    uses_accuracy: bool,
+) -> ComparisonReport {
+    if left.report.status != "ok" || right.report.status != "ok" {
+        return ComparisonReport {
+            name: name.to_string(),
+            status: "skipped",
+            note: "one or both backends did not complete".to_string(),
+            max_abs_diff: None,
+            mean_abs_diff: None,
+        };
+    }
+
+    let (max_abs_diff, mean_abs_diff) = diff_metrics(&left.output, &right.output);
+    let left_loss = left
+        .report
+        .loss_history
+        .as_ref()
+        .map(|v| is_decreasing(v))
+        .unwrap_or(false);
+    let right_loss = right
+        .report
+        .loss_history
+        .as_ref()
+        .map(|v| is_decreasing(v))
+        .unwrap_or(false);
+    let mut ok = left_loss && right_loss;
+    let mut note = "both runs decreased training loss".to_string();
+
+    if uses_accuracy
+        && let (Some(a), Some(b)) = (left.report.final_accuracy, right.report.final_accuracy)
+    {
+        let acc_gap = (a - b).abs();
+        ok &= acc_gap <= 0.15;
+        note = format!("loss trends decrease; final accuracy gap = {:.4}", acc_gap);
+    }
+
+    ComparisonReport {
+        name: name.to_string(),
+        status: if ok { "ok" } else { "warn" },
+        note,
+        max_abs_diff: Some(max_abs_diff),
+        mean_abs_diff: Some(mean_abs_diff),
+    }
+}
+
+fn compare_forward(name: &str, left: &RunArtifacts, right: &RunArtifacts) -> ComparisonReport {
+    if left.report.status != "ok" || right.report.status != "ok" {
+        return ComparisonReport {
+            name: name.to_string(),
+            status: "skipped",
+            note: "one or both backends did not complete".to_string(),
+            max_abs_diff: None,
+            mean_abs_diff: None,
+        };
+    }
+    let (max_abs_diff, mean_abs_diff) = diff_metrics(&left.output, &right.output);
+    ComparisonReport {
+        name: name.to_string(),
+        status: if max_abs_diff <= FORWARD_TOL {
+            "ok"
+        } else {
+            "warn"
+        },
+        note: format!("forward tolerance target {:.1e}", FORWARD_TOL),
+        max_abs_diff: Some(max_abs_diff),
+        mean_abs_diff: Some(mean_abs_diff),
+    }
+}
+
+fn is_decreasing(losses: &[f32]) -> bool {
+    match (losses.first(), losses.last()) {
+        (Some(first), Some(last)) => last < first,
+        _ => false,
+    }
+}
+
+fn diff_metrics(left: &[f32], right: &[f32]) -> (f32, f32) {
+    if left.len() != right.len() || left.is_empty() {
+        return (f32::INFINITY, f32::INFINITY);
+    }
+    let mut max_abs = 0.0f32;
+    let mut sum_abs = 0.0f32;
+    for (&a, &b) in left.iter().zip(right.iter()) {
+        let d = (a - b).abs();
+        max_abs = max_abs.max(d);
+        sum_abs += d;
+    }
+    (max_abs, sum_abs / left.len() as f32)
+}
+
+fn run_training_backend(
+    backend: Backend,
+    prefix: &str,
+    data_path: &Path,
+    programs: &TrainingPrograms,
+    uses_accuracy: bool,
+) -> RunArtifacts {
+    if !tool_available(backend.tool(), &["--version"]) {
+        return skipped(format!("{} not available", backend.tool()));
+    }
+
+    let train = match backend {
+        Backend::Cpu => &programs.train_c,
+        Backend::Hip => {
+            return run_training_backend_hip(prefix, data_path, programs, uses_accuracy);
+        }
+    };
+    let main_source = build_training_main_c(
+        prefix,
+        data_path,
+        train,
+        &programs.train_labels,
+        uses_accuracy,
+    );
+    match compile_and_run_c(
+        prefix,
+        &[("train_model.c", &train.c_source)],
+        &main_source,
+        &train.compile_flags,
+        &train.link_flags,
+    ) {
+        Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+        Err(err) => failed(err),
+    }
+}
+
+fn run_training_backend_hip(
+    prefix: &str,
+    data_path: &Path,
+    programs: &TrainingPrograms,
+    uses_accuracy: bool,
+) -> RunArtifacts {
+    let train = &programs.train_hip;
+    let main_source = build_training_main_c(
+        prefix,
+        data_path,
+        &c_shim(train),
+        &programs.train_labels,
+        uses_accuracy,
+    );
+    match compile_and_run_hip(
+        prefix,
+        &[("train_model.cpp", &train.c_source)],
+        &main_source,
+        &train.compile_flags,
+        &train.link_flags,
+    ) {
+        Ok((compile_ms, stdout)) => {
+            parse_run_output(stdout, compile_ms, Some(train.peak_device_bytes_estimate))
+        }
+        Err(err) => failed(err),
+    }
+}
+
+fn run_forward_backend(
+    backend: Backend,
+    prefix: &str,
+    data_path: &Path,
+    programs: &ForwardPrograms,
+) -> RunArtifacts {
+    if !tool_available(backend.tool(), &["--version"]) {
+        return skipped(format!("{} not available", backend.tool()));
+    }
+
+    match backend {
+        Backend::Cpu => {
+            let main_source =
+                build_forward_main_c(prefix, data_path, &programs.cpu, programs.output_index);
+            match compile_and_run_c(
+                prefix,
+                &[("model.c", &programs.cpu.c_source)],
+                &main_source,
+                &programs.cpu.compile_flags,
+                &programs.cpu.link_flags,
+            ) {
+                Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+                Err(err) => failed(err),
+            }
+        }
+        Backend::Hip => {
+            let main_source = build_forward_main_c(
+                prefix,
+                data_path,
+                &c_shim(&programs.hip),
+                programs.output_index,
+            );
+            match compile_and_run_hip(
+                prefix,
+                &[("model.cpp", &programs.hip.c_source)],
+                &main_source,
+                &programs.hip.compile_flags,
+                &programs.hip.link_flags,
+            ) {
+                Ok((compile_ms, stdout)) => parse_run_output(
+                    stdout,
+                    compile_ms,
+                    Some(programs.hip.peak_device_bytes_estimate),
+                ),
+                Err(err) => failed(err),
+            }
+        }
+    }
+}
+
+fn run_pytorch(
+    script: &str,
+    data_path: &Path,
+    extra_flag: Option<&str>,
+    name: &str,
+) -> RunArtifacts {
+    let python = match resolve_pytorch_python() {
+        Ok(path) => path,
+        Err(reason) => return skipped(reason),
+    };
+    run_pytorch_with_python(&python, script, data_path, extra_flag, name)
+}
+
+fn run_pytorch_with_python(
+    python: &Path,
+    script: &str,
+    data_path: &Path,
+    extra_flag: Option<&str>,
+    name: &str,
+) -> RunArtifacts {
+    let mut probe = Command::new(python);
+    apply_pytorch_env(&mut probe);
+    let torch_probe = probe.args(["-c", "import torch"]).output();
+    match torch_probe {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            return skipped(format!(
+                "PyTorch import failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Err(err) => return skipped(format!("failed to probe PyTorch: {err}")),
+    }
+
+    let mut cmd = Command::new(python);
+    apply_pytorch_env(&mut cmd);
+    cmd.arg(script).arg("--data-file").arg(data_path);
+    if let Some(flag) = extra_flag {
+        cmd.arg(flag).arg(TRANSFORMER_ITERS.to_string());
+    }
+    let start = Instant::now();
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(err) => return failed(format!("failed to run python for {name}: {err}")),
+    };
+    let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
+    if !output.status.success() {
+        return failed(format!(
+            "python benchmark failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    parse_run_output(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        compile_ms,
+        None,
+    )
+}
+
+fn apply_pytorch_env(cmd: &mut Command) {
+    cmd.env_remove("HSA_OVERRIDE_GFX_VERSION");
+    cmd.env("PYTORCH_ROCM_ARCH", "gfx1151");
+    cmd.env("HSA_XNACK", "1");
+    cmd.env("HSA_FORCE_FINE_GRAIN_PCIE", "1");
+    cmd.env("GPU_MAX_HEAP_SIZE", "100");
+    cmd.env("GPU_MAX_ALLOC_PERCENT", "100");
+
+    let rocm_lib_dirs = [
+        workspace_root().join("py/.venv/lib/python3.12/site-packages/_rocm_sdk_core/lib"),
+        workspace_root()
+            .join("py/.venv/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib"),
+    ];
+    let existing = env::var_os("LD_LIBRARY_PATH");
+    let mut paths: Vec<PathBuf> = rocm_lib_dirs.into_iter().filter(|p| p.is_dir()).collect();
+    if let Some(existing) = existing {
+        paths.extend(env::split_paths(&existing));
+    }
+    if let Ok(joined) = env::join_paths(paths) {
+        cmd.env("LD_LIBRARY_PATH", joined);
+    }
+}
+
+fn parse_run_output(
+    stdout: String,
+    compile_ms: f64,
+    peak_device_bytes_estimate: Option<usize>,
+) -> RunArtifacts {
+    #[derive(serde::Deserialize)]
+    struct RawRun {
+        run_ms: f64,
+        #[serde(default)]
+        loss_history: Vec<f32>,
+        #[serde(default)]
+        final_loss: Option<f32>,
+        #[serde(default)]
+        final_accuracy: Option<f32>,
+        #[serde(default)]
+        output: Vec<f32>,
+    }
+
+    match serde_json::from_str::<RawRun>(stdout.trim()) {
+        Ok(raw) => {
+            let checksum: f64 = raw.output.iter().map(|v| *v as f64).sum();
+            RunArtifacts {
+                report: BackendReport {
+                    status: "ok",
+                    reason: None,
+                    compile_ms: Some(compile_ms),
+                    run_ms: Some(raw.run_ms),
+                    peak_device_bytes_estimate,
+                    loss_history: if raw.loss_history.is_empty() {
+                        None
+                    } else {
+                        Some(raw.loss_history.clone())
+                    },
+                    final_loss: raw.final_loss,
+                    final_accuracy: raw.final_accuracy,
+                    output_len: Some(raw.output.len()),
+                    output_checksum: Some(checksum),
+                    output_sample: Some(raw.output.iter().take(8).copied().collect()),
+                },
+                output: raw.output,
+            }
+        }
+        Err(err) => failed(format!(
+            "failed to parse benchmark output as JSON: {err}\n{stdout}"
+        )),
+    }
+}
+
+fn resolve_pytorch_python() -> Result<PathBuf, String> {
+    resolve_pytorch_python_in(&workspace_root())
+}
+
+fn resolve_pytorch_python_in(workspace_root: &Path) -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("CHELIS_BENCH_PYTHON") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "CHELIS_BENCH_PYTHON points to a missing interpreter `{}`",
+            path.display()
+        ));
+    }
+
+    for candidate in benchmark_python_candidates(workspace_root) {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "PyTorch benchmark environment not prepared; {PYTORCH_SETUP_HINT}"
+    ))
+}
+
+fn benchmark_python_candidates(workspace_root: &Path) -> [PathBuf; 2] {
+    [
+        workspace_root.join("py/.venv/bin/python"),
+        workspace_root.join("py/.venv/Scripts/python.exe"),
+    ]
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+fn skipped(reason: String) -> RunArtifacts {
+    RunArtifacts {
+        report: BackendReport {
+            status: "skipped",
+            reason: Some(reason),
+            compile_ms: None,
+            run_ms: None,
+            peak_device_bytes_estimate: None,
+            loss_history: None,
+            final_loss: None,
+            final_accuracy: None,
+            output_len: None,
+            output_checksum: None,
+            output_sample: None,
+        },
+        output: Vec::new(),
+    }
+}
+
+fn failed(reason: String) -> RunArtifacts {
+    RunArtifacts {
+        report: BackendReport {
+            status: "failed",
+            reason: Some(reason),
+            compile_ms: None,
+            run_ms: None,
+            peak_device_bytes_estimate: None,
+            loss_history: None,
+            final_loss: None,
+            final_accuracy: None,
+            output_len: None,
+            output_checksum: None,
+            output_sample: None,
+        },
+        output: Vec::new(),
+    }
+}
+
+fn build_linreg_programs() -> Result<TrainingPrograms, String> {
+    let src = include_str!("../../../examples/linreg.ch");
+    let compiled = compile_surf(src)?;
+    let loss = *compiled
+        .root_nodes
+        .get("loss")
+        .ok_or("linreg example missing `loss` root")?;
+    let pred = *compiled
+        .root_nodes
+        .get("pred")
+        .ok_or("linreg example missing `pred` root")?;
+    build_training_programs_from_compiled(compiled.dag, loss, pred, &["w", "b"])
+}
+
+fn build_mnist_programs() -> Result<TrainingPrograms, String> {
+    let program = build_mnist_program()?;
+    build_training_programs_from_compiled(
+        program.dag,
+        program.loss_node,
+        program.logits_node,
+        &["w1", "b1", "w2", "b2"],
+    )
+}
+
+fn build_training_programs_from_compiled(
+    mut forward_dag: Dag,
+    loss_node: NodeId,
+    infer_node: NodeId,
+    param_names: &[&str],
+) -> Result<TrainingPrograms, String> {
+    let param_nodes = param_names
+        .iter()
+        .map(|name| {
+            find_load(&forward_dag, name)
+                .ok_or_else(|| format!("missing parameter load `{name}` in benchmark program"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    add_named_store(&mut forward_dag, "eval_output", infer_node);
+    let grad = grad_then_fuse(&forward_dag, loss_node, &param_nodes)
+        .ok_or("failed to build gradient DAG".to_string())?;
+
+    let mut train_dag = grad.dag.clone();
+    add_named_store(&mut train_dag, "loss", grad.output_node);
+    for (&name, &param_node) in param_names.iter().zip(param_nodes.iter()) {
+        let grad_node = *grad
+            .grad_nodes
+            .get(&param_node)
+            .ok_or_else(|| format!("missing gradient for `{name}`"))?;
+        add_named_store(&mut train_dag, &format!("grad_{name}"), grad_node);
+    }
+    let train_dag = dag_without_roots(&train_dag);
+
+    let train_c = chelis_backend_c::codegen(&train_dag, "chelis_train");
+    let train_hip = chelis_backend_hip::codegen_hip(&train_dag, "chelis_train");
+
+    let train_labels = output_index_map(&train_c.output_labels);
+    if !train_labels.contains_key("eval_output") {
+        return Err("missing eval_output store in training DAG".to_string());
+    }
+
+    Ok(TrainingPrograms {
+        train_c,
+        train_hip,
+        train_labels,
+    })
+}
+
+fn build_transformer_programs() -> Result<ForwardPrograms, String> {
+    let src = include_str!("../../../examples/transformer_block.ch");
+    let compiled = compile_surf(src)?;
+    let out = *compiled
+        .root_nodes
+        .get("out")
+        .ok_or("transformer example missing `out` root")?;
+    let mut dag = compiled.dag;
+    add_named_store(&mut dag, "out", out);
+    let fused = fuse::fuse(&dag);
+    let fused = dag_without_roots(&fused);
+    let cpu = chelis_backend_c::codegen(&fused, "chelis_forward");
+    let hip = chelis_backend_hip::codegen_hip(&fused, "chelis_forward");
+    let output_index = *output_index_map(&cpu.output_labels)
+        .get("out")
+        .ok_or("missing `out` output label".to_string())?;
+    Ok(ForwardPrograms {
+        cpu,
+        hip,
+        output_index,
+    })
+}
+
+fn find_load(dag: &Dag, name: &str) -> Option<NodeId> {
+    dag.nodes().iter().find_map(|node| match &node.op {
+        RiscOp::Load { name: load } if load == name => Some(node.id),
+        _ => None,
+    })
+}
+
+fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
+    let ty = dag
+        .get(input)
+        .unwrap_or_else(|| panic!("missing node for store `{name}`"))
+        .output_type
+        .clone();
+    dag.add_node(
+        RiscOp::Store {
+            name: name.to_string(),
+        },
+        vec![input],
+        ty,
+    );
+}
+
+fn dag_without_roots(dag: &Dag) -> Dag {
+    let mut out = Dag::new();
+    for node in dag.nodes() {
+        out.add_node(
+            node.op.clone(),
+            node.inputs.clone(),
+            node.output_type.clone(),
+        );
+    }
+    out
+}
+
+fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
+    labels
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(idx, label)| (label, idx))
+        .collect()
+}
+
+fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
+    CCodegenResult {
+        c_source: hip.c_source.clone(),
+        h_header: hip.h_header.clone(),
+        compile_flags: hip.compile_flags.clone(),
+        link_flags: hip.link_flags.clone(),
+        input_labels: hip.input_labels.clone(),
+        output_labels: hip.output_labels.clone(),
+    }
+}
+
+fn tool_available(tool: &str, args: &[&str]) -> bool {
+    Command::new(tool)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn cpu_runtime_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-c/runtime")
+}
+
+fn hip_runtime_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-hip/runtime")
+}
+
+fn compile_and_run_c(
+    prefix: &str,
+    model_sources: &[(&str, &str)],
+    main_source: &str,
+    compile_flags: &[String],
+    link_flags: &[String],
+) -> Result<(f64, String), String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+    write_runtime_files(temp.path(), false)?;
+    for (name, source) in model_sources {
+        fs::write(temp.path().join(name), source)
+            .map_err(|e| format!("write {name} failed: {e}"))?;
+    }
+    fs::write(temp.path().join("main.c"), main_source)
+        .map_err(|e| format!("write main.c failed: {e}"))?;
+
+    let bin = temp.path().join(prefix);
+    let mut cmd = Command::new("gcc");
+    cmd.arg("-O3");
+    cmd.args(compile_flags);
+    cmd.arg(temp.path().join("main.c"));
+    for (name, _) in model_sources {
+        cmd.arg(temp.path().join(name));
+    }
+    cmd.arg(temp.path().join("chelis_runtime.c"));
+    cmd.args(link_flags);
+    cmd.arg("-o").arg(&bin);
+
+    let start = Instant::now();
+    let output = cmd
+        .output()
+        .map_err(|e| format!("gcc failed to start: {e}"))?;
+    let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
+    if !output.status.success() {
+        return Err(format!(
+            "gcc failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let run = Command::new(&bin)
+        .output()
+        .map_err(|e| format!("failed to run compiled benchmark: {e}"))?;
+    if !run.status.success() {
+        return Err(format!(
+            "compiled benchmark failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ));
+    }
+    Ok((
+        compile_ms,
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+    ))
+}
+
+fn compile_and_run_hip(
+    prefix: &str,
+    model_sources: &[(&str, &str)],
+    main_source: &str,
+    compile_flags: &[String],
+    link_flags: &[String],
+) -> Result<(f64, String), String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+    write_runtime_files(temp.path(), true)?;
+    for (name, source) in model_sources {
+        fs::write(temp.path().join(name), source)
+            .map_err(|e| format!("write {name} failed: {e}"))?;
+    }
+    fs::write(temp.path().join("main.cpp"), main_source)
+        .map_err(|e| format!("write main.cpp failed: {e}"))?;
+
+    let bin = temp.path().join(prefix);
+    let mut cmd = Command::new("hipcc");
+    cmd.arg("-O3");
+    cmd.args(compile_flags);
+    cmd.arg(temp.path().join("main.cpp"));
+    for (name, _) in model_sources {
+        cmd.arg(temp.path().join(name));
+    }
+    cmd.arg(temp.path().join("chelis_runtime.c"));
+    cmd.args(link_flags);
+    cmd.arg("-o").arg(&bin);
+
+    let start = Instant::now();
+    let output = cmd
+        .output()
+        .map_err(|e| format!("hipcc failed to start: {e}"))?;
+    let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
+    if !output.status.success() {
+        return Err(format!(
+            "hipcc failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let run = Command::new(&bin)
+        .output()
+        .map_err(|e| format!("failed to run compiled HIP benchmark: {e}"))?;
+    if !run.status.success() {
+        return Err(format!(
+            "compiled HIP benchmark failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ));
+    }
+    Ok((
+        compile_ms,
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+    ))
+}
+
+fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
+    let cpu_runtime = cpu_runtime_dir();
+    fs::write(
+        dir.join("chelis_runtime.h"),
+        fs::read_to_string(cpu_runtime.join("chelis_runtime.h"))
+            .map_err(|e| format!("read chelis_runtime.h failed: {e}"))?,
+    )
+    .map_err(|e| format!("write chelis_runtime.h failed: {e}"))?;
+    fs::write(
+        dir.join("chelis_runtime.c"),
+        fs::read_to_string(cpu_runtime.join("chelis_runtime.c"))
+            .map_err(|e| format!("read chelis_runtime.c failed: {e}"))?,
+    )
+    .map_err(|e| format!("write chelis_runtime.c failed: {e}"))?;
+    if hip {
+        let hip_runtime = hip_runtime_dir();
+        fs::write(
+            dir.join("chelis_hip_runtime.h"),
+            fs::read_to_string(hip_runtime.join("chelis_hip_runtime.h"))
+                .map_err(|e| format!("read chelis_hip_runtime.h failed: {e}"))?,
+        )
+        .map_err(|e| format!("write chelis_hip_runtime.h failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn write_linreg_data(path: &Path) -> Result<(), String> {
+    let mut buf = Vec::new();
+    push_u64(&mut buf, LINREG_TRAIN_BATCHES as u64);
+    push_u64(&mut buf, LINREG_TEST_BATCHES as u64);
+    push_u64(&mut buf, LINREG_BATCH_SIZE as u64);
+    push_u64(&mut buf, LINREG_FEATURES as u64);
+    push_u64(&mut buf, LINREG_EPOCHS as u64);
+    push_f32(&mut buf, LINREG_LR);
+
+    let true_w: Vec<f32> = (0..LINREG_FEATURES)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.07)
+        .collect();
+    let true_b = 0.3f32;
+
+    let train_total = LINREG_TRAIN_BATCHES * LINREG_BATCH_SIZE;
+    let test_total = LINREG_TEST_BATCHES * LINREG_BATCH_SIZE;
+    let x_train = generate_linreg_inputs(train_total);
+    let y_train = generate_linreg_targets(&x_train, &true_w, true_b);
+    let x_test = generate_linreg_inputs(train_total + test_total);
+    let y_test = generate_linreg_targets(&x_test[train_total * LINREG_FEATURES..], &true_w, true_b);
+    push_f32s(&mut buf, &x_train);
+    push_f32s(&mut buf, &y_train);
+    push_f32s(&mut buf, &x_test[train_total * LINREG_FEATURES..]);
+    push_f32s(&mut buf, &y_test);
+    push_f32s(&mut buf, &vec![0.0; LINREG_FEATURES]);
+    push_f32(&mut buf, 0.0);
+    fs::write(path, buf).map_err(|e| format!("write linreg data failed: {e}"))
+}
+
+fn generate_linreg_inputs(samples: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(samples * LINREG_FEATURES);
+    for sample in 0..samples {
+        for feature in 0..LINREG_FEATURES {
+            let idx = sample * LINREG_FEATURES + feature;
+            let value = ((idx as f32) * 0.013).sin() + ((sample as f32) * 0.031).cos() * 0.25;
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn generate_linreg_targets(x: &[f32], w: &[f32], b: f32) -> Vec<f32> {
+    let samples = x.len() / LINREG_FEATURES;
+    let mut out = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let row = &x[sample * LINREG_FEATURES..(sample + 1) * LINREG_FEATURES];
+        let value = row.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f32>() + b;
+        out.push(value);
+    }
+    out
+}
+
+fn write_mnist_data(path: &Path) -> Result<(), String> {
+    let mnist_dir = default_mnist_dir();
+    let (train_data, test_data) = load_mnist(&mnist_dir)?;
+    let train_data: Vec<_> = train_data.into_iter().take(MNIST_TRAIN_BATCHES).collect();
+    let test_data: Vec<_> = test_data.into_iter().take(MNIST_TEST_BATCHES).collect();
+    if train_data.len() != MNIST_TRAIN_BATCHES || test_data.len() != MNIST_TEST_BATCHES {
+        return Err("MNIST benchmark subset is smaller than requested".to_string());
+    }
+
+    let mut buf = Vec::new();
+    push_u64(&mut buf, MNIST_TRAIN_BATCHES as u64);
+    push_u64(&mut buf, MNIST_TEST_BATCHES as u64);
+    push_u64(&mut buf, MNIST_BATCH_SIZE as u64);
+    push_u64(&mut buf, MNIST_EPOCHS as u64);
+    push_f32(&mut buf, MNIST_LR);
+
+    for (x, _) in &train_data {
+        push_tensor_f32(&mut buf, x);
+    }
+    for (_, y) in &train_data {
+        push_tensor_f32(&mut buf, y);
+    }
+    for (x, _) in &test_data {
+        push_tensor_f32(&mut buf, x);
+    }
+    for (_, y) in &test_data {
+        push_tensor_f32(&mut buf, y);
+    }
+
+    let params = init_params(MNIST_SEED);
+    for name in ["w1", "b1", "w2", "b2"] {
+        let tensor = params
+            .get(name)
+            .ok_or_else(|| format!("missing MNIST init param `{name}`"))?;
+        push_tensor_f32(&mut buf, tensor);
+    }
+
+    fs::write(path, buf).map_err(|e| format!("write mnist data failed: {e}"))
+}
+
+fn write_transformer_data(path: &Path) -> Result<(), String> {
+    let mut buf = Vec::new();
+    push_u64(&mut buf, TRANSFORMER_SEQ_LEN as u64);
+    push_u64(&mut buf, TRANSFORMER_D_MODEL as u64);
+    push_u64(&mut buf, TRANSFORMER_HEADS as u64);
+    push_u64(&mut buf, TRANSFORMER_HEAD_DIM as u64);
+    push_u64(&mut buf, TRANSFORMER_D_FF as u64);
+    push_u64(&mut buf, TRANSFORMER_ITERS as u64);
+
+    let x = deterministic_array(TRANSFORMER_SEQ_LEN * TRANSFORMER_D_MODEL, 0.011, 0.37);
+    push_f32s(&mut buf, &x);
+    for offset in 0..TRANSFORMER_HEADS {
+        push_f32s(
+            &mut buf,
+            &deterministic_array(
+                TRANSFORMER_D_MODEL * TRANSFORMER_HEAD_DIM,
+                0.007 + offset as f32 * 0.001,
+                0.11,
+            ),
+        );
+        push_f32s(
+            &mut buf,
+            &deterministic_array(
+                TRANSFORMER_D_MODEL * TRANSFORMER_HEAD_DIM,
+                0.009 + offset as f32 * 0.001,
+                0.21,
+            ),
+        );
+        push_f32s(
+            &mut buf,
+            &deterministic_array(
+                TRANSFORMER_D_MODEL * TRANSFORMER_HEAD_DIM,
+                0.013 + offset as f32 * 0.001,
+                0.31,
+            ),
+        );
+        push_f32s(
+            &mut buf,
+            &deterministic_array(
+                TRANSFORMER_HEAD_DIM * TRANSFORMER_D_MODEL,
+                0.005 + offset as f32 * 0.001,
+                0.41,
+            ),
+        );
+    }
+    push_f32s(
+        &mut buf,
+        &deterministic_array(TRANSFORMER_D_MODEL * TRANSFORMER_D_FF, 0.004, 0.17),
+    );
+    push_f32s(
+        &mut buf,
+        &deterministic_array(TRANSFORMER_D_FF * TRANSFORMER_D_MODEL, 0.003, 0.23),
+    );
+    for offset in 0..4 {
+        push_f32s(
+            &mut buf,
+            &deterministic_array(
+                TRANSFORMER_D_MODEL,
+                0.01 + offset as f32 * 0.001,
+                0.05 * offset as f32,
+            ),
+        );
+    }
+    fs::write(path, buf).map_err(|e| format!("write transformer data failed: {e}"))
+}
+
+fn deterministic_array(len: usize, scale: f32, bias: f32) -> Vec<f32> {
+    (0..len)
+        .map(|i| ((i as f32) * scale + bias).sin() * 0.5)
+        .collect()
+}
+
+fn push_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32(buf: &mut Vec<u8>, value: f32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32s(buf: &mut Vec<u8>, values: &[f32]) {
+    for value in values {
+        push_f32(buf, *value);
+    }
+}
+
+fn push_tensor_f32(buf: &mut Vec<u8>, tensor: &TensorValue) {
+    push_f32s(
+        buf,
+        &tensor.data.iter().map(|v| *v as f32).collect::<Vec<_>>(),
+    );
+}
+
+fn build_training_main_c(
+    _prefix: &str,
+    data_path: &Path,
+    train: &CCodegenResult,
+    train_labels: &HashMap<String, usize>,
+    uses_accuracy: bool,
+) -> String {
+    let train_input_slots = slot_assignments(
+        "train_inputs",
+        &train.input_labels,
+        &[
+            ("x", "x_tensor"),
+            ("y", "y_tensor"),
+            ("labels", "y_tensor"),
+            ("w", "w_tensor"),
+            ("b", "b_tensor"),
+            ("w1", "w1_tensor"),
+            ("b1", "b1_tensor"),
+            ("w2", "w2_tensor"),
+            ("b2", "b2_tensor"),
+        ],
+    );
+    let loss_idx = train_labels["loss"];
+    let eval_output_index = train_labels["eval_output"];
+    let grad_w_idx = train_labels.get("grad_w").copied();
+    let grad_b_idx = train_labels.get("grad_b").copied();
+    let grad_w1_idx = train_labels.get("grad_w1").copied();
+    let grad_b1_idx = train_labels.get("grad_b1").copied();
+    let grad_w2_idx = train_labels.get("grad_w2").copied();
+    let grad_b2_idx = train_labels.get("grad_b2").copied();
+
+    let (param_allocs, param_fills, update_code, free_params, infer_output_len) = if uses_accuracy {
+        (
+            r#"
+    chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_F32);
+    chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_F32);
+    chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_F32);
+    chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_F32);
+"#,
+            r#"
+    memcpy(w1_tensor->data, w1_init, sizeof(float) * 784 * 128);
+    memcpy(b1_tensor->data, b1_init, sizeof(float) * 128);
+    memcpy(w2_tensor->data, w2_init, sizeof(float) * 128 * 10);
+    memcpy(b2_tensor->data, b2_init, sizeof(float) * 10);
+"#,
+            format!(
+                r#"
+            for (int i = 0; i < 784 * 128; i++) w1_tensor->data[i] -= lr * train_outputs[{gw1}]->data[i];
+            for (int i = 0; i < 128; i++) b1_tensor->data[i] -= lr * train_outputs[{gb1}]->data[i];
+            for (int i = 0; i < 128 * 10; i++) w2_tensor->data[i] -= lr * train_outputs[{gw2}]->data[i];
+            for (int i = 0; i < 10; i++) b2_tensor->data[i] -= lr * train_outputs[{gb2}]->data[i];
+"#,
+                gw1 = grad_w1_idx.unwrap(),
+                gb1 = grad_b1_idx.unwrap(),
+                gw2 = grad_w2_idx.unwrap(),
+                gb2 = grad_b2_idx.unwrap(),
+            ),
+            r#"
+    chelis_free(w1_tensor);
+    chelis_free(b1_tensor);
+    chelis_free(w2_tensor);
+    chelis_free(b2_tensor);
+"#,
+            MNIST_TEST_BATCHES * MNIST_BATCH_SIZE * 10,
+        )
+    } else {
+        (
+            r#"
+    chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_F32);
+    chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_F32);
+"#,
+            r#"
+    memcpy(w_tensor->data, w_init, sizeof(float) * features);
+    memcpy(b_tensor->data, b_init, sizeof(float) * 1);
+"#,
+            format!(
+                r#"
+            for (int i = 0; i < features; i++) w_tensor->data[i] -= lr * train_outputs[{gw}]->data[i];
+            b_tensor->data[0] -= lr * train_outputs[{gb}]->data[0];
+"#,
+                gw = grad_w_idx.unwrap(),
+                gb = grad_b_idx.unwrap(),
+            ),
+            r#"
+    chelis_free(w_tensor);
+    chelis_free(b_tensor);
+"#,
+            LINREG_TEST_BATCHES * LINREG_BATCH_SIZE,
+        )
+    };
+
+    let metric_calc = if uses_accuracy {
+        r#"
+    int correct = 0;
+    for (uint64_t batch = 0; batch < test_batches; batch++) {
+        memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+        memcpy(y_tensor->data, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+        chelis_tensor *infer_outputs[TRAIN_OUTPUT_COUNT] = {0};
+        chelis_tensor *infer_inputs[TRAIN_INPUT_COUNT] = {0};
+TRAIN_INPUT_ASSIGNMENTS
+        chelis_train(infer_inputs, TRAIN_INPUT_COUNT, infer_outputs, TRAIN_OUTPUT_COUNT);
+        memcpy(eval_output + batch * batch_size * y_dim, infer_outputs[EVAL_OUTPUT_INDEX]->data, sizeof(float) * batch_size * y_dim);
+        for (int b = 0; b < batch_size; b++) {
+            int pred = 0;
+            int truth = 0;
+            float pred_best = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim];
+            float truth_best = y_tensor->data[b * y_dim];
+            for (int cls = 1; cls < y_dim; cls++) {
+                float pred_val = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim + cls];
+                if (pred_val > pred_best) { pred_best = pred_val; pred = cls; }
+                float truth_val = y_tensor->data[b * y_dim + cls];
+                if (truth_val > truth_best) { truth_best = truth_val; truth = cls; }
+            }
+            if (pred == truth) correct++;
+        }
+        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
+    }
+    final_accuracy = (float)correct / (float)(test_batches * batch_size);
+"#
+    } else {
+        r#"
+    for (uint64_t batch = 0; batch < test_batches; batch++) {
+        memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+        memcpy(y_tensor->data, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+        chelis_tensor *infer_outputs[TRAIN_OUTPUT_COUNT] = {0};
+        chelis_tensor *infer_inputs[TRAIN_INPUT_COUNT] = {0};
+TRAIN_INPUT_ASSIGNMENTS
+        chelis_train(infer_inputs, TRAIN_INPUT_COUNT, infer_outputs, TRAIN_OUTPUT_COUNT);
+        memcpy(eval_output + batch * batch_size, infer_outputs[EVAL_OUTPUT_INDEX]->data, sizeof(float) * batch_size);
+        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
+    }
+"#
+    };
+
+    let final_json = if uses_accuracy {
+        r#"
+    printf("{\"run_ms\":%.6f,\"loss_history\":[", run_ms);
+    for (uint64_t epoch = 0; epoch < epochs; epoch++) {
+        if (epoch) printf(",");
+        printf("%.8f", loss_history[epoch]);
+    }
+    printf("],\"final_loss\":%.8f,\"final_accuracy\":%.8f,\"output\":[", loss_history[epochs - 1], final_accuracy);
+    for (int i = 0; i < eval_output_len; i++) {
+        if (i) printf(",");
+        printf("%.8f", eval_output[i]);
+    }
+    printf("]}");
+"#
+    } else {
+        r#"
+    printf("{\"run_ms\":%.6f,\"loss_history\":[", run_ms);
+    for (uint64_t epoch = 0; epoch < epochs; epoch++) {
+        if (epoch) printf(",");
+        printf("%.8f", loss_history[epoch]);
+    }
+    printf("],\"final_loss\":%.8f,\"final_accuracy\":null,\"output\":[", loss_history[epochs - 1]);
+    for (int i = 0; i < eval_output_len; i++) {
+        if (i) printf(",");
+        printf("%.8f", eval_output[i]);
+    }
+    printf("]}");
+"#
+    };
+
+    format!(
+        r#"#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "chelis_runtime.h"
+
+{train_header}
+
+static uint64_t read_u64(FILE *f) {{
+    uint64_t value = 0;
+    if (fread(&value, sizeof(uint64_t), 1, f) != 1) {{
+        fprintf(stderr, "failed to read u64\n");
+        exit(1);
+    }}
+    return value;
+}}
+
+static float read_f32(FILE *f) {{
+    float value = 0.0f;
+    if (fread(&value, sizeof(float), 1, f) != 1) {{
+        fprintf(stderr, "failed to read f32\n");
+        exit(1);
+    }}
+    return value;
+}}
+
+static void read_f32s(FILE *f, float *out, size_t n) {{
+    if (fread(out, sizeof(float), n, f) != n) {{
+        fprintf(stderr, "failed to read %zu floats\n", n);
+        exit(1);
+    }}
+}}
+
+static double elapsed_ms(struct timespec start, struct timespec end) {{
+    return (double)(end.tv_sec - start.tv_sec) * 1000.0 +
+           (double)(end.tv_nsec - start.tv_nsec) / 1000000.0;
+}}
+
+int main(void) {{
+    FILE *f = fopen("{data_path}", "rb");
+    if (!f) {{
+        fprintf(stderr, "failed to open benchmark data file\n");
+        return 1;
+    }}
+
+    uint64_t train_batches = read_u64(f);
+    uint64_t test_batches = read_u64(f);
+    uint64_t batch_size = read_u64(f);
+    uint64_t features = {features_read};
+    uint64_t epochs = read_u64(f);
+    float lr = read_f32(f);
+    uint64_t x_dim = {x_dim};
+    uint64_t y_dim = {y_dim};
+    int x_shape[2] = {{ (int)batch_size, (int)x_dim }};
+    int y_shape[2] = {{ (int)batch_size, (int)y_dim }};
+{shape_decls}
+
+    size_t train_x_len = (size_t)train_batches * batch_size * x_dim;
+    size_t train_y_len = (size_t)train_batches * batch_size * y_dim;
+    size_t test_x_len = (size_t)test_batches * batch_size * x_dim;
+    size_t test_y_len = (size_t)test_batches * batch_size * y_dim;
+
+    float *x_train = (float*)malloc(sizeof(float) * train_x_len);
+    float *y_train = (float*)malloc(sizeof(float) * train_y_len);
+    float *x_test = (float*)malloc(sizeof(float) * test_x_len);
+    float *y_test = (float*)malloc(sizeof(float) * test_y_len);
+    read_f32s(f, x_train, train_x_len);
+    read_f32s(f, y_train, train_y_len);
+    read_f32s(f, x_test, test_x_len);
+    read_f32s(f, y_test, test_y_len);
+{init_allocs}
+    fclose(f);
+
+    chelis_tensor *x_tensor = chelis_alloc(2, x_shape, CHELIS_F32);
+    chelis_tensor *y_tensor = chelis_alloc(2, y_shape, CHELIS_F32);
+{param_allocs}
+{param_fills}
+
+    float *loss_history = (float*)calloc(epochs, sizeof(float));
+    int eval_output_len = {infer_output_len};
+    float *eval_output = (float*)calloc((size_t)eval_output_len, sizeof(float));
+    float final_accuracy = 0.0f;
+
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (uint64_t epoch = 0; epoch < epochs; epoch++) {{
+        double epoch_loss = 0.0;
+        for (uint64_t batch = 0; batch < train_batches; batch++) {{
+            memcpy(x_tensor->data, x_train + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+            memcpy(y_tensor->data, y_train + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+
+            chelis_tensor *train_outputs[{train_outs}] = {{0}};
+            chelis_tensor *train_inputs[{train_ins}] = {{0}};
+{train_input_slots}
+            chelis_train(train_inputs, {train_ins}, train_outputs, {train_outs});
+            epoch_loss += train_outputs[{loss_idx}]->data[0];
+{update_code}
+            for (int i = 0; i < {train_outs}; i++) chelis_free(train_outputs[i]);
+        }}
+        loss_history[epoch] = (float)(epoch_loss / (double)train_batches);
+    }}
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    double run_ms = elapsed_ms(start, end);
+{metric_calc}
+{final_json}
+
+    free(x_train);
+    free(y_train);
+    free(x_test);
+    free(y_test);
+{free_inits}
+    chelis_free(x_tensor);
+    chelis_free(y_tensor);
+{free_params}
+    free(loss_history);
+    free(eval_output);
+    return 0;
+}}
+"#,
+        data_path = escape_c_string(data_path),
+        train_header = train.h_header,
+        x_dim = if uses_accuracy { 784 } else { LINREG_FEATURES },
+        y_dim = if uses_accuracy { 10 } else { 1 },
+        shape_decls = if uses_accuracy {
+            r#"
+    int w1_shape[2] = { 784, 128 };
+    int b1_shape[1] = { 128 };
+    int w2_shape[2] = { 128, 10 };
+    int b2_shape[1] = { 10 };
+"#
+        } else {
+            r#"
+    int w_shape[2] = { (int)features, 1 };
+    int b_shape[1] = { 1 };
+"#
+        },
+        features_read = if uses_accuracy { "0" } else { "read_u64(f)" },
+        init_allocs = if uses_accuracy {
+            r#"
+    float *w1_init = (float*)malloc(sizeof(float) * 784 * 128);
+    float *b1_init = (float*)malloc(sizeof(float) * 128);
+    float *w2_init = (float*)malloc(sizeof(float) * 128 * 10);
+    float *b2_init = (float*)malloc(sizeof(float) * 10);
+    read_f32s(f, w1_init, 784 * 128);
+    read_f32s(f, b1_init, 128);
+    read_f32s(f, w2_init, 128 * 10);
+    read_f32s(f, b2_init, 10);
+"#
+        } else {
+            r#"
+    float *w_init = (float*)malloc(sizeof(float) * features);
+    float *b_init = (float*)malloc(sizeof(float) * 1);
+    read_f32s(f, w_init, features);
+    read_f32s(f, b_init, 1);
+"#
+        },
+        param_allocs = param_allocs,
+        param_fills = param_fills,
+        infer_output_len = infer_output_len,
+        train_outs = train.output_labels.len(),
+        train_ins = train.input_labels.len(),
+        train_input_slots = train_input_slots,
+        loss_idx = loss_idx,
+        update_code = update_code,
+        metric_calc = metric_calc
+            .replace(
+                "TRAIN_INPUT_ASSIGNMENTS",
+                &slot_assignments(
+                    "infer_inputs",
+                    &train.input_labels,
+                    &[
+                        ("x", "x_tensor"),
+                        ("y", "y_tensor"),
+                        ("labels", "y_tensor"),
+                        ("w", "w_tensor"),
+                        ("b", "b_tensor"),
+                        ("w1", "w1_tensor"),
+                        ("b1", "b1_tensor"),
+                        ("w2", "w2_tensor"),
+                        ("b2", "b2_tensor"),
+                    ]
+                )
+            )
+            .replace("TRAIN_INPUT_COUNT", &train.input_labels.len().to_string())
+            .replace("TRAIN_OUTPUT_COUNT", &train.output_labels.len().to_string())
+            .replace("EVAL_OUTPUT_INDEX", &eval_output_index.to_string()),
+        final_json = final_json,
+        free_inits = if uses_accuracy {
+            r#"
+    free(w1_init);
+    free(b1_init);
+    free(w2_init);
+    free(b2_init);
+"#
+        } else {
+            r#"
+    free(w_init);
+    free(b_init);
+"#
+        },
+        free_params = free_params,
+    )
+}
+
+fn build_forward_main_c(
+    _prefix: &str,
+    data_path: &Path,
+    model: &CCodegenResult,
+    output_index: usize,
+) -> String {
+    let input_slots = slot_assignments(
+        "inputs",
+        &model.input_labels,
+        &[
+            ("x", "x_tensor"),
+            ("wq0", "wq0_tensor"),
+            ("wk0", "wk0_tensor"),
+            ("wv0", "wv0_tensor"),
+            ("wo0", "wo0_tensor"),
+            ("wq1", "wq1_tensor"),
+            ("wk1", "wk1_tensor"),
+            ("wv1", "wv1_tensor"),
+            ("wo1", "wo1_tensor"),
+            ("wq2", "wq2_tensor"),
+            ("wk2", "wk2_tensor"),
+            ("wv2", "wv2_tensor"),
+            ("wo2", "wo2_tensor"),
+            ("wq3", "wq3_tensor"),
+            ("wk3", "wk3_tensor"),
+            ("wv3", "wv3_tensor"),
+            ("wo3", "wo3_tensor"),
+            ("ff1", "ff1_tensor"),
+            ("ff2", "ff2_tensor"),
+            ("gamma1", "gamma1_tensor"),
+            ("beta1", "beta1_tensor"),
+            ("gamma2", "gamma2_tensor"),
+            ("beta2", "beta2_tensor"),
+        ],
+    );
+
+    format!(
+        r#"#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "chelis_runtime.h"
+
+{header}
+
+static uint64_t read_u64(FILE *f) {{
+    uint64_t value = 0;
+    if (fread(&value, sizeof(uint64_t), 1, f) != 1) {{
+        fprintf(stderr, "failed to read u64\n");
+        exit(1);
+    }}
+    return value;
+}}
+
+static void read_f32s(FILE *f, float *out, size_t n) {{
+    if (fread(out, sizeof(float), n, f) != n) {{
+        fprintf(stderr, "failed to read %zu floats\n", n);
+        exit(1);
+    }}
+}}
+
+static double elapsed_ms(struct timespec start, struct timespec end) {{
+    return (double)(end.tv_sec - start.tv_sec) * 1000.0 +
+           (double)(end.tv_nsec - start.tv_nsec) / 1000000.0;
+}}
+
+static chelis_tensor *alloc_and_fill(FILE *f, int ndim, int *shape, size_t count) {{
+    chelis_tensor *tensor = chelis_alloc(ndim, shape, CHELIS_F32);
+    read_f32s(f, tensor->data, count);
+    return tensor;
+}}
+
+int main(void) {{
+    FILE *f = fopen("{data_path}", "rb");
+    if (!f) {{
+        fprintf(stderr, "failed to open benchmark data file\n");
+        return 1;
+    }}
+
+    uint64_t seq_len = read_u64(f);
+    uint64_t d_model = read_u64(f);
+    uint64_t n_heads = read_u64(f);
+    uint64_t head_dim = read_u64(f);
+    uint64_t d_ff = read_u64(f);
+    uint64_t iters = read_u64(f);
+    int x_shape[2] = {{ (int)seq_len, (int)d_model }};
+    int head_shape[2] = {{ (int)d_model, (int)head_dim }};
+    int proj_shape[2] = {{ (int)head_dim, (int)d_model }};
+    int ff1_shape[2] = {{ (int)d_model, (int)d_ff }};
+    int ff2_shape[2] = {{ (int)d_ff, (int)d_model }};
+    int norm_shape[1] = {{ (int)d_model }};
+
+    chelis_tensor *x_tensor = alloc_and_fill(f, 2, x_shape, seq_len * d_model);
+    chelis_tensor *wq0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wk0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wv0_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wo0_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
+    chelis_tensor *wq1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wk1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wv1_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wo1_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
+    chelis_tensor *wq2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wk2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wv2_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wo2_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
+    chelis_tensor *wq3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wk3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wv3_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
+    chelis_tensor *wo3_tensor = alloc_and_fill(f, 2, proj_shape, head_dim * d_model);
+    chelis_tensor *ff1_tensor = alloc_and_fill(f, 2, ff1_shape, d_model * d_ff);
+    chelis_tensor *ff2_tensor = alloc_and_fill(f, 2, ff2_shape, d_ff * d_model);
+    chelis_tensor *gamma1_tensor = alloc_and_fill(f, 1, norm_shape, d_model);
+    chelis_tensor *beta1_tensor = alloc_and_fill(f, 1, norm_shape, d_model);
+    chelis_tensor *gamma2_tensor = alloc_and_fill(f, 1, norm_shape, d_model);
+    chelis_tensor *beta2_tensor = alloc_and_fill(f, 1, norm_shape, d_model);
+    fclose(f);
+
+    chelis_tensor *inputs[{n_inputs}] = {{0}};
+{input_slots}
+
+    chelis_tensor *outputs[{n_outputs}] = {{0}};
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (uint64_t iter = 0; iter < iters; iter++) {{
+        for (int i = 0; i < {n_outputs}; i++) {{
+            if (outputs[i]) {{
+                chelis_free(outputs[i]);
+                outputs[i] = NULL;
+            }}
+        }}
+        chelis_forward(inputs, {n_inputs}, outputs, {n_outputs});
+    }}
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    chelis_tensor *out = outputs[{output_index}];
+    int out_size = out->size;
+    printf("{{\"run_ms\":%.6f,\"loss_history\":[],\"final_loss\":null,\"final_accuracy\":null,\"output\":[", elapsed_ms(start, end));
+    for (int i = 0; i < out_size; i++) {{
+        if (i) printf(",");
+        printf("%.8f", out->data[i]);
+    }}
+    printf("]}}");
+
+    for (int i = 0; i < {n_outputs}; i++) {{
+        if (outputs[i]) chelis_free(outputs[i]);
+    }}
+    chelis_free(x_tensor);
+    chelis_free(wq0_tensor);
+    chelis_free(wk0_tensor);
+    chelis_free(wv0_tensor);
+    chelis_free(wo0_tensor);
+    chelis_free(wq1_tensor);
+    chelis_free(wk1_tensor);
+    chelis_free(wv1_tensor);
+    chelis_free(wo1_tensor);
+    chelis_free(wq2_tensor);
+    chelis_free(wk2_tensor);
+    chelis_free(wv2_tensor);
+    chelis_free(wo2_tensor);
+    chelis_free(wq3_tensor);
+    chelis_free(wk3_tensor);
+    chelis_free(wv3_tensor);
+    chelis_free(wo3_tensor);
+    chelis_free(ff1_tensor);
+    chelis_free(ff2_tensor);
+    chelis_free(gamma1_tensor);
+    chelis_free(beta1_tensor);
+    chelis_free(gamma2_tensor);
+    chelis_free(beta2_tensor);
+    return 0;
+}}
+"#,
+        header = model.h_header,
+        data_path = escape_c_string(data_path),
+        n_inputs = model.input_labels.len(),
+        input_slots = input_slots,
+        n_outputs = model.output_labels.len(),
+        output_index = output_index,
+    )
+}
+
+fn slot_assignments(array_name: &str, labels: &[String], mapping: &[(&str, &str)]) -> String {
+    let map: HashMap<&str, &str> = mapping.iter().copied().collect();
+    let mut lines = Vec::new();
+    for (idx, label) in labels.iter().enumerate() {
+        let value = map
+            .get(label.as_str())
+            .unwrap_or_else(|| panic!("missing slot assignment for `{label}`"));
+        lines.push(format!("    {array_name}[{idx}] = {value};"));
+    }
+    lines.join("\n")
+}
+
+fn escape_c_string(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn model_parser_accepts_all_keyword() {
+        let parsed = Model::parse("all").expect("parse all");
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].name(), "linreg");
+        assert_eq!(parsed[1].name(), "mnist");
+        assert_eq!(parsed[2].name(), "transformer");
+    }
+
+    #[test]
+    fn training_comparison_detects_decreasing_loss() {
+        let make = |losses: Vec<f32>| RunArtifacts {
+            report: BackendReport {
+                status: "ok",
+                reason: None,
+                compile_ms: None,
+                run_ms: None,
+                peak_device_bytes_estimate: None,
+                loss_history: Some(losses),
+                final_loss: None,
+                final_accuracy: None,
+                output_len: Some(1),
+                output_checksum: Some(0.0),
+                output_sample: Some(vec![0.0]),
+            },
+            output: vec![0.0],
+        };
+
+        let comparison = compare_training(
+            "cpu_vs_pytorch",
+            &make(vec![3.0, 2.0]),
+            &make(vec![4.0, 1.0]),
+            false,
+        );
+        assert_eq!(comparison.status, "ok");
+    }
+
+    #[test]
+    fn resolve_pytorch_python_prefers_repo_venv() {
+        let dir = tempdir().expect("tempdir");
+        let python = dir.path().join("py/.venv/bin/python");
+        fs::create_dir_all(python.parent().expect("parent")).expect("create parent");
+        fs::write(&python, b"").expect("write fake python");
+
+        let resolved = resolve_pytorch_python_in(dir.path()).expect("resolve repo python");
+        assert_eq!(resolved, python);
+    }
+
+    #[test]
+    fn resolve_pytorch_python_reports_setup_hint_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let err = resolve_pytorch_python_in(dir.path()).expect_err("missing repo python");
+        assert!(err.contains(PYTORCH_SETUP_HINT));
+    }
+
+    #[test]
+    fn run_pytorch_with_non_python_binary_becomes_structured_skip() {
+        let current = env::current_exe().expect("current exe");
+        let result = run_pytorch_with_python(
+            &current,
+            "benchmarks/pytorch/linreg.py",
+            Path::new("unused.bin"),
+            None,
+            "linreg",
+        );
+        assert_eq!(result.report.status, "skipped");
+        let reason = result.report.reason.expect("skip reason");
+        assert!(reason.contains("PyTorch import failed"));
+    }
+}

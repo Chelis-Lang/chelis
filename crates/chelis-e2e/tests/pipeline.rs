@@ -23,6 +23,31 @@ fn pipeline_mnist_model_lowers() {
 }
 
 #[test]
+fn pipeline_linreg_model_lowers() {
+    let src = include_str!("../../../examples/linreg.ch");
+    let result = compile_surf(src).expect("linear regression example should compile");
+    let dag = result.dag;
+    assert!(
+        !dag.is_empty(),
+        "linear regression example should lower to a non-empty DAG"
+    );
+    assert!(result.root_nodes.contains_key("pred"));
+    assert!(result.root_nodes.contains_key("loss"));
+}
+
+#[test]
+fn pipeline_transformer_model_lowers() {
+    let src = include_str!("../../../examples/transformer_block.ch");
+    let result = compile_surf(src).expect("transformer example should compile");
+    let dag = result.dag;
+    assert!(
+        !dag.is_empty(),
+        "transformer example should lower to a non-empty DAG"
+    );
+    assert!(result.root_nodes.contains_key("out"));
+}
+
+#[test]
 fn pipeline_tier2_relu_decomposes() {
     // Verify relu desugars through the pipeline and lowers to MaxElem + Const
     let src = "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)";
