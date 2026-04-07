@@ -6,8 +6,10 @@
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
+use crate::blas;
 use crate::kernels;
 use crate::launch;
+use crate::memory::{MemoryPlan, NodeMemoryKind};
 
 /// Emits C/HIP host source code from a RISC DAG.
 pub struct HipEmitter {
@@ -15,10 +17,12 @@ pub struct HipEmitter {
     indent: usize,
     /// Collected kernel sources: (kernel_name, kernel_source_string).
     kernel_sources: Vec<(String, String)>,
-    /// Track which nodes are views (movement ops) vs allocations.
-    views: std::collections::HashSet<usize>,
+    /// Planner-driven slot/wrapper ownership.
+    plan: MemoryPlan,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: std::collections::HashSet<usize>,
+    /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
+    extra_peak_device_bytes_estimate: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -31,14 +35,18 @@ struct OutputSpec {
 
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
-    pub fn emit_dag(dag: &Dag, func_name: &str) -> String {
+    pub fn emit_dag(dag: &Dag, func_name: &str) -> (String, usize) {
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
+        let output_specs = Self::output_specs(dag);
+        let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
+        let plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
             kernel_sources: Vec::new(),
-            views: std::collections::HashSet::new(),
+            plan,
             reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
+            extra_peak_device_bytes_estimate: 0,
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
@@ -60,7 +68,6 @@ impl HipEmitter {
         // Emit function signature (same ABI as C backend)
         let input_labels = Self::input_labels(dag);
         let input_slots = Self::input_slots(&input_labels);
-        let output_specs = Self::output_specs(dag);
         let expected_inputs = input_labels.len();
         let expected_outputs = output_specs.len();
 
@@ -112,7 +119,7 @@ impl HipEmitter {
                 let input_idx = *input_slots
                     .get(name)
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
-                e.emit_load(node.id.0, input_idx);
+                e.emit_load(node.id.0, input_idx, &node.output_type);
             } else {
                 e.emit_node(node, dag);
             }
@@ -154,16 +161,17 @@ impl HipEmitter {
         e.line("");
 
         // Cleanup: free GPU tensors (skip reduction-inlined FusedElems — never allocated)
-        let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
-        let skip_ids: Vec<NodeId> = e.reduction_inlined.iter().map(|&id| NodeId(id)).collect();
-        let cleanup = crate::memory::emit_cleanup_with_skip(dag, &output_ids, &skip_ids);
+        let cleanup = e.plan.emit_cleanup();
         for line in cleanup {
             e.lines.push(line);
         }
 
         e.indent = 0;
         e.line("}");
-        e.lines.join("\n")
+        (
+            e.lines.join("\n"),
+            e.plan.peak_device_bytes_estimate() + e.extra_peak_device_bytes_estimate,
+        )
     }
 
     // ------------------------------------------------------------------
@@ -178,6 +186,17 @@ impl HipEmitter {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            match &node.op {
+                RiscOp::Sum { axis } | RiscOp::MaxReduce { axis } => {
+                    for (name, source) in self.reduction_kernel_sources(node, dag, *axis) {
+                        if seen.insert(name.clone()) {
+                            self.kernel_sources.push((name, source));
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let name = self.kernel_name_for_op(&node.op, node, dag);
             if let Some(name) = name
                 && seen.insert(name.clone())
@@ -186,6 +205,123 @@ impl HipEmitter {
                 self.kernel_sources.push((name, source));
             }
         }
+    }
+
+    fn reduction_kernel_sources(
+        &self,
+        node: &DagNode,
+        dag: &Dag,
+        axis: usize,
+    ) -> Vec<(String, String)> {
+        let kind = match node.op {
+            RiscOp::Sum { .. } => kernels::ReduceKind::Sum,
+            RiscOp::MaxReduce { .. } => kernels::ReduceKind::Max,
+            _ => unreachable!("reduction_kernel_sources called on non-reduction"),
+        };
+        let input_id = node.inputs[0];
+        if self.reduction_inlined.contains(&input_id.0) {
+            let fused_node = dag.get(input_id).unwrap();
+            let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
+            let axis_size = Self::dim_size(&fused_node.output_type.dims[axis]);
+            let launch = launch::segmented_launch(Self::total_size(&node.output_type), axis_size);
+            let (name, source) = match launch.strategy {
+                launch::SegmentedStrategy::Tiny => {
+                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "tiny");
+                    let source = kernels::reduce_fused(&name, axis, axis_size, steps, n_ext, kind);
+                    (name, source)
+                }
+                launch::SegmentedStrategy::Small => {
+                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "small");
+                    let source = kernels::segmented_reduce_small_fused(
+                        &name,
+                        axis,
+                        axis_size,
+                        launch.threads_per_segment,
+                        launch.segments_per_block,
+                        steps,
+                        n_ext,
+                        kind,
+                    );
+                    (name, source)
+                }
+                launch::SegmentedStrategy::Large => {
+                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "large");
+                    let source = kernels::segmented_reduce_large_fused(
+                        &name,
+                        axis,
+                        axis_size,
+                        launch.block,
+                        steps,
+                        n_ext,
+                        kind,
+                    );
+                    (name, source)
+                }
+            };
+            return vec![(name, source)];
+        }
+
+        if matches!(kind, kernels::ReduceKind::Sum)
+            && let Some(matmul) = blas::detect_matmul_pattern(dag, node.id)
+            && Self::supports_static_hipblas_matmul(dag, &matmul, &node.output_type)
+        {
+            return Vec::new();
+        }
+
+        let input_node = dag.get(input_id).unwrap();
+        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
+        if Self::supports_staged_scalar_reduction(node, input_node, axis, dag) {
+            let block = launch::reduction_block_size(Self::total_size(&input_node.output_type));
+            return vec![
+                (
+                    Self::scalar_stage1_kernel_name(kind, block),
+                    kernels::staged_reduce_stage1(
+                        &Self::scalar_stage1_kernel_name(kind, block),
+                        block,
+                        kind,
+                    ),
+                ),
+                (
+                    Self::scalar_stage_n_kernel_name(kind, block),
+                    kernels::staged_reduce_stage_n(
+                        &Self::scalar_stage_n_kernel_name(kind, block),
+                        block,
+                        kind,
+                    ),
+                ),
+            ];
+        }
+
+        let launch = launch::segmented_launch(Self::total_size(&node.output_type), axis_size);
+        let (name, source) = match launch.strategy {
+            launch::SegmentedStrategy::Tiny => {
+                let name = Self::reduction_kernel_name(kind, axis, axis_size, "tiny");
+                let source = match kind {
+                    kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis, axis_size),
+                    kernels::ReduceKind::Max => kernels::reduce_max(&name, axis, axis_size),
+                };
+                (name, source)
+            }
+            launch::SegmentedStrategy::Small => {
+                let name = Self::reduction_kernel_name(kind, axis, axis_size, "small");
+                let source = kernels::segmented_reduce_small(
+                    &name,
+                    axis,
+                    axis_size,
+                    launch.threads_per_segment,
+                    launch.segments_per_block,
+                    kind,
+                );
+                (name, source)
+            }
+            launch::SegmentedStrategy::Large => {
+                let name = Self::reduction_kernel_name(kind, axis, axis_size, "large");
+                let source =
+                    kernels::segmented_reduce_large(&name, axis, axis_size, launch.block, kind);
+                (name, source)
+            }
+        };
+        vec![(name, source)]
     }
 
     fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
@@ -373,37 +509,31 @@ impl HipEmitter {
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
-                    let fused_node = dag.get(input_id).unwrap();
-                    let kname = format!("kernel_fused_sum_{id}");
-                    self.emit_fused_reduce_launch(
-                        id,
-                        &kname,
-                        &fused_node.inputs.clone(),
-                        &node.output_type,
-                    );
+                    self.emit_fused_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    let kname = format!("kernel_sum_ax{axis}_sz{axis_size}");
-                    self.emit_reduce_launch(id, &kname, &node.inputs, &node.output_type, dag);
+                    self.emit_reduce_launch(
+                        id,
+                        *axis,
+                        &node.inputs,
+                        &node.output_type,
+                        dag,
+                        kernels::ReduceKind::Sum,
+                    );
                 }
             }
             RiscOp::MaxReduce { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
-                    let fused_node = dag.get(input_id).unwrap();
-                    let kname = format!("kernel_fused_maxred_{id}");
-                    self.emit_fused_reduce_launch(
-                        id,
-                        &kname,
-                        &fused_node.inputs.clone(),
-                        &node.output_type,
-                    );
+                    self.emit_fused_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag);
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    let kname = format!("kernel_maxred_ax{axis}_sz{axis_size}");
-                    self.emit_reduce_launch(id, &kname, &node.inputs, &node.output_type, dag);
+                    self.emit_reduce_launch(
+                        id,
+                        *axis,
+                        &node.inputs,
+                        &node.output_type,
+                        dag,
+                        kernels::ReduceKind::Max,
+                    );
                 }
             }
             RiscOp::Reshape { .. } => {
@@ -430,7 +560,7 @@ impl HipEmitter {
             RiscOp::Cast { .. } => {
                 self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
             }
-            RiscOp::Store { name } => self.emit_store(id, name, &node.inputs),
+            RiscOp::Store { name } => self.emit_store(id, name, &node.inputs, &node.output_type),
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
                 self.emit_fused_launch(
@@ -448,18 +578,54 @@ impl HipEmitter {
     // Const (fill kernel)
     // ------------------------------------------------------------------
 
-    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
+    fn slot_id_for_node(&self, id: usize) -> usize {
+        match self.plan.node_kind(NodeId(id)) {
+            NodeMemoryKind::UniqueInput { slot, .. } | NodeMemoryKind::SlotBacked { slot } => *slot,
+            other => panic!("node {id} does not own slot-backed storage: {other:?}"),
+        }
+    }
+
+    fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
+        let slot_id = self.slot_id_for_node(id);
+        let slot = self.plan.slot(slot_id);
+        if slot.first_owner != NodeId(id) {
+            return;
+        }
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
-        let (grid, block) = launch::grid_1d(Self::total_size(ty));
         self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+            "chelis_gpu_tensor *chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
         ));
+    }
+
+    fn emit_slot_wrapper(&mut self, id: usize, ty: &TensorType) {
+        self.emit_slot_allocation_if_needed(id, ty);
+        let slot_id = self.slot_id_for_node(id);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
+        ));
+    }
+
+    fn emit_alias_view(&mut self, id: usize, ty: &TensorType, data_expr: &str, storage_expr: &str) {
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, {data_expr}, {storage_expr});"
+        ));
+    }
+
+    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
+        let (grid, block) = launch::grid_1d(Self::total_size(ty));
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
         self.line(&format!("float fill_val = {:.8}f;", value as f32));
-        self.line(&format!("int fill_size = d_t{id}->storage_size;"));
+        self.line(&format!("int fill_size = d_t{id}->size;"));
         self.line(&format!(
             "void *fill_args[] = {{ &d_t{id}->data, &fill_val, &fill_size }};"
         ));
@@ -472,14 +638,24 @@ impl HipEmitter {
     // Load
     // ------------------------------------------------------------------
 
-    fn emit_load(&mut self, id: usize, input_idx: usize) {
-        // Allocate GPU tensor from host input and transfer data
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc(inputs[{input_idx}]->ndim, inputs[{input_idx}]->shape, inputs[{input_idx}]->dtype);"
-        ));
-        self.line(&format!(
-            "chelis_host_to_device(d_t{id}, inputs[{input_idx}]);"
-        ));
+    fn emit_load(&mut self, id: usize, input_idx: usize, ty: &TensorType) {
+        match self.plan.node_kind(NodeId(id)) {
+            NodeMemoryKind::UniqueInput { .. } => {
+                self.emit_slot_wrapper(id, ty);
+                self.line(&format!(
+                    "chelis_host_to_device(d_t{id}, inputs[{input_idx}]);"
+                ));
+            }
+            NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
+                self.emit_alias_view(
+                    id,
+                    ty,
+                    &format!("d_t{}->data", canonical_load.0),
+                    &format!("d_t{}->storage_size", canonical_load.0),
+                );
+            }
+            other => panic!("unexpected memory plan for load node {id}: {other:?}"),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -495,18 +671,13 @@ impl HipEmitter {
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let size = Self::total_size(ty);
         let (grid, block) = launch::grid_1d(size);
 
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->storage_size;"));
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
         // Stride params for a (8 ints)
         self.emit_stride_vars(id, "a", a);
         self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
@@ -550,18 +721,13 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let size = Self::total_size(ty);
         let (grid, block) = launch::grid_1d(size);
 
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->storage_size;"));
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
         self.emit_stride_vars(id, "a", a);
         self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
         self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
@@ -596,18 +762,13 @@ impl HipEmitter {
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
     ) {
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let size = Self::total_size(ty);
         let (grid, block) = launch::grid_1d(size);
 
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->storage_size;"));
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
 
         // Emit stride vars for each external input
         for (i, inp) in inputs.iter().enumerate() {
@@ -657,24 +818,51 @@ impl HipEmitter {
     fn emit_reduce_launch(
         &mut self,
         id: usize,
-        kernel_name: &str,
+        axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        _dag: &Dag,
+        dag: &Dag,
+        kind: kernels::ReduceKind,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        let out_size = Self::total_size(ty);
-        let (grid, block) = launch::grid_1d(out_size);
+        let input_node = dag.get(inputs[0]).unwrap();
 
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        if matches!(kind, kernels::ReduceKind::Sum)
+            && let Some(matmul) = blas::detect_matmul_pattern(dag, NodeId(id))
+            && Self::supports_static_hipblas_matmul(dag, &matmul, ty)
+        {
+            self.emit_blas_matmul(id, &matmul, ty);
+            return;
+        }
+
+        if Self::supports_staged_scalar_reduction(
+            dag.get(NodeId(id)).unwrap(),
+            input_node,
+            axis,
+            dag,
+        ) {
+            self.emit_staged_scalar_reduce_launch(id, a, input_node, ty, kind);
+            return;
+        }
+
+        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
+        let launch_cfg = launch::segmented_launch(Self::total_size(ty), axis_size);
+        let kernel_name = match launch_cfg.strategy {
+            launch::SegmentedStrategy::Tiny => {
+                Self::reduction_kernel_name(kind, axis, axis_size, "tiny")
+            }
+            launch::SegmentedStrategy::Small => {
+                Self::reduction_kernel_name(kind, axis, axis_size, "small")
+            }
+            launch::SegmentedStrategy::Large => {
+                Self::reduction_kernel_name(kind, axis, axis_size, "large")
+            }
+        };
+
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->storage_size;"));
+        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
         self.emit_stride_vars(id, "a", a);
         self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
         self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
@@ -688,9 +876,9 @@ impl HipEmitter {
         ));
         self.emit_kernel_launch(
             &format!("mod_{kernel_name}"),
-            kernel_name,
-            grid,
-            block,
+            &kernel_name,
+            launch_cfg.grid,
+            launch_cfg.block,
             "args",
         );
         self.indent -= 1;
@@ -704,22 +892,33 @@ impl HipEmitter {
     fn emit_fused_reduce_launch(
         &mut self,
         id: usize,
-        kernel_name: &str,
-        ext_inputs: &[NodeId],
+        axis: usize,
+        reduction_inputs: &[NodeId],
         ty: &TensorType,
+        dag: &Dag,
     ) {
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        let out_size = Self::total_size(ty);
-        let (grid, block) = launch::grid_1d(out_size);
-
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        let fused_node = dag.get(reduction_inputs[0]).unwrap();
+        let ext_inputs = &fused_node.inputs;
+        let axis_size = Self::dim_size(&fused_node.output_type.dims[axis]);
+        let launch_cfg = launch::segmented_launch(Self::total_size(ty), axis_size);
+        let kind = match dag.get(NodeId(id)).unwrap().op {
+            RiscOp::Sum { .. } => kernels::ReduceKind::Sum,
+            RiscOp::MaxReduce { .. } => kernels::ReduceKind::Max,
+            _ => unreachable!("emit_fused_reduce_launch called on non-reduction"),
+        };
+        let kernel_name = match launch_cfg.strategy {
+            launch::SegmentedStrategy::Tiny => Self::fused_reduction_kernel_name(id, kind, "tiny"),
+            launch::SegmentedStrategy::Small => {
+                Self::fused_reduction_kernel_name(id, kind, "small")
+            }
+            launch::SegmentedStrategy::Large => {
+                Self::fused_reduction_kernel_name(id, kind, "large")
+            }
+        };
+        self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->storage_size;"));
+        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
 
         // Emit stride vars for each external input of the fused chain
         for (i, inp) in ext_inputs.iter().enumerate() {
@@ -753,11 +952,106 @@ impl HipEmitter {
         self.line(&format!("void *args[] = {{ {} }};", arg_parts.join(", ")));
         self.emit_kernel_launch(
             &format!("mod_{kernel_name}"),
-            kernel_name,
-            grid,
-            block,
+            &kernel_name,
+            launch_cfg.grid,
+            launch_cfg.block,
             "args",
         );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_blas_matmul(&mut self, id: usize, info: &blas::MatmulInfo, ty: &TensorType) {
+        let a = info.a.0;
+        let b = info.b.0;
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "chelis_hipblas_sgemm_row_major(d_t{a}, d_t{b}, d_t{id}, {}, {}, {});",
+            info.m, info.n, info.k
+        ));
+    }
+
+    fn emit_staged_scalar_reduce_launch(
+        &mut self,
+        id: usize,
+        input_id: usize,
+        input_node: &DagNode,
+        ty: &TensorType,
+        kind: kernels::ReduceKind,
+    ) {
+        let total_size = Self::total_size(&input_node.output_type);
+        let block = launch::reduction_block_size(total_size);
+        let counts = launch::staged_chain_partial_counts(total_size, block);
+        let scratch_elems = launch::staged_chain_scratch_elements(total_size, block);
+        self.extra_peak_device_bytes_estimate = self
+            .extra_peak_device_bytes_estimate
+            .max(scratch_elems * Self::bytes_per_element(ty.precision));
+        let stage1_name = Self::scalar_stage1_kernel_name(kind, block);
+        let stage_n_name = Self::scalar_stage_n_kernel_name(kind, block);
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_stage0_total = {total_size};"));
+        for (stage, &partials) in counts.iter().take_while(|&&c| c > 1).enumerate() {
+            self.line(&format!("float *t{id}_partials{stage} = NULL;"));
+            self.line(&format!(
+                "CHELIS_HIP_CHECK(hipMalloc(&t{id}_partials{stage}, {partials} * sizeof(float)));"
+            ));
+        }
+        if counts[0] > 1 {
+            self.line(&format!(
+                "void *stage0_args[] = {{ &d_t{input_id}->data, &t{id}_partials0, &t{id}_stage0_total }};"
+            ));
+            self.emit_kernel_launch(
+                &format!("mod_{stage1_name}"),
+                &stage1_name,
+                counts[0],
+                block,
+                "stage0_args",
+            );
+            for stage in 1..counts.len() {
+                let in_count = counts[stage - 1];
+                let out_count = counts[stage];
+                self.line(&format!("int t{id}_stage{stage}_total = {in_count};"));
+                let in_ptr = if stage == 1 {
+                    format!("t{id}_partials0")
+                } else {
+                    format!("t{id}_partials{}", stage - 1)
+                };
+                let out_ptr = if out_count == 1 {
+                    format!("d_t{id}->data")
+                } else {
+                    format!("t{id}_partials{stage}")
+                };
+                self.line(&format!(
+                    "void *stage{stage}_args[] = {{ &{in_ptr}, &{out_ptr}, &t{id}_stage{stage}_total }};"
+                ));
+                self.emit_kernel_launch(
+                    &format!("mod_{stage_n_name}"),
+                    &stage_n_name,
+                    out_count,
+                    block,
+                    &format!("stage{stage}_args"),
+                );
+            }
+            for stage in 0..counts.iter().take_while(|&&c| c > 1).count() {
+                self.line(&format!(
+                    "CHELIS_HIP_CHECK(hipFree(t{id}_partials{stage}));"
+                ));
+            }
+        } else {
+            self.line(&format!(
+                "void *stage0_args[] = {{ &d_t{input_id}->data, &d_t{id}->data, &t{id}_stage0_total }};"
+            ));
+            self.emit_kernel_launch(
+                &format!("mod_{stage1_name}"),
+                &stage1_name,
+                1,
+                block,
+                "stage0_args",
+            );
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -768,29 +1062,27 @@ impl HipEmitter {
 
     fn emit_reshape(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{a}->data, d_t{a}->storage_size);"
-        ));
-        self.views.insert(id);
+        self.emit_alias_view(
+            id,
+            ty,
+            &format!("d_t{a}->data"),
+            &format!("d_t{a}->storage_size"),
+        );
     }
 
     fn emit_permute(&mut self, id: usize, axes: &[usize], inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{a}->data, d_t{a}->storage_size);"
-        ));
+        self.emit_alias_view(
+            id,
+            ty,
+            &format!("d_t{a}->data"),
+            &format!("d_t{a}->storage_size"),
+        );
         for (new_d, &old_d) in axes.iter().enumerate() {
             self.line(&format!(
                 "d_t{id}->strides[{new_d}] = d_t{a}->strides[{old_d}];"
             ));
         }
-        self.views.insert(id);
     }
 
     fn emit_expand(
@@ -802,12 +1094,12 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{a}->data, d_t{a}->storage_size);"
-        ));
+        self.emit_alias_view(
+            id,
+            ty,
+            &format!("d_t{a}->data"),
+            &format!("d_t{a}->storage_size"),
+        );
         self.line(&format!("if (d_t{id}->ndim == d_t{a}->ndim) {{"));
         self.indent += 1;
         self.line(&format!(
@@ -826,7 +1118,6 @@ impl HipEmitter {
         ));
         self.indent -= 1;
         self.line("}");
-        self.views.insert(id);
     }
 
     fn emit_stride(
@@ -837,12 +1128,12 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{a}->data, d_t{a}->storage_size);"
-        ));
+        self.emit_alias_view(
+            id,
+            ty,
+            &format!("d_t{a}->data"),
+            &format!("d_t{a}->storage_size"),
+        );
         let max_dims = ty.dims.len().max(1);
         for (d, &s) in stride_factors.iter().enumerate() {
             if d >= max_dims {
@@ -852,15 +1143,17 @@ impl HipEmitter {
                 "d_t{id}->strides[{d}] = d_t{a}->strides[{d}] * {s};"
             ));
         }
-        self.views.insert(id);
     }
 
-    fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId]) {
+    fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        // Store just aliases the input — transfer to host happens in the output section
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = d_t{a}; /* store: {name} */"
-        ));
+        self.emit_alias_view(
+            id,
+            ty,
+            &format!("d_t{a}->data"),
+            &format!("d_t{a}->storage_size"),
+        );
+        self.line(&format!("/* store: {name} */"));
     }
 
     // ------------------------------------------------------------------
@@ -916,6 +1209,103 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_finalize_kernel_launch({module_var}, \"{kernel_name}\");"
         ));
+    }
+
+    fn reduction_kernel_name(
+        kind: kernels::ReduceKind,
+        axis: usize,
+        axis_size: usize,
+        strategy: &str,
+    ) -> String {
+        let op = match kind {
+            kernels::ReduceKind::Sum => "sum",
+            kernels::ReduceKind::Max => "maxred",
+        };
+        format!("kernel_{op}_ax{axis}_sz{axis_size}_{strategy}")
+    }
+
+    fn fused_reduction_kernel_name(id: usize, kind: kernels::ReduceKind, strategy: &str) -> String {
+        let op = match kind {
+            kernels::ReduceKind::Sum => "fused_sum",
+            kernels::ReduceKind::Max => "fused_maxred",
+        };
+        format!("kernel_{op}_{id}_{strategy}")
+    }
+
+    fn scalar_stage1_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
+        let op = match kind {
+            kernels::ReduceKind::Sum => "sum",
+            kernels::ReduceKind::Max => "maxred",
+        };
+        format!("kernel_{op}_scalar_stage1_bs{block}")
+    }
+
+    fn scalar_stage_n_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
+        let op = match kind {
+            kernels::ReduceKind::Sum => "sum",
+            kernels::ReduceKind::Max => "maxred",
+        };
+        format!("kernel_{op}_scalar_stage_n_bs{block}")
+    }
+
+    fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
+        ty.precision == Prim::F32
+            && ty.dims.len() == 2
+            && dag.get(info.a).map(|n| n.output_type.precision) == Some(Prim::F32)
+            && dag.get(info.b).map(|n| n.output_type.precision) == Some(Prim::F32)
+            && Self::node_is_statically_contiguous(dag, info.a)
+            && Self::node_is_statically_contiguous(dag, info.b)
+    }
+
+    fn supports_staged_scalar_reduction(
+        node: &DagNode,
+        input_node: &DagNode,
+        axis: usize,
+        dag: &Dag,
+    ) -> bool {
+        Self::total_size(&node.output_type) == 1
+            && input_node.output_type.dims.len() <= 1
+            && axis == 0
+            && Self::node_is_statically_contiguous(dag, input_node.id)
+    }
+
+    fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
+        match &dag.get(id).unwrap().op {
+            RiscOp::Load { .. }
+            | RiscOp::Const { .. }
+            | RiscOp::Add
+            | RiscOp::Mul
+            | RiscOp::MaxElem
+            | RiscOp::CmpLt
+            | RiscOp::Neg
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Sum { .. }
+            | RiscOp::MaxReduce { .. }
+            | RiscOp::Realize
+            | RiscOp::Cast { .. }
+            | RiscOp::FusedElem { .. } => true,
+            RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
+                Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
+            }
+            RiscOp::Permute { .. }
+            | RiscOp::Expand { .. }
+            | RiscOp::Stride { .. }
+            | RiscOp::Pad { .. }
+            | RiscOp::Shrink { .. } => false,
+        }
+    }
+
+    fn bytes_per_element(dtype: Prim) -> usize {
+        match dtype {
+            Prim::F32 | Prim::Bool => 4,
+            other => panic!(
+                "unsupported HIP dtype in device-memory estimate: {}",
+                other.name()
+            ),
+        }
     }
 
     // ------------------------------------------------------------------

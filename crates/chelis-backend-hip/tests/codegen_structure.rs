@@ -33,6 +33,13 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
     }
 }
 
+fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
+        precision: Prim::F32,
+    }
+}
+
 fn write_temp_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, contents).expect("write temp file");
@@ -494,6 +501,59 @@ fn s12_transfer_order() {
     );
 }
 
+#[test]
+fn s12_duplicate_load_transfers_once() {
+    let mut dag = Dag::new();
+    let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4));
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_dup_transfer_once");
+    assert_eq!(
+        result.c_source.matches("chelis_host_to_device").count(),
+        1,
+        "Repeated loads of the same input should share one host→device transfer"
+    );
+}
+
+#[test]
+fn s12_peak_estimate_reported() {
+    let dag = dag_with_load();
+    let result = codegen_hip(&dag, "test_peak_estimate");
+    assert!(
+        result.peak_device_bytes_estimate > 0,
+        "HIP codegen should report a nonzero peak device-memory estimate"
+    );
+}
+
+#[test]
+fn s12_reused_slots_iterate_over_logical_size() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(8));
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(8));
+    let _wide = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
+    let small = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(4));
+    let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4));
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "test_logical_size");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("int fill_size = d_t3->size;"),
+        "A smaller tensor reusing a larger slot must iterate over logical size"
+    );
+    assert!(
+        !src.contains("int fill_size = d_t3->storage_size;"),
+        "Fill kernels must not iterate over slot capacity"
+    );
+    assert!(
+        src.contains("int t4_size = d_t4->size;"),
+        "Elementwise outputs must use logical size even when backed by a reused slot"
+    );
+}
+
 // ===========================================================================
 // S13: Cleanup frees GPU tensors; views don't double-free
 // ===========================================================================
@@ -506,14 +566,22 @@ fn s13_cleanup_frees_intermediates() {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_cleanup");
-    // a (t0) and b (t1) are intermediates, should be freed
+    // a (t0) and b (t1) are intermediates, so both their wrappers and slot owners are freed.
     assert!(
-        result.c_source.contains("chelis_gpu_free(d_t0)"),
-        "Intermediate const t0 must be freed"
+        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        "Intermediate wrapper t0 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(d_t1)"),
-        "Intermediate const t1 must be freed"
+        result.c_source.contains("chelis_gpu_free_view(d_t1)"),
+        "Intermediate wrapper t1 must be freed"
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        "Intermediate slot 0 must be freed"
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_free(chelis_slot1)"),
+        "Intermediate slot 1 must be freed"
     );
 }
 
@@ -521,21 +589,30 @@ fn s13_cleanup_frees_intermediates() {
 fn s13_outputs_not_freed() {
     let dag = dag_add_consts();
     let result = codegen_hip(&dag, "test_no_free_output");
-    // t2 is the output (root), should NOT be freed
+    // The output wrapper is freed after the host copy, and the backing slot is freed once at the end.
     assert!(
-        !result.c_source.contains("chelis_gpu_free(d_t2)"),
-        "Output tensor must not be freed"
+        result.c_source.contains("chelis_gpu_free_view(d_t2)"),
+        "Output wrapper must be freed after the output transfer"
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_free(chelis_slot0)")
+            || result.c_source.contains("chelis_gpu_free(chelis_slot1)")
+            || result.c_source.contains("chelis_gpu_free(chelis_slot2)"),
+        "At least one backing slot must be freed during cleanup"
     );
 }
 
 #[test]
-fn s13_loads_not_freed() {
+fn s13_input_copies_are_freed() {
     let dag = dag_with_load();
-    let result = codegen_hip(&dag, "test_no_free_load");
-    // Load tensors are borrowed, must not be freed
+    let result = codegen_hip(&dag, "test_free_input_copy");
     assert!(
-        !result.c_source.contains("chelis_gpu_free(d_t0)"),
-        "Load tensor must not be freed (borrowed from caller)"
+        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        "The per-node load wrapper must be freed"
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        "The unique input device slot must be freed"
     );
 }
 
@@ -616,6 +693,146 @@ int main(void) {
         "hipcc failed:\nstderr: {}\nsource:\n{}",
         String::from_utf8_lossy(&output.stderr),
         result.c_source
+    );
+}
+
+// ===========================================================================
+// S15: Phase 1d optimized reductions + hipBLAS
+// ===========================================================================
+
+#[test]
+fn s15_segmented_reduction_strategy_names_track_axis_size() {
+    let mut tiny = Dag::new();
+    let x_tiny = tiny.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 8));
+    let sum_tiny = tiny.add_node(RiscOp::Sum { axis: 1 }, vec![x_tiny], vec_f32(3));
+    tiny.add_root(sum_tiny);
+    let tiny_result = codegen_hip(&tiny, "test_tiny_reduce");
+    assert!(
+        tiny_result.c_source.contains("kernel_sum_ax1_sz8_tiny"),
+        "axis_size=8 should use the tiny segmented reduction kernel"
+    );
+
+    let mut small = Dag::new();
+    let x_small = small.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 16));
+    let sum_small = small.add_node(RiscOp::Sum { axis: 1 }, vec![x_small], vec_f32(3));
+    small.add_root(sum_small);
+    let small_result = codegen_hip(&small, "test_small_reduce");
+    assert!(
+        small_result.c_source.contains("kernel_sum_ax1_sz16_small"),
+        "axis_size=16 should use the small segmented reduction kernel"
+    );
+    assert!(
+        small_result
+            .c_source
+            .contains("__shared__ float shared[256];"),
+        "small segmented reductions should use shared-memory batching"
+    );
+
+    let mut large = Dag::new();
+    let x_large = large.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 128));
+    let sum_large = large.add_node(RiscOp::Sum { axis: 1 }, vec![x_large], vec_f32(3));
+    large.add_root(sum_large);
+    let large_result = codegen_hip(&large, "test_large_reduce");
+    assert!(
+        large_result.c_source.contains("kernel_sum_ax1_sz128_large"),
+        "axis_size=128 should use the large segmented reduction kernel"
+    );
+    assert!(
+        large_result
+            .c_source
+            .contains("chelis_launch_kernel(mod_kernel_sum_ax1_sz128_large"),
+        "large segmented reductions should launch their dedicated kernel"
+    );
+}
+
+#[test]
+fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024));
+    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32());
+    dag.add_root(sum);
+    let result = codegen_hip(&dag, "test_scalar_stage");
+
+    assert!(
+        result.c_source.contains("kernel_sum_scalar_stage1_bs256"),
+        "scalar reductions should emit the staged stage-1 kernel"
+    );
+    assert!(
+        result.c_source.contains("kernel_sum_scalar_stage_n_bs256"),
+        "multi-stage scalar reductions should emit the stage-n kernel"
+    );
+    assert!(
+        result.c_source.contains("hipMalloc(&t1_partials0"),
+        "staged scalar reductions should allocate inline scratch buffers"
+    );
+    assert_eq!(
+        result.peak_device_bytes_estimate, 4116,
+        "peak estimate should include slot-plan bytes plus staged scratch"
+    );
+}
+
+#[test]
+fn s15_matmul_emits_hipblas_and_link_flag() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let ea = dag.add_node(
+        RiscOp::Expand { axis: 2, size: 4 },
+        vec![a],
+        tensor3_f32(2, 3, 4),
+    );
+    let eb = dag.add_node(
+        RiscOp::Expand { axis: 0, size: 2 },
+        vec![b],
+        tensor3_f32(2, 3, 4),
+    );
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    dag.add_root(sum);
+    let result = codegen_hip(&dag, "test_hipblas_matmul");
+
+    assert!(
+        result.c_source.contains("chelis_hipblas_sgemm_row_major"),
+        "contiguous rank-2 matmul should lower to hipBLAS"
+    );
+    assert!(
+        result.link_flags.iter().any(|flag| flag == "-lhipblas"),
+        "hipBLAS specialization must surface the extra link flag"
+    );
+}
+
+#[test]
+fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
+    let mut dag = Dag::new();
+    let base_a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 2));
+    let a = dag.add_node(
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![base_a],
+        mat_f32(2, 3),
+    );
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let ea = dag.add_node(
+        RiscOp::Expand { axis: 2, size: 4 },
+        vec![a],
+        tensor3_f32(2, 3, 4),
+    );
+    let eb = dag.add_node(
+        RiscOp::Expand { axis: 0, size: 2 },
+        vec![b],
+        tensor3_f32(2, 3, 4),
+    );
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    dag.add_root(sum);
+    let result = codegen_hip(&dag, "test_generic_matmul");
+
+    assert!(
+        !result.c_source.contains("chelis_hipblas_sgemm_row_major"),
+        "non-contiguous matmul operands must fall back to the generic reduction path"
+    );
+    assert!(
+        result.c_source.contains("kernel_sum_ax1_sz3_tiny"),
+        "fallback matmul should still emit the generic reduction kernel"
     );
 }
 

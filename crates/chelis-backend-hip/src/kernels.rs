@@ -284,6 +284,493 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+fn reduce_init(kind: ReduceKind) -> &'static str {
+    match kind {
+        ReduceKind::Sum => "0.0f",
+        ReduceKind::Max => "-3.402823466e+38F",
+    }
+}
+
+fn reduce_accumulate(kind: ReduceKind, lhs: &str, rhs: &str) -> String {
+    match kind {
+        ReduceKind::Sum => format!("{lhs} += {rhs};"),
+        ReduceKind::Max => format!("{lhs} = fmaxf({lhs}, {rhs});"),
+    }
+}
+
+fn reduce_combine_expr(kind: ReduceKind, lhs: &str, rhs: &str) -> String {
+    match kind {
+        ReduceKind::Sum => format!("{lhs} + {rhs}"),
+        ReduceKind::Max => format!("fmaxf({lhs}, {rhs})"),
+    }
+}
+
+pub fn segmented_reduce_small(
+    kernel_name: &str,
+    axis: usize,
+    axis_size: usize,
+    threads_per_segment: usize,
+    segments_per_block: usize,
+    kind: ReduceKind,
+) -> String {
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", "a[src_idx]");
+    let combine = reduce_combine_expr(kind, "shared[base + lane]", "shared[base + lane + offset]");
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  __shared__ float shared[256];
+  int lane = threadIdx.x % {threads_per_segment};
+  int seg_in_block = threadIdx.x / {threads_per_segment};
+  int seg = blockIdx.x * {segments_per_block} + seg_in_block;
+  if (seg >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(seg, out_sh, out_ndim, out_indices);
+  float acc = {init};
+  for (int k = lane; k < {axis_size}; k += {threads_per_segment}) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < a_ndim; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+    int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    {accumulate}
+  }}
+  int base = seg_in_block * {threads_per_segment};
+  shared[base + lane] = acc;
+  __syncthreads();
+  for (int offset = {threads_per_segment} / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[base + lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) {{
+    out[seg] = shared[base];
+  }}
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+pub fn segmented_reduce_large(
+    kernel_name: &str,
+    axis: usize,
+    axis_size: usize,
+    block_size: usize,
+    kind: ReduceKind,
+) -> String {
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", "a[src_idx]");
+    let combine = reduce_combine_expr(kind, "shared[lane]", "shared[lane + offset]");
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const float *a, {a_strides}, int a_ndim, int a_size,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  __shared__ float shared[{block_size}];
+  int seg = blockIdx.x;
+  int lane = threadIdx.x;
+  if (seg >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(seg, out_sh, out_ndim, out_indices);
+  float acc = {init};
+  for (int k = lane; k < {axis_size}; k += blockDim.x) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < a_ndim; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+    int src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    {accumulate}
+  }}
+  shared[lane] = acc;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) out[seg] = shared[0];
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+pub fn staged_reduce_stage1(kernel_name: &str, block_size: usize, kind: ReduceKind) -> String {
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", "a[idx]");
+    let combine = reduce_combine_expr(kind, "shared[lane]", "shared[lane + offset]");
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const float *a, float *partials, int total_size) {{
+  __shared__ float shared[{block_size}];
+  int lane = threadIdx.x;
+  int start = blockIdx.x * blockDim.x + lane;
+  float acc = {init};
+  for (int idx = start; idx < total_size; idx += gridDim.x * blockDim.x) {{
+    {accumulate}
+  }}
+  shared[lane] = acc;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) partials[blockIdx.x] = shared[0];
+}}
+"
+    )
+}
+
+pub fn staged_reduce_stage_n(kernel_name: &str, block_size: usize, kind: ReduceKind) -> String {
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", "in_data[k]");
+    let combine = reduce_combine_expr(kind, "shared[lane]", "shared[lane + offset]");
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(const float *in_data, float *out_data, int total_size) {{
+  __shared__ float shared[{block_size}];
+  int lane = threadIdx.x;
+  int start = blockIdx.x * blockDim.x + lane;
+  float acc = {init};
+  for (int k = start; k < total_size; k += gridDim.x * blockDim.x) {{
+    {accumulate}
+  }}
+  shared[lane] = acc;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) out_data[blockIdx.x] = shared[0];
+}}
+"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn segmented_reduce_small_fused(
+    kernel_name: &str,
+    axis: usize,
+    axis_size: usize,
+    threads_per_segment: usize,
+    segments_per_block: usize,
+    steps: &[chelis_ir::dag::FusedStep],
+    n_external: usize,
+    kind: ReduceKind,
+) -> String {
+    use chelis_ir::dag::{FusedInput, FusedStepOp};
+
+    let mut params = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        params.push(format!("const float *{pfx}"));
+        params.push(stride_params(&pfx));
+        params.push(format!("int {pfx}_ndim"));
+        params.push(format!("int {pfx}_size"));
+    }
+    params.push("float *out".into());
+    params.push(shape_params("out"));
+    params.push("int out_ndim".into());
+    params.push("int out_size".into());
+
+    let mut body_arrays = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        body_arrays.push(build_array(&format!("{pfx}_s"), &pfx, "s"));
+    }
+    body_arrays.push(build_array("out_sh", "out", "sh"));
+
+    let resolve = |input: &FusedInput| -> String {
+        match input {
+            FusedInput::External(i) => format!("ext{i}[idx_ext{i}]"),
+            FusedInput::PreviousStep(j) => format!("v{j}"),
+        }
+    };
+
+    let mut step_lines = Vec::new();
+    for (si, step) in steps.iter().enumerate() {
+        let expr = match step.op {
+            FusedStepOp::Add => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} + {b}")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} * {b}")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("fmaxf({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("({a} < {b}) ? 1.0f : 0.0f")
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&step.input_indices[0]);
+                format!("-{a}")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&step.input_indices[0]);
+                format!("expf({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&step.input_indices[0]);
+                format!("logf({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sinf({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sqrtf({a})")
+            }
+        };
+        step_lines.push(format!("    float v{si} = {expr};"));
+    }
+
+    let last_step = steps.len() - 1;
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", &format!("v{last_step}"));
+    let combine = reduce_combine_expr(kind, "shared[base + lane]", "shared[base + lane + offset]");
+
+    let mut index_lines = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        index_lines.push(format!(
+            "    int idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+        ));
+    }
+
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    {params}) {{
+{arrays}
+  __shared__ float shared[256];
+  int lane = threadIdx.x % {threads_per_segment};
+  int seg_in_block = threadIdx.x / {threads_per_segment};
+  int seg = blockIdx.x * {segments_per_block} + seg_in_block;
+  if (seg >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(seg, out_sh, out_ndim, out_indices);
+  float acc = {init};
+  for (int k = lane; k < {axis_size}; k += {threads_per_segment}) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < out_ndim + 1; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+{index_lines}
+{step_lines}
+    {accumulate}
+  }}
+  int base = seg_in_block * {threads_per_segment};
+  shared[base + lane] = acc;
+  __syncthreads();
+  for (int offset = {threads_per_segment} / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[base + lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) {{
+    out[seg] = shared[base];
+  }}
+}}
+",
+        params = params.join(",\n    "),
+        arrays = body_arrays.join("\n"),
+        index_lines = index_lines.join("\n"),
+        step_lines = step_lines.join("\n"),
+    )
+}
+
+pub fn segmented_reduce_large_fused(
+    kernel_name: &str,
+    axis: usize,
+    axis_size: usize,
+    block_size: usize,
+    steps: &[chelis_ir::dag::FusedStep],
+    n_external: usize,
+    kind: ReduceKind,
+) -> String {
+    use chelis_ir::dag::{FusedInput, FusedStepOp};
+
+    let mut params = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        params.push(format!("const float *{pfx}"));
+        params.push(stride_params(&pfx));
+        params.push(format!("int {pfx}_ndim"));
+        params.push(format!("int {pfx}_size"));
+    }
+    params.push("float *out".into());
+    params.push(shape_params("out"));
+    params.push("int out_ndim".into());
+    params.push("int out_size".into());
+
+    let mut body_arrays = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        body_arrays.push(build_array(&format!("{pfx}_s"), &pfx, "s"));
+    }
+    body_arrays.push(build_array("out_sh", "out", "sh"));
+
+    let resolve = |input: &FusedInput| -> String {
+        match input {
+            FusedInput::External(i) => format!("ext{i}[idx_ext{i}]"),
+            FusedInput::PreviousStep(j) => format!("v{j}"),
+        }
+    };
+
+    let mut step_lines = Vec::new();
+    for (si, step) in steps.iter().enumerate() {
+        let expr = match step.op {
+            FusedStepOp::Add => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} + {b}")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("{a} * {b}")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("fmaxf({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&step.input_indices[0]);
+                let b = resolve(&step.input_indices[1]);
+                format!("({a} < {b}) ? 1.0f : 0.0f")
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&step.input_indices[0]);
+                format!("-{a}")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&step.input_indices[0]);
+                format!("expf({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&step.input_indices[0]);
+                format!("logf({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sinf({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&step.input_indices[0]);
+                format!("sqrtf({a})")
+            }
+        };
+        step_lines.push(format!("    float v{si} = {expr};"));
+    }
+
+    let last_step = steps.len() - 1;
+    let init = reduce_init(kind);
+    let accumulate = reduce_accumulate(kind, "acc", &format!("v{last_step}"));
+    let combine = reduce_combine_expr(kind, "shared[lane]", "shared[lane + offset]");
+
+    let mut index_lines = Vec::new();
+    for i in 0..n_external {
+        let pfx = format!("ext{i}");
+        index_lines.push(format!(
+            "    int idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+        ));
+    }
+
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    {params}) {{
+{arrays}
+  __shared__ float shared[{block_size}];
+  int seg = blockIdx.x;
+  int lane = threadIdx.x;
+  if (seg >= out_size) return;
+  int out_indices[{MAX_DIM}];
+  chelis_flat_to_indices(seg, out_sh, out_ndim, out_indices);
+  float acc = {init};
+  for (int k = lane; k < {axis_size}; k += blockDim.x) {{
+    int full_indices[{MAX_DIM}];
+    int out_d = 0;
+    for (int d = 0; d < out_ndim + 1; d++) {{
+      if (d == {axis}) {{
+        full_indices[d] = k;
+      }} else {{
+        full_indices[d] = out_indices[out_d];
+        out_d++;
+      }}
+    }}
+{index_lines}
+{step_lines}
+    {accumulate}
+  }}
+  shared[lane] = acc;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {{
+    if (lane < offset) {{
+      shared[lane] = {combine};
+    }}
+    __syncthreads();
+  }}
+  if (lane == 0) out[seg] = shared[0];
+}}
+",
+        params = params.join(",\n    "),
+        arrays = body_arrays.join("\n"),
+        index_lines = index_lines.join("\n"),
+        step_lines = step_lines.join("\n"),
+    )
+}
+
 /// Generate a fused reduction kernel: elementwise chain inlined into the reduction inner loop.
 ///
 /// Instead of reading `a[src_idx]` in the reduction loop, this kernel applies

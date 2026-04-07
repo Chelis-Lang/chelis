@@ -24,6 +24,13 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
     }
 }
 
+fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
+        precision: Prim::F32,
+    }
+}
+
 // ===========================================================================
 // RT1: Load -> Permute -> Add -> Sum (stride handling through chain)
 // ===========================================================================
@@ -80,16 +87,18 @@ fn rt2_two_loads_store() {
     let result = codegen_hip(&dag, "test_store");
     let src = &result.c_source;
 
-    // Store should alias its input
+    // Store should alias its input through a metadata wrapper, not by allocating fresh storage.
     assert!(
-        src.contains("d_t3 = d_t2"),
-        "Store must alias its input, not allocate"
+        src.contains("chelis_gpu_alloc_view")
+            && src.contains("d_t2->data")
+            && src.contains("d_t2->storage_size"),
+        "Store must alias its input rather than owning a new slot"
     );
     // Output labels should include the store name
     assert_eq!(result.output_labels, vec!["result"]);
     // Input labels should be x, y in order
     assert_eq!(result.input_labels, vec!["x", "y"]);
-    // Verify both loads transfer data
+    // Repeated loads of different input labels still transfer once each.
     let h2d_count = src.matches("chelis_host_to_device").count();
     assert_eq!(
         h2d_count, 2,
@@ -137,19 +146,20 @@ fn rt4_fanout_same_input_two_ops() {
     let result = codegen_hip(&dag, "test_fanout");
     let src = &result.c_source;
 
-    // x (d_t0) is used by both add and mul, should not be freed until after both
-    // The output is t2, so t0 and t1 should be freed
+    // x and the add intermediate should have their wrappers freed; backing slots free at end.
     assert!(
-        src.contains("chelis_gpu_free(d_t0)"),
-        "t0 should be freed (not an output)"
+        src.contains("chelis_gpu_free_view(d_t0)"),
+        "t0 wrapper should be freed"
     );
     assert!(
-        src.contains("chelis_gpu_free(d_t1)"),
-        "t1 should be freed (not an output)"
+        src.contains("chelis_gpu_free_view(d_t1)"),
+        "t1 wrapper should be freed"
     );
     // t0 should not be freed before it's used by both ops
     // Verify topological order: t0 defined before t1 (add) and t2 (mul)
-    let t0_def = src.find("d_t0 = chelis_gpu_alloc").expect("t0 alloc");
+    let t0_def = src
+        .find("d_t0 = chelis_gpu_alloc_view")
+        .expect("t0 wrapper alloc");
     // Look for the actual kernel launch calls (not the static module cache)
     let t1_alloc = src
         .find("d_t1 = chelis_gpu_alloc")
@@ -353,19 +363,15 @@ fn rt11_store_no_double_free() {
     let result = codegen_hip(&dag, "test_store_free");
     let src = &result.c_source;
 
-    // Store (t3) aliases Add (t2): d_t3 = d_t2
-    // Store is an output, so t3 is skipped in cleanup. Good.
-    // But t2 (the Add) is NOT an output, so it WILL be freed.
-    // This means d_t2 gets freed, but d_t3 (== d_t2) was already used for device_to_host.
-    // This is OK because device_to_host happens before cleanup.
-    // But it would be a problem if d_t3 is used after cleanup.
-
-    // The device_to_host must happen BEFORE chelis_gpu_free(d_t2)
+    // The store aliases the add result through a metadata wrapper, so the output copy must
+    // happen before the backing slot is released.
     let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
-    let free_t2 = src.find("chelis_gpu_free(d_t2)").expect("t2 freed");
+    let free_slot = src
+        .find("chelis_gpu_free(chelis_slot2)")
+        .expect("aliased slot freed");
     assert!(
-        d2h_pos < free_t2,
-        "device_to_host must happen before freeing the aliased node"
+        d2h_pos < free_slot,
+        "device_to_host must happen before freeing the aliased backing slot"
     );
 }
 
@@ -402,4 +408,87 @@ fn rt13_zero_size_grid() {
     let (grid, block) = chelis_backend_hip::launch::grid_1d(0);
     assert_eq!(grid, 0, "Zero-element grid should have 0 blocks");
     assert_eq!(block, 256, "Block size unchanged for zero elements");
+}
+
+// ===========================================================================
+// RT14: scalar staged reduction scratch stays inline, outside slot planner
+// ===========================================================================
+
+#[test]
+fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024));
+    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32());
+    dag.add_root(sum);
+    let result = codegen_hip(&dag, "test_stage_scratch");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("hipMalloc(&t1_partials0"),
+        "staged scalar reductions should allocate scratch inline"
+    );
+    assert!(
+        src.contains("hipFree(t1_partials0)"),
+        "inline staged scratch must be freed in the same emission block"
+    );
+    assert!(
+        !src.contains("chelis_slot2"),
+        "staged scratch must not be routed through the slot planner"
+    );
+}
+
+// ===========================================================================
+// RT15: contiguous matmul specializes, non-contiguous matmul does not
+// ===========================================================================
+
+#[test]
+fn rt15_matmul_specialization_respects_contiguity() {
+    let mut contiguous = Dag::new();
+    let a = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
+    let b = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let ea = contiguous.add_node(
+        RiscOp::Expand { axis: 2, size: 4 },
+        vec![a],
+        tensor3_f32(2, 3, 4),
+    );
+    let eb = contiguous.add_node(
+        RiscOp::Expand { axis: 0, size: 2 },
+        vec![b],
+        tensor3_f32(2, 3, 4),
+    );
+    let mul = contiguous.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
+    let sum = contiguous.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    contiguous.add_root(sum);
+    let contiguous_src = codegen_hip(&contiguous, "test_matmul_contig").c_source;
+    assert!(
+        contiguous_src.contains("chelis_hipblas_sgemm_row_major"),
+        "contiguous matmul should specialize to hipBLAS"
+    );
+
+    let mut fallback = Dag::new();
+    let base_a = fallback.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 2));
+    let a_perm = fallback.add_node(
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![base_a],
+        mat_f32(2, 3),
+    );
+    let b = fallback.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let ea = fallback.add_node(
+        RiscOp::Expand { axis: 2, size: 4 },
+        vec![a_perm],
+        tensor3_f32(2, 3, 4),
+    );
+    let eb = fallback.add_node(
+        RiscOp::Expand { axis: 0, size: 2 },
+        vec![b],
+        tensor3_f32(2, 3, 4),
+    );
+    let mul = fallback.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
+    let sum = fallback.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    fallback.add_root(sum);
+    let fallback_src = codegen_hip(&fallback, "test_matmul_fallback").c_source;
+    assert!(
+        !fallback_src.contains("chelis_hipblas_sgemm_row_major"),
+        "non-contiguous matmul must stay on the generic reduction path"
+    );
 }

@@ -10,11 +10,14 @@ Phase 1 extends the Chelis compiler to target GPUs via HIP. The architecture fol
 
 **What does NOT change:** The RISC DAG, the type checker, the Surf/Deep parsers, the desugarer, the AD engine. Phase 1 adds a new backend alongside the existing C backend. Both coexist. The C backend remains the test oracle — every GPU result must match it numerically.
 
-**Implemented boundary note:** The currently shipped surface reaches Phase 1a plus the
-Phase 1b AD-ordering helper. `grad` from Phase 0g still runs on the unfused DAG, and
-`chelis-ir::grad_then_fuse` now re-fuses the resulting forward+backward graph. Full
-fusion/codegen integration beyond that helper, optimized reductions (1d), and later
-memory/layout refinements are still planned work.
+**Implemented boundary note:** The currently shipped surface reaches Phase 1a through
+Phase 1d. `grad` from Phase 0g still runs on the unfused DAG, and
+`chelis-ir::grad_then_fuse` re-fuses the resulting forward+backward graph. The HIP
+backend now reuses backing slots, deduplicates repeated input transfers, reports
+estimated peak device bytes through codegen/CLI output, emits segmented reduction
+strategies, uses staged scratch buffers for safe scalar reductions, and specializes
+contiguous rank-2 `f32` matmul patterns to hipBLAS. Benchmarks (1e) and executable
+grammar work (1f) remain planned work.
 
 ---
 
@@ -27,32 +30,29 @@ crates/
   chelis-backend-hip/          ← NEW: HIP GPU backend
     Cargo.toml
     src/
-      lib.rs                   — pub fn codegen_hip(dag, name, opts) → HipCodegenResult
+      lib.rs                   — pub fn codegen_hip(dag, name) → HipCodegenResult
       emit.rs                  — RISC DAG → C host code + HIP kernel strings
       kernels.rs               — Kernel string templates for each op pattern
-      fuse.rs                  — Fusion pass: merge adjacent ops into single kernels
-      memory.rs                — GPU buffer lifetime analysis, host↔device transfer planning
+      memory.rs                — device slot planning, transfer dedup, cleanup emission
       launch.rs                — Kernel launch configuration (grid size, block size)
     runtime/
-      chelis_hip_runtime.h     — GPU tensor struct, hipMalloc/hipFree, host↔device transfer
-      chelis_hip_runtime.c     — Runtime implementation
+      chelis_hip_runtime.h     — GPU tensor/runtime helpers used by generated host code
     tests/
-      kernel_correctness.rs    — Each op: GPU output matches CPU backend (within tolerance)
-      fusion_correctness.rs    — Fused vs unfused: identical results
-      memory_tests.rs          — No leaks, no double-free, transfer minimization
-      benchmark.rs             — Wall-clock comparisons against CPU backend
+      codegen_structure.rs     — structural/source-emission coverage for HIP codegen
+      gpu_correctness.rs       — manual HIP oracle on real GPU hardware
+      redteam_adversarial.rs   — adversarial ownership, cleanup, and surface checks
 
   chelis-ir/                   ← MODIFIED: fusion pass, symbolic dimensions
     src/
-      fuse.rs                  — NEW: DAG-to-DAG fusion rewrite (shared by HIP backend)
+      fuse.rs                  — DAG-to-DAG fusion rewrite shared by backends
       optimize.rs              — existing DCE/CSE/constant folding (unchanged)
 
   chelis-cli/                  ← MODIFIED: --target hip flag
     src/
-      main.rs                  — add --target flag to build command
+      main.rs                  — add --target flag to build command and print HIP estimate
 ```
 
-The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a DAG optimization that future backends (StableHLO, FX) would also use. The HIP backend consumes the fused DAG.
+The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a DAG optimization that future backends (StableHLO, FX) would also use. The HIP backend consumes the fused DAG. The current runtime support is header-only (`chelis_hip_runtime.h`), not a separate `.c` implementation file.
 
 ## Accepted Update Tracking
 
@@ -60,7 +60,7 @@ The fusion pass lives in `chelis-ir` (not the HIP backend) because fusion is a D
 |---|---|---|---|---|
 | GPU failure variable for bounds/debug checking | Adopt now | Phase 1a runtime | Yes | 1a |
 | AD before fusion, then re-fuse | Adopt now | Transform ordering + Phase 1b | Yes | 0g semantics now, 1b pipeline later |
-| Segmented reduction strategies | Adopt now | Phase 1d | No | future 1d |
+| Segmented reduction strategies | Adopt now | Phase 1d | Yes | 1d |
 | Lightweight uniqueness over full linear types | Defer note | Phase 2b | No | future 2b |
 | Recomputation-based AD for GPU execution | Defer note | Phase 2 AD refinement | No | future |
 | Monotonicity-based autotuning | Defer note | Phase 1d+ kernel selection | No | future |

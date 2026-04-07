@@ -339,6 +339,10 @@ fn cmd_build_hip(
         "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
         runtime_dir.display()
     );
+    println!(
+        "Estimated peak device memory: {}",
+        human_bytes(result.peak_device_bytes_estimate)
+    );
     let mut flags: Vec<&str> = result
         .compile_flags
         .iter()
@@ -355,6 +359,19 @@ fn cmd_build_hip(
         c_path.with_extension("").display()
     );
     Ok(())
+}
+
+fn human_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+
+    if bytes >= MIB as usize {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else if bytes >= KIB as usize {
+        format!("{:.2} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn run_tide() -> Result<(), Box<dyn std::error::Error>> {

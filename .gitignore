@@ -7,3 +7,5 @@ data/
 *.c
 *.h
 !crates/
+!crates/**/*.c
+!crates/**/*.h

@@ -24,6 +24,17 @@ fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
 
+fn write_matmul_program(path: &Path) {
+    fs::write(
+        path,
+        r#"let a = (a : tensor[2, 3, f32])
+let b = (b : tensor[3, 4, f32])
+let out = (matmul(a, b) : tensor[2, 4, f32])
+"#,
+    )
+    .expect("write matmul program");
+}
+
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -144,7 +155,8 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .success()
         .stdout(predicate::str::contains(
             out_dir.join("chelis_runtime.c").display().to_string(),
-        ));
+        ))
+        .stdout(predicate::str::contains("Estimated peak device memory:"));
 
     assert!(out_dir.join("mnist_hip.cpp").exists());
     assert!(out_dir.join("mnist_hip.h").exists());
@@ -179,6 +191,34 @@ fn build_hip_mnist_emits_fused_kernels_and_launches() {
     assert!(
         hip_src.contains("chelis_launch_kernel"),
         "MNIST HIP build should emit kernel launches on the real CLI path"
+    );
+}
+
+#[test]
+fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-output");
+    let source = dir.path().join("matmul.ch");
+    write_matmul_program(&source);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-lhipblas"));
+
+    let hip_src = fs::read_to_string(out_dir.join("matmul_hip.cpp")).expect("hip source");
+    assert!(
+        hip_src.contains("chelis_hipblas_sgemm_row_major"),
+        "HIP build should surface hipBLAS specialization for a simple matmul program"
     );
 }
 

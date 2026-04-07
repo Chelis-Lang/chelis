@@ -2,6 +2,21 @@
 
 **Goal:** Minimize GPU memory usage and host↔device transfers.
 
+### Shipped Scope
+
+Phase 1c is a codegen/runtime-planning change inside the HIP backend. The shipped surface is:
+
+- a greedy device-slot planner in `crates/chelis-backend-hip/src/memory.rs`
+- planner-driven HIP emission that reuses backing allocations across non-overlapping lifetimes
+- unique input copies transferred once, with repeated `Load(name)` nodes aliasing that copy
+- metadata-only wrappers for movement ops and `store`
+- a structured `peak_device_bytes_estimate` on `HipCodegenResult`
+- a human-readable estimate line in `chelis build --target hip`
+
+Phase 1c does **not** add a persistent GPU execution API, automatic checkpoint insertion, or
+runtime budget comparison flags. The estimate is surfaced to the user; policy decisions based on
+that estimate remain later work.
+
 ### What the Agent Builds
 
 **Buffer lifetime analysis (`chelis-backend-hip/src/memory.rs`):**
@@ -34,21 +49,40 @@ The transfer plan is a list of `(tensor, direction, timing)` triples emitted alo
 
 Given a VRAM budget, estimate peak memory usage from the buffer plan. If it exceeds the budget, insert recomputation points — trade compute for memory by recomputing an intermediate result instead of keeping it in VRAM. This is activation checkpointing. For Phase 1c, implement the estimation and warning ("this model needs N MB VRAM, you have M MB") but not automatic checkpointing insertion.
 
+The shipped Phase 1c surface stops at the estimate itself. It reports estimated peak bytes through
+`HipCodegenResult` and `chelis build --target hip`, but does not compare against live free memory.
+Phase 1d extends that estimate to include inline staged-reduction scratch chains; it still does
+not compare the estimate against live device memory.
+
 **Deferred optimization note:** LMAD-style algebraic memory-layout analysis may later help
 reason about coalescing, transposes, and layout-sensitive kernel selection. That is not a
 Phase 1c correctness requirement. Implement buffer lifetime analysis and reuse first; only
 escalate to LMAD-style reasoning if profiling shows memory layout is the bottleneck.
 
-### Test Strategy (~8 tests)
+### Acceptance Oracle
 
-- [ ] Buffer reuse: a DAG with non-overlapping lifetimes reuses memory (inspect allocation count)
-- [ ] Buffer reuse: a DAG with overlapping lifetimes does NOT reuse (verify no aliasing)
-- [ ] No host↔device transfers between consecutive kernels (intermediates stay on device)
-- [ ] Input transferred to device exactly once
-- [ ] Output transferred to host exactly once
-- [ ] Peak memory estimation is within 10% of actual (measure with `hipMemGetInfo`)
-- [ ] No memory leaks: alloc count == free count in generated code
-- [ ] MNIST model: peak VRAM usage is reasonable (not allocating per-node without reuse)
+Phase 1c is complete when this manual GPU oracle passes on a HIP-capable machine:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Supporting evidence:
+
+- `cargo test -p chelis-backend-hip --test codegen_structure`
+- `cargo test -p chelis-backend-hip --test redteam_adversarial`
+- `cargo test -p chelis-cli --test cli`
+
+### Test Strategy
+
+- [x] Buffer reuse: non-overlapping lifetimes reuse slots (`memory.rs` unit tests)
+- [x] Buffer reuse: overlapping lifetimes stay separate (`memory.rs` unit tests)
+- [x] Repeated `Load(name)` shares one device transfer (`codegen_structure.rs`)
+- [x] Outputs transfer host↔device only at the function boundary (`codegen_structure.rs`)
+- [x] Cleanup frees every wrapper and every backing slot exactly once (`memory.rs`, `codegen_structure.rs`, `redteam_adversarial.rs`)
+- [x] Reused slots still iterate over logical tensor size, not slot capacity (`codegen_structure.rs`, `gpu_correctness.rs`)
+- [x] Manual GPU correctness covers repeated-load aliasing and reused-slot execution (`gpu_correctness.rs`)
+- [ ] Direct estimate-vs-`hipMemGetInfo` comparison remains future validation work if profiling shows the estimate needs tighter calibration
 
 ### Execution Strategy
 

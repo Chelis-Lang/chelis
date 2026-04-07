@@ -3,6 +3,7 @@
 //! Generates C host code with embedded HIP kernel source strings.
 //! At runtime, `hiprtc` JIT-compiles the kernels and dispatches them to GPU.
 
+pub mod blas;
 pub mod emit;
 pub mod kernels;
 pub mod launch;
@@ -22,6 +23,8 @@ pub struct HipCodegenResult {
     pub input_labels: Vec<String>,
     /// Output slot labels in positional order.
     pub output_labels: Vec<String>,
+    /// Estimated peak device memory from the slot plan plus inline staged-reduction scratch.
+    pub peak_device_bytes_estimate: usize,
 }
 
 /// Return the path to the HIP runtime directory (relative to the crate root).
@@ -40,18 +43,23 @@ pub fn runtime_dir() -> &'static str {
 /// Inputs arrive as host tensors, are transferred to GPU, processed via
 /// HIP kernels, and results are transferred back to host tensors in outputs.
 pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResult {
-    let c_source = emit::HipEmitter::emit_dag(dag, func_name);
+    let (c_source, peak_device_bytes_estimate) = emit::HipEmitter::emit_dag(dag, func_name);
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
     let input_labels = emit::HipEmitter::input_labels(dag);
     let output_labels = emit::HipEmitter::output_labels(dag);
+    let mut link_flags = vec!["-lhiprtc".to_string()];
+    if c_source.contains("chelis_hipblas_sgemm_row_major(") {
+        link_flags.push("-lhipblas".to_string());
+    }
     HipCodegenResult {
         c_source,
         h_header,
         compile_flags: vec![],
-        link_flags: vec!["-lhiprtc".to_string()],
+        link_flags,
         input_labels,
         output_labels,
+        peak_device_bytes_estimate,
     }
 }

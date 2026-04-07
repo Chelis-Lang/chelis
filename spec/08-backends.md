@@ -90,10 +90,47 @@ launches.
 - `realize()` lowers to a real DAG materialization barrier and blocks fusion across it
 - `egg` evaluation skipped; greedy heuristic sufficient for Phase 1b scope
 
+### Phase 1c: Memory Planning (complete)
+
+Authoritative Phase 1c oracle:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Current implementation:
+
+- greedy slot reuse for non-overlapping storage lifetimes in `chelis-backend-hip/src/memory.rs`
+- unique input copies transferred once, with repeated `Load(name)` nodes aliasing the first copy
+- planner-driven cleanup: every metadata wrapper freed once, every backing slot freed once
+- movement ops and `store` remain metadata aliases over the chosen backing slot
+- kernel outputs iterate over logical element count (`d_t->size`), while input guard checks still use backing `storage_size`
+- HIP codegen reports `peak_device_bytes_estimate`, and `chelis build --target hip` prints that estimate
+- the estimate now includes inline staged-reduction scratch chains used by Phase 1d scalar reductions
+- no runtime memory-budget comparison or checkpoint insertion yet; Phase 1c ships estimate-only reporting
+
+### Phase 1d: Optimized Reductions + hipBLAS (complete)
+
+Authoritative Phase 1d oracle:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Current implementation:
+
+- segmented reductions use three strategies keyed by static segment size:
+  tiny (`<= 8`), small (`9..=64`), and large (`>= 65`)
+- small and large segmented reductions use shared-memory block cooperation; tiny segments stay on the simple per-segment loop
+- fused elementwise→reduction kernels reuse the same tiny/small/large strategy split
+- scalar contiguous reductions use a staged scratch-chain reduction with inline `hipMalloc`/`hipFree`, outside the Phase 1c slot planner
+- `peak_device_bytes_estimate` includes the worst single staged scratch chain alongside the slot-plan estimate
+- rank-2 contiguous `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to `chelis_hipblas_sgemm_row_major(...)`
+- non-contiguous matmul-shaped DAGs fall back to the generic reduction path
+- `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
+
 Key work remaining in Phase 1:
 
-- GPU memory planning with buffer reuse (Phase 1c)
-- optimized reductions + hipBLAS (Phase 1d)
 - benchmark and correctness validation against the C backend (Phase 1e)
 - executable grammar / `chelis validate` (Phase 1f)
 

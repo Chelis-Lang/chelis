@@ -18,8 +18,10 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1a** | HIP kernel code generation (`chelis build --target hip`) | ✅ Complete |
-| **1b** | Kernel fusion (elem→elem, elem→reduce, multi-consumer split) | Structurally complete, awaiting GPU validation |
-| **1c-f** | Memory planning, optimized reductions, benchmarks, executable grammar |  |
+| **1b** | Kernel fusion (elem→elem, elem→reduce, multi-consumer split) | ✅ Complete |
+| **1c** | GPU memory planning (buffer reuse, transfer minimization, peak estimate) | ✅ Complete |
+| **1d** | Optimized reductions, staged scalar scratch, hipBLAS matmul specialization | ✅ Complete |
+| **1e-f** | Benchmarks, executable grammar |  |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 

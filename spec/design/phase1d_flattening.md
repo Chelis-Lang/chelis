@@ -1,83 +1,73 @@
 ## Phase 1d: Optimized Reductions and hipBLAS
 
-**Goal:** Optimize GPU utilization for reductions and matrix operations.
+**Goal:** Improve GPU utilization for reductions and matrix-shaped contraction patterns
+without changing Chelis's regular tensor execution model.
 
-### What the Agent Builds
+### Shipped Scope
 
-**No flattening needed for Phase 1.** Futhark's incremental flattening addresses irregular nested parallelism (arrays of arrays with varying inner sizes). Chelis's tensor model has regular, predictable parallelism: batch dimension → grid blocks, inner dimensions → threads. Full flattening can actually reduce performance by destroying data locality. Revisit if irregular parallelism is added later.
+Phase 1d ships inside the HIP backend code generator and runtime header:
 
-**Optimized reductions:**
+- segmented reductions use three strategies keyed by static segment size
+  - tiny: `axis_size <= 8`
+  - small: `9..=64`
+  - large: `>= 65`
+- small and large strategies use shared-memory block cooperation
+- fused elementwise→reduction kernels reuse the same tiny/small/large split
+- scalar contiguous reductions use a staged scratch-chain reduction
+- staged partial buffers are allocated/freed inline in generated host code and are **not**
+  routed through the Phase 1c slot planner
+- `peak_device_bytes_estimate` includes the worst single staged scratch chain
+- contiguous rank-2 `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to
+  hipBLAS via `chelis_hipblas_sgemm_row_major(...)`
+- non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 
-The Phase 1a naive reduction (one thread per output element, inner loop over reduction axis) is correct but slow. Replace with the standard two-phase GPU reduction:
+Phase 1d still does **not** implement flattening for irregular nested parallelism, autotuned
+kernel threshold selection, or internal hipBLAS workspace estimation.
 
-Phase 1: Each thread block cooperatively reduces a chunk of the reduction axis using shared memory. Produces one partial result per block.
+### Design Notes
 
-Phase 2: A second kernel reduces the partial results.
+**No flattening for Phase 1.**
+Chelis tensors are regular. The shipped Phase 1d path keeps the existing tensor-stride model
+and focuses on better reduction kernels rather than flattening transformations.
 
-This is a standard GPU programming pattern, well-documented in the NVIDIA/AMD reduction tutorials. The agent can follow the pattern directly.
+**Segmented reductions are the primary optimization target.**
+Softmax-style workloads reduce rows or row-like segments repeatedly, so the backend now picks
+between tiny/small/large segmented kernels instead of using the Phase 1a naive loop for all
+cases.
 
-**Segmented reductions are a first-class target in Phase 1d:**
+**Scalar staged reductions are intentionally narrow.**
+The staged scratch-chain path is used only for safe scalar contiguous reductions. Row-wise and
+other multi-output reductions stay on the segmented path.
 
-Softmax-style workloads depend on repeated segmented reductions over rows or row-like
-segments:
+**hipBLAS specialization is deliberately constrained.**
+Only statically contiguous rank-2 `f32` operands take the hipBLAS path. This avoids inventing a
+new GPU "make contiguous" runtime surface in Phase 1d. Non-contiguous matmul-shaped DAGs remain
+correct via the generic reduction fallback.
 
-- `max(x, axis)` for numerical stabilization
-- `sum(exp(x - max(x, axis)), axis)` for normalization
-- the broadcast/divide path that consumes those segmented results
+### Acceptance Oracle
 
-Phase 1d should implement three segmented-reduction strategies with runtime dispatch by
-segment size:
+Phase 1d is complete when this manual GPU oracle passes on a HIP-capable machine:
 
-1. large segments -> one block per segment
-2. small segments -> multiple segments per block
-3. tiny segments -> sequential loop per segment
-
-This is the concrete optimization target for variable sequence lengths and other
-real-model row reductions, not just a generic future idea.
-
-**Thread block sizing:**
-
-Phase 1a uses `blockDim = 256` for everything. This is reasonable for elementwise ops but suboptimal for reductions and operations with specific memory access patterns.
-
-- Elementwise: 256 threads/block, coalesced memory access (contiguous threads access contiguous memory)
-- Reduction: block size = min(axis_size, 256), rounded down to power of 2 for efficient butterfly reduction
-- Matmul (BLAS): don't emit a kernel — use `hipblas` (the HIP equivalent of cuBLAS). Pattern-match the expand+mul+sum DAG subgraph and emit a `hipblasSgemm` call instead. This mirrors the CPU backend's BLAS integration.
-
-**hipBLAS for matmul:**
-
-Same pattern-matching as the CPU backend's BLAS integration, but targeting `hipblasSgemm` instead of `cblas_sgemm`:
-
-```c
-hipblasHandle_t handle;
-hipblasCreate(&handle);
-hipblasSgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N,
-             n, m, k, &alpha, B_d, n, A_d, k, &beta, C_d, n);
-hipblasDestroy(handle);
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Note: hipBLAS uses column-major by default. The argument order differs from cblas_sgemm. The agent must handle the row-major → column-major translation carefully (swap A and B, swap m and n).
+Supporting evidence:
 
-### Test Strategy (~8 tests)
+- `cargo test -p chelis-backend-hip --test codegen_structure`
+- `cargo test -p chelis-backend-hip --test redteam_adversarial`
+- `cargo test -p chelis-cli --test cli`
 
-- [ ] Optimized reduction matches naive reduction output
-- [ ] Optimized reduction is measurably faster than naive on large tensors (>100K elements)
-- [ ] Segmented reduction dispatch picks the intended strategy for large/small/tiny segments
-- [ ] Softmax-like segmented reductions match the naive path across varied row lengths
-- [ ] hipBLAS matmul matches CPU BLAS matmul (within tolerance)
-- [ ] hipBLAS path is taken for matmul (check generated C for `hipblasSgemm`)
-- [ ] Block size selection: elementwise uses 256, reduction uses power-of-2 ≤ axis_size
-- [ ] Memory access is coalesced for elementwise ops (can verify via profiler or structurally in generated code)
+### Test Strategy
 
-**Future enhancement note:** Once the segmented-reduction and kernel-selection surfaces are
-stable, `chelis build --tune` can grow a monotonic-threshold autotuning mode that chooses
-between kernel variants at runtime. That is explicitly post-1d work, not part of the
-initial optimized-reduction deliverable.
+- [x] tiny/small/large segmented kernels are selected for the expected axis-size ranges
+- [x] staged scalar reductions emit inline scratch buffers and extend the peak-memory estimate
+- [x] contiguous matmul patterns emit the hipBLAS helper call and surface `-lhipblas`
+- [x] non-contiguous matmul-shaped DAGs stay on the generic reduction path
+- [x] manual GPU correctness covers segmented reductions, staged scalar reduction, hipBLAS matmul, and the non-contiguous fallback
 
-### Execution Strategy
+### Deferred Follow-Ups
 
-```
-Commit 1: Optimized two-phase reduction kernels
-Commit 2: hipBLAS integration for matmul
-Commit 3: Thread block sizing heuristics
-Commit 4: Performance profiling + correctness tests
-```
+- benchmark the optimized reduction and hipBLAS paths against the C backend and PyTorch (Phase 1e)
+- add monotonic-threshold autotuning once the kernel selection surface is stable
+- consider LMAD-style memory-layout reasoning only if profiling shows coalescing/layout is the next bottleneck
