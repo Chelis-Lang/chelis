@@ -22,8 +22,8 @@ workloads.
 
 **Current status:** Phase 0 is complete.
 Phases 0a-0i are complete.
-Phase 1a is complete.
-Phase 1b and later GPU optimization/tooling work remain.
+Phases 1a-1e are complete.
+Phase 1 remains in progress because executable grammar work (1f) is still pending.
 
 ---
 

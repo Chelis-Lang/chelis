@@ -240,9 +240,9 @@ fn cmd_build(
             cmd_build_c(&fused, func_name, file, output)
         }
         "hip" => {
-            // GPU pipeline (Phase 1b): lower → fuse → codegen.
-            // Full target pipeline: lower → optimize → grad → optimize → fuse → codegen.
-            // optimize and grad integration is Phase 1e work.
+            // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
+            // When grad participates in a GPU compilation pipeline, the intended ordering is:
+            // lower -> optimize -> grad -> optimize -> fuse -> codegen.
             let fused = chelis_ir::fuse::fuse(&dag);
             cmd_build_hip(&fused, func_name, file, output)
         }

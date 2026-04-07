@@ -150,18 +150,18 @@ For reductions: more complex — depends on reduction axis size and output shape
 
 ### Test Strategy (~15 tests)
 
-- [ ] `add(const(1), const(2))` on GPU produces 3.0
-- [ ] All elementwise unary ops: neg, exp, log, sin, sqrt — GPU matches CPU (within 1e-5 for f32)
-- [ ] All elementwise binary ops: add, mul, max_elem, cmplt — GPU matches CPU
-- [ ] `cmplt` produces 1.0f/0.0f on GPU (not integer bool)
-- [ ] Reduction: `sum(x, axis=0)` on GPU matches CPU
-- [ ] Stride-aware: `expand` then `add` — GPU handles stride-0 correctly
-- [ ] Stride-aware: `permute` then elementwise — GPU handles reordered strides
-- [ ] Generated C compiles with `hipcc` (or gcc + HIP runtime link)
-- [ ] Kernel JIT compilation succeeds at runtime
-- [ ] Host↔device transfer round-trips correctly (transfer to device, transfer back, compare)
-- [ ] Multiple kernels in sequence (add then mul) — correct chaining
-- [ ] Name-based Load mapping works (same contract as CPU backend)
+- [x] `add(const(1), const(2))` on GPU produces 3.0
+- [x] All elementwise unary ops: neg, exp, log, sin, sqrt — GPU matches CPU (within 1e-5 for f32)
+- [x] All elementwise binary ops: add, mul, max_elem, cmplt — GPU matches CPU
+- [x] `cmplt` produces 1.0f/0.0f on GPU (not integer bool)
+- [x] Reduction: `sum(x, axis=0)` on GPU matches CPU
+- [x] Stride-aware: `expand` then `add` — GPU handles stride-0 correctly
+- [x] Stride-aware: `permute` then elementwise — GPU handles reordered strides
+- [x] Generated C compiles with `hipcc` (or gcc + HIP runtime link)
+- [x] Kernel JIT compilation succeeds at runtime
+- [x] Host↔device transfer round-trips correctly (transfer to device, transfer back, compare)
+- [x] Multiple kernels in sequence (add then mul) — correct chaining
+- [x] Name-based Load mapping works (same contract as CPU backend)
 
 ### Acceptance Oracle
 

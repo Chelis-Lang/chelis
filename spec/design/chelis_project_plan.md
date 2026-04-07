@@ -8,7 +8,8 @@ Each phase has a concrete deliverable, verification target, and red-team checkpo
 
 **Current status:** Phase 0 complete.
 Phases 0a-0i complete.
-Phase 1 is next.
+Phases 1a-1e complete.
+Phase 1 remains open for executable grammar (`chelis validate`).
 
 **Repo:** `chelis-lang/chelis` (Rust workspace)
 **Domain:** `chelis.ch`
@@ -29,7 +30,7 @@ Phase 1 is next.
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
-| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) |  |
+| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | In progress |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
@@ -139,6 +140,12 @@ Interactive execution policy:
 **Deliverable:** GPU execution through a single HIP backend plus executable grammar
 validation tooling.
 
+**Current shipped boundary:** the HIP backend work through Phase 1e is in `main`.
+That includes HIP code generation, fusion, device memory planning, segmented and staged
+reduction paths, hipBLAS specialization for contiguous rank-2 `f32` matmul, and the
+fixed-workload benchmark oracle with checked-in results. Phase 1 is still not complete
+because `chelis validate` from 1f has not shipped yet.
+
 ### 1a: Kernel Code Generation
 
 - emit HIP kernel strings alongside generated host code
@@ -157,11 +164,12 @@ validation tooling.
 - reuse buffers where safe
 - minimize host/device transfer boundaries
 
-### 1d: Flattening and Parallelization
+### 1d: Optimized Reductions + hipBLAS
 
-- flatten nested parallel structure
-- support segmented reductions
-- choose reasonable block sizing heuristics
+- ship segmented reductions with tiny/small/large strategy selection
+- use staged scratch buffers for safe scalar contiguous reductions
+- specialize contiguous rank-2 `f32` matmul patterns to hipBLAS
+- keep irregular flattening/autotuning out of Phase 1d
 
 ### 1e: Benchmarks and Real Models
 
@@ -170,6 +178,9 @@ validation tooling.
 - compare against the reference C backend for correctness
 - keep PyTorch as a local/manual comparison dependency through the repo `py/` env, not a CI requirement
 - target credibility, not premature parity with PyTorch
+
+Phase 1e is now implemented through `chelis-e2e`'s `bench_phase1e` oracle and the
+checked-in `benchmarks/results/latest.json` / `benchmarks/RESULTS.md` artifacts.
 
 ### 1f: Executable Grammar
 

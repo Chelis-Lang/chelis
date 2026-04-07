@@ -76,15 +76,14 @@ No intermediate memory allocation. All operations happen in registers.
 
 ### Test Strategy (~12 tests)
 
-- [ ] `add → relu` fusion produces identical output to unfused
-- [ ] `add → relu → mul` three-way fusion: identical output, one kernel launch
-- [ ] Reduction following elementwise: fuses correctly
-- [ ] Multi-consumer split: node used by two downstream ops — one fuses, other gets its own path
-- [ ] Fusion does not cross reduction axis boundaries
-- [ ] `realize()` prevents fusion across the boundary
-- [ ] MNIST model: count kernel launches with and without fusion, verify reduction
-- [ ] If `egg` is adopted: `egg` result matches greedy on simple cases
-- [ ] If `egg` is adopted: `egg` finds better strategy on at least one complex case
+- [x] `add → relu` fusion produces identical output to unfused
+- [x] `add → relu → mul` three-way fusion: identical output, one kernel launch
+- [x] Reduction following elementwise: fuses correctly
+- [x] Multi-consumer split: node used by two downstream ops — one fuses, other gets its own path
+- [x] Fusion does not cross reduction axis boundaries
+- [x] `realize()` prevents fusion across the boundary
+- [x] MNIST model: count kernel launches with and without fusion, verify reduction
+- `egg` was not adopted in the shipped 1b scope; the greedy fusion path is the implemented boundary.
 
 ### Acceptance Oracle
 

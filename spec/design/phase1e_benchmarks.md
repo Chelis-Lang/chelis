@@ -95,10 +95,10 @@ Missing-MNIST behavior:
 
 ### Tests
 
-- [ ] `bench_phase1e` rejects invalid `--model`
-- [ ] `bench_phase1e --model all` exercises the real fixed benchmark scope
-- [ ] skipped backends always carry explicit reasons
-- [ ] missing MNIST data becomes a structured skip, not a CLI failure
-- [ ] missing benchmark Python interpreter becomes a structured PyTorch skip
-- [ ] new executable examples compile through the full Surf pipeline
-- [ ] release oracle produces a report with CPU results and explicit backend statuses
+- [x] `bench_phase1e` rejects invalid `--model`
+- [x] `bench_phase1e --model all` exercises the real fixed benchmark scope
+- [x] skipped backends always carry explicit reasons
+- [x] missing MNIST data becomes a structured skip, not a CLI failure
+- [x] missing benchmark Python interpreter becomes a structured PyTorch skip
+- [x] new executable examples compile through the full Surf pipeline
+- [x] release oracle produces a report with CPU results and explicit backend statuses
