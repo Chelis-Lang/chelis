@@ -178,7 +178,7 @@ Supported modes are `--surf`, `--deep`, and `--desugar`.
 
 ### `chelis cove`
 
-Launch the planned terminal coding environment.
+Launch the Cove terminal coding environment.
 
 ## 6. Type-System Terms
 

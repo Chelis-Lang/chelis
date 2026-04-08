@@ -322,6 +322,37 @@ fn tide_lsp_stdio_flag_is_accepted_and_exits_on_eof() {
 }
 
 #[test]
+fn cove_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--file"))
+        .stdout(predicate::str::contains("Launch the Cove terminal UI"));
+}
+
+#[test]
+fn cove_reports_missing_file_before_terminal_error() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--file", "/definitely/missing/chelis-file.ch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read Cove file"));
+}
+
+#[test]
+fn cove_requires_interactive_terminal_for_valid_launch() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--file", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("interactive terminal"));
+}
+
+#[test]
 fn vscode_extension_manifest_registers_languages_and_command() {
     let manifest = fs::read_to_string(editor_file("package.json")).expect("manifest");
     let json: Value = serde_json::from_str(&manifest).expect("valid json");

@@ -1,0 +1,16 @@
+[package]
+name = "tree-sitter-chelis"
+description = "Tree-sitter language bindings for Chelis Surf and Deep"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter = "0.26.8"
+
+[build-dependencies]
+cc = "1"

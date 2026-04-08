@@ -82,6 +82,11 @@ enum Command {
         #[command(subcommand)]
         command: Option<TideCommand>,
     },
+    /// Launch the Cove terminal UI
+    Cove {
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -122,6 +127,7 @@ fn main() {
             target,
         }) => cmd_build(&file, output.as_deref(), &target),
         Some(Command::Tide { command }) => run_tide(command),
+        Some(Command::Cove { file }) => cmd_cove(file),
         None => {
             println!("chelis 0.1.0 -- use --help for commands");
             Ok(())
@@ -511,6 +517,11 @@ fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Erro
             Ok(())
         }
     }
+}
+
+fn cmd_cove(file: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    chelis_cove::run(chelis_cove::CoveOptions { file })?;
+    Ok(())
 }
 
 fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {

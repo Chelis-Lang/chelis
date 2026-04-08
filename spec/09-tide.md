@@ -1,7 +1,8 @@
 # Tide: Interactive And Agent Mode
 
 **Status:** Phase 0i REPL shipped; Phase 2e agent API + MCP shipped; Phase 2f LSP
-server + VS Code-compatible extension scaffold shipped.
+server + VS Code-compatible extension scaffold shipped; Phase 2g `chelis cove`
+single-file TUI shipped.
 This document records the intended architecture so the rest of the docs stay aligned
 while implementation catches up.
 
@@ -157,3 +158,22 @@ Phase 2 extends Tide beyond the REPL:
 - The 2f manual acceptance oracle is opening a `.ch` file through the extension and
   verifying immediate syntax highlighting, diagnostics, hover, completion, definition
   lookup, Deep view, and fitness status in one session.
+
+## 10. Phase 2g Contract Notes
+
+- `chelis cove` is the shipped TUI entrypoint; `chelis cove --file examples/mnist.ch`
+  opens a specific file.
+- The shipped v1 is single-file and direct-library: it calls `chelis-tide::compiler`
+  helpers in-process rather than talking to a background daemon.
+- The shipped pane layout is Surf editor, read-only Deep view, diagnostics/fitness, and
+  output.
+- The output pane supports compile-preview and evaluator execution with auto-generated
+  zero-filled named bindings for `Load` nodes whose shapes are known.
+- The bundled tree-sitter grammars live in `grammars/tree-sitter-chelis-surf/` and
+  `grammars/tree-sitter-chelis-deep/`; Cove uses them for Surf and Deep highlighting.
+- Agent-mode hosting inside Cove is deferred; the shipped 2g surface does not embed an
+  MCP-driven assistant session.
+- The 2g manual acceptance oracle is:
+  `cargo run -p chelis-cli -- cove --file examples/mnist.ch`
+  and confirming that editing updates Deep/diagnostics live, `Ctrl-S` saves, and
+  compile/eval actions populate the output pane.

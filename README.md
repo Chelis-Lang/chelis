@@ -71,11 +71,13 @@ Phase 0i shipped:
 - `chelis tide serve`
 - `chelis tide mcp`
 - `chelis tide lsp`
+- `chelis cove`
 
 The current shipped surface includes the Phase 1 HIP backend work plus
 `chelis validate` for executable grammar conformance, the Phase 2e Tide
-machine-facing API surface, and the Phase 2f Tide LSP/editor package surface in
-`editors/vscode/`.
+machine-facing API surface, the Phase 2f Tide LSP/editor package surface in
+`editors/vscode/`, and the Phase 2g `chelis cove` terminal UI plus checked-in
+tree-sitter grammars for Surf and Deep.
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
@@ -90,6 +92,14 @@ AI assistance planning is split cleanly:
 
 - Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
 - Phase 3: a local coding model that ships with the toolchain
+
+Phase 2g currently ships as:
+
+- `chelis cove --file examples/mnist.ch`
+- live Surf editing with checked-in tree-sitter highlighting
+- read-only Deep view derived from the current Surf buffer
+- live diagnostics and numeric fitness status
+- `Ctrl-S` save, `Ctrl-R` compile, `Ctrl-E` eval, `Ctrl-Q` quit
 
 ## Phase 0h Validation
 
@@ -117,9 +127,11 @@ crates/
   chelis-backend-c/  C backend and runtime
   chelis-tide/       Tide HTTP/JSON API and MCP server
   chelis-lsp/        Tide Language Server Protocol support
+  chelis-cove/       Cove terminal coding environment
   chelis-cli/        CLI binary
   spec/                Numbered language specs and design docs
 editors/vscode/      VS Code-compatible extension and TextMate grammars
+grammars/            Tree-sitter grammars for Surf and Deep
 examples/            Executable Phase 0 example programs
 examples/illustrative/  Non-executable syntax/design examples
 ```

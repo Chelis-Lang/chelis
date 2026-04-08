@@ -10,3 +10,5 @@ data/
 !crates/
 !crates/**/*.c
 !crates/**/*.h
+!grammars/**/*.c
+!grammars/**/*.h

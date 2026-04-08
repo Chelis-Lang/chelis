@@ -152,8 +152,7 @@ chelis validate --deep app.dp
 chelis validate --desugar app.ch
 ```
 
-Not every command is implemented yet.
-This list is the intended stable surface for project-level documentation.
+This is the intended stable surface for project-level documentation.
 
 ---
 
@@ -167,14 +166,14 @@ This list is the intended stable surface for project-level documentation.
 - named tensor dimensions
 - graded fitness scoring with repair suggestions
 
-### Deferred to Phase 2
+### Deferred to later Phase 2 work
 
 - algebraic effects: `Diff`, `Random`, `Accum`, `Resource(Device)`
 - inferred effect sets with explicit handlers at the program boundary
 - linear types for tensors with borrowing rules and explicit `copy`
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
-- Tide LSP (with TextMate grammar and semantic tokens) and `chelis cove` (with tree-sitter grammar)
+- algebraic-effect, linearity, macro, and `vmap` tooling that remains planned in Phase 2
 
 ### Deferred to Phase 3
 

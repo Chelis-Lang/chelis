@@ -636,32 +636,26 @@ development experience.
 
 ### Design
 
-Built on Ratatui. The TUI is a frontend to the Agent API (2e) and uses the same
-compiler services as the LSP (2f).
+Built on Ratatui. The shipped v1 uses the same direct compiler services as the LSP (2f)
+without introducing a background daemon or `salsa`.
 
 **Panels:**
 - Editor pane: Surf code with syntax highlighting
-- Deep pane: live canonical Deep of the current function
-- Type/effect pane: inferred types, effects, linearity annotations
-- Output pane: evaluation results, training loss, compilation output
-- Agent pane (agent mode): AI writes Deep, human reviews in Surf
+- Deep pane: live canonical Deep of the current buffer
+- Diagnostics pane: fitness and structured compiler diagnostics
+- Output pane: compile preview and evaluator output
 
 **Flagship feature: Surf <-> Deep live toggle.** The programmer writes in Surf and sees
 the AI's representation in Deep in real time. No other language has this. It makes the
 "written by AIs, for AIs" thesis concrete and visible.
-
-**Agent mode:** The TUI hosts an AI agent session - the agent proposes Deep programs,
-the human reviews them in Surf, and edits are round-tripped through the compiler. This
-requires the MCP server (2e) running in the background.
 
 ### Implementation Plan
 
 **Crate: `chelis-cove` (new)**
 - `app.rs`: application state, event loop
 - `ui.rs`: panel layout, rendering (Ratatui)
-- `editor.rs`: text editing with tree-sitter-based Surf syntax highlighting
-- `agent.rs`: agent mode integration (connects to `chelis tide mcp`)
-- `live.rs`: live desugar/check/decompile pipeline (debounced, async)
+- `editor.rs`: text editing plus tree-sitter-based Surf/Deep highlighting
+- `live.rs`: in-process desugar/check/eval/compile helpers
 
 **Tree-sitter grammar (`grammar.js`):** A tree-sitter grammar for Surf and Deep generates
 a C parser used by the editor pane for incremental reparsing on each keystroke.
@@ -675,14 +669,15 @@ natively.
 - `chelis cove --file examples/mnist.ch` opens a specific file
 
 **Test strategy:** TUI testing is primarily manual. Automated tests cover non-UI logic
-(live pipeline, agent mode protocol). The acceptance gate is a human completing the
-MNIST tutorial entirely within `chelis cove`.
+(live pipeline, zero-binding eval, file loading, CLI surface). The acceptance gate is a
+human running the documented manual oracle and confirming live Deep/diagnostic updates
+plus compile/eval output from inside `chelis cove`.
 
 ### Acceptance Gate
 
-A user (not the developer) can: open `chelis cove`, load `examples/mnist.ch`, see the
-Deep form, edit the Surf code, see type errors update live, compile, and run training
-- without leaving the TUI.
+A user (not the developer) can run `cargo run -p chelis-cli -- cove --file
+examples/mnist.ch`, see the Deep form, edit the Surf code, see fitness/diagnostics
+update live, save, and trigger compile/eval output without leaving the TUI.
 
 ---
 
