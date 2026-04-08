@@ -1,5 +1,13 @@
-(module {} HelloTensor
-  (def {} main
-    (fn {} (params {})
-      (let {} (bind {} a (tuple {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0)) b (tuple {} (lit {} 4.0) (lit {} 5.0) (lit {} 6.0)))
+(module {}
+  HelloTensor
+  (def {}
+    main
+    (fn {}
+      (params {})
+      (let {}
+        (bind {}
+          a
+          (tuple {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0))
+          b
+          (tuple {} (lit {} 4.0) (lit {} 5.0) (lit {} 6.0)))
         (app {} (var {} add) (var {} a) (var {} b))))))

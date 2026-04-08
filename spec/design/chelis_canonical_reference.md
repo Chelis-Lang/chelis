@@ -139,6 +139,7 @@ chelis build app.ch
 chelis build app.ch --target hip
 chelis check app.ch
 chelis deep app.ch
+chelis deep --flat app.ch
 chelis surf program.dp
 chelis eval expr
 chelis tide
@@ -147,12 +148,15 @@ chelis tide mcp
 chelis tide lsp
 chelis cove
 chelis fmt app.ch
+chelis fmt app.dp --check
 chelis validate --surf app.ch
 chelis validate --deep app.dp
 chelis validate --desugar app.ch
 ```
 
 This is the intended stable surface for project-level documentation.
+`chelis deep` defaults to canonical pretty Deep; `--flat` is the explicit flat-output
+escape hatch.
 
 ---
 

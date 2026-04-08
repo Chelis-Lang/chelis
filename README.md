@@ -73,6 +73,14 @@ Phase 0i shipped:
 - `chelis tide lsp`
 - `chelis cove`
 
+Deep formatting now defaults to canonical pretty-printed `.dp` output:
+
+- `chelis deep app.ch` prints width-aware canonical Deep
+- `chelis deep --flat app.ch` preserves flat per-form rendering for explicit machine
+  pipelines while keeping top-level forms separated
+- `chelis fmt file.dp --check` verifies canonical `.dp` formatting without rewriting the
+  file
+
 The current shipped surface includes the Phase 1 HIP backend work plus
 `chelis validate` for executable grammar conformance, the Phase 2e Tide
 machine-facing API surface, the Phase 2f Tide LSP/editor package surface in

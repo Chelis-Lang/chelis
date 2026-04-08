@@ -641,7 +641,8 @@ without introducing a background daemon or `salsa`.
 
 **Panels:**
 - Editor pane: Surf code with syntax highlighting
-- Deep pane: live canonical Deep of the current buffer
+- Deep pane: live canonical Deep of the current buffer, rendered with the canonical
+  pretty Deep layout
 - Diagnostics pane: fitness and structured compiler diagnostics
 - Output pane: compile preview and evaluator output
 
@@ -667,6 +668,9 @@ natively.
 **CLI:**
 - `chelis cove` launches the TUI
 - `chelis cove --file examples/mnist.ch` opens a specific file
+- canonical Deep elsewhere in the toolchain now defaults to pretty-printed `.dp`; use
+  `chelis deep --flat` for flat machine-oriented output and `chelis fmt --check` to
+  verify canonical Surf/Deep formatting without rewriting files
 
 **Test strategy:** TUI testing is primarily manual. Automated tests cover non-UI logic
 (live pipeline, zero-binding eval, file loading, CLI surface). The acceptance gate is a

@@ -1,3 +1,5 @@
-(def {} process
-  (fn {} (params {} x)
+(def {}
+  process
+  (fn {}
+    (params {} x)
     (pipe {} (var {} x) (var {} normalize) (var {} relu) (var {} softmax))))

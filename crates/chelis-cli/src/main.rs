@@ -34,7 +34,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Desugar Surf (.ch) to canonical Deep s-expressions
-    Deep { file: PathBuf },
+    Deep {
+        #[arg(long)]
+        flat: bool,
+        file: PathBuf,
+    },
     /// Decompile Deep (.dp) to Surf (best-effort)
     Surf { file: PathBuf },
     /// Format source code (canonical form)
@@ -42,6 +46,8 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         inplace: bool,
+        #[arg(long)]
+        check: bool,
     },
     /// Evaluate an expression or file
     Eval {
@@ -110,9 +116,13 @@ enum TideCommand {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Command::Deep { file }) => cmd_deep(&file),
+        Some(Command::Deep { file, flat }) => cmd_deep(&file, flat),
         Some(Command::Surf { file }) => cmd_surf(&file),
-        Some(Command::Fmt { file, inplace }) => cmd_fmt(&file, inplace),
+        Some(Command::Fmt {
+            file,
+            inplace,
+            check,
+        }) => cmd_fmt(&file, inplace, check),
         Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
         Some(Command::Check { file }) => cmd_check(&file),
         Some(Command::Validate {
@@ -139,11 +149,15 @@ fn main() {
     }
 }
 
-fn cmd_deep(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deep(file: &PathBuf, flat: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-    let output = chelis_deep::printer::print_canonical(&deep_exprs);
+    let output = if flat {
+        chelis_deep::printer::print_canonical_flat(&deep_exprs)
+    } else {
+        chelis_deep::printer::print_canonical(&deep_exprs)
+    };
     print!("{output}");
     Ok(())
 }
@@ -165,7 +179,10 @@ fn cmd_surf(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_fmt(file: &PathBuf, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if inplace && check {
+        return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
+    }
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let output = if ext == "dp" {
@@ -177,6 +194,12 @@ fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Erro
         let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
         chelis_surf::decompile::decompile_program(&deep_exprs)
     };
+    if check {
+        if output == source {
+            return Ok(());
+        }
+        return Err(format!("{} is not canonically formatted", file.display()).into());
+    }
     if inplace {
         fs::write(file, &output)?;
     } else {

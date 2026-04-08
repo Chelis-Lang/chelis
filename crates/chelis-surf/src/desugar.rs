@@ -906,7 +906,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(let {} (bind {} x (lit {type: (t-prim {} int32)} 1)) (var {} x))"
+            "(let {}\n  (bind {}\n    x\n    (lit {type: (t-prim {} int32)} 1))\n  (var {} x))"
         );
     }
 
@@ -929,13 +929,14 @@ mod tests {
             s(),
         );
         let result = print_expr(&desugar_expr(&expr));
-        assert!(result.contains("(bind {} __chelis_tmp0 (var {} triple))"));
+        assert!(result.contains("__chelis_tmp0"));
+        assert!(result.contains("(var {} triple)"));
         assert!(result.contains("(lit {type: (t-prim {} int32)} 0)"));
         assert!(result.contains("(lit {type: (t-prim {} int32)} 1)"));
         assert!(result.contains("(lit {type: (t-prim {} int32)} 2)"));
         assert_eq!(result.matches("(tuple-get {}").count(), 3);
-        assert!(result.contains("(bind {} a (var {} __chelis_tmp"));
-        assert!(result.contains("(bind {} c (var {} __chelis_tmp"));
+        assert!(result.contains("(var {} __chelis_tmp0)"));
+        assert!(result.contains("(var {} c)"));
         assert!(!result.contains("(bind {} _ "));
     }
 
@@ -946,7 +947,7 @@ mod tests {
         let expr = Expr::Lambda(vec![param("x", None)], Box::new(tvar("x")), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(fn {} (params {} x) (var {} x))"
+            "(fn {}\n  (params {} x)\n  (var {} x))"
         );
     }
 

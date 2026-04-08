@@ -23,7 +23,7 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **1d** | Optimized reductions, staged scalar scratch, hipBLAS matmul specialization | Implemented; carried-forward backend limits documented |
 | **1e** | Benchmarks, reference comparison, checked-in results | Shipped for fixed benchmark models |
 | **1f** | Executable grammar | Implemented |
-| **2** | Effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | In progress; 2e Tide Agent API + MCP, 2f LSP, and 2g Cove shipped, remaining work planned in `spec/design/chelis_phase2_plan.md` |
+| **2** | Effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | In progress; 2e Tide Agent API + MCP, 2f LSP, 2g Cove, and the 2gb Deep pretty-formatting side quest shipped; remaining work planned in `spec/design/chelis_phase2_plan.md` |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
 ## Red Team Checkpoints

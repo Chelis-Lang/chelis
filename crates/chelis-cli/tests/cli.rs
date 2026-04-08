@@ -116,6 +116,79 @@ fn fmt_inplace_preserves_pipeline_parseability() {
 }
 
 #[test]
+fn fmt_check_succeeds_for_canonical_deep() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&path, output).expect("write deep");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn fmt_check_succeeds_for_canonical_surf() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mnist.ch");
+    fs::copy(mnist_example(), &path).expect("copy");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn fmt_check_fails_for_noncanonical_deep() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    write_file(
+        &path,
+        "(app {} (var {} mean) (app {} (var {} neg) (app {} (var {} sum) (var {} very_long_intermediate_name) (lit {type: (t-prim {} i32)} 0))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not canonically formatted"));
+}
+
+#[test]
+fn fmt_rejects_check_and_inplace_together() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    write_file(&path, "(def {} x (lit {type: (t-prim {} int32)} 1))\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check", "--inplace"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not allow `--inplace` and `--check` together",
+        ));
+}
+
+#[test]
 fn check_does_not_report_perfect_score_with_errors() {
     let json = run_json_check(&illustrative_example("pattern_matching.ch"));
     assert!(json["score"].as_f64().unwrap() < 1.0);
@@ -446,6 +519,85 @@ fn validate_deep_accepts_canonical_deep_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn validate_deep_accepts_flat_canonical_output() {
+    let dir = tempdir().expect("tempdir");
+    let deep_path = dir.path().join("hello_tensor_flat.dp");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, output).expect("write deep output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", deep_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn deep_defaults_to_pretty_output_and_flat_flag_preserves_flat_per_form_rendering() {
+    let pretty = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pretty = String::from_utf8(pretty).expect("utf8");
+    assert!(
+        pretty.contains("\n  ("),
+        "expected indented pretty Deep: {pretty}"
+    );
+
+    let flat = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flat = String::from_utf8(flat).expect("utf8");
+    assert!(
+        !flat.contains("\n  ("),
+        "flat output should not indent child lines: {flat}"
+    );
+}
+
+#[test]
+fn deep_flat_keeps_top_level_forms_separated() {
+    let dir = tempdir().expect("tempdir");
+    let surf_path = dir.path().join("multi.ch");
+    write_file(&surf_path, "def a = 1\ndef b = 2\n");
+
+    let flat = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flat = String::from_utf8(flat).expect("utf8");
+    assert!(
+        flat.contains("\n\n"),
+        "expected top-level form separation: {flat}"
+    );
+    assert!(
+        !flat.contains("\n  ("),
+        "flat output should not indent child lines: {flat}"
+    );
 }
 
 #[test]

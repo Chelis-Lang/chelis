@@ -95,6 +95,8 @@ No C emission or external compiler process is involved.
 ### `chelis deep file.ch`
 
 Show the canonical Deep form of Surf input.
+Default output is width-aware pretty Deep; `--flat` preserves flat per-form output while
+keeping top-level forms separated.
 
 ### `chelis surf file.dp`
 
@@ -102,7 +104,8 @@ Best-effort decompile Deep into readable Surf.
 
 ### `chelis fmt file.ch`
 
-Format Surf using the compiler-owned canonical style.
+Format Surf or Deep using the compiler-owned canonical style.
+`--check` validates canonical formatting without rewriting the file.
 
 ## 5. Output Expectations
 
