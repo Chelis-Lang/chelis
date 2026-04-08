@@ -155,6 +155,9 @@ Current implementation:
   - `transformer` forward pass
 - missing HIP, PyTorch, or MNIST dataset prerequisites are surfaced as explicit skips in the emitted JSON rather than aborting the oracle
 - CI keeps PyTorch out of the default gate; the local checked-in artifact is the PyTorch comparison proof
+- the full `bench_phase1e --model all` integration test is `#[ignore]` and run manually via
+  `cargo test -p chelis-e2e --test bench_phase1e -- --ignored`; the default workspace gate
+  keeps only the fast structural smoke coverage
 
 ### Phase 1f: Executable Grammar (complete)
 

@@ -112,6 +112,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+Default-gate discipline:
+
+- `cargo test --workspace` is the inner development loop and should stay under roughly 60
+  seconds on a machine without GPU/PyTorch
+- tests that exceed that budget or require heavyweight local prerequisites should be
+  `#[ignore]` by default and invoked through a documented manual gate
+- every ignored test must have a concrete manual command and expected success condition in
+  the owning phase docs
+
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
 

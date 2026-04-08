@@ -27,6 +27,17 @@ uv pip install --python py/.venv/bin/python --index-url https://rocm.nightlies.a
 CI does **not** install PyTorch. In CI, the oracle is still expected to emit structured
 PyTorch `skipped` reports rather than fail or silently downgrade.
 
+Default-test/manual-gate split:
+
+- `cargo test --workspace` should only exercise the fast structural benchmark coverage
+- the real fixed-scope benchmark integration test is `#[ignore]` so the default test loop
+  does not pay the full multi-minute benchmark cost
+- manual benchmark-test gate:
+
+```sh
+cargo test -p chelis-e2e --test bench_phase1e -- --ignored
+```
+
 ### Benchmark Surface
 
 Phase 1e is intentionally a **thin fixed runner**, not a general benchmarking framework.
@@ -96,7 +107,10 @@ Missing-MNIST behavior:
 ### Tests
 
 - [x] `bench_phase1e` rejects invalid `--model`
-- [x] `bench_phase1e --model all` exercises the real fixed benchmark scope
+- [x] fast structural smoke coverage emits valid benchmark JSON without requiring the full
+  real benchmark scope
+- [x] `bench_phase1e --model all` exercises the real fixed benchmark scope via the manual
+  ignored-test gate
 - [x] skipped backends always carry explicit reasons
 - [x] missing MNIST data becomes a structured skip, not a CLI failure
 - [x] missing benchmark Python interpreter becomes a structured PyTorch skip
