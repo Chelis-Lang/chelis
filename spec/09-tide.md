@@ -112,9 +112,10 @@ The Phase 0i test strategy includes evaluator-agreement tests:
 Phase 2 extends Tide beyond the REPL:
 
 - 2e: HTTP / JSON compiler API plus MCP server for coding agents
-- 2f: LSP support with diagnostics, hover, completion, go-to-definition, and Surf/Deep
-  visibility
-- 2g: `chelis cove` terminal UI with live checking and Surf/Deep toggling
+- 2f: LSP support with diagnostics, hover, completion, go-to-definition, Surf/Deep
+  visibility, TextMate grammar for instant highlighting, and LSP semantic tokens
+- 2g: `chelis cove` terminal UI with live checking, Surf/Deep toggling, and tree-sitter
+  grammar for incremental terminal highlighting
 - batch interfaces for agent loops and corpus collection
 
 ## 8. Phase 2e Contract Notes

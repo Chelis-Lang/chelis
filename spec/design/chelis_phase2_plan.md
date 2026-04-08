@@ -591,6 +591,13 @@ LSP responses.
 - **Hover:** type information, dimension annotations, effect annotations, Deep form of
   any Surf expression
 - **Go-to-definition:** navigate to function definitions, type aliases, module sources
+- **TextMate grammar:** a `.tmLanguage.json` regex grammar for Surf and Deep, bundled
+  with the VS Code extension. Provides instant keyword, string, comment, and literal
+  highlighting before the LSP server is ready.
+- **Semantic tokens:** the LSP implements `textDocument/semanticTokens/full`, returning
+  token types (keyword, operator, function, parameter, type, dimension, literal, comment,
+  effect). Overrides TextMate classifications once the server is running, providing
+  compiler-aware highlighting that regex patterns cannot achieve.
 - **Surf <-> Deep toggle:** command to show/toggle the Deep representation of the
   current selection
 
@@ -607,14 +614,18 @@ mechanical. If it did not, fixing the violations is prerequisite work.
 - `completion.rs`: built-in-scope completion
 - `hover.rs`: type/effect/Deep hover info
 - `commands.rs`: custom commands (`Surf <-> Deep` toggle)
+- `semantic_tokens.rs`: `textDocument/semanticTokens/full` provider; token types map to
+  LSP `SemanticTokenTypes`
 
 **`salsa` integration (if ready):**
 - `chelis-db` crate wrapping compiler passes as `salsa` queries
 - Incremental recomputation: editing one function re-checks only that function and its
   dependents
 
-**VS Code extension:** TypeScript extension that starts the LSP server and provides
-Chelis-specific UI (Deep toggle button, fitness score in status bar).
+**VS Code extension:** TypeScript extension that bundles the TextMate grammar for
+immediate syntax highlighting, starts the LSP server, and provides Chelis-specific UI
+(Deep toggle button, fitness score in status bar). Once the LSP is ready, its semantic
+tokens override TextMate classifications for richer highlighting.
 
 **Test strategy (~10 tests):**
 - Diagnostics match CLI `chelis check` output
@@ -622,6 +633,7 @@ Chelis-specific UI (Deep toggle button, fitness score in status bar).
 - Hover shows correct type information
 - Deep toggle produces valid Deep
 - Edit -> re-check cycle completes in <500ms for MNIST-sized programs
+- Semantic tokens response covers all token types for a representative program
 
 ### Acceptance Gate
 
@@ -660,9 +672,16 @@ requires the MCP server (2e) running in the background.
 **Crate: `chelis-cove` (new)**
 - `app.rs`: application state, event loop
 - `ui.rs`: panel layout, rendering (Ratatui)
-- `editor.rs`: text editing with Surf syntax highlighting
+- `editor.rs`: text editing with tree-sitter-based Surf syntax highlighting
 - `agent.rs`: agent mode integration (connects to `chelis tide mcp`)
 - `live.rs`: live desugar/check/decompile pipeline (debounced, async)
+
+**Tree-sitter grammar (`grammar.js`):** A tree-sitter grammar for Surf and Deep generates
+a C parser used by the editor pane for incremental reparsing on each keystroke.
+Tree-sitter is required here because Ratatui TUIs cannot use TextMate grammars or LSP
+semantic tokens — terminal editors need their own parser for responsive highlighting. The
+same grammar also benefits Neovim, Emacs, and Helix users who support tree-sitter
+natively.
 
 **CLI:**
 - `chelis cove` launches the TUI

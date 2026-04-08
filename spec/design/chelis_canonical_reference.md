@@ -173,7 +173,7 @@ This list is the intended stable surface for project-level documentation.
 - linear types for tensors with borrowing rules and explicit `copy`
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
-- Tide LSP and `chelis cove`
+- Tide LSP (with TextMate grammar and semantic tokens) and `chelis cove` (with tree-sitter grammar)
 
 ### Deferred to Phase 3
 
