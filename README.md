@@ -70,10 +70,12 @@ Phase 0i shipped:
 - `chelis tide`
 - `chelis tide serve`
 - `chelis tide mcp`
+- `chelis tide lsp`
 
 The current shipped surface includes the Phase 1 HIP backend work plus
-`chelis validate` for executable grammar conformance and the Phase 2e Tide
-machine-facing API surface.
+`chelis validate` for executable grammar conformance, the Phase 2e Tide
+machine-facing API surface, and the Phase 2f Tide LSP/editor package surface in
+`editors/vscode/`.
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
@@ -114,8 +116,10 @@ crates/
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
   chelis-backend-c/  C backend and runtime
   chelis-tide/       Tide HTTP/JSON API and MCP server
+  chelis-lsp/        Tide Language Server Protocol support
   chelis-cli/        CLI binary
-spec/                Numbered language specs and design docs
+  spec/                Numbered language specs and design docs
+editors/vscode/      VS Code-compatible extension and TextMate grammars
 examples/            Executable Phase 0 example programs
 examples/illustrative/  Non-executable syntax/design examples
 ```

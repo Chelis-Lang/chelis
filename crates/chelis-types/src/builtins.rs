@@ -10,6 +10,45 @@
 use crate::env::Env;
 use crate::types::*;
 
+pub const BUILTIN_NAMES: &[&str] = &[
+    "add",
+    "mul",
+    "max_elem",
+    "neg",
+    "exp",
+    "log",
+    "sin",
+    "sqrt",
+    "cmplt",
+    "sub",
+    "div",
+    "eq",
+    "neq",
+    "gt",
+    "lte",
+    "gte",
+    "and",
+    "or",
+    "not",
+    "relu",
+    "sigmoid",
+    "softmax",
+    "normalize",
+    "mean",
+    "matmul",
+    "min_elem",
+    "layer_norm",
+    "conv2d",
+    "sum",
+    "max_reduce",
+    "reshape",
+    "permute",
+    "expand",
+    "pad",
+    "shrink",
+    "stride",
+];
+
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
 pub fn builtin_env() -> (Env, VarGen) {
     let mut env = Env::new();

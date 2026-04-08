@@ -351,13 +351,25 @@ fn deep_exprs_from_source(source_kind: SourceKind, source: &str) -> Result<Vec<D
 }
 
 fn parse_surf(source: &str) -> Result<Vec<Decl>> {
-    chelis_surf::parser::parse_str(source)
-        .map_err(|err| stage_error("parse", err.to_string(), "surf_parse_error"))
+    chelis_surf::parser::parse_str(source).map_err(|err| {
+        stage_error_with_span(
+            "parse",
+            err.to_string(),
+            "surf_parse_error",
+            parse_error_span_surf(source, &err),
+        )
+    })
 }
 
 fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str(source)
-        .map_err(|err| stage_error("parse", err.to_string(), "deep_parse_error"))
+    chelis_deep::parser::parse_str(source).map_err(|err| {
+        stage_error_with_span(
+            "parse",
+            err.to_string(),
+            "deep_parse_error",
+            parse_error_span_deep(&err),
+        )
+    })
 }
 
 fn lowered_decl_names_from_surf(source: &str) -> Result<Vec<String>> {
@@ -545,6 +557,15 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 }
 
 fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
+    stage_error_with_span(stage, message, kind, None)
+}
+
+fn stage_error_with_span(
+    stage: &str,
+    message: impl Into<String>,
+    kind: &str,
+    diagnostic_span: Option<Span>,
+) -> CompilerError {
     CompilerError {
         stage: stage.to_string(),
         errors: vec![Diagnostic {
@@ -554,9 +575,29 @@ fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerE
             expected: None,
             got: None,
             suggestions: Vec::new(),
-            span: None,
+            span: diagnostic_span,
         }],
     }
+}
+
+fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> Option<Span> {
+    let offset = match err {
+        chelis_surf::parser::ParseError::Lex(_) => return None,
+        chelis_surf::parser::ParseError::UnexpectedEof => source.len(),
+        chelis_surf::parser::ParseError::Expected { offset, .. }
+        | chelis_surf::parser::ParseError::NonAssocChain { offset } => *offset,
+    };
+    Some(Span { offset, len: 0 })
+}
+
+fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> {
+    let offset = match err {
+        chelis_deep::parser::ParseError::Lex(_) => return None,
+        chelis_deep::parser::ParseError::UnexpectedEof { offset }
+        | chelis_deep::parser::ParseError::Expected { offset, .. }
+        | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
+    };
+    Some(Span { offset, len: 0 })
 }
 
 fn check_error_diagnostic(error: &CheckError) -> Diagnostic {

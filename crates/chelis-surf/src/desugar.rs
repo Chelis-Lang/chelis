@@ -18,6 +18,14 @@ pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
     decls.iter().flat_map(desugar_decl).collect()
 }
 
+pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
+    desugar_decl(decl)
+}
+
+pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
+    desugar_expr(expr)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers for building Deep AST nodes (3-tuple format)
 // ---------------------------------------------------------------------------

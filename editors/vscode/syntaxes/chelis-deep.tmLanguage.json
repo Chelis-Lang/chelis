@@ -1,0 +1,89 @@
+{
+  "name": "Chelis Deep",
+  "scopeName": "source.chelis.deep",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#tags"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#symbols"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.semicolon.chelis-deep",
+          "match": ";.*$"
+        }
+      ]
+    },
+    "tags": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.chelis-deep",
+          "match": "(?<=\\()([a-z][a-z0-9-]*)(?=\\s+\\{)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.chelis-deep",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.other.keyword.chelis-deep",
+          "match": ":[A-Za-z0-9_-]+"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.chelis-deep",
+          "match": "\\b\\d+\\.\\d+(?:[eE][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.chelis-deep",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.chelis-deep",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.chelis-deep",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "symbols": {
+      "patterns": [
+        {
+          "name": "variable.other.chelis-deep",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_.-]*\\b"
+        }
+      ]
+    }
+  }
+}

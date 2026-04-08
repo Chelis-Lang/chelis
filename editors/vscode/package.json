@@ -1,0 +1,66 @@
+{
+  "name": "chelis-vscode",
+  "displayName": "Chelis",
+  "description": "Chelis language support with Tide LSP and canonical Deep views",
+  "version": "0.1.0",
+  "publisher": "chelis",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:chelis",
+    "onLanguage:chelis-deep",
+    "onCommand:chelis.showDeep"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "chelis.showDeep",
+        "title": "Chelis: Show Deep"
+      }
+    ],
+    "languages": [
+      {
+        "id": "chelis",
+        "aliases": [
+          "Chelis",
+          "chelis"
+        ],
+        "extensions": [
+          ".ch"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "chelis-deep",
+        "aliases": [
+          "Chelis Deep",
+          "chelis-deep"
+        ],
+        "extensions": [
+          ".dp"
+        ],
+        "configuration": "./deep-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "chelis",
+        "scopeName": "source.chelis",
+        "path": "./syntaxes/chelis.tmLanguage.json"
+      },
+      {
+        "language": "chelis-deep",
+        "scopeName": "source.chelis.deep",
+        "path": "./syntaxes/chelis-deep.tmLanguage.json"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

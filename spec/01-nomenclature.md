@@ -119,6 +119,9 @@ The current command vocabulary used across docs is:
 - `chelis surf`
 - `chelis eval`
 - `chelis tide`
+- `chelis tide serve`
+- `chelis tide mcp`
+- `chelis tide lsp`
 - `chelis fmt`
 - `chelis validate`
 - `chelis cove`
@@ -151,6 +154,18 @@ Evaluate an expression through the IR evaluator without going through C compilat
 ### `chelis tide`
 
 Launch the interactive REPL-oriented mode.
+
+### `chelis tide serve`
+
+Launch the Tide HTTP/JSON compiler service.
+
+### `chelis tide mcp`
+
+Launch the Tide MCP server on stdio.
+
+### `chelis tide lsp`
+
+Launch the Tide LSP server on stdio.
 
 ### `chelis fmt`
 

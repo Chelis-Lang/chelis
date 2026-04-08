@@ -1,6 +1,7 @@
 # Tide: Interactive And Agent Mode
 
-**Status:** Phase 0i REPL shipped; Phase 2e agent API + MCP shipped.
+**Status:** Phase 0i REPL shipped; Phase 2e agent API + MCP shipped; Phase 2f LSP
+server + VS Code-compatible extension scaffold shipped.
 This document records the intended architecture so the rest of the docs stay aligned
 while implementation catches up.
 
@@ -70,6 +71,21 @@ The shipped MCP tool surface is:
 - `chelis_grad`
 - `chelis_validate`
 
+### `chelis tide lsp`
+
+Launch the Tide LSP server on stdio.
+The shipped v1 surface is full-file recomputation on each open/change and provides:
+
+- diagnostics
+- completion
+- hover
+- go-to-definition
+- `workspace/executeCommand` commands for Deep view and fitness status
+
+The server only promises information the compiler can actually produce today.
+For `.dp` files the shipped surface is diagnostics-first; the richer editor features are
+centered on Surf.
+
 ### `chelis eval expr`
 
 Evaluate a single expression through the evaluator fast path.
@@ -113,7 +129,7 @@ Phase 2 extends Tide beyond the REPL:
 
 - 2e: HTTP / JSON compiler API plus MCP server for coding agents
 - 2f: LSP support with diagnostics, hover, completion, go-to-definition, Surf/Deep
-  visibility, TextMate grammar for instant highlighting, and LSP semantic tokens
+  visibility, and TextMate grammar for instant highlighting
 - 2g: `chelis cove` terminal UI with live checking, Surf/Deep toggling, and tree-sitter
   grammar for incremental terminal highlighting
 - batch interfaces for agent loops and corpus collection
@@ -127,3 +143,17 @@ Phase 2 extends Tide beyond the REPL:
 - The 2e automated acceptance oracle is `cargo test -p chelis-tide --test api`.
 - MCP-agent end-to-end validation remains a documented manual gate rather than part of
   the default workspace run.
+
+## 9. Phase 2f Contract Notes
+
+- `chelis tide lsp` is the shipped stdio entrypoint; there is no separate `chelis-lsp`
+  binary on the user-facing CLI surface.
+- The v1 LSP does not depend on `salsa`; it recomputes from the full current document.
+- The bundled VS Code-compatible extension lives in `editors/vscode/` and includes
+  TextMate grammars for Surf and Deep so syntax highlighting works before the LSP is
+  ready.
+- The Deep toggle is a read-only command that shows canonical Deep; it does not attempt
+  bidirectional Surf/Deep editing.
+- The 2f manual acceptance oracle is opening a `.ch` file through the extension and
+  verifying immediate syntax highlighting, diagnostics, hover, completion, definition
+  lookup, Deep view, and fitness status in one session.

@@ -585,59 +585,46 @@ adapter - it translates LSP messages to compiler API calls and formats the resul
 LSP responses.
 
 **Features:**
-- **Diagnostics:** real-time type errors, effect errors, linearity errors, fitness
-  score in the status bar
+- **Diagnostics:** real-time compiler diagnostics and fitness score in the status bar
 - **Completion:** built-in scope plus standard-library surface
-- **Hover:** type information, dimension annotations, effect annotations, Deep form of
-  any Surf expression
+- **Hover:** type information and Deep form of the current Surf selection where
+  available
 - **Go-to-definition:** navigate to function definitions, type aliases, module sources
 - **TextMate grammar:** a `.tmLanguage.json` regex grammar for Surf and Deep, bundled
   with the VS Code extension. Provides instant keyword, string, comment, and literal
   highlighting before the LSP server is ready.
-- **Semantic tokens:** the LSP implements `textDocument/semanticTokens/full`, returning
-  token types (keyword, operator, function, parameter, type, dimension, literal, comment,
-  effect). Overrides TextMate classifications once the server is running, providing
-  compiler-aware highlighting that regex patterns cannot achieve.
 - **Surf <-> Deep toggle:** command to show/toggle the Deep representation of the
   current selection
 
-**Implementation depends on `salsa` readiness.** The Phase 0 architectural discipline
-(pure-function crate boundaries, no global mutable state) was explicitly designed for
-this moment. If the discipline held through Phase 1, `salsa` adoption should be
-mechanical. If it did not, fixing the violations is prerequisite work.
+**Implementation note:** v1 ships without `salsa`.
+The server recomputes from the full current document and keeps the compiler boundary
+clean so a later `salsa` migration remains mechanical.
 
 ### Implementation Plan
 
 **Crate: `chelis-lsp` (new)**
 - `server.rs`: LSP server (`tower-lsp`)
-- `diagnostics.rs`: map compiler errors to LSP diagnostics
-- `completion.rs`: built-in-scope completion
-- `hover.rs`: type/effect/Deep hover info
-- `commands.rs`: custom commands (`Surf <-> Deep` toggle)
-- `semantic_tokens.rs`: `textDocument/semanticTokens/full` provider; token types map to
-  LSP `SemanticTokenTypes`
+- `analysis.rs`: document parsing, symbol indexing, diagnostics mapping, and Deep-view
+  preparation
+- `commands.rs` equivalent inside the server layer for read-only Deep view and fitness
+  status
 
-**`salsa` integration (if ready):**
-- `chelis-db` crate wrapping compiler passes as `salsa` queries
-- Incremental recomputation: editing one function re-checks only that function and its
-  dependents
-
-**VS Code extension:** TypeScript extension that bundles the TextMate grammar for
+**VS Code extension:** minimal JS extension that bundles the TextMate grammar for
 immediate syntax highlighting, starts the LSP server, and provides Chelis-specific UI
-(Deep toggle button, fitness score in status bar). Once the LSP is ready, its semantic
-tokens override TextMate classifications for richer highlighting.
+(Deep toggle button, fitness score in status bar).
 
 **Test strategy (~10 tests):**
 - Diagnostics match CLI `chelis check` output
 - Completion includes built-in scope
 - Hover shows correct type information
 - Deep toggle produces valid Deep
-- Edit -> re-check cycle completes in <500ms for MNIST-sized programs
-- Semantic tokens response covers all token types for a representative program
+- Edit -> re-check cycle completes in <500ms for MNIST-sized programs on the manual
+  editor gate
 
 ### Acceptance Gate
 
-Open a `.ch` file in VS Code with the extension installed. Type errors appear in
+Open a `.ch` file in VS Code with the extension installed. Syntax highlighting appears
+immediately on open. Type errors appear in
 real time. Hover shows types. Deep toggle works. Fitness score is visible.
 
 ---

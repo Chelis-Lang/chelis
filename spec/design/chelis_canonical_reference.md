@@ -144,6 +144,7 @@ chelis eval expr
 chelis tide
 chelis tide serve --port 8080
 chelis tide mcp
+chelis tide lsp
 chelis cove
 chelis fmt app.ch
 chelis validate --surf app.ch

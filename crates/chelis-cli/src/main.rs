@@ -95,6 +95,11 @@ enum TideCommand {
     },
     /// Start the Tide MCP server over stdio
     Mcp,
+    /// Start the Tide LSP server over stdio
+    Lsp {
+        #[arg(long, hide = true, action = ArgAction::SetTrue)]
+        stdio: bool,
+    },
 }
 
 fn main() {
@@ -499,6 +504,10 @@ fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Erro
         }
         Some(TideCommand::Mcp) => {
             chelis_tide::mcp::run_stdio_blocking()?;
+            Ok(())
+        }
+        Some(TideCommand::Lsp { .. }) => {
+            chelis_lsp::serve_stdio_blocking()?;
             Ok(())
         }
     }

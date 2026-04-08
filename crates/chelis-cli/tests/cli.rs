@@ -24,6 +24,10 @@ fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
 
+fn editor_file(rel: &str) -> PathBuf {
+    example_path(&format!("../../editors/vscode/{rel}"))
+}
+
 fn write_matmul_program(path: &Path) {
     fs::write(
         path,
@@ -296,6 +300,58 @@ fn tide_mcp_help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Start the Tide MCP server"));
+}
+
+#[test]
+fn tide_lsp_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "lsp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the Tide LSP server"));
+}
+
+#[test]
+fn tide_lsp_stdio_flag_is_accepted_and_exits_on_eof() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "lsp", "--stdio"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn vscode_extension_manifest_registers_languages_and_command() {
+    let manifest = fs::read_to_string(editor_file("package.json")).expect("manifest");
+    let json: Value = serde_json::from_str(&manifest).expect("valid json");
+    let languages = json["contributes"]["languages"]
+        .as_array()
+        .expect("languages array");
+    assert!(languages.iter().any(|entry| entry["id"] == "chelis"));
+    assert!(languages.iter().any(|entry| entry["id"] == "chelis-deep"));
+
+    let commands = json["contributes"]["commands"]
+        .as_array()
+        .expect("commands array");
+    assert!(
+        commands
+            .iter()
+            .any(|entry| entry["command"] == "chelis.showDeep")
+    );
+}
+
+#[test]
+fn vscode_grammars_exist_and_parse_as_json() {
+    for path in [
+        editor_file("syntaxes/chelis.tmLanguage.json"),
+        editor_file("syntaxes/chelis-deep.tmLanguage.json"),
+    ] {
+        let contents = fs::read_to_string(&path).expect("grammar");
+        let json: Value = serde_json::from_str(&contents).expect("valid grammar json");
+        assert!(json["scopeName"].is_string(), "{path:?}");
+        assert!(json["repository"].is_object(), "{path:?}");
+    }
 }
 
 #[test]
