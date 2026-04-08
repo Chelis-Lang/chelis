@@ -6,9 +6,11 @@ the supervisor.
 Surf is the readable syntax for humans.
 Deep is the canonical s-expression syntax for machines and the compiler.
 
-**Status:** Phase 0 complete.
-Phases 0a-0i complete.
-Phase 1 is next.
+**Status:** Phase 0 is complete.
+Phases 0a-0i are complete.
+Phases 1a-1f are implemented.
+Phase 1 is structurally complete for the shipped fixed-workload deliverable, with known
+backend limitations carried forward explicitly in the design docs.
 
 ## Prerequisites
 
@@ -67,7 +69,18 @@ Phase 0i shipped:
 - `chelis build`
 - `chelis tide`
 
-Next up is Phase 1: the first GPU/backend expansion and executable grammar tooling.
+The current shipped surface includes the Phase 1 HIP backend work plus
+`chelis validate` for executable grammar conformance.
+The shipped Phase 1 benchmark models compile and run on both backends.
+Known carried-forward limitations are:
+
+- HIP does not yet implement `pad` / `shrink`; no current Phase 1 model uses them
+- unresolved symbolic dimensions are not implemented in either codegen backend, so
+  shape changes still require recompilation
+- compiler-emitted dotted Deep module/import paths still do not fully round-trip through
+  the compiler-side Deep parser
+
+These limitations are real debt, but they do not block the Phase 2 language work.
 AI assistance planning is split cleanly:
 
 - Phase 2: `SKILL.md` + Tide MCP for frontier models

@@ -129,8 +129,6 @@ Current implementation:
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 - `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
 
-Key work remaining in Phase 1:
-
 ### Phase 1e: Benchmarks and Reference Comparison (complete)
 
 Authoritative Phase 1e oracle:
@@ -159,9 +157,34 @@ Current implementation:
 - missing HIP, PyTorch, or MNIST dataset prerequisites are surfaced as explicit skips in the emitted JSON rather than aborting the oracle
 - CI keeps PyTorch out of the default gate; the local checked-in artifact is the PyTorch comparison proof
 
-Key work remaining in Phase 1:
+### Phase 1f: Executable Grammar (complete)
 
-- executable grammar / `chelis validate` (Phase 1f)
+Authoritative Phase 1f oracle:
+
+```sh
+cargo test -p chelis-e2e --test phase1f_validate
+```
+
+Current implementation:
+
+- `chelis validate --surf file.ch` validates Surf syntax against the PEG conformance grammar
+- `chelis validate --deep file.dp` validates Deep syntax plus the closed tag/metadata/arity rules
+- `chelis validate --desugar file.ch` validates compiler-desugared canonical Deep output
+- the validator is implemented in the standalone `chelis-validate` crate and wired through the CLI
+- the oracle suite checks agreement across executable examples, illustrative syntax examples,
+  `SKILL.md`, curated positive spec fixtures, and curated negative fixtures
+
+Phase 1 implementation work is now present through 1f.
+The shipped fixed-workload Phase 1 deliverable is met: the benchmark models used by
+Phase 1e compile and run on both backends, and the executable-grammar surface from 1f
+is shipped. Known carried-forward limitations remain explicit:
+
+- HIP does not yet implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
+- unresolved symbolic dimensions are not implemented in either codegen backend, so shape changes still require recompilation
+- dotted Deep module/import round-trip remains a separate Phase 2 parser/decompiler follow-up
+
+These are real backend limitations, not hidden caveats, but they do not block Phase 2
+language work.
 
 ## 4. Later Integration Backends
 

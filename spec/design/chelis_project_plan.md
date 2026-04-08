@@ -8,8 +8,9 @@ Each phase has a concrete deliverable, verification target, and red-team checkpo
 
 **Current status:** Phase 0 complete.
 Phases 0a-0i complete.
-Phases 1a-1e complete.
-Phase 1 remains open for executable grammar (`chelis validate`).
+Phases 1a-1f implemented.
+Phase 1 is structurally complete for its shipped fixed-workload deliverable, with known
+backend limitations carried forward explicitly rather than treated as hidden blockers.
 
 **Repo:** `chelis-lang/chelis` (Rust workspace)
 **Domain:** `chelis.ch`
@@ -30,7 +31,7 @@ Phase 1 remains open for executable grammar (`chelis validate`).
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
-| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | In progress |
+| **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
@@ -143,8 +144,21 @@ validation tooling.
 **Current shipped boundary:** the HIP backend work through Phase 1e is in `main`.
 That includes HIP code generation, fusion, device memory planning, segmented and staged
 reduction paths, hipBLAS specialization for contiguous rank-2 `f32` matmul, and the
-fixed-workload benchmark oracle with checked-in results. Phase 1 is still not complete
-because `chelis validate` from 1f has not shipped yet.
+fixed-workload benchmark oracle with checked-in results. `chelis validate` from 1f is
+now shipped too. The fixed Phase 1e benchmark set (`mnist`, `linreg`,
+`transformer_block`) compiles and runs on both backends, so the intended Phase 1
+deliverable is met for the shipped models.
+
+**Known carried-forward limitations:** these are real debt and must stay documented, but
+they do not block Phase 2 language work.
+
+- HIP codegen still does not implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
+- unresolved symbolic dimensions are not implemented in either codegen backend, so changing batch/shape still requires recompilation
+- the compiler emits dotted Deep module/import paths that `chelis validate` accepts, but the compiler-side Deep parser does not yet fully round-trip that emitted form
+
+These limitations matter for future serving, dynamic batching, and full backend
+generality, but they do not block the Phase 2 work on effects, linear types, macros,
+and Tide tooling.
 
 ### 1a: Kernel Code Generation
 
@@ -195,8 +209,14 @@ It is not a proposal to rewrite the Surf parser.
 
 ## Phase 2
 
-**Prerequisite:** Phase 1 complete.
+**Prerequisite:** the shipped Phase 1 fixed-workload deliverable is in place.
 **Deliverable:** language maturity features and interactive tooling.
+
+**Phase 2 follow-up bug:** the compiler currently emits dotted Deep module/import
+paths that `chelis validate` accepts, but the compiler-side Deep parser still does not
+fully round-trip that emitted form. Fixing emit -> reparse -> identical AST for this
+shape is a Phase 2 task because it matters for decompilation and LLM repair
+workflows, but it is not a Phase 1 correctness blocker.
 
 ### 2a: Algebraic Effects
 

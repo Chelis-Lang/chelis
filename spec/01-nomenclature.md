@@ -158,7 +158,8 @@ Format Surf code using the compiler-owned canonical style.
 
 ### `chelis validate`
 
-Validate syntax against executable grammar tooling once that Phase 1 tool exists.
+Validate Surf or Deep syntax against the executable grammar conformance tool.
+Supported modes are `--surf`, `--deep`, and `--desugar`.
 
 ### `chelis cove`
 

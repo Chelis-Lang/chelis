@@ -7,6 +7,7 @@ members = [
     "crates/chelis-ir",
     "crates/chelis-backend-c",
     "crates/chelis-backend-hip",
+    "crates/chelis-validate",
     "crates/chelis-cli",
     "crates/chelis-e2e",
 ]
@@ -24,6 +25,7 @@ chelis-types = { path = "crates/chelis-types" }
 chelis-ir = { path = "crates/chelis-ir" }
 chelis-backend-c = { path = "crates/chelis-backend-c" }
 chelis-backend-hip = { path = "crates/chelis-backend-hip" }
+chelis-validate = { path = "crates/chelis-validate" }
 
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }

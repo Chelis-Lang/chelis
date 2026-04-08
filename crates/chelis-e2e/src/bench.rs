@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use chelis_backend_c::CodegenResult as CCodegenResult;
@@ -71,7 +72,7 @@ impl Model {
 
 #[derive(Serialize)]
 pub struct BenchmarkReport {
-    pub oracle: &'static str,
+    pub oracle: String,
     pub models: Vec<ModelReport>,
 }
 
@@ -156,7 +157,7 @@ struct ForwardPrograms {
     output_index: usize,
 }
 
-pub fn run_phase1e(models: &[Model]) -> Result<BenchmarkReport, String> {
+pub fn run_phase1e(models: &[Model], emit_json: Option<&Path>) -> Result<BenchmarkReport, String> {
     let mut reports = Vec::new();
     for model in models {
         reports.push(match model {
@@ -166,9 +167,25 @@ pub fn run_phase1e(models: &[Model]) -> Result<BenchmarkReport, String> {
         });
     }
     Ok(BenchmarkReport {
-        oracle: "cargo run --release -p chelis-e2e --bin bench_phase1e -- --model all --emit-json benchmarks/results/latest.json",
+        oracle: oracle_command(models, emit_json),
         models: reports,
     })
+}
+
+fn oracle_command(models: &[Model], emit_json: Option<&Path>) -> String {
+    let model = match models {
+        [Model::Linreg] => "linreg",
+        [Model::Mnist] => "mnist",
+        [Model::Transformer] => "transformer",
+        [Model::Linreg, Model::Mnist, Model::Transformer] => "all",
+        _ => "all",
+    };
+    let emit_json = emit_json
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<stdout>".to_string());
+    format!(
+        "cargo run --release -p chelis-e2e --bin bench_phase1e -- --model {model} --emit-json {emit_json}"
+    )
 }
 
 fn run_linreg() -> Result<ModelReport, String> {
@@ -457,6 +474,9 @@ fn run_training_backend_hip(
     programs: &TrainingPrograms,
     uses_accuracy: bool,
 ) -> RunArtifacts {
+    if let Some(reason) = hip_prerequisite_skip_reason() {
+        return skipped(reason);
+    }
     let train = &programs.train_hip;
     let main_source = build_training_main_c(
         prefix,
@@ -505,6 +525,9 @@ fn run_forward_backend(
             }
         }
         Backend::Hip => {
+            if let Some(reason) = hip_prerequisite_skip_reason() {
+                return skipped(reason);
+            }
             let main_source = build_forward_main_c(
                 prefix,
                 data_path,
@@ -1006,6 +1029,86 @@ fn compile_and_run_hip(
         compile_ms,
         String::from_utf8_lossy(&run.stdout).into_owned(),
     ))
+}
+
+fn hip_prerequisite_skip_reason() -> Option<String> {
+    static HIP_RUNTIME_PROBE: OnceLock<Option<String>> = OnceLock::new();
+    HIP_RUNTIME_PROBE
+        .get_or_init(probe_hip_runtime_prerequisite)
+        .clone()
+}
+
+fn probe_hip_runtime_prerequisite() -> Option<String> {
+    if !tool_available("hipcc", &["--version"]) {
+        return Some("hipcc not available".to_string());
+    }
+
+    let temp = match tempfile::tempdir() {
+        Ok(temp) => temp,
+        Err(err) => {
+            return Some(format!(
+                "failed to create HIP prerequisite probe dir: {err}"
+            ));
+        }
+    };
+    let src = temp.path().join("probe.cpp");
+    let bin = temp.path().join("probe");
+    let source = r#"#include <hip/hip_runtime.h>
+#include <stdio.h>
+
+int main(void) {
+    int count = 0;
+    hipError_t err = hipGetDeviceCount(&count);
+    if (err != hipSuccess) {
+        fprintf(stderr, "hipGetDeviceCount failed: %s\n", hipGetErrorString(err));
+        return 2;
+    }
+    if (count <= 0) {
+        fprintf(stderr, "no HIP devices visible\n");
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(err) = fs::write(&src, source) {
+        return Some(format!("failed to write HIP prerequisite probe: {err}"));
+    }
+
+    let compile = match Command::new("hipcc")
+        .arg("-O2")
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return Some(format!(
+                "hipcc failed to start for prerequisite probe: {err}"
+            ));
+        }
+    };
+    if !compile.status.success() {
+        return Some(format!(
+            "HIP prerequisite probe failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr).trim()
+        ));
+    }
+
+    let run = match Command::new(&bin).output() {
+        Ok(output) => output,
+        Err(err) => return Some(format!("failed to run HIP prerequisite probe: {err}")),
+    };
+    if run.status.success() {
+        return None;
+    }
+
+    let stderr = String::from_utf8_lossy(&run.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Some("HIP runtime unavailable".to_string())
+    } else {
+        Some(format!("HIP runtime unavailable: {stderr}"))
+    }
 }
 
 fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {

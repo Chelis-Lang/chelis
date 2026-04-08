@@ -32,6 +32,9 @@ fn bench_phase1e_rejects_unknown_model() {
 #[test]
 fn bench_phase1e_all_emits_structured_json_for_real_scope() {
     let json = run_bench("all");
+    let oracle = json["oracle"].as_str().expect("oracle string");
+    assert!(oracle.contains("--model all"));
+    assert!(oracle.contains("--emit-json"));
     let models = json["models"].as_array().expect("models array");
     assert_eq!(models.len(), 3, "expected all benchmark models");
     let names: Vec<_> = models
@@ -61,6 +64,9 @@ fn bench_phase1e_mnist_missing_data_emits_structured_skip_report() {
         "mnist",
         &[("MNIST_DIR", "/tmp/chelis-phase1e-missing-mnist")],
     );
+    let oracle = json["oracle"].as_str().expect("oracle string");
+    assert!(oracle.contains("--model mnist"));
+    assert!(oracle.contains("--emit-json"));
     let model = &json["models"][0];
     assert_eq!(model["name"].as_str(), Some("mnist"));
     for backend_name in ["cpu", "hip", "pytorch"] {
@@ -92,5 +98,27 @@ fn bench_phase1e_missing_pytorch_interpreter_emits_structured_skip_report() {
     assert!(
         reason.contains("CHELIS_BENCH_PYTHON points to a missing interpreter"),
         "unexpected PyTorch skip reason: {reason}"
+    );
+}
+
+#[test]
+fn bench_phase1e_hidden_hip_device_emits_structured_skip_report() {
+    let json = run_bench_with_env(
+        "linreg",
+        &[
+            ("ROCR_VISIBLE_DEVICES", ""),
+            (
+                "CHELIS_BENCH_PYTHON",
+                "/tmp/chelis-phase1e-missing-python-interpreter",
+            ),
+        ],
+    );
+    let model = &json["models"][0];
+    let hip = &model["hip"];
+    assert_eq!(hip["status"].as_str(), Some("skipped"));
+    let reason = hip["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("HIP runtime unavailable") || reason.contains("no HIP devices visible"),
+        "unexpected HIP skip reason: {reason}"
     );
 }

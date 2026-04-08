@@ -101,4 +101,4 @@ Missing-MNIST behavior:
 - [x] missing MNIST data becomes a structured skip, not a CLI failure
 - [x] missing benchmark Python interpreter becomes a structured PyTorch skip
 - [x] new executable examples compile through the full Surf pipeline
-- [x] release oracle produces a report with CPU results and explicit backend statuses
+- [x] benchmark integration coverage produces a report with CPU results and explicit backend statuses

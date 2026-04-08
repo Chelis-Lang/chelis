@@ -39,7 +39,7 @@ fn parse_args() -> Result<Config, String> {
 
 fn main() -> Result<(), String> {
     let config = parse_args()?;
-    let report = run_phase1e(&config.models)?;
+    let report = run_phase1e(&config.models, config.emit_json.as_deref())?;
     emit_report(&report, config.emit_json.as_deref())
 }
 

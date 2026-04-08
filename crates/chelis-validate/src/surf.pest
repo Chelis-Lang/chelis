@@ -1,0 +1,240 @@
+program = { SOI ~ module_decl? ~ decl* ~ EOI }
+
+module_decl = { MODULE ~ module_path }
+decl = _{ import_decl | export_decl | dim_decl | type_decl | sig_decl | fun_decl | let_decl }
+
+module_path = { type_ident ~ ("." ~ type_ident)* }
+
+import_decl = { IMPORT ~ module_path ~ import_spec? }
+import_spec = { "(" ~ (".." | ident_or_type ~ ("," ~ ident_or_type)* ~ ","?)? ~ ")" }
+ident_or_type = { type_ident | ident }
+
+export_decl = { EXPORT ~ "(" ~ ident_or_type ~ ("," ~ ident_or_type)* ~ ","? ~ ")" }
+dim_decl = { DIM ~ ident ~ ("," ~ ident)* ~ ","? }
+
+type_decl = { TYPE ~ type_ident ~ type_params? ~ "=" ~ (type_expr | adt_decl) }
+adt_decl = { "|" ? ~ variant ~ ("|" ~ variant)* }
+type_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
+variant = { type_ident ~ (record_fields | tuple_fields)? }
+record_fields = { "{" ~ field_decl ~ ("," ~ field_decl)* ~ ","? ~ "}" }
+tuple_fields = { "(" ~ type_expr ~ ("," ~ type_expr)* ~ ","? ~ ")" }
+field_decl = { ident ~ ":" ~ type_expr }
+
+sig_decl = { SIG ~ ident ~ ":" ~ type_expr }
+fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ "=" ~ expr }
+dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
+params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
+param = { ident ~ (":" ~ type_expr)? }
+return_type = { ":" ~ type_expr }
+let_decl = { LET ~ ident ~ (":" ~ type_expr)? ~ "=" ~ expr }
+
+expr = _{ let_expr | match_expr | if_expr | fn_expr | pipe_expr }
+
+let_expr = { LET ~ let_binding ~ (LET ~ let_binding)* ~ IN ~ expr }
+let_binding = { let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
+let_pattern = { "(" ~ let_pattern ~ ("," ~ let_pattern)+ ~ ","? ~ ")" | ident | "_" }
+
+match_expr = { MATCH ~ expr ~ WITH ~ "{" ~ match_arm+ ~ "}" }
+match_arm = { "|" ~ pattern ~ guard? ~ "=>" ~ expr }
+guard = { IF ~ expr }
+
+if_expr = { IF ~ expr ~ THEN ~ expr ~ ELSE ~ expr }
+fn_expr = { FN ~ params ~ ARROW ~ expr }
+
+pipe_expr = { or_expr ~ (PIPE ~ pipe_stage)* }
+pipe_stage = { let_expr | match_expr | if_expr | fn_expr | or_expr }
+or_expr = { and_expr ~ (OROR ~ and_expr)* }
+and_expr = { cmp_expr ~ (ANDAND ~ cmp_expr)* }
+cmp_expr = { add_expr ~ (cmp_op ~ add_expr)? }
+cmp_op = { EQEQ | NEQ | LTE | GTE | LT | GT }
+add_expr = { mul_expr ~ (add_op ~ mul_expr)* }
+add_op = { PLUS | MINUS }
+mul_expr = { ascribed_expr ~ (mul_op ~ ascribed_expr)* }
+mul_op = { STAR_OP | SLASH | PERCENT }
+ascribed_expr = { unary_expr ~ (":" ~ type_expr)? }
+unary_expr = { unary_op ~ unary_expr | access_expr }
+unary_op = { MINUS | BANG }
+access_expr = { app_expr ~ ("." ~ (ident | int_lit))* }
+app_expr = { atom_expr ~ (call_suffix | juxtapose_arg)* }
+call_suffix = { "(" ~ expr_list? ~ ")" }
+juxtapose_arg = { atomic_arg }
+expr_list = { expr ~ ("," ~ expr)* ~ ","? }
+
+atom_expr = _{
+    unit_expr
+  | tuple_or_paren_expr
+  | block_expr
+  | transform_expr
+  | record_expr
+  | literal
+  | ident
+  | type_ident
+}
+atomic_arg = _{
+    unit_expr
+  | tuple_or_paren_expr
+  | block_expr
+  | transform_expr
+  | record_expr
+  | literal
+  | ident
+  | type_ident
+}
+unit_expr = { "(" ~ ")" }
+tuple_or_paren_expr = { "(" ~ expr ~ ("," ~ expr)+ ~ ","? ~ ")" | "(" ~ expr ~ ")" }
+
+block_expr = { "{" ~ block_body ~ "}" }
+block_body = { (block_let ~ semicolons?)* ~ expr }
+block_let = { LET ~ let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
+
+transform_expr = _{ grad_expr | vmap_expr | jit_expr | cast_expr | realize_expr | copy_expr | par_expr }
+grad_expr = { GRAD ~ "(" ~ expr ~ ")" }
+vmap_expr = { VMAP ~ "(" ~ expr ~ ("," ~ vmap_axis)? ~ ")" }
+vmap_axis = { AXIS ~ "=" ~ int_lit | int_lit }
+jit_expr = { JIT ~ "(" ~ expr ~ ")" }
+cast_expr = { CAST ~ "(" ~ expr ~ "," ~ precision_type ~ ")" }
+realize_expr = { REALIZE ~ "(" ~ expr ~ ")" }
+copy_expr = { COPY ~ "(" ~ expr ~ ")" }
+par_expr = { PAR ~ "{" ~ par_body? ~ "}" }
+par_body = { expr ~ (semicolons ~ expr)* ~ semicolons? }
+
+record_expr = { type_ident ~ "{" ~ record_field ~ ("," ~ record_field)* ~ ","? ~ "}" }
+record_field = { ident ~ ":" ~ expr | ident }
+
+pattern = { pat_atom ~ (AT ~ pat_atom)? }
+pat_atom = _{
+    tuple_pat
+  | paren_pat
+  | record_pat
+  | constructor_pat
+  | literal
+  | "_"
+  | ident
+}
+tuple_pat = { "(" ~ pattern ~ ("," ~ pattern)+ ~ ","? ~ ")" }
+paren_pat = { "(" ~ pattern ~ ")" }
+record_pat = { type_ident ~ "{" ~ record_pat_field ~ ("," ~ record_pat_field)* ~ ","? ~ "}" }
+record_pat_field = { ident ~ ":" ~ pattern | ident }
+constructor_pat = { type_ident ~ pat_arg* }
+pat_arg = _{ tuple_pat | paren_pat | record_pat | literal | "_" | ident | type_ident }
+
+type_expr = { type_atom ~ (ARROW ~ type_atom)* }
+type_atom = _{
+    tensor_type
+  | precision_type
+  | "_"
+  | "*"
+  | int_lit
+  | ident
+  | type_app
+  | tuple_or_paren_type
+}
+type_app = { type_ident ~ ("[" ~ type_expr ~ ("," ~ type_expr)* ~ ","? ~ "]")? }
+tuple_or_paren_type = { "(" ~ type_expr ~ ("," ~ type_expr)+ ~ ","? ~ ")" | "(" ~ type_expr ~ ")" | "(" ~ ")" }
+tensor_type = { TENSOR ~ "[" ~ type_atom ~ ("," ~ type_atom)* ~ "]" }
+precision_type = { F32 | F64 | F16 | BF16 | F8E4M3 | INT8 | INT32 | INT64 | BOOL | STRING | UNIT }
+
+literal = { float_lit | int_lit | bool_lit | string_lit }
+float_lit = @{ "-"? ~ digits ~ "." ~ digits ~ exponent?
+             | "-"? ~ digits ~ exponent }
+exponent = @{ ("e" | "E") ~ ("+" | "-")? ~ digits }
+int_lit = @{ "-"? ~ digits }
+digits = @{ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+bool_lit = { TRUE | FALSE }
+string_lit = @{ "\"" ~ string_char* ~ "\"" }
+string_char = { "\\\\" ~ ("n" | "r" | "t" | "0" | "\"" | "\\")
+              | !("\"") ~ ANY }
+
+ident = @{ !keyword ~ (ASCII_ALPHA_LOWER | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+type_ident = @{ !keyword ~ ASCII_ALPHA_UPPER ~ ASCII_ALPHANUMERIC* }
+
+keyword = _{
+    "def" ~ !ident_continue
+  | "sig" ~ !ident_continue
+  | "let" ~ !ident_continue
+  | "in" ~ !ident_continue
+  | "type" ~ !ident_continue
+  | "dim" ~ !ident_continue
+  | "match" ~ !ident_continue
+  | "with" ~ !ident_continue
+  | "fn" ~ !ident_continue
+  | "module" ~ !ident_continue
+  | "import" ~ !ident_continue
+  | "export" ~ !ident_continue
+  | "if" ~ !ident_continue
+  | "then" ~ !ident_continue
+  | "else" ~ !ident_continue
+  | "grad" ~ !ident_continue
+  | "vmap" ~ !ident_continue
+  | "jit" ~ !ident_continue
+  | "cast" ~ !ident_continue
+  | "realize" ~ !ident_continue
+  | "copy" ~ !ident_continue
+  | "par" ~ !ident_continue
+  | "true" ~ !ident_continue
+  | "false" ~ !ident_continue
+  | "tensor" ~ !ident_continue
+}
+ident_continue = _{ ASCII_ALPHANUMERIC | "_" }
+semicolons = _{ ";" }
+
+MODULE = _{ "module" }
+IMPORT = _{ "import" }
+EXPORT = _{ "export" }
+DIM = _{ "dim" }
+TYPE = _{ "type" }
+SIG = _{ "sig" }
+DEF = _{ "def" }
+LET = _{ "let" }
+IN = _{ "in" }
+MATCH = _{ "match" }
+WITH = _{ "with" }
+IF = _{ "if" }
+THEN = _{ "then" }
+ELSE = _{ "else" }
+FN = _{ "fn" }
+GRAD = _{ "grad" }
+VMAP = _{ "vmap" }
+JIT = _{ "jit" }
+CAST = _{ "cast" }
+REALIZE = _{ "realize" }
+COPY = _{ "copy" }
+PAR = _{ "par" }
+AXIS = _{ "axis" }
+TENSOR = _{ "tensor" }
+TRUE = _{ "true" }
+FALSE = _{ "false" }
+F32 = _{ "f32" }
+F64 = _{ "f64" }
+F16 = _{ "f16" }
+BF16 = _{ "bf16" }
+F8E4M3 = _{ "f8e4m3" }
+INT8 = _{ "int8" }
+INT32 = _{ "int32" }
+INT64 = _{ "int64" }
+BOOL = _{ "bool" }
+STRING = _{ "string" }
+UNIT = _{ "unit" }
+
+PIPE = _{ "|>" }
+OROR = _{ "||" }
+ANDAND = _{ "&&" }
+EQEQ = _{ "==" }
+NEQ = _{ "!=" }
+LTE = _{ "<=" }
+GTE = _{ ">=" }
+LT = _{ "<" }
+GT = _{ ">" }
+PLUS = _{ "+" }
+MINUS = _{ "-" }
+STAR_OP = _{ "*" }
+SLASH = _{ "/" }
+PERCENT = _{ "%" }
+BANG = _{ "!" }
+ARROW = _{ "->" }
+AT = _{ "@" }
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ line_comment | block_comment }
+line_comment = _{ "--" ~ (!"\n" ~ ANY)* }
+block_comment = _{ "{-" ~ (block_comment | !"-}" ~ ANY)* ~ "-}" }

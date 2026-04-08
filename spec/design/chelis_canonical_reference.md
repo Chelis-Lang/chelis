@@ -22,8 +22,9 @@ workloads.
 
 **Current status:** Phase 0 is complete.
 Phases 0a-0i are complete.
-Phases 1a-1e are complete.
-Phase 1 remains in progress because executable grammar work (1f) is still pending.
+Phases 1a-1f are implemented.
+Phase 1 remains in progress at the project level because the phase-level red-team
+checkpoint is still the completion bar.
 
 ---
 
@@ -84,6 +85,10 @@ Every Deep node has the same shape:
 Deep is the single source of truth.
 Surf desugars losslessly to Deep.
 Deep decompiles back to Surf on a best-effort basis.
+Current Phase 1 caveat: the compiler may emit dotted Deep module/import paths that
+`chelis validate` accepts, but the compiler-side Deep parser does not yet fully
+reparse that emitted shape. This round-trip gap is tracked as a Phase 2 bug because it
+matters for decompilation and LLM repair workflows, but it is not a Phase 1 blocker.
 
 **Macro expansion boundary:** LLMs interact exclusively with expanded Deep.
 Macro invocations are expanded before any LLM-facing operation (generation, training,
@@ -140,6 +145,8 @@ chelis tide
 chelis cove
 chelis fmt app.ch
 chelis validate --surf app.ch
+chelis validate --deep app.dp
+chelis validate --desugar app.ch
 ```
 
 Not every command is implemented yet.

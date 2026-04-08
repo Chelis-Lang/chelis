@@ -1,0 +1,17 @@
+[package]
+name = "chelis-validate"
+description = "Executable grammar validator for the Chelis language"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chelis-deep.workspace = true
+chelis-surf.workspace = true
+pest = "2"
+pest_derive = "2"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

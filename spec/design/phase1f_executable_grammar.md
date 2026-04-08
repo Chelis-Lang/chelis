@@ -2,6 +2,12 @@
 
 **Goal:** Extract PEG grammars from spec prose into a standalone validation tool.
 
+**Authoritative oracle:**
+
+```sh
+cargo test -p chelis-e2e --test phase1f_validate
+```
+
 ### What the Agent Builds
 
 A new CLI subcommand using a PEG parser generator (e.g., `pest` crate) that validates Chelis syntax independently from the full compiler.
@@ -21,15 +27,30 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
 
 **This is a conformance tool, not a replacement for the parser.** The full compiler's parser is hand-written (Pratt + recursive descent). The `pest`-based validator is an independent second implementation derived from the spec grammar. If they disagree about whether a program is valid, that's a bug in one of them — and the disagreement is the valuable finding.
 
-### Test Strategy (~8 tests)
+### Current Implementation
 
-- [ ] Every example in SKILL.md validates (both Surf and Deep)
-- [ ] Every example in spec docs validates
-- [ ] Known invalid programs are rejected with clear messages
-- [ ] Validator and compiler parser agree on 100% of the spec test suite programs
-- [ ] Deep validator rejects: unknown tags, missing `{}` metadata, wrong arity
-- [ ] Surf validator rejects: unknown keywords, malformed operators, missing delimiters
-- [ ] `--desugar` mode: desugared output passes Deep validation
+- `crates/chelis-validate` owns the standalone `pest` grammars and validation entrypoints
+- `chelis validate --surf file.ch` validates the shipped Surf surface, including script-style
+  top-level `let` declarations used by the executable examples, semicolon-separated block/par
+  forms, and ordinary identifiers such as `axis` outside `vmap(..., axis=...)`
+- `chelis validate --deep file.dp` validates Deep PEG structure plus the closed tag
+  vocabulary, metadata-map requirement, arity/helper-form invariants, and dotted module/import
+  path names emitted by canonical Deep
+- `chelis validate --desugar file.ch` reuses the compiler Surf parser/desugarer and then
+  validates the emitted canonical Deep
+- the oracle suite checks validator/compiler agreement across:
+  - executable examples in `examples/`
+  - illustrative syntax examples in `examples/illustrative/`
+  - `SKILL.md` Surf and Deep teaching blocks
+  - curated positive spec fixtures
+  - curated negative Surf and Deep fixtures
+
+### Acceptance Notes
+
+- This remains a conformance tool, not a parser replacement.
+- The validator is intentionally strict about canonical Deep structure.
+- Phase 1f shipping does not, by itself, declare all of Phase 1 complete; the broader
+  phase gate remains the red-team checkpoint in the Phase 1 plan.
 
 ### Execution Strategy
 

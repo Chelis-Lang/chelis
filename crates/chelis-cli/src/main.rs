@@ -1,6 +1,6 @@
 //! Chelis compiler CLI.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -52,6 +52,21 @@ enum Command {
     },
     /// Type-check and report fitness score
     Check { file: PathBuf },
+    /// Validate syntax against executable grammar tooling
+    #[command(group(
+        ArgGroup::new("mode")
+            .required(true)
+            .args(["surf", "deep", "desugar"])
+    ))]
+    Validate {
+        #[arg(long, action = ArgAction::SetTrue, group = "mode")]
+        surf: bool,
+        #[arg(long, action = ArgAction::SetTrue, group = "mode")]
+        deep: bool,
+        #[arg(long, action = ArgAction::SetTrue, group = "mode")]
+        desugar: bool,
+        file: PathBuf,
+    },
     /// Compile to C (default) or HIP GPU code
     Build {
         file: PathBuf,
@@ -73,6 +88,12 @@ fn main() {
         Some(Command::Fmt { file, inplace }) => cmd_fmt(&file, inplace),
         Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
         Some(Command::Check { file }) => cmd_check(&file),
+        Some(Command::Validate {
+            surf,
+            deep,
+            desugar,
+            file,
+        }) => cmd_validate(&file, surf, deep, desugar),
         Some(Command::Build {
             file,
             output,
@@ -236,10 +257,13 @@ fn cmd_build(
 
     match target {
         "c" => {
+            reject_unsized_named_dims(&dag, "c")?;
             let fused = chelis_ir::fuse::fuse(&dag);
             cmd_build_c(&fused, func_name, file, output)
         }
         "hip" => {
+            reject_unsized_named_dims(&dag, "hip")?;
+            reject_unsupported_hip_ops(&dag)?;
             // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
             // When grad participates in a GPU compilation pipeline, the intended ordering is:
             // lower -> optimize -> grad -> optimize -> fuse -> codegen.
@@ -247,6 +271,80 @@ fn cmd_build(
             cmd_build_hip(&fused, func_name, file, output)
         }
         other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
+    }
+}
+
+fn reject_unsized_named_dims(
+    dag: &chelis_ir::dag::Dag,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for node in dag.nodes() {
+        for dim in &node.output_type.dims {
+            if let chelis_ir::dag::DimInfo::Named(name, None) = dim {
+                return Err(format!(
+                    "`chelis build --target {target}` does not yet support unresolved named dimensions; node {} uses symbolic dimension `{name}`",
+                    node.id.0
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
+    for node in dag.nodes() {
+        match &node.op {
+            chelis_ir::dag::RiscOp::Pad { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support `pad`; lowered node {} requires it",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Shrink { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not yet support `shrink`; lowered node {} requires it",
+                    node.id.0
+                )
+                .into());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn cmd_validate(
+    file: &PathBuf,
+    surf: bool,
+    deep: bool,
+    desugar: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source = fs::read_to_string(file)?;
+    let mode = if surf {
+        "surf"
+    } else if deep {
+        "deep"
+    } else if desugar {
+        "desugar"
+    } else {
+        return Err("validation mode is required".into());
+    };
+
+    let result = match mode {
+        "surf" => chelis_validate::validate_surf(&source),
+        "deep" => chelis_validate::validate_deep(&source),
+        "desugar" => chelis_validate::validate_desugared(&source),
+        _ => unreachable!("validated above"),
+    };
+
+    match result {
+        Ok(()) => {
+            println!("validated {mode}: {}", file.display());
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
     }
 }
 

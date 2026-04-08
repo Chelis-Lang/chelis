@@ -17,12 +17,12 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **0g** | `grad` transformation (reverse-mode AD on DAG) | ✅ Complete |
 | **0h** | End-to-end: MNIST on CPU + spec test suite | ✅ Complete |
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
-| **1a** | HIP kernel code generation (`chelis build --target hip`) | ✅ Complete |
-| **1b** | Kernel fusion (elem→elem, elem→reduce, multi-consumer split) | ✅ Complete |
-| **1c** | GPU memory planning (buffer reuse, transfer minimization, peak estimate) | ✅ Complete |
-| **1d** | Optimized reductions, staged scalar scratch, hipBLAS matmul specialization | ✅ Complete |
-| **1e** | Benchmarks, reference comparison, checked-in results | ✅ Complete |
-| **1f** | Executable grammar |  |
+| **1a** | HIP kernel code generation (`chelis build --target hip`) | Implemented; carried-forward backend limits documented |
+| **1b** | Kernel fusion (elem→elem, elem→reduce, multi-consumer split) | Implemented; carried-forward backend limits documented |
+| **1c** | GPU memory planning (buffer reuse, transfer minimization, peak estimate) | Implemented; carried-forward backend limits documented |
+| **1d** | Optimized reductions, staged scalar scratch, hipBLAS matmul specialization | Implemented; carried-forward backend limits documented |
+| **1e** | Benchmarks, reference comparison, checked-in results | Shipped for fixed benchmark models |
+| **1f** | Executable grammar | Implemented |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 

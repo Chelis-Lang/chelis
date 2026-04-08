@@ -1,0 +1,33 @@
+program = { SOI ~ spacing ~ node+ ~ EOI }
+
+node = { "(" ~ spacing ~ tag ~ spacing ~ meta ~ spacing ~ child* ~ ")" ~ spacing }
+typed_helper = { "(" ~ spacing ~ bare_name ~ spacing ~ typed_meta ~ spacing ~ ")" ~ spacing }
+unit_list = { "(" ~ spacing ~ ")" ~ spacing }
+
+meta = { "{" ~ spacing ~ (meta_pair ~ ("," ~ spacing ~ meta_pair)*)? ~ spacing ~ "}" }
+typed_meta = { "{" ~ spacing ~ "type" ~ spacing ~ ":" ~ spacing ~ meta_value ~ ("," ~ spacing ~ meta_pair)* ~ spacing ~ "}" }
+meta_pair = { meta_key ~ spacing ~ ":" ~ spacing ~ meta_value }
+meta_key = @{ ASCII_ALPHA_LOWER+ }
+meta_value = { typed_helper | node | unit_list | literal | bare_name }
+
+child = { typed_helper | node | unit_list | literal | bare_name }
+bare_name = { identifier | type_name }
+tag = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+identifier = @{ ident_segment ~ ("." ~ ident_segment)* }
+ident_segment = @{ (ASCII_ALPHA_LOWER | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+type_name = @{ ASCII_ALPHA_UPPER ~ ASCII_ALPHANUMERIC* }
+
+literal = { float_lit | int_lit | bool_lit | string_lit }
+float_lit = @{ "-"? ~ digits ~ "." ~ digits ~ exponent?
+             | "-"? ~ digits ~ exponent }
+exponent = @{ ("e" | "E") ~ ("+" | "-")? ~ digits }
+int_lit = @{ "-"? ~ digits }
+digits = @{ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+bool_lit = { "true" | "false" }
+string_lit = @{ "\"" ~ string_char* ~ "\"" }
+string_char = { "\\\\" ~ ("n" | "r" | "t" | "0" | "\"" | "\\")
+              | !("\"") ~ ANY }
+
+spacing = _{ (WHITESPACE | comment)* }
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+comment = _{ ";" ~ (!"\n" ~ ANY)* }

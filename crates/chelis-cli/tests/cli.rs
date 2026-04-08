@@ -35,6 +35,10 @@ let out = (matmul(a, b) : tensor[2, 4, f32])
     .expect("write matmul program");
 }
 
+fn write_file(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write file");
+}
+
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -137,6 +141,46 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
+fn build_hip_rejects_symbolic_dims_without_panic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic.ch");
+    write_file(
+        &path,
+        "def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not yet support unresolved named dimensions",
+        ))
+        .stderr(predicate::str::contains("symbolic dimension `batch`"));
+}
+
+#[test]
+fn build_hip_rejects_pad_lowering_without_panic() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pad.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+    );
+
+    let json = run_json_check(&path);
+    assert_eq!(json["score"].as_f64().unwrap(), 1.0);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not yet support `pad`"));
+}
+
+#[test]
 fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("nested/hip-output");
@@ -231,4 +275,154 @@ fn tide_quit_exits_cleanly() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Chelis Tide v0.1"));
+}
+
+#[test]
+fn validate_requires_exactly_one_mode() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--surf"))
+        .stderr(predicate::str::contains("--deep"))
+        .stderr(predicate::str::contains("--desugar"));
+}
+
+#[test]
+fn validate_surf_accepts_executable_example() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "validate",
+            "--surf",
+            hello_tensor_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated surf:"));
+}
+
+#[test]
+fn validate_desugar_accepts_executable_example() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "validate",
+            "--desugar",
+            hello_tensor_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated desugar:"));
+}
+
+#[test]
+fn validate_deep_accepts_canonical_deep_output() {
+    let dir = tempdir().expect("tempdir");
+    let deep_path = dir.path().join("hello_tensor.dp");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, output).expect("write deep output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", deep_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn validate_deep_accepts_dotted_module_deep_output() {
+    let dir = tempdir().expect("tempdir");
+    let surf_path = dir.path().join("module_paths.ch");
+    let deep_path = dir.path().join("module_paths.dp");
+    write_file(
+        &surf_path,
+        "module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, output).expect("write deep output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", deep_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn validate_surf_rejects_malformed_operator_chain() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad.ch");
+    write_file(&path, "def f(x) = a == b == c\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--surf", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("validation failed"));
+}
+
+#[test]
+fn validate_surf_accepts_semicolon_block_and_axis_identifier() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("ok.ch");
+    write_file(
+        &path,
+        "def f(axis) = { let y = axis; y }\ndef g() = par { a; b }\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated surf:"));
+}
+
+#[test]
+fn validate_desugar_accepts_dotted_module_paths() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("module_paths.ch");
+    write_file(&path, "module Foo.Bar\nimport Baz.Qux(..)\ndef f(x) = x\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--desugar", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated desugar:"));
+}
+
+#[test]
+fn validate_deep_rejects_unknown_tag() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad.dp");
+    write_file(&path, "(mystery {} x)\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown Deep tag"));
 }

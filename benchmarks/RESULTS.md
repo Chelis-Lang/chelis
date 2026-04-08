@@ -47,7 +47,7 @@ CI policy:
 
 ## Notes
 
-- These timings are end-to-end benchmark runs of generated Chelis backends or the checked-in PyTorch reference scripts, not isolated kernel timings.
+- These timings measure the benchmarked train/forward execution loops after benchmark data loading, tensor allocation/setup, and parameter initialization; they are not isolated kernel timings.
 - The PyTorch comparison scripts now run on ROCm GPU when `torch.cuda.is_available()` succeeds in the repo-local env.
 - The benchmark runner strips the stale `HSA_OVERRIDE_GFX_VERSION=11.0.0` shell override before invoking PyTorch; without that cleanup this machine misreports as `gfx1100` and the ROCm PyTorch lane fails with an invalid kernel image.
 - Timings vary noticeably between captures; `benchmarks/results/latest.json` is the authoritative machine-readable artifact for the exact measured run.
