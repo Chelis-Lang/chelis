@@ -25,7 +25,7 @@ fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ effect_suffix?
 dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
 params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
 param = { ident ~ (":" ~ type_expr)? }
-return_type = { ":" ~ type_expr }
+return_type = { (":" | ARROW) ~ type_expr }
 let_decl = { LET ~ ident ~ (":" ~ type_expr)? ~ "=" ~ expr }
 
 expr = _{ let_expr | match_expr | if_expr | fn_expr | with_expr | pipe_expr }

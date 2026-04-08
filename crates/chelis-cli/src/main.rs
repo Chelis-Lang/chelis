@@ -35,7 +35,11 @@ enum Command {
     /// Desugar Surf (.ch) to canonical Deep s-expressions
     Deep { file: PathBuf },
     /// Decompile Deep (.dp) to Surf (best-effort)
-    Surf { file: PathBuf },
+    Surf {
+        file: PathBuf,
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Format source code (canonical form)
     Fmt {
         file: PathBuf,
@@ -50,7 +54,7 @@ enum Command {
         /// Inline expression
         expr: Option<String>,
     },
-    /// Type-check and report fitness score
+    /// Run front-end checks and report fitness-oriented diagnostics
     Check { file: PathBuf },
     /// Validate syntax against executable grammar tooling
     #[command(group(
@@ -84,7 +88,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Deep { file }) => cmd_deep(&file),
-        Some(Command::Surf { file }) => cmd_surf(&file),
+        Some(Command::Surf { file, verbose }) => cmd_surf(&file, verbose),
         Some(Command::Fmt { file, inplace }) => cmd_fmt(&file, inplace),
         Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
         Some(Command::Check { file }) => cmd_check(&file),
@@ -114,24 +118,38 @@ fn main() {
 fn cmd_deep(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let output = chelis_deep::printer::print_canonical(&deep_exprs);
     print!("{output}");
     Ok(())
 }
 
-fn cmd_surf(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_surf(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let options = if verbose {
+        chelis_surf::decompile::DecompileOptions::verbose()
+    } else {
+        chelis_surf::decompile::DecompileOptions::idiomatic()
+    };
+    let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
     if ext == "dp" {
         let deep_exprs = chelis_deep::parser::parse_str(&source)?;
-        let surf = chelis_surf::decompile::decompile_program(&deep_exprs);
+        let surf = chelis_surf::decompile::decompile_program_with_context(
+            &deep_exprs,
+            &options,
+            synthetic_name,
+        );
         print!("{surf}");
     } else {
         // For .ch files, round-trip through deep and back
         let decls = chelis_surf::parser::parse_str(&source)?;
         let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-        let surf = chelis_surf::decompile::decompile_program(&deep_exprs);
+        let surf = chelis_surf::decompile::decompile_program_with_context(
+            &deep_exprs,
+            &options,
+            synthetic_name,
+        );
         print!("{surf}");
     }
     Ok(())
@@ -147,7 +165,11 @@ fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Erro
         // .ch: parse Surf -> desugar -> decompile back to Surf (idempotent)
         let decls = chelis_surf::parser::parse_str(&source)?;
         let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-        chelis_surf::decompile::decompile_program(&deep_exprs)
+        chelis_surf::decompile::decompile_program_with_context(
+            &deep_exprs,
+            &chelis_surf::decompile::DecompileOptions::idiomatic(),
+            file.file_stem().and_then(|stem| stem.to_str()),
+        )
     };
     if inplace {
         fs::write(file, &output)?;
@@ -180,16 +202,25 @@ fn cmd_eval(
 fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
-    let effect_errors = match chelis_types::check_phase0e_program(&deep_exprs) {
-        Ok(checked) => chelis_effects::check_program(&checked)
-            .err()
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
+    let (effect_errors, linearity_errors) = match chelis_types::check_typed_program(&deep_exprs) {
+        Ok(checked) => match chelis_effects::check_program(&checked) {
+            Ok(checked) => (
+                Vec::new(),
+                chelis_types::check_linearity(&checked)
+                    .err()
+                    .unwrap_or_default(),
+            ),
+            Err(errors) => (errors, Vec::new()),
+        },
+        Err(_) => (Vec::new(), Vec::new()),
     };
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
+    }
+    if !linearity_errors.is_empty() {
+        report.score = (report.score - 0.2 * linearity_errors.len() as f64).max(0.0);
     }
     // Format as JSON manually
     let mut errors_json: Vec<String> = report
@@ -220,6 +251,14 @@ fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":0.8}}",
             e.kind,
             serde_json::to_string(&e.message).unwrap_or_default(),
+        )
+    }));
+    errors_json.extend(linearity_errors.iter().map(|e| {
+        format!(
+            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}}}",
+            e.kind,
+            serde_json::to_string(&e.message).unwrap_or_default(),
+            e.severity,
         )
     }));
 
@@ -262,7 +301,7 @@ fn cmd_build(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
     let checked =
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
@@ -523,6 +562,7 @@ fn run_tide() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if trimmed.starts_with("def ")
+            || trimmed.starts_with("macro ")
             || trimmed.starts_with("type ")
             || trimmed.starts_with("let ")
         {
@@ -542,7 +582,7 @@ fn run_tide() -> Result<(), Box<dyn std::error::Error>> {
 
 fn try_eval(source: &str) -> Result<String, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("{e}"))?;
-    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = expanded_desugared_program(&decls)?;
     let checked = checked_program_with_effects(&deep)?;
     let dag = chelis_ir::lower::lower_program(&checked);
 
@@ -582,10 +622,33 @@ fn checked_program_with_effects(
 ) -> Result<chelis_types::CheckedProgram, String> {
     let checked = chelis_types::check_phase0e_program(deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
-    chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))
+    let checked =
+        chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))?;
+    chelis_types::check_linearity(&checked).map_err(|errors| format_type_errors(&errors))
+}
+
+fn expanded_desugared_program(
+    decls: &[chelis_surf::ast::Decl],
+) -> Result<Vec<chelis_deep::ast::Expr>, String> {
+    let deep = chelis_surf::desugar::desugar_program(decls);
+    chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
+        .map(|expanded| expanded.into_exprs())
+        .map_err(|err| err.to_string())
+}
+
+fn boxed_string_error(message: String) -> Box<dyn std::error::Error> {
+    message.into()
 }
 
 fn format_effect_errors(errors: &[chelis_effects::EffectError]) -> String {
+    errors
+        .iter()
+        .map(|error| error.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_type_errors(errors: &[chelis_types::errors::CheckError]) -> String {
     errors
         .iter()
         .map(|error| error.message.clone())

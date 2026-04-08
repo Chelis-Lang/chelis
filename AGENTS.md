@@ -150,6 +150,19 @@ be treated as runnable unless they require a separate missing prerequisite.
   against a corpus, not only single happy-path examples.
 - For machine-facing CLI output, test both shape and semantic invariants.
 
+## Surf Style Guide
+
+When writing or rewriting Surf in this repository:
+
+- prefer `def ... -> T = ...` over `def ... : T = ...`
+- put types on function parameters, not on load-style top-level `let` bindings
+- use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
+- keep fixed architecture dimensions concrete
+- do not annotate intermediate expressions when inference already determines the type
+- keep meaningful intermediates like `h1`, `logits`, `probs`, and `loss`
+- combine short tensor operations when the composed expression is clearer than over-decomposed single-op bindings
+- treat decompiler-generated verbose load chains and checker-inserted ascriptions as debug output, not example style
+
 ## Chelis-Specific Rules
 
 ### Deep AST

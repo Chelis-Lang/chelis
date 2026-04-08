@@ -105,6 +105,16 @@ fn roundtrip_example_hello_tensor() {
 }
 
 #[test]
+fn roundtrip_example_mnist() {
+    roundtrip(include_str!("../../../examples/mnist.ch"));
+}
+
+#[test]
+fn roundtrip_example_linreg() {
+    roundtrip(include_str!("../../../examples/linreg.ch"));
+}
+
+#[test]
 fn roundtrip_example_linear_regression() {
     roundtrip(include_str!(
         "../../../examples/illustrative/linear_regression.ch"

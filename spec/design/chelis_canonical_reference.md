@@ -92,12 +92,15 @@ matters for decompilation and LLM repair workflows, but it is not a Phase 1 bloc
 
 **Macro expansion boundary:** LLMs interact exclusively with expanded Deep.
 Macro invocations are expanded before any LLM-facing operation (generation, training,
-fitness scoring, error reporting).
+fitness scoring, error reporting), and before CLI paths such as `chelis deep`,
+`check`, `build`, and `eval`.
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
 The 59-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
+Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
+public Deep and are rejected by strict Deep validation.
 
 ### Serialization
 
@@ -151,6 +154,17 @@ chelis validate --desugar app.ch
 
 Not every command is implemented yet.
 This list is the intended stable surface for project-level documentation.
+
+## 6a. Surf Style
+
+Project-facing Surf should read like human-written model code, not typed Deep debug output.
+
+- prefer `def ... -> T = ...` for typed function definitions
+- put input types on parameters instead of top-level load-style `let` bindings
+- use symbolic dimensions for runtime-varying axes such as `batch` and `seq`
+- keep fixed architecture dimensions concrete
+- avoid redundant intermediate type ascriptions when inference already determines the type
+- prefer meaningful intermediate names over mechanically naming every primitive step
 
 ---
 

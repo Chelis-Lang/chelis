@@ -5,8 +5,57 @@
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecompileOptions {
+    pub strip_redundant_types: bool,
+    pub emit_function_defs: bool,
+    pub use_symbolic_dims: bool,
+}
+
+impl DecompileOptions {
+    pub const fn idiomatic() -> Self {
+        Self {
+            strip_redundant_types: true,
+            emit_function_defs: true,
+            use_symbolic_dims: true,
+        }
+    }
+
+    pub const fn verbose() -> Self {
+        Self {
+            strip_redundant_types: false,
+            emit_function_defs: false,
+            use_symbolic_dims: false,
+        }
+    }
+
+    fn is_verbose(self) -> bool {
+        !self.strip_redundant_types && !self.emit_function_defs && !self.use_symbolic_dims
+    }
+}
+
 /// Decompile a list of top-level Deep expressions to Surf source.
 pub fn decompile_program(exprs: &[Expr]) -> String {
+    decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None)
+}
+
+pub fn decompile_program_with_options(exprs: &[Expr], options: &DecompileOptions) -> String {
+    decompile_program_with_context(exprs, options, None)
+}
+
+pub fn decompile_program_with_context(
+    exprs: &[Expr],
+    options: &DecompileOptions,
+    synthetic_name: Option<&str>,
+) -> String {
+    if options.is_verbose() {
+        return decompile_program_verbose(exprs);
+    }
+
+    IdiomaticDecompiler::new(*options, synthetic_name).decompile_program(exprs)
+}
+
+fn decompile_program_verbose(exprs: &[Expr]) -> String {
     let mut out = String::new();
     for expr in exprs {
         let s = decompile_toplevel(expr);
@@ -23,6 +72,7 @@ fn decompile_toplevel(expr: &Expr) -> String {
         Expr::List(list, _) => match tag(list) {
             Some("def") => decompile_def(list),
             Some("defsig") => decompile_defsig(list),
+            Some("defmacro") => decompile_defmacro(list),
             Some("deftype") => decompile_deftype(list),
             Some("typealias") => decompile_typealias(list),
             Some("module") => decompile_module(list),
@@ -84,6 +134,655 @@ fn format_float(f: f64) -> String {
     if s.contains('.') { s } else { format!("{s}.0") }
 }
 
+struct FnSignature {
+    arg_types: Vec<Expr>,
+    ret_type: Expr,
+    effects: String,
+}
+
+struct LoadBinding {
+    name: String,
+    ty: Expr,
+}
+
+struct PlainDef<'a> {
+    name: &'a str,
+    body: &'a Expr,
+}
+
+struct IdiomaticDecompiler<'a> {
+    options: DecompileOptions,
+    synthetic_name: Option<&'a str>,
+}
+
+impl<'a> IdiomaticDecompiler<'a> {
+    fn new(options: DecompileOptions, synthetic_name: Option<&'a str>) -> Self {
+        Self {
+            options,
+            synthetic_name,
+        }
+    }
+
+    fn decompile_program(&self, exprs: &[Expr]) -> String {
+        if let Some(collapsed) = self.decompile_script_program(exprs) {
+            return collapsed;
+        }
+        self.render_toplevel_sequence(exprs)
+    }
+
+    fn render_toplevel_sequence(&self, exprs: &[Expr]) -> String {
+        let mut lines = Vec::new();
+        let mut index = 0;
+
+        while index < exprs.len() {
+            if let Some((name, sig_expr)) = match_defsig_name(&exprs[index])
+                && let Some(next) = exprs.get(index + 1)
+                && let Some(def_list) = as_tagged_list(next, "def")
+                && def_name(def_list) == Some(name)
+            {
+                lines.push(self.render_def(def_list, Some(sig_expr)));
+                index += 2;
+                continue;
+            }
+
+            lines.push(self.render_toplevel(&exprs[index]));
+            index += 1;
+        }
+
+        lines
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_toplevel(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::List(list, _) => match tag(list) {
+                Some("def") => self.render_def(list, None),
+                Some("defsig") => decompile_defsig(list),
+                Some("defmacro") => decompile_defmacro(list),
+                Some("deftype") => decompile_deftype(list),
+                Some("typealias") => decompile_typealias(list),
+                Some("module") => self.render_module(list),
+                Some("import") => decompile_import(list),
+                Some("import-all") => decompile_import_all(list),
+                Some("export") => decompile_export(list),
+                Some("defdim") => decompile_defdim(list),
+                _ => format!("-- unknown: {}", brief(expr)),
+            },
+            _ => format!("-- atom: {}", brief(expr)),
+        }
+    }
+
+    fn render_module(&self, list: &List) -> String {
+        let kids = children(list);
+        if kids.is_empty() {
+            return "-- malformed module".to_string();
+        }
+        let name = sym_str(&kids[0]).unwrap_or("_");
+        let cap_name = capitalize(name);
+        let mut out = format!("module {cap_name}");
+        if kids.len() > 1 {
+            out.push('\n');
+            out.push_str(&self.render_toplevel_sequence(&kids[1..]));
+        }
+        out
+    }
+
+    fn render_def(&self, list: &List, sig_expr: Option<&Expr>) -> String {
+        let kids = children(list);
+        if kids.len() < 2 {
+            return "-- malformed def".to_string();
+        }
+        let name = sym_str(&kids[0]).unwrap_or("_");
+        let body = &kids[1];
+
+        if let Some(load) = match_load_binding(name, body) {
+            return format!(
+                "let {}: {} = {}",
+                load.name,
+                decompile_type_expr(&load.ty),
+                load.name
+            );
+        }
+
+        if let Expr::List(fn_list, _) = body
+            && tag(fn_list) == Some("fn")
+        {
+            return self.render_fn_def(name, fn_list, sig_expr);
+        }
+
+        let body_text = self.decompile_expr(body);
+        format!("let {name} = {body_text}")
+    }
+
+    fn render_fn_def(&self, name: &str, fn_list: &List, sig_expr: Option<&Expr>) -> String {
+        let fn_kids = children(fn_list);
+        if fn_kids.len() < 2 {
+            return format!("def {name}() = ()");
+        }
+
+        let signature = sig_expr.and_then(extract_fn_signature);
+        let params = self.render_params(&fn_kids[0], signature.as_ref());
+        let ret_suffix = signature
+            .as_ref()
+            .map(|sig| format!(" -> {}", decompile_type_expr(&sig.ret_type)))
+            .unwrap_or_default();
+        let effects = signature.map(|sig| sig.effects).unwrap_or_default();
+        let body = indent_lines(&self.decompile_expr(&fn_kids[1]), 2);
+        format!("def {name}({params}){ret_suffix}{effects} =\n{body}")
+    }
+
+    fn render_params(&self, expr: &Expr, signature: Option<&FnSignature>) -> String {
+        let Some(list) = as_tagged_list(expr, "params") else {
+            return self.decompile_expr(expr);
+        };
+        let kids = children(list);
+        let mut params = Vec::new();
+        for (index, param) in kids.iter().enumerate() {
+            let fallback_ty = signature.and_then(|sig| sig.arg_types.get(index));
+            params.push(self.render_param(param, fallback_ty));
+        }
+        params.join(", ")
+    }
+
+    fn render_param(&self, expr: &Expr, fallback_ty: Option<&Expr>) -> String {
+        match expr {
+            Expr::Atom(Atom::Symbol(name), _) => {
+                if let Some(ty) = fallback_ty {
+                    format!("{name}: {}", decompile_type_expr(ty))
+                } else {
+                    name.clone()
+                }
+            }
+            Expr::List(list, _) => {
+                let name = list.elements.first().and_then(sym_str).unwrap_or("_");
+                if let Some(ty) = list.elements.get(1).and_then(extract_type_meta) {
+                    format!("{name}: {}", decompile_type_expr(&ty))
+                } else if let Some(ty) = fallback_ty {
+                    format!("{name}: {}", decompile_type_expr(ty))
+                } else {
+                    name.to_string()
+                }
+            }
+            _ => self.decompile_expr(expr),
+        }
+    }
+
+    fn decompile_script_program(&self, exprs: &[Expr]) -> Option<String> {
+        if !self.options.emit_function_defs {
+            return None;
+        }
+
+        let mut defs = Vec::new();
+        for expr in exprs {
+            defs.push(as_tagged_list(expr, "def")?);
+        }
+
+        let mut load_prefix = Vec::new();
+        let mut index = 0;
+        while let Some(def) = defs.get(index) {
+            let name = def_name(def)?;
+            let body = def_body(def)?;
+            if let Some(load) = match_load_binding(name, body) {
+                load_prefix.push(load);
+                index += 1;
+            } else {
+                break;
+            }
+        }
+
+        if load_prefix.is_empty() || index >= defs.len() {
+            return None;
+        }
+
+        let mut plain_defs = Vec::new();
+        for def in &defs[index..] {
+            let name = def_name(def)?;
+            let body = def_body(def)?;
+            if matches!(body, Expr::List(list, _) if tag(list) == Some("fn")) {
+                return None;
+            }
+            plain_defs.push(PlainDef { name, body });
+        }
+
+        let output_name = terminal_output_name(&plain_defs)?;
+        let used_defs = transitive_dependencies(output_name, &plain_defs);
+        let output = plain_defs.iter().find(|plain| plain.name == output_name)?;
+
+        let mut bindings = Vec::new();
+        for plain in &plain_defs {
+            if plain.name != output_name && used_defs.contains(plain.name) {
+                bindings.push((plain.name.to_string(), plain.body));
+            }
+        }
+
+        let params = load_prefix
+            .iter()
+            .map(|load| format!("{}: {}", load.name, decompile_type_expr(&load.ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret_suffix = extract_expr_type(output.body)
+            .map(|ty| format!(" -> {}", decompile_type_expr(&ty)))
+            .unwrap_or_default();
+        let synthetic_name = self.synthetic_name.unwrap_or("forward");
+        let body = if bindings.is_empty() {
+            self.decompile_expr(output.body)
+        } else {
+            self.render_let_chain(&bindings, output.body)
+        };
+
+        Some(format!(
+            "def {synthetic_name}({params}){ret_suffix} =\n{}",
+            indent_lines(&body, 2)
+        ))
+    }
+
+    fn render_let_chain(&self, bindings: &[(String, &Expr)], final_expr: &Expr) -> String {
+        let mut lines = Vec::new();
+        for (name, value) in bindings {
+            lines.push(format!("let {name} = {}", self.decompile_expr(value)));
+        }
+        lines.push(format!("in {}", self.decompile_expr(final_expr)));
+        lines.join("\n")
+    }
+
+    fn decompile_expr(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+            Expr::Atom(Atom::Int(n), _) => n.to_string(),
+            Expr::Atom(Atom::Float(f), _) => format_float(*f),
+            Expr::Atom(Atom::Bool(b), _) => b.to_string(),
+            Expr::Atom(Atom::Str(s), _) => {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+            Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
+            Expr::Map(_, _) => "()".to_string(),
+            Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
+            Expr::List(list, _) => self.decompile_list_expr(list),
+        }
+    }
+
+    fn decompile_list_expr(&self, list: &List) -> String {
+        match tag(list) {
+            Some("var") => children(list)
+                .first()
+                .and_then(sym_str)
+                .unwrap_or("_")
+                .to_string(),
+            Some("lit") => {
+                let kids = children(list);
+                if let Some(child) = kids.first() {
+                    if let Expr::List(inner, _) = child
+                        && inner.elements.is_empty()
+                    {
+                        return "()".to_string();
+                    }
+                    brief(child)
+                } else {
+                    "()".to_string()
+                }
+            }
+            Some("app") => {
+                let kids = children(list);
+                if kids.is_empty() {
+                    return "()".to_string();
+                }
+                let func = self.decompile_expr(&kids[0]);
+                let args = kids[1..]
+                    .iter()
+                    .map(|arg| self.decompile_call_arg(arg))
+                    .collect::<Vec<_>>();
+                if args.is_empty() {
+                    format!("{func}()")
+                } else {
+                    format!("{func}({})", args.join(", "))
+                }
+            }
+            Some("fn") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return "fn () -> ()".to_string();
+                }
+                let params = self.render_params(&kids[0], None);
+                let body = self.decompile_expr(&kids[1]);
+                format!("fn ({params}) -> {body}")
+            }
+            Some("let") => self.decompile_let_expr(list),
+            Some("if") => {
+                let kids = children(list);
+                if kids.len() < 3 {
+                    return "()".to_string();
+                }
+                format!(
+                    "if {} then {} else {}",
+                    self.decompile_expr(&kids[0]),
+                    self.decompile_expr(&kids[1]),
+                    self.decompile_expr(&kids[2])
+                )
+            }
+            Some("tuple") => {
+                let elems = children(list)
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>();
+                format!("({})", elems.join(", "))
+            }
+            Some("tuple-get") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return "()".to_string();
+                }
+                format!(
+                    "{}.{}",
+                    self.decompile_expr(&kids[0]),
+                    self.decompile_expr(&kids[1])
+                )
+            }
+            Some("pipe") => children(list)
+                .iter()
+                .map(|expr| self.decompile_expr(expr))
+                .collect::<Vec<_>>()
+                .join(" |> "),
+            Some("match") => {
+                let kids = children(list);
+                if kids.is_empty() {
+                    return "match () with {}".to_string();
+                }
+                let arms = kids[1..]
+                    .iter()
+                    .map(decompile_arm)
+                    .collect::<Vec<_>>()
+                    .join("\n  ");
+                format!(
+                    "match {} with {{\n  {}\n}}",
+                    self.decompile_expr(&kids[0]),
+                    arms
+                )
+            }
+            Some("cast") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return "()".to_string();
+                }
+                format!(
+                    "({} as {})",
+                    self.decompile_expr(&kids[0]),
+                    decompile_type_expr(&kids[1])
+                )
+            }
+            Some("grad") => children(list)
+                .first()
+                .map(|expr| format!("grad({})", self.decompile_expr(expr)))
+                .unwrap_or_else(|| "grad()".to_string()),
+            Some("vmap") => {
+                let kids = children(list);
+                if kids.len() >= 2 {
+                    if let Some(axis) = extract_int_literal(&kids[1]) {
+                        format!("vmap({}, axis={axis})", self.decompile_expr(&kids[0]))
+                    } else {
+                        format!(
+                            "vmap({}, {})",
+                            self.decompile_expr(&kids[0]),
+                            self.decompile_expr(&kids[1])
+                        )
+                    }
+                } else if kids.len() == 1 {
+                    format!("vmap({})", self.decompile_expr(&kids[0]))
+                } else {
+                    "vmap()".to_string()
+                }
+            }
+            Some("jit") => children(list)
+                .first()
+                .map(|expr| format!("jit({})", self.decompile_expr(expr)))
+                .unwrap_or_else(|| "jit()".to_string()),
+            Some("realize") => children(list)
+                .first()
+                .map(|expr| format!("realize({})", self.decompile_expr(expr)))
+                .unwrap_or_else(|| "realize()".to_string()),
+            Some("copy") => children(list)
+                .first()
+                .map(|expr| format!("copy({})", self.decompile_expr(expr)))
+                .unwrap_or_else(|| "copy()".to_string()),
+            Some("borrow") => children(list)
+                .first()
+                .map(|expr| format!("&{}", self.decompile_expr(expr)))
+                .unwrap_or_else(|| "&()".to_string()),
+            Some("handle-effect") => decompile_handle_effect(list),
+            Some("par") => format!(
+                "par({})",
+                children(list)
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some("record") => {
+                let kids = children(list);
+                if kids.is_empty() {
+                    return "()".to_string();
+                }
+                let name = sym_str(&kids[0]).unwrap_or("_");
+                let fields = kids[1..]
+                    .iter()
+                    .filter_map(|kv| {
+                        let kv_list = as_tagged_list(kv, "kv")?;
+                        let kv_kids = children(kv_list);
+                        if kv_kids.len() < 2 {
+                            return None;
+                        }
+                        let field = sym_str(&kv_kids[0]).unwrap_or("_");
+                        Some(format!("{field} = {}", self.decompile_expr(&kv_kids[1])))
+                    })
+                    .collect::<Vec<_>>();
+                format!("{name} {{ {} }}", fields.join(", "))
+            }
+            Some("access") => {
+                let kids = children(list);
+                if kids.len() >= 2 {
+                    let field = sym_str(&kids[1]).unwrap_or("_");
+                    format!("{}.{}", self.decompile_expr(&kids[0]), field)
+                } else {
+                    "()".to_string()
+                }
+            }
+            Some(t) => {
+                let args = children(list)
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>();
+                if args.is_empty() {
+                    t.to_string()
+                } else {
+                    format!("{t}({})", args.join(", "))
+                }
+            }
+            None => {
+                let parts = list
+                    .elements
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>();
+                format!("({})", parts.join(", "))
+            }
+        }
+    }
+
+    fn decompile_call_arg(&self, expr: &Expr) -> String {
+        self.decompile_expr(expr)
+    }
+
+    fn decompile_let_expr(&self, list: &List) -> String {
+        let kids = children(list);
+        if kids.len() < 2 {
+            return "()".to_string();
+        }
+        let Some(bind_list) = as_tagged_list(&kids[0], "bind") else {
+            return "()".to_string();
+        };
+        let bind_kids = children(bind_list);
+        let mut bindings = Vec::new();
+        let mut index = 0;
+        while index + 1 < bind_kids.len() {
+            let name = sym_str(&bind_kids[index]).unwrap_or("_").to_string();
+            bindings.push((name, &bind_kids[index + 1]));
+            index += 2;
+        }
+        self.render_let_chain(&bindings, &kids[1])
+    }
+}
+
+fn as_tagged_list<'a>(expr: &'a Expr, expected_tag: &str) -> Option<&'a List> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    (tag(list) == Some(expected_tag)).then_some(list)
+}
+
+fn def_name(list: &List) -> Option<&str> {
+    children(list).first().and_then(sym_str)
+}
+
+fn def_body(list: &List) -> Option<&Expr> {
+    children(list).get(1)
+}
+
+fn match_defsig_name(expr: &Expr) -> Option<(&str, &Expr)> {
+    let list = as_tagged_list(expr, "defsig")?;
+    let kids = children(list);
+    if kids.len() < 2 {
+        return None;
+    }
+    Some((sym_str(&kids[0])?, &kids[1]))
+}
+
+fn extract_fn_signature(expr: &Expr) -> Option<FnSignature> {
+    let list = as_tagged_list(expr, "t-fn")?;
+    let kids = children(list);
+    let ret_type = kids.last()?.clone();
+    let arg_types = kids[..kids.len().saturating_sub(1)].to_vec();
+    Some(FnSignature {
+        arg_types,
+        ret_type,
+        effects: decompile_effect_suffix_from_type_expr(expr),
+    })
+}
+
+fn match_load_binding(expected_name: &str, expr: &Expr) -> Option<LoadBinding> {
+    let ty = extract_expr_type(expr)?;
+    let list = as_tagged_list(strip_meta(expr), "var")?;
+    let actual_name = children(list).first().and_then(sym_str)?;
+    (actual_name == expected_name).then(|| LoadBinding {
+        name: expected_name.to_string(),
+        ty,
+    })
+}
+
+fn strip_meta(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::MetaExpr(meta, _) => strip_meta(&meta.expr),
+        _ => expr,
+    }
+}
+
+fn extract_expr_type(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::List(list, _) => extract_type_meta_from_list(list),
+        Expr::MetaExpr(meta, _) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value.clone())
+            .or_else(|| extract_expr_type(&meta.expr)),
+        _ => None,
+    }
+}
+
+fn collect_var_refs(expr: &Expr, refs: &mut Vec<String>) {
+    match expr {
+        Expr::List(list, _) => {
+            if tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(sym_str)
+            {
+                refs.push(name.to_string());
+            }
+            for child in children(list) {
+                collect_var_refs(child, refs);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_var_refs(value, refs);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            collect_var_refs(&meta.expr, refs);
+            for (_, value) in &meta.entries {
+                collect_var_refs(value, refs);
+            }
+        }
+        Expr::Atom(_, _) => {}
+    }
+}
+
+fn terminal_output_name<'a>(defs: &'a [PlainDef<'a>]) -> Option<&'a str> {
+    let names = defs.iter().map(|plain| plain.name).collect::<Vec<_>>();
+    let mut referenced = std::collections::BTreeSet::new();
+    for plain in defs {
+        let mut refs = Vec::new();
+        collect_var_refs(plain.body, &mut refs);
+        for name in refs {
+            if names.iter().any(|candidate| *candidate == name) {
+                referenced.insert(name);
+            }
+        }
+    }
+
+    let outputs = defs
+        .iter()
+        .filter(|plain| !referenced.contains(plain.name))
+        .map(|plain| plain.name)
+        .collect::<Vec<_>>();
+    (outputs.len() == 1).then_some(outputs[0])
+}
+
+fn transitive_dependencies(
+    output_name: &str,
+    defs: &[PlainDef<'_>],
+) -> std::collections::BTreeSet<String> {
+    let by_name = defs
+        .iter()
+        .map(|plain| (plain.name, plain.body))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut needed = std::collections::BTreeSet::new();
+    let mut stack = vec![output_name.to_string()];
+
+    while let Some(name) = stack.pop() {
+        let Some(body) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let mut refs = Vec::new();
+        collect_var_refs(body, &mut refs);
+        for reference in refs {
+            if by_name.contains_key(reference.as_str()) && needed.insert(reference.clone()) {
+                stack.push(reference);
+            }
+        }
+    }
+
+    needed
+}
+
+fn indent_lines(text: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // Top-level forms
 // ---------------------------------------------------------------------------
@@ -120,6 +819,17 @@ fn decompile_defsig(list: &List) -> String {
     let ty = decompile_type_expr(&kids[1]);
     let effects = decompile_effect_suffix_from_type_expr(&kids[1]);
     format!("sig {name} : {ty}{effects}")
+}
+
+fn decompile_defmacro(list: &List) -> String {
+    let kids = children(list);
+    if kids.len() < 3 {
+        return "-- malformed defmacro".to_string();
+    }
+    let name = sym_str(&kids[0]).unwrap_or("_");
+    let params = decompile_params(&kids[1]);
+    let body = decompile_expr(&kids[2]);
+    format!("macro {name}({params}) = {body}")
 }
 
 fn decompile_deftype(list: &List) -> String {
@@ -436,6 +1146,14 @@ fn decompile_list_expr(list: &List) -> String {
                 format!("copy({})", decompile_expr(child))
             } else {
                 "copy()".to_string()
+            }
+        }
+        Some("borrow") => {
+            let kids = children(list);
+            if let Some(child) = kids.first() {
+                format!("&{}", decompile_expr(child))
+            } else {
+                "&()".to_string()
             }
         }
         Some("handle-effect") => decompile_handle_effect(list),
@@ -872,7 +1590,7 @@ fn capitalize(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decompile_program;
+    use super::{DecompileOptions, decompile_program, decompile_program_with_context};
     use crate::desugar::desugar_program;
     use crate::parser::parse_str;
 
@@ -899,6 +1617,63 @@ mod tests {
     fn decompile_with_device_handler() {
         let rendered = surf_to_surf("def f() = with device(\"gpu:0\") { x }");
         assert!(rendered.contains("with device(\"gpu:0\") {"));
-        assert!(rendered.contains("\n  x\n}"));
+        assert!(rendered.contains("\n    x\n  }"));
+    }
+
+    #[test]
+    fn decompile_combines_inline_typed_defs() {
+        let rendered = surf_to_surf("def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)");
+        assert!(rendered.contains("def f(x: tensor[n, f32]) -> tensor[n, f32] ="));
+        assert!(!rendered.contains("sig f"));
+    }
+
+    #[test]
+    fn decompile_macro_def_preserves_macro_surface() {
+        let rendered = surf_to_surf("macro relu_ref(x) = max_elem(x, 0.0)");
+        assert!(rendered.contains("macro relu_ref(x) = max_elem("));
+        assert!(rendered.contains("0.0 : f32"));
+    }
+
+    #[test]
+    fn decompile_script_program_collapses_loads_into_params() {
+        let rendered = decompile_program_with_context(
+            &chelis_deep::parser::parse_str(
+                "(def {} x (var {type: (t-tensor {} (d-name {} batch) (d-lit {} 784) (t-prim {} f32))} x))
+                 (def {} w (var {type: (t-tensor {} (d-lit {} 784) (d-lit {} 128) (t-prim {} f32))} w))
+                 (def {} out (app {type: (t-tensor {} (d-name {} batch) (d-lit {} 128) (t-prim {} f32))}
+                   (var {} matmul)
+                   (var {} x)
+                   (var {} w)))",
+            )
+            .expect("deep parse"),
+            &DecompileOptions::idiomatic(),
+            Some("forward"),
+        );
+        assert!(rendered.contains("def forward(x: tensor[batch, 784, f32], w: tensor[784, 128, f32]) -> tensor[batch, 128, f32] ="));
+        assert!(rendered.contains("matmul(x, w)"));
+        assert!(!rendered.contains("let x:"));
+    }
+
+    #[test]
+    fn decompile_verbose_preserves_sig_and_annotations() {
+        let decls =
+            parse_str("def f(x: tensor[n, f32]) -> tensor[n, f32] = (relu(x) : tensor[n, f32])")
+                .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let rendered = decompile_program_with_context(&deep, &DecompileOptions::verbose(), None);
+        assert!(rendered.contains("sig f :"));
+        assert!(rendered.contains("(relu(x) : tensor[n, f32])"));
+    }
+
+    #[test]
+    fn decompile_executable_mnist_stays_idiomatic() {
+        let rendered = surf_to_surf(include_str!("../../../examples/mnist.ch"));
+        assert!(rendered.contains("def logits("));
+        assert!(rendered.contains("def loss("));
+        assert!(rendered.contains("-> tensor[32, 10, f32]"));
+        assert!(rendered.contains("-> tensor[f32]"));
+        assert!(!rendered.contains("sig logits"));
+        assert!(!rendered.contains("sig loss"));
+        assert!(!rendered.contains("let x: tensor["));
     }
 }

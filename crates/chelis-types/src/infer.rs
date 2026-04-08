@@ -203,15 +203,6 @@ fn validate_phase0e_expr(
                     && let Some(func_name) = phase0e_builtin_name(list)
                     && is_phase0e_shape_sensitive_builtin(func_name)
                 {
-                    if !has_type_metadata(list) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::Other,
-                            format!(
-                                "Phase 0e builtin `{func_name}` requires explicit type metadata on the app node"
-                            ),
-                            vec!["Run lowering only on checked/annotated Deep".to_string()],
-                        ));
-                    }
                     validate_phase0e_builtin_symbolic_requirements(
                         list, func_name, type_env, errors,
                     );
@@ -669,10 +660,6 @@ fn span_of_list(list: &deep::List) -> Span {
         .first()
         .map(span_of_expr)
         .unwrap_or_else(zero_span)
-}
-
-fn has_type_metadata(list: &deep::List) -> bool {
-    matches!(get_meta(list), Some(meta) if meta.entries.iter().any(|(k, _)| k == "type"))
 }
 
 fn phase0e_builtin_name(list: &deep::List) -> Option<&str> {

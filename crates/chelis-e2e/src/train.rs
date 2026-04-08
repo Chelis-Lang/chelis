@@ -26,14 +26,8 @@ pub fn build_mnist_program() -> Result<MnistProgram, String> {
     let src = include_str!("../../../examples/mnist.ch");
     let compiled = compile_surf(src)?;
 
-    let loss_node = *compiled
-        .root_nodes
-        .get("loss")
-        .ok_or("compiled MNIST program is missing `loss` root")?;
-    let logits_node = *compiled
-        .root_nodes
-        .get("logits")
-        .ok_or("compiled MNIST program is missing `logits` root")?;
+    let loss_node = *require_root(&compiled.root_nodes, "loss")?;
+    let logits_node = *require_root(&compiled.root_nodes, "logits")?;
 
     let reachable = reachable_nodes(&compiled.dag, loss_node);
     let param_nodes = MNIST_PARAM_NAMES
@@ -51,6 +45,12 @@ pub fn build_mnist_program() -> Result<MnistProgram, String> {
         logits_node,
         param_nodes,
     })
+}
+
+fn require_root<'a>(roots: &'a HashMap<String, NodeId>, name: &str) -> Result<&'a NodeId, String> {
+    roots
+        .get(name)
+        .ok_or_else(|| format!("compiled MNIST program is missing `{name}` root"))
 }
 
 fn reachable_nodes(dag: &Dag, root: NodeId) -> HashSet<NodeId> {

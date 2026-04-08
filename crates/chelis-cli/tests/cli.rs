@@ -147,6 +147,61 @@ fn fmt_inplace_preserves_pipeline_parseability() {
 }
 
 #[test]
+fn surf_default_collapses_load_program_into_typed_def() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("forward.ch");
+    write_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "def forward(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] =",
+        ))
+        .stdout(predicate::str::contains("matmul(a, b)"))
+        .stdout(predicate::str::contains("let a").not());
+}
+
+#[test]
+fn surf_verbose_preserves_debug_style_annotations() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("forward.ch");
+    write_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap(), "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("let a = (a : tensor[2, 3, f32])"))
+        .stdout(predicate::str::contains(
+            "(matmul(a, b) : tensor[2, 4, f32])",
+        ));
+}
+
+#[test]
+fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("typed.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "def f(x: tensor[n, f32]) -> tensor[n, f32] =",
+        ))
+        .stdout(predicate::str::contains("sig f").not());
+}
+
+#[test]
 fn check_does_not_report_perfect_score_with_errors() {
     let json = run_json_check(&illustrative_example("pattern_matching.ch"));
     assert!(json["score"].as_f64().unwrap() < 1.0);
@@ -486,6 +541,171 @@ fn check_reports_unhandled_random_effect() {
                 .is_some_and(|message| message.contains("Random"))
     }));
     assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn check_reports_linearity_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("linearity.ch");
+    write_file(
+        &path,
+        "def bad(x: tensor[4, f32]): tensor[4, f32] = let y: tensor[4, f32] = relu(x) in add(x, y)\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("relu"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn check_reports_macro_provenance_for_type_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_type_error.ch");
+    write_file(
+        &path,
+        r#"
+macro bad_bool(x) = and(x, x)
+def bad(x: tensor[4, f32]): tensor[4, f32] = bad_bool(x)
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("in expansion of (bad_bool"))
+    }));
+}
+
+#[test]
+fn check_reports_macro_provenance_for_linearity_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_linearity.ch");
+    write_file(
+        &path,
+        r#"
+macro dup_relu(x) = add(relu(x), x)
+def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("in expansion of (dup_relu"))
+    }));
+}
+
+#[test]
+fn check_reports_match_linearity_even_when_phase0e_rejects_match() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("match_linearity.ch");
+    write_file(
+        &path,
+        r#"def bad(pair: (tensor[4, f32], int32)): int32 =
+  let n: int32 = match pair with {
+    | (x, _) => 1
+  }
+  let again: (tensor[4, f32], int32) = pair
+  in n
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["message"].as_str().is_some_and(|message| {
+            message.contains("`match` is not supported by Phase 0e lowering")
+        })
+    }));
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("pair"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn deep_expands_macros_and_emits_provenance() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_deep.ch");
+    write_file(
+        &path,
+        r#"
+macro relu_ref(x) = max_elem(x, 0.0)
+def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf8");
+    assert!(!text.contains("defmacro"));
+    assert!(!text.contains("macro-invoke"));
+    assert!(text.contains("source: (relu_ref"));
+    assert!(text.contains("max_elem"));
+}
+
+#[test]
+fn fmt_preserves_macro_syntax() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_fmt.ch");
+    write_file(
+        &path,
+        r#"
+macro keep(x)=x
+def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let formatted = fs::read_to_string(&path).expect("formatted");
+    assert!(formatted.contains("macro keep(x) = x"));
+    let json = run_json_check(&path);
+    assert_eq!(json["errors"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn validate_desugar_accepts_macro_program() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_validate.ch");
+    write_file(
+        &path,
+        r#"
+macro relu_ref(x) = max_elem(x, 0.0)
+def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--desugar", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated desugar:"));
 }
 
 #[test]

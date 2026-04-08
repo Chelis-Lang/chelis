@@ -193,11 +193,26 @@ fn run_linreg() -> Result<ModelReport, String> {
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
     let data_path = temp.path().join("linreg.bin");
     write_linreg_data(&data_path)?;
-    let programs = build_linreg_programs()?;
-
-    let cpu = run_training_backend(Backend::Cpu, "linreg_train", &data_path, &programs, false);
-    let hip = run_training_backend(Backend::Hip, "linreg_train", &data_path, &programs, false);
     let pytorch = run_pytorch("benchmarks/pytorch/linreg.py", &data_path, None, "linreg");
+    let (cpu, hip) = match build_linreg_programs() {
+        Ok(programs) => (
+            run_training_backend(Backend::Cpu, "linreg_train", &data_path, &programs, false),
+            run_training_backend(Backend::Hip, "linreg_train", &data_path, &programs, false),
+        ),
+        Err(reason) => {
+            let cpu = skipped(format!(
+                "linreg benchmark training DAG unavailable: {reason}"
+            ));
+            let hip = if let Some(hip_reason) = hip_prerequisite_skip_reason() {
+                skipped(hip_reason)
+            } else {
+                skipped(format!(
+                    "linreg benchmark training DAG unavailable: {reason}"
+                ))
+            };
+            (cpu, hip)
+        }
+    };
 
     Ok(ModelReport {
         name: "linreg".to_string(),
@@ -231,11 +246,26 @@ fn run_mnist() -> Result<ModelReport, String> {
             format!("MNIST benchmark data unavailable: {err}"),
         ));
     }
-    let programs = build_mnist_programs()?;
-
-    let cpu = run_training_backend(Backend::Cpu, "mnist_train", &data_path, &programs, true);
-    let hip = run_training_backend(Backend::Hip, "mnist_train", &data_path, &programs, true);
     let pytorch = run_pytorch("benchmarks/pytorch/mnist.py", &data_path, None, "mnist");
+    let (cpu, hip) = match build_mnist_programs() {
+        Ok(programs) => (
+            run_training_backend(Backend::Cpu, "mnist_train", &data_path, &programs, true),
+            run_training_backend(Backend::Hip, "mnist_train", &data_path, &programs, true),
+        ),
+        Err(reason) => {
+            let cpu = skipped(format!(
+                "mnist benchmark training DAG unavailable: {reason}"
+            ));
+            let hip = if let Some(hip_reason) = hip_prerequisite_skip_reason() {
+                skipped(hip_reason)
+            } else {
+                skipped(format!(
+                    "mnist benchmark training DAG unavailable: {reason}"
+                ))
+            };
+            (cpu, hip)
+        }
+    };
 
     Ok(ModelReport {
         name: "mnist".to_string(),
@@ -774,14 +804,8 @@ fn failed(reason: String) -> RunArtifacts {
 fn build_linreg_programs() -> Result<TrainingPrograms, String> {
     let src = include_str!("../../../examples/linreg.ch");
     let compiled = compile_surf(src)?;
-    let loss = *compiled
-        .root_nodes
-        .get("loss")
-        .ok_or("linreg example missing `loss` root")?;
-    let pred = *compiled
-        .root_nodes
-        .get("pred")
-        .ok_or("linreg example missing `pred` root")?;
+    let loss = *require_named_root(&compiled.root_nodes, &["loss"])?;
+    let pred = *require_named_root(&compiled.root_nodes, &["predict", "pred"])?;
     build_training_programs_from_compiled(compiled.dag, loss, pred, &["w", "b"])
 }
 
@@ -841,10 +865,7 @@ fn build_training_programs_from_compiled(
 fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     let src = include_str!("../../../examples/transformer_block.ch");
     let compiled = compile_surf(src)?;
-    let out = *compiled
-        .root_nodes
-        .get("out")
-        .ok_or("transformer example missing `out` root")?;
+    let out = *require_named_root(&compiled.root_nodes, &["forward", "out"])?;
     let mut dag = compiled.dag;
     add_named_store(&mut dag, "out", out);
     let fused = fuse::fuse(&dag);
@@ -902,6 +923,21 @@ fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
         .enumerate()
         .map(|(idx, label)| (label, idx))
         .collect()
+}
+
+fn require_named_root<'a>(
+    roots: &'a HashMap<String, NodeId>,
+    candidates: &[&str],
+) -> Result<&'a NodeId, String> {
+    for candidate in candidates {
+        if let Some(node) = roots.get(*candidate) {
+            return Ok(node);
+        }
+    }
+    Err(format!(
+        "missing expected root; tried {}",
+        candidates.join(", ")
+    ))
 }
 
 fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
