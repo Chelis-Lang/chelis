@@ -4,6 +4,7 @@ use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -33,7 +34,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Desugar Surf (.ch) to canonical Deep s-expressions
-    Deep { file: PathBuf },
+    Deep {
+        #[arg(long)]
+        flat: bool,
+        file: PathBuf,
+    },
     /// Decompile Deep (.dp) to Surf (best-effort)
     Surf {
         file: PathBuf,
@@ -45,6 +50,8 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         inplace: bool,
+        #[arg(long)]
+        check: bool,
     },
     /// Evaluate an expression or file
     Eval {
@@ -80,16 +87,46 @@ enum Command {
         #[arg(long, default_value = "c")]
         target: String,
     },
-    /// Interactive REPL
-    Tide,
+    /// Interactive REPL, HTTP API, and MCP server
+    Tide {
+        #[command(subcommand)]
+        command: Option<TideCommand>,
+    },
+    /// Launch the Cove terminal UI
+    Cove {
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TideCommand {
+    /// Start the Tide HTTP/JSON API server
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+    /// Start the Tide MCP server over stdio
+    Mcp,
+    /// Start the Tide LSP server over stdio
+    Lsp {
+        #[arg(long, hide = true, action = ArgAction::SetTrue)]
+        stdio: bool,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Command::Deep { file }) => cmd_deep(&file),
+        Some(Command::Deep { file, flat }) => cmd_deep(&file, flat),
         Some(Command::Surf { file, verbose }) => cmd_surf(&file, verbose),
-        Some(Command::Fmt { file, inplace }) => cmd_fmt(&file, inplace),
+        Some(Command::Fmt {
+            file,
+            inplace,
+            check,
+        }) => cmd_fmt(&file, inplace, check),
         Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
         Some(Command::Check { file }) => cmd_check(&file),
         Some(Command::Validate {
@@ -103,7 +140,8 @@ fn main() {
             output,
             target,
         }) => cmd_build(&file, output.as_deref(), &target),
-        Some(Command::Tide) => run_tide(),
+        Some(Command::Tide { command }) => run_tide(command),
+        Some(Command::Cove { file }) => cmd_cove(file),
         None => {
             println!("chelis 0.1.0 -- use --help for commands");
             Ok(())
@@ -115,11 +153,15 @@ fn main() {
     }
 }
 
-fn cmd_deep(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deep(file: &PathBuf, flat: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-    let output = chelis_deep::printer::print_canonical(&deep_exprs);
+    let output = if flat {
+        chelis_deep::printer::print_canonical_flat(&deep_exprs)
+    } else {
+        chelis_deep::printer::print_canonical(&deep_exprs)
+    };
     print!("{output}");
     Ok(())
 }
@@ -155,7 +197,10 @@ fn cmd_surf(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_fmt(file: &PathBuf, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if inplace && check {
+        return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
+    }
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let output = if ext == "dp" {
@@ -171,6 +216,12 @@ fn cmd_fmt(file: &PathBuf, inplace: bool) -> Result<(), Box<dyn std::error::Erro
             file.file_stem().and_then(|stem| stem.to_str()),
         )
     };
+    if check {
+        if output == source {
+            return Ok(());
+        }
+        return Err(format!("{} is not canonically formatted", file.display()).into());
+    }
     if inplace {
         fs::write(file, &output)?;
     } else {
@@ -540,7 +591,31 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
-fn run_tide() -> Result<(), Box<dyn std::error::Error>> {
+fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        None => run_tide_repl(),
+        Some(TideCommand::Serve { host, port }) => {
+            let addr = SocketAddr::new(host, port);
+            chelis_tide::http::serve_blocking(addr)?;
+            Ok(())
+        }
+        Some(TideCommand::Mcp) => {
+            chelis_tide::mcp::run_stdio_blocking()?;
+            Ok(())
+        }
+        Some(TideCommand::Lsp { .. }) => {
+            chelis_lsp::serve_stdio_blocking()?;
+            Ok(())
+        }
+    }
+}
+
+fn cmd_cove(file: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    chelis_cove::run(chelis_cove::CoveOptions { file })?;
+    Ok(())
+}
+
+fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
     println!("Chelis Tide v0.1 -- type expressions or definitions. Ctrl-D to exit.");
     let stdin = io::stdin();
     let mut accumulated_source = String::new();

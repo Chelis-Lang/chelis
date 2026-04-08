@@ -71,6 +71,18 @@ Phase 0i shipped:
 - `chelis check`
 - `chelis build`
 - `chelis tide`
+- `chelis tide serve`
+- `chelis tide mcp`
+- `chelis tide lsp`
+- `chelis cove`
+
+Deep formatting now defaults to canonical pretty-printed `.dp` output:
+
+- `chelis deep app.ch` prints width-aware canonical Deep
+- `chelis deep --flat app.ch` preserves flat per-form rendering for explicit machine
+  pipelines while keeping top-level forms separated
+- `chelis fmt file.dp --check` verifies canonical `.dp` formatting without rewriting the
+  file
 
 The current shipped surface includes the Phase 1 HIP backend work,
 `chelis validate` for executable grammar conformance, and the first Phase 2a effect
@@ -82,7 +94,11 @@ surface:
   onto the returned tree
 - `dropout(x, rate)` as the concrete `Random` source in evaluation/lowering
 - build-target validation for resource regions such as `with device("gpu:0") { ... }`
-
+- the Phase 2e Tide machine-facing API surface (`chelis tide serve` and
+  `chelis tide mcp`)
+- the Phase 2f Tide LSP/editor package surface in `editors/vscode/`
+- the Phase 2g `chelis cove` terminal UI plus checked-in tree-sitter grammars for Surf
+  and Deep
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
@@ -100,8 +116,16 @@ Known carried-forward limitations are:
 These limitations are real debt, but they do not block the Phase 2 language work.
 AI assistance planning is split cleanly:
 
-- Phase 2: `SKILL.md` + Tide MCP for frontier models
+- Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
 - Phase 3: a local coding model that ships with the toolchain
+
+Phase 2g currently ships as:
+
+- `chelis cove --file examples/mnist.ch`
+- live Surf editing with checked-in tree-sitter highlighting
+- read-only Deep view derived from the current Surf buffer
+- live diagnostics and numeric fitness status
+- `Ctrl-S` save, `Ctrl-R` compile, `Ctrl-E` eval, `Ctrl-Q` quit
 
 ## Phase 0h Validation
 
@@ -128,8 +152,13 @@ crates/
   chelis-effects/    Effect inference/checking over annotated Deep
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
   chelis-backend-c/  C backend and runtime
+  chelis-tide/       Tide HTTP/JSON API and MCP server
+  chelis-lsp/        Tide Language Server Protocol support
+  chelis-cove/       Cove terminal coding environment
   chelis-cli/        CLI binary
-spec/                Numbered language specs and design docs
+  spec/                Numbered language specs and design docs
+editors/vscode/      VS Code-compatible extension and TextMate grammars
+grammars/            Tree-sitter grammars for Surf and Deep
 examples/            Executable Phase 0 example programs
 examples/illustrative/  Non-executable syntax/design examples
 ```
@@ -172,6 +201,12 @@ Tool-specific skill entry points should resolve to the same local skill library:
 
 - `.claude/skills` -> `agent-skills/`
 - `.codex/skills` -> `agent-skills/`
+
+External Phase 2e validation can be run with:
+
+```sh
+python scripts/redteam_tide_phase2e.py
+```
 
 ## License
 

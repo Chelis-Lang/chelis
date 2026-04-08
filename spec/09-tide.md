@@ -1,6 +1,8 @@
-# Tide: Interactive Mode
+# Tide: Interactive And Agent Mode
 
-**Status:** Implemented in Phase 0i.
+**Status:** Phase 0i REPL shipped; Phase 2e agent API + MCP shipped; Phase 2f LSP
+server + VS Code-compatible extension scaffold shipped; Phase 2g `chelis cove`
+single-file TUI shipped.
 This document records the intended architecture so the rest of the docs stay aligned
 while implementation catches up.
 
@@ -14,8 +16,7 @@ Phase 0i covers the first interactive developer workflow:
 - `chelis fmt` for Surf formatting
 - `chelis eval expr` for one-shot evaluation
 
-Later phases extend Tide into machine-facing services such as the agent API, MCP,
-language server support, and the Cove TUI.
+Later phases extend Tide into language-server support and the Cove TUI.
 
 ## 2. Interactive Execution Strategy
 
@@ -50,6 +51,42 @@ Launch an interactive REPL.
 It should accept Deep expressions directly and may accept Surf input when the front-end
 path is available.
 
+### `chelis tide serve`
+
+Launch the HTTP/JSON compiler service.
+The shipped surface includes `/parse`, `/desugar`, `/check`, `/lower`, `/compile`,
+`/eval`, `/grad`, `/validate`, `/decompile`, and `/batch`.
+The public contract uses explicit wire-model types rather than serialized compiler
+internals.
+
+### `chelis tide mcp`
+
+Launch the MCP server on stdio.
+The shipped MCP tool surface is:
+
+- `chelis_check`
+- `chelis_compile`
+- `chelis_desugar`
+- `chelis_decompile`
+- `chelis_eval`
+- `chelis_grad`
+- `chelis_validate`
+
+### `chelis tide lsp`
+
+Launch the Tide LSP server on stdio.
+The shipped v1 surface is full-file recomputation on each open/change and provides:
+
+- diagnostics
+- completion
+- hover
+- go-to-definition
+- `workspace/executeCommand` commands for Deep view and fitness status
+
+The server only promises information the compiler can actually produce today.
+For `.dp` files the shipped surface is diagnostics-first; the richer editor features are
+centered on Surf.
+
 ### `chelis eval expr`
 
 Evaluate a single expression through the evaluator fast path.
@@ -58,6 +95,8 @@ No C emission or external compiler process is involved.
 ### `chelis deep file.ch`
 
 Show the canonical Deep form of Surf input.
+Default output is width-aware pretty Deep; `--flat` preserves flat per-form output while
+keeping top-level forms separated.
 
 ### `chelis surf file.dp`
 
@@ -65,7 +104,8 @@ Best-effort decompile Deep into readable Surf.
 
 ### `chelis fmt file.ch`
 
-Format Surf using the compiler-owned canonical style.
+Format Surf or Deep using the compiler-owned canonical style.
+`--check` validates canonical formatting without rewriting the file.
 
 ## 5. Output Expectations
 
@@ -92,7 +132,51 @@ The Phase 0i test strategy includes evaluator-agreement tests:
 Phase 2 extends Tide beyond the REPL:
 
 - 2e: HTTP / JSON compiler API plus MCP server for coding agents
-- 2f: LSP support with diagnostics, hover, completion, go-to-definition, and Surf/Deep
-  visibility
-- 2g: `chelis cove` terminal UI with live checking and Surf/Deep toggling
+- 2f: LSP support with diagnostics, hover, completion, go-to-definition, Surf/Deep
+  visibility, and TextMate grammar for instant highlighting
+- 2g: `chelis cove` terminal UI with live checking, Surf/Deep toggling, and tree-sitter
+  grammar for incremental terminal highlighting
 - batch interfaces for agent loops and corpus collection
+
+## 8. Phase 2e Contract Notes
+
+- `/eval` takes named input bindings and resolves them by `Load.name`; the evaluator
+  itself remains unchanged.
+- `/grad` is DAG-level in the shipped Phase 2e surface and returns differentiated DAG
+  JSON plus node mappings, not a source-level differentiated Surf or Deep program.
+- The 2e automated acceptance oracle is `cargo test -p chelis-tide --test api`.
+- MCP-agent end-to-end validation remains a documented manual gate rather than part of
+  the default workspace run.
+
+## 9. Phase 2f Contract Notes
+
+- `chelis tide lsp` is the shipped stdio entrypoint; there is no separate `chelis-lsp`
+  binary on the user-facing CLI surface.
+- The v1 LSP does not depend on `salsa`; it recomputes from the full current document.
+- The bundled VS Code-compatible extension lives in `editors/vscode/` and includes
+  TextMate grammars for Surf and Deep so syntax highlighting works before the LSP is
+  ready.
+- The Deep toggle is a read-only command that shows canonical Deep; it does not attempt
+  bidirectional Surf/Deep editing.
+- The 2f manual acceptance oracle is opening a `.ch` file through the extension and
+  verifying immediate syntax highlighting, diagnostics, hover, completion, definition
+  lookup, Deep view, and fitness status in one session.
+
+## 10. Phase 2g Contract Notes
+
+- `chelis cove` is the shipped TUI entrypoint; `chelis cove --file examples/mnist.ch`
+  opens a specific file.
+- The shipped v1 is single-file and direct-library: it calls `chelis-tide::compiler`
+  helpers in-process rather than talking to a background daemon.
+- The shipped pane layout is Surf editor, read-only Deep view, diagnostics/fitness, and
+  output.
+- The output pane supports compile-preview and evaluator execution with auto-generated
+  zero-filled named bindings for `Load` nodes whose shapes are known.
+- The bundled tree-sitter grammars live in `grammars/tree-sitter-chelis-surf/` and
+  `grammars/tree-sitter-chelis-deep/`; Cove uses them for Surf and Deep highlighting.
+- Agent-mode hosting inside Cove is deferred; the shipped 2g surface does not embed an
+  MCP-driven assistant session.
+- The 2g manual acceptance oracle is:
+  `cargo run -p chelis-cli -- cove --file examples/mnist.ch`
+  and confirming that editing updates Deep/diagnostics live, `Ctrl-S` saves, and
+  compile/eval actions populate the output pane.

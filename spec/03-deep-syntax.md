@@ -283,7 +283,11 @@ Deep has exactly one textual representation per program.
 
 ### 6.1 Whitespace
 - 2-space indent per nesting level.
-- Node fits on one line if ≤ 80 characters (including indentation). Otherwise, each child starts on its own line.
+- Node fits on one line if ≤ 80 characters (including indentation). Otherwise, keep the
+  opening paren, tag, and metadata together on the first line and start each child on
+  its own indented line.
+- Canonical helper-heavy forms such as `fn`, `let`, and `bind` are printed in structured
+  multi-line form even when a short flat rendering would fit.
 - No trailing whitespace. Single newline at EOF.
 
 ### 6.2 Ordering

@@ -9,8 +9,12 @@ members = [
     "crates/chelis-backend-c",
     "crates/chelis-backend-hip",
     "crates/chelis-validate",
+    "crates/chelis-tide",
+    "crates/chelis-lsp",
+    "crates/chelis-cove",
     "crates/chelis-cli",
     "crates/chelis-e2e",
+    "tree-sitter-chelis",
 ]
 
 [workspace.package]
@@ -28,6 +32,9 @@ chelis-ir = { path = "crates/chelis-ir" }
 chelis-backend-c = { path = "crates/chelis-backend-c" }
 chelis-backend-hip = { path = "crates/chelis-backend-hip" }
 chelis-validate = { path = "crates/chelis-validate" }
+chelis-tide = { path = "crates/chelis-tide" }
+chelis-lsp = { path = "crates/chelis-lsp" }
+chelis-cove = { path = "crates/chelis-cove" }
 
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }

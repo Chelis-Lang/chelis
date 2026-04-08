@@ -1,0 +1,20 @@
+[package]
+name = "chelis-lsp"
+description = "Language Server Protocol support for Chelis"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chelis-deep.workspace = true
+chelis-surf.workspace = true
+chelis-tide.workspace = true
+chelis-types.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tower-lsp = "0.20"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,5 +1,5 @@
 use chelis_deep::parser::parse_str;
-use chelis_deep::printer::print_canonical;
+use chelis_deep::printer::{print_canonical, print_canonical_flat};
 use chelis_deep::validate::validate;
 use chelis_deep::{Atom, Expr};
 
@@ -302,4 +302,21 @@ fn all_fixtures_pass_tag_validator() {
     );
     assert_fixture_valid("metadata.dp", include_str!("fixtures/metadata.dp"));
     assert_fixture_valid("pipeline.dp", include_str!("fixtures/pipeline.dp"));
+}
+
+#[test]
+fn pretty_and_flat_printers_round_trip_to_same_ast() {
+    let source = include_str!("fixtures/pattern_match.dp");
+    let exprs = parse_str(source).expect("parse fixture");
+
+    let pretty = print_canonical(&exprs);
+    let flat = print_canonical_flat(&exprs);
+
+    let pretty_exprs = parse_str(&pretty).expect("parse pretty");
+    let flat_exprs = parse_str(&flat).expect("parse flat");
+
+    assert_eq!(print_canonical(&pretty_exprs), pretty);
+    assert_eq!(print_canonical_flat(&pretty_exprs), flat);
+    assert_eq!(print_canonical(&flat_exprs), pretty);
+    assert_eq!(print_canonical_flat(&flat_exprs), flat);
 }

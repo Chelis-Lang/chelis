@@ -538,7 +538,8 @@ tests.
 ### Design
 
 HTTP/JSON API that wraps every compiler pass as an endpoint. An AI agent connects via
-MCP and uses the compiler as a tool.
+MCP and uses the compiler as a tool. The shipped contract uses explicit stable wire
+models rather than serializing compiler AST/DAG structs directly.
 
 **Endpoints:**
 
@@ -546,11 +547,11 @@ MCP and uses the compiler as a tool.
 |---|---|---|
 | `POST /parse` | Surf or Deep source | AST (success) or parse errors |
 | `POST /desugar` | Surf source | Canonical Deep |
-| `POST /check` | Surf or Deep source | Fitness score + typed AST + errors |
+| `POST /check` | Surf or Deep source | Fitness report + structured diagnostics |
 | `POST /lower` | Surf or Deep source | RISC DAG (JSON-serialized) |
-| `POST /compile` | Surf or Deep source + target | Generated C/HIP code |
-| `POST /eval` | Deep expression + bindings | Evaluation result |
-| `POST /grad` | Surf or Deep source | Differentiated program |
+| `POST /compile` | Surf or Deep source + target | Generated C/HIP files + flags |
+| `POST /eval` | Surf or Deep source + named bindings | Evaluated roots |
+| `POST /grad` | Surf or Deep source + output/wrt names | Differentiated DAG JSON |
 | `POST /validate` | Surf or Deep source + mode | Conformance result |
 | `POST /decompile` | Deep source | Surf source |
 
@@ -567,18 +568,18 @@ MCP and uses the compiler as a tool.
 Essential for evolutionary loops and trajectory collection (Phase 3g training
 pipeline).
 
-**Implementation:** Rust HTTP server (`axum` or `warp`) wrapping the existing compiler
-crates. The MCP server is a thin adapter that translates MCP tool calls to HTTP
-requests. The server runs as `chelis tide serve` (HTTP) or is embedded in the MCP
-protocol.
+**Implementation:** Rust HTTP server (`axum`) wrapping the existing compiler crates.
+The MCP server is a thin stdio adapter over the same compiler adapter layer. The
+server runs as `chelis tide serve` (HTTP) or `chelis tide mcp` (stdio MCP).
 
 ### Implementation Plan
 
 **Crate: `chelis-tide` (new)**
-- `server.rs`: HTTP server with endpoints
+- `schema.rs`: stable wire models and request/response types
+- `compiler.rs`: shared compiler adapter and name-based eval binding bridge
+- `http.rs`: HTTP server with endpoints
 - `mcp.rs`: MCP protocol adapter
-- `batch.rs`: batch request handling
-- `lib.rs`: shared compiler invocation logic
+- `lib.rs`: shared service exports
 
 **CLI:**
 - `chelis tide serve --port 8080` starts the HTTP server
@@ -591,6 +592,8 @@ protocol.
 - Batch endpoint handles mixed success/failure
 - MCP tool calls map correctly to HTTP endpoints
 - Server handles concurrent requests without data races
+- `/eval` resolves request bindings by input name rather than position
+- `/grad` returns DAG JSON and rejects unsupported non-scalar outputs cleanly
 
 ### Acceptance Gate
 
@@ -598,6 +601,8 @@ protocol.
 
 Manual: connect Claude (or another MCP-capable agent) to `chelis tide mcp`, have it
 write a program, check fitness, fix errors based on feedback, compile, and run.
+For a reproducible external-process validation harness, run
+`python scripts/redteam_tide_phase2e.py`.
 
 ---
 
@@ -612,47 +617,46 @@ adapter - it translates LSP messages to compiler API calls and formats the resul
 LSP responses.
 
 **Features:**
-- **Diagnostics:** real-time type errors, effect errors, linearity errors, fitness
-  score in the status bar
+- **Diagnostics:** real-time compiler diagnostics and fitness score in the status bar
 - **Completion:** built-in scope plus standard-library surface
-- **Hover:** type information, dimension annotations, effect annotations, Deep form of
-  any Surf expression
+- **Hover:** type information and Deep form of the current Surf selection where
+  available
 - **Go-to-definition:** navigate to function definitions, type aliases, module sources
+- **TextMate grammar:** a `.tmLanguage.json` regex grammar for Surf and Deep, bundled
+  with the VS Code extension. Provides instant keyword, string, comment, and literal
+  highlighting before the LSP server is ready.
 - **Surf <-> Deep toggle:** command to show/toggle the Deep representation of the
   current selection
 
-**Implementation depends on `salsa` readiness.** The Phase 0 architectural discipline
-(pure-function crate boundaries, no global mutable state) was explicitly designed for
-this moment. If the discipline held through Phase 1, `salsa` adoption should be
-mechanical. If it did not, fixing the violations is prerequisite work.
+**Implementation note:** v1 ships without `salsa`.
+The server recomputes from the full current document and keeps the compiler boundary
+clean so a later `salsa` migration remains mechanical.
 
 ### Implementation Plan
 
 **Crate: `chelis-lsp` (new)**
 - `server.rs`: LSP server (`tower-lsp`)
-- `diagnostics.rs`: map compiler errors to LSP diagnostics
-- `completion.rs`: built-in-scope completion
-- `hover.rs`: type/effect/Deep hover info
-- `commands.rs`: custom commands (`Surf <-> Deep` toggle)
+- `analysis.rs`: document parsing, symbol indexing, diagnostics mapping, and Deep-view
+  preparation
+- `commands.rs` equivalent inside the server layer for read-only Deep view and fitness
+  status
 
-**`salsa` integration (if ready):**
-- `chelis-db` crate wrapping compiler passes as `salsa` queries
-- Incremental recomputation: editing one function re-checks only that function and its
-  dependents
-
-**VS Code extension:** TypeScript extension that starts the LSP server and provides
-Chelis-specific UI (Deep toggle button, fitness score in status bar).
+**VS Code extension:** minimal JS extension that bundles the TextMate grammar for
+immediate syntax highlighting, starts the LSP server, and provides Chelis-specific UI
+(Deep toggle button, fitness score in status bar).
 
 **Test strategy (~10 tests):**
 - Diagnostics match CLI `chelis check` output
 - Completion includes built-in scope
 - Hover shows correct type information
 - Deep toggle produces valid Deep
-- Edit -> re-check cycle completes in <500ms for MNIST-sized programs
+- Edit -> re-check cycle completes in <500ms for MNIST-sized programs on the manual
+  editor gate
 
 ### Acceptance Gate
 
-Open a `.ch` file in VS Code with the extension installed. Type errors appear in
+Open a `.ch` file in VS Code with the extension installed. Syntax highlighting appears
+immediately on open. Type errors appear in
 real time. Hover shows types. Deep toggle works. Fitness score is visible.
 
 ---
@@ -664,46 +668,52 @@ development experience.
 
 ### Design
 
-Built on Ratatui. The TUI is a frontend to the Agent API (2e) and uses the same
-compiler services as the LSP (2f).
+Built on Ratatui. The shipped v1 uses the same direct compiler services as the LSP (2f)
+without introducing a background daemon or `salsa`.
 
 **Panels:**
 - Editor pane: Surf code with syntax highlighting
-- Deep pane: live canonical Deep of the current function
-- Type/effect pane: inferred types, effects, linearity annotations
-- Output pane: evaluation results, training loss, compilation output
-- Agent pane (agent mode): AI writes Deep, human reviews in Surf
+- Deep pane: live canonical Deep of the current buffer, rendered with the canonical
+  pretty Deep layout
+- Diagnostics pane: fitness and structured compiler diagnostics
+- Output pane: compile preview and evaluator output
 
 **Flagship feature: Surf <-> Deep live toggle.** The programmer writes in Surf and sees
 the AI's representation in Deep in real time. No other language has this. It makes the
 "written by AIs, for AIs" thesis concrete and visible.
-
-**Agent mode:** The TUI hosts an AI agent session - the agent proposes Deep programs,
-the human reviews them in Surf, and edits are round-tripped through the compiler. This
-requires the MCP server (2e) running in the background.
 
 ### Implementation Plan
 
 **Crate: `chelis-cove` (new)**
 - `app.rs`: application state, event loop
 - `ui.rs`: panel layout, rendering (Ratatui)
-- `editor.rs`: text editing with Surf syntax highlighting
-- `agent.rs`: agent mode integration (connects to `chelis tide mcp`)
-- `live.rs`: live desugar/check/decompile pipeline (debounced, async)
+- `editor.rs`: text editing plus tree-sitter-based Surf/Deep highlighting
+- `live.rs`: in-process desugar/check/eval/compile helpers
+
+**Tree-sitter grammar (`grammar.js`):** A tree-sitter grammar for Surf and Deep generates
+a C parser used by the editor pane for incremental reparsing on each keystroke.
+Tree-sitter is required here because Ratatui TUIs cannot use TextMate grammars or LSP
+semantic tokens — terminal editors need their own parser for responsive highlighting. The
+same grammar also benefits Neovim, Emacs, and Helix users who support tree-sitter
+natively.
 
 **CLI:**
 - `chelis cove` launches the TUI
 - `chelis cove --file examples/mnist.ch` opens a specific file
+- canonical Deep elsewhere in the toolchain now defaults to pretty-printed `.dp`; use
+  `chelis deep --flat` for flat machine-oriented output and `chelis fmt --check` to
+  verify canonical Surf/Deep formatting without rewriting files
 
 **Test strategy:** TUI testing is primarily manual. Automated tests cover non-UI logic
-(live pipeline, agent mode protocol). The acceptance gate is a human completing the
-MNIST tutorial entirely within `chelis cove`.
+(live pipeline, zero-binding eval, file loading, CLI surface). The acceptance gate is a
+human running the documented manual oracle and confirming live Deep/diagnostic updates
+plus compile/eval output from inside `chelis cove`.
 
 ### Acceptance Gate
 
-A user (not the developer) can: open `chelis cove`, load `examples/mnist.ch`, see the
-Deep form, edit the Surf code, see type errors update live, compile, and run training
-- without leaving the TUI.
+A user (not the developer) can run `cargo run -p chelis-cli -- cove --file
+examples/mnist.ch`, see the Deep form, edit the Surf code, see fitness/diagnostics
+update live, save, and trigger compile/eval output without leaving the TUI.
 
 ---
 

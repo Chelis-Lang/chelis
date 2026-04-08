@@ -29,6 +29,8 @@ Every Deep node has the canonical shape `(tag {} children...)`.
 The unique printed form of a Deep program.
 Canonical printing normalizes structure and metadata placement so the same AST always
 prints the same way.
+The default canonical text is width-aware pretty Deep with 2-space indentation; the CLI
+may also expose non-canonical flat output for explicit machine pipelines.
 
 ## 2. File and Artifact Terms
 
@@ -119,6 +121,9 @@ The current command vocabulary used across docs is:
 - `chelis surf`
 - `chelis eval`
 - `chelis tide`
+- `chelis tide serve`
+- `chelis tide mcp`
+- `chelis tide lsp`
 - `chelis fmt`
 - `chelis validate`
 - `chelis cove`
@@ -138,7 +143,9 @@ Run the front-end and type-checking path only, producing fitness-oriented diagno
 
 ### `chelis deep`
 
-Print the Deep form of Surf input.
+Print the canonical Deep form of Surf input.
+The default output is pretty-printed canonical Deep; `--flat` is the explicit escape
+hatch for flat per-form output with top-level form separation preserved.
 
 ### `chelis surf`
 
@@ -152,9 +159,22 @@ Evaluate an expression through the IR evaluator without going through C compilat
 
 Launch the interactive REPL-oriented mode.
 
+### `chelis tide serve`
+
+Launch the Tide HTTP/JSON compiler service.
+
+### `chelis tide mcp`
+
+Launch the Tide MCP server on stdio.
+
+### `chelis tide lsp`
+
+Launch the Tide LSP server on stdio.
+
 ### `chelis fmt`
 
-Format Surf code using the compiler-owned canonical style.
+Format Surf or Deep code using the compiler-owned canonical style.
+`--check` verifies canonical formatting without rewriting the file.
 
 ### `chelis validate`
 
@@ -163,7 +183,7 @@ Supported modes are `--surf`, `--deep`, and `--desugar`.
 
 ### `chelis cove`
 
-Launch the planned terminal coding environment.
+Launch the Cove terminal coding environment.
 
 ## 6. Type-System Terms
 

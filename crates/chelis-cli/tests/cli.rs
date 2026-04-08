@@ -24,6 +24,10 @@ fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
 
+fn editor_file(rel: &str) -> PathBuf {
+    example_path(&format!("../../editors/vscode/{rel}"))
+}
+
 fn write_matmul_program(path: &Path) {
     fs::write(
         path,
@@ -144,6 +148,79 @@ fn fmt_inplace_preserves_pipeline_parseability() {
         .args(["deep", path.to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn fmt_check_succeeds_for_canonical_deep() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&path, output).expect("write deep");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn fmt_check_succeeds_for_canonical_surf() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mnist.ch");
+    fs::copy(mnist_example(), &path).expect("copy");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn fmt_check_fails_for_noncanonical_deep() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    write_file(
+        &path,
+        "(app {} (var {} mean) (app {} (var {} neg) (app {} (var {} sum) (var {} very_long_intermediate_name) (lit {type: (t-prim {} i32)} 0))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not canonically formatted"));
+}
+
+#[test]
+fn fmt_rejects_check_and_inplace_together() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.dp");
+    write_file(&path, "(def {} x (lit {type: (t-prim {} int32)} 1))\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check", "--inplace"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not allow `--inplace` and `--check` together",
+        ));
 }
 
 #[test]
@@ -734,6 +811,110 @@ fn tide_quit_exits_cleanly() {
 }
 
 #[test]
+fn tide_serve_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--port"))
+        .stdout(predicate::str::contains("--host"));
+}
+
+#[test]
+fn tide_mcp_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "mcp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the Tide MCP server"));
+}
+
+#[test]
+fn tide_lsp_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "lsp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the Tide LSP server"));
+}
+
+#[test]
+fn tide_lsp_stdio_flag_is_accepted_and_exits_on_eof() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "lsp", "--stdio"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cove_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--file"))
+        .stdout(predicate::str::contains("Launch the Cove terminal UI"));
+}
+
+#[test]
+fn cove_reports_missing_file_before_terminal_error() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--file", "/definitely/missing/chelis-file.ch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read Cove file"));
+}
+
+#[test]
+fn cove_requires_interactive_terminal_for_valid_launch() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["cove", "--file", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("interactive terminal"));
+}
+
+#[test]
+fn vscode_extension_manifest_registers_languages_and_command() {
+    let manifest = fs::read_to_string(editor_file("package.json")).expect("manifest");
+    let json: Value = serde_json::from_str(&manifest).expect("valid json");
+    let languages = json["contributes"]["languages"]
+        .as_array()
+        .expect("languages array");
+    assert!(languages.iter().any(|entry| entry["id"] == "chelis"));
+    assert!(languages.iter().any(|entry| entry["id"] == "chelis-deep"));
+
+    let commands = json["contributes"]["commands"]
+        .as_array()
+        .expect("commands array");
+    assert!(
+        commands
+            .iter()
+            .any(|entry| entry["command"] == "chelis.showDeep")
+    );
+}
+
+#[test]
+fn vscode_grammars_exist_and_parse_as_json() {
+    for path in [
+        editor_file("syntaxes/chelis.tmLanguage.json"),
+        editor_file("syntaxes/chelis-deep.tmLanguage.json"),
+    ] {
+        let contents = fs::read_to_string(&path).expect("grammar");
+        let json: Value = serde_json::from_str(&contents).expect("valid grammar json");
+        assert!(json["scopeName"].is_string(), "{path:?}");
+        assert!(json["repository"].is_object(), "{path:?}");
+    }
+}
+
+#[test]
 fn validate_requires_exactly_one_mode() {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -794,6 +975,85 @@ fn validate_deep_accepts_canonical_deep_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn validate_deep_accepts_flat_canonical_output() {
+    let dir = tempdir().expect("tempdir");
+    let deep_path = dir.path().join("hello_tensor_flat.dp");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, output).expect("write deep output");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", deep_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated deep:"));
+}
+
+#[test]
+fn deep_defaults_to_pretty_output_and_flat_flag_preserves_flat_per_form_rendering() {
+    let pretty = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pretty = String::from_utf8(pretty).expect("utf8");
+    assert!(
+        pretty.contains("\n  ("),
+        "expected indented pretty Deep: {pretty}"
+    );
+
+    let flat = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flat = String::from_utf8(flat).expect("utf8");
+    assert!(
+        !flat.contains("\n  ("),
+        "flat output should not indent child lines: {flat}"
+    );
+}
+
+#[test]
+fn deep_flat_keeps_top_level_forms_separated() {
+    let dir = tempdir().expect("tempdir");
+    let surf_path = dir.path().join("multi.ch");
+    write_file(&surf_path, "def a = 1\ndef b = 2\n");
+
+    let flat = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--flat", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flat = String::from_utf8(flat).expect("utf8");
+    assert!(
+        flat.contains("\n\n"),
+        "expected top-level form separation: {flat}"
+    );
+    assert!(
+        !flat.contains("\n  ("),
+        "flat output should not indent child lines: {flat}"
+    );
 }
 
 #[test]

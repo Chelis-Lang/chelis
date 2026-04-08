@@ -300,12 +300,15 @@ provenance annotation format — not whether LLMs interact with macros (they don
 
 - diagnostics, hover, completion, go-to-definition
 - Surf↔Deep visibility inside editor tooling
+- TextMate grammar (`.tmLanguage.json`) for instant Surf/Deep highlighting in VS Code
+- LSP semantic tokens override TextMate with compiler-aware highlighting once server is ready
 
 ### 2g: Tide TUI (`chelis cove`)
 
 - terminal coding environment
 - live type checking
 - Surf↔Deep toggling
+- tree-sitter grammar (`grammar.js`) for incremental Surf/Deep highlighting in the TUI
 - build and run flows without leaving the terminal
 
 ### 2s: Seed Corpus

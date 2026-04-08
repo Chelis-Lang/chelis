@@ -24,7 +24,7 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **1e** | Benchmarks, reference comparison, checked-in results | Shipped for fixed benchmark models |
 | **1f** | Executable grammar | Implemented |
 | **2a** | Algebraic effects | Initial subset shipped: effect syntax, annotated checked Deep, `Random` via `dropout` + `with seed(...)`, and `Resource(Device)` build-boundary validation |
-| **2** | Remaining Phase 2 work: broader effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | In progress; detailed design in `spec/design/chelis_phase2_plan.md` |
+| **2** | Remaining Phase 2 work: broader effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | In progress; 2e Tide Agent API + MCP, 2f LSP, 2g Cove, and the 2gb Deep pretty-formatting side quest are shipped alongside the initial 2a subset; detailed design in `spec/design/chelis_phase2_plan.md` |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
 ## Red Team Checkpoints

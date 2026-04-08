@@ -43,12 +43,20 @@ Increasing-complexity examples:
 (lit {type: (t-prim {} f32)} 3.14)
 (var {} x)
 (app {} (var {} add) (var {} x) (var {} y))
-(def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))
+(def {}
+  f
+  (fn {}
+    (params {} x y)
+    (app {} (var {} add) (var {} x) (var {} y))))
 (module {}
   demo.core
   (export {} f)
   (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))
+  (def {}
+    f
+    (fn {}
+      (params {} (x {type: (t-prim {} f32)}))
+      (var {} x))))
 ```
 
 Rules that matter most:
