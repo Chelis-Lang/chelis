@@ -464,6 +464,9 @@ Current shipped inference/checking behavior:
 - `with seed(seed) { ... }` handles `Random`
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
+- declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but
+  the current checker does not yet synthesize `Resource(Device)` onto checked `fn`
+  metadata the way it does for inferred `Random`
 - unhandled top-level `Random` is a check error with repair guidance
 
 The current shipped checker does **not** yet claim the full Phase 2 design:
@@ -488,6 +491,10 @@ Checked function bodies may also carry inferred effect metadata:
 ```scheme
 (fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
 ```
+
+In the shipped subset, this inferred `effects` metadata is used for effect information
+the checker actually synthesizes today, notably `Random`. Resource regions are enforced
+at the handler/build boundary, but are not yet written back onto checked `fn` metadata.
 
 Effect annotations remain optional in Surf and Deep. They are accepted as part of the
 surface syntax even where the current checker only implements a bounded subset of the

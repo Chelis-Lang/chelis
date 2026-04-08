@@ -26,4 +26,7 @@ Numerical paths must be validated with execution.
 - include multi-op pipelines, not just single primitives
 - exercise scalar, small tensor, and larger tensor cases where threading matters
 - document any manual long-running numerical gate separately from default CI
-
+- On the current local machine, HIP numerical/manual checks are available:
+  `rocminfo` reports `Radeon 8060S Graphics` with ISA `gfx1100`, and `hipcc` is installed.
+  Use the real GPU path rather than downgrading to evaluator-only evidence when the gate
+  specifically concerns HIP correctness.

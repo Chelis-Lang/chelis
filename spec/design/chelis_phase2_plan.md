@@ -160,14 +160,18 @@ resumable computations - complexity that is hard for both humans and LLMs.
   `sig f: tensor[n, f32] -> tensor[n, f32] ! {Random}` is valid but never required
 - Effect annotations in Deep:
   - `t-fn` type expressions may carry `eff: (effects {} ...)`
-  - checked `fn` nodes may carry inferred `effects: (effects {} ...)`
+  - checked `fn` nodes may carry inferred `effects: (effects {} ...)` for the effect
+    information the checker synthesizes today
+  - `Resource(Device)` is currently enforced at the handler/build boundary rather than
+    being synthesized back onto checked `fn` metadata
 
 **Error messages (the LLM-facing concern):**
-- "Function `predict` has unhandled effect `Random` - `dropout` at line 42 introduces
-  randomness. Wrap the call site with `with seed(42) { ... }` for deterministic
-  inference, or propagate the effect by declaring it in the caller's signature."
-- Repair suggestions must reference specific line numbers and concrete fix patterns.
-  The fitness score should degrade proportionally to the number of unhandled effects.
+- Current shipped shape:
+  "Function `predict` has unhandled effect `Random`; `dropout` requires
+  `with seed(...)`."
+- Current shipped repair suggestions are concrete but not yet source-located.
+- Line-numbered effect diagnostics remain a follow-up rather than a shipped guarantee.
+- The fitness score should degrade proportionally to the number of unhandled effects.
 
 ### Implementation Plan
 
@@ -179,7 +183,8 @@ resumable computations - complexity that is hard for both humans and LLMs.
 **Integration points:**
 - `chelis-types::check_phase0e_program()` returns the upgraded `CheckedProgram`
 - after type checking succeeds, run `chelis-effects::check_program()` on the annotated AST
-- effect information is stored as metadata on checked `fn` nodes
+- inferred effect information is stored as metadata on checked `fn` nodes where the
+  checker synthesizes it today
 - `chelis-ir::lower()` threads handler-provided seeds into `dropout`
 - `chelis-cli build` validates `with device(...)` regions against the requested target
 - Fitness scoring extended: unhandled effects reduce fitness proportionally
@@ -212,14 +217,37 @@ resumable computations - complexity that is hard for both humans and LLMs.
 Current shipped-subset oracle:
 
 ```sh
-cargo test -p chelis-effects -p chelis-ir -p chelis-cli --test cli
+cargo test --workspace
 ```
 
-Manual: write a Surf program with dropout in training, `grad` for differentiation, and
-explicit seed for deterministic inference. Check/evaluate it. Verify:
-- effect errors appear when handlers are missing
-- effect errors disappear when handlers are added
-- the evaluator produces deterministic output with a fixed seed
+Supporting manual gates for the local HIP-capable validation path:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Expected success condition: all ignored HIP correctness tests pass on a machine with a
+working ROCm + `hipcc` environment.
+
+Concrete Phase 2a effect-surface manual check:
+
+```sh
+tmpdir="$(mktemp -d)"
+cat > "$tmpdir/unhandled_random.ch" <<'EOF'
+let x: tensor[32, f32] = x
+let y: tensor[32, f32] = dropout(x, 0.5)
+EOF
+cat > "$tmpdir/handled_random.ch" <<'EOF'
+let x: tensor[32, f32] = x
+let y: tensor[32, f32] = with seed(42) { dropout(x, 0.5) }
+EOF
+cargo run -q -p chelis-cli -- check "$tmpdir/unhandled_random.ch"
+cargo run -q -p chelis-cli -- check "$tmpdir/handled_random.ch"
+```
+
+Expected success condition:
+- the first `check` output reports `UnhandledEffect` / `Random`
+- the second `check` output reports no effect errors
 
 ---
 

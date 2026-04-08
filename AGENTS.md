@@ -115,6 +115,24 @@ cargo fmt --all -- --check
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
 
+## Local HIP Environment
+
+This repository is currently being worked on from a real AMD/ROCm machine, not a
+CPU-only dev box.
+
+- Host OS: Fedora 43 (`Linux fedora 6.18.16-200.fc43.x86_64`)
+- CPU marketing name from `rocminfo`: `AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`
+- GPU marketing name from `rocminfo`: `Radeon 8060S Graphics`
+- ROCm ISA from `rocminfo`: `amdgcn-amd-amdhsa--gfx1100`
+- `hipcc` on PATH: HIP `6.4.43484-9999`
+- `rocminfo` is available and should be treated as the source of truth for local GPU
+  probing
+- `rocm-smi` may be absent; do not assume it exists before using it in instructions or
+  validation scripts
+
+Implication for agent work: on this machine, ignored/manual HIP validation gates should
+be treated as runnable unless they require a separate missing prerequisite.
+
 ## Manual Gates
 
 - Every manual acceptance gate must have a documented command, expected success condition,
@@ -154,6 +172,8 @@ default workspace run.
 - `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
 - `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
 - Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
+- On this workstation specifically, HIP manual gates can use the local `hipcc` + ROCm
+  stack directly; prefer `rocminfo` for environment confirmation
 
 ## Shared Local Skills
 

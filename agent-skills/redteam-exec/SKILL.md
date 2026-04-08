@@ -24,6 +24,9 @@ find issues in an implementation.
 - Cross-check active docs against actual shipped behavior.
 - Identify the authoritative phase oracle and verify it directly.
 - Look for machine-facing invariant violations, not just test failures.
+- On the current repo workstation, do not assume HIP gates are unavailable:
+  `rocminfo` reports a local AMD Radeon 8060S / `gfx1100` GPU and `hipcc` is on PATH.
+  Treat ignored HIP suites as executable evidence unless some other prerequisite is missing.
 
 ## Output Standard
 
