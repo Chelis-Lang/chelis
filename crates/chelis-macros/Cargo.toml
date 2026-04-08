@@ -1,8 +1,7 @@
 [package]
-name = "chelis-types"
-description = "Type checker for the Chelis language"
-edition.workspace = true
+name = "chelis-macros"
 version.workspace = true
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
@@ -12,3 +11,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chelis-surf.workspace = true
+chelis-types.workspace = true
+chelis-effects.workspace = true
+chelis-ir.workspace = true

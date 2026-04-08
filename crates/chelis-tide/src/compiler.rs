@@ -288,11 +288,30 @@ struct CompiledSource {
     forward_nodes_by_name: BTreeMap<String, NodeId>,
 }
 
+type RootNameBuilder = Box<dyn FnOnce(&HashMap<String, DeepExpr>) -> Vec<String>>;
+
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
-    let deep_exprs = deep_exprs_from_source(source_kind, source)?;
-    let root_names = match source_kind {
-        SourceKind::Surf => lowered_decl_names_from_surf(source)?,
-        SourceKind::Deep => lowered_decl_names_from_deep(&deep_exprs),
+    let (deep_exprs, root_name_builder): (Vec<DeepExpr>, RootNameBuilder) = match source_kind {
+        SourceKind::Surf => {
+            let decls = parse_surf(source)?;
+            let deep_exprs = chelis_macros::expand_program(
+                &chelis_surf::desugar::desugar_program(&decls),
+                &chelis_macros::ExpansionOptions::default(),
+            )
+            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
+            .into_exprs();
+            (
+                deep_exprs,
+                Box::new(move |type_env| lowered_root_names_from_surf(&decls, type_env)),
+            )
+        }
+        SourceKind::Deep => {
+            let deep_exprs = parse_deep(source)?;
+            (
+                deep_exprs.clone(),
+                Box::new(move |type_env| lowered_root_names_from_deep(&deep_exprs, type_env)),
+            )
+        }
     };
 
     let checked =
@@ -300,6 +319,26 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
             stage: "check".to_string(),
             errors: report.errors.iter().map(check_error_diagnostic).collect(),
         })?;
+    let root_names = root_name_builder(checked.type_env());
+    let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
+        stage: "effects".to_string(),
+        errors: errors
+            .iter()
+            .map(|error| Diagnostic {
+                kind: "effect_error".to_string(),
+                message: error.message.clone(),
+                severity: 0.8,
+                expected: None,
+                got: None,
+                suggestions: vec![],
+                span: None,
+            })
+            .collect(),
+    })?;
+    let checked = chelis_types::check_linearity(&checked).map_err(|errors| CompilerError {
+        stage: "linearity".to_string(),
+        errors: errors.iter().map(check_error_diagnostic).collect(),
+    })?;
 
     let dag = chelis_ir::lower::lower_program(&checked);
 
@@ -344,7 +383,12 @@ fn deep_exprs_from_source(source_kind: SourceKind, source: &str) -> Result<Vec<D
     match source_kind {
         SourceKind::Surf => {
             let decls = parse_surf(source)?;
-            Ok(chelis_surf::desugar::desugar_program(&decls))
+            chelis_macros::expand_program(
+                &chelis_surf::desugar::desugar_program(&decls),
+                &chelis_macros::ExpansionOptions::default(),
+            )
+            .map(|expanded| expanded.into_exprs())
+            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))
         }
         SourceKind::Deep => parse_deep(source),
     }
@@ -372,35 +416,51 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
     })
 }
 
-fn lowered_decl_names_from_surf(source: &str) -> Result<Vec<String>> {
+fn lowered_root_names_from_surf(
+    decls: &[Decl],
+    type_env: &HashMap<String, DeepExpr>,
+) -> Vec<String> {
     let mut names = Vec::new();
-    for decl in parse_surf(source)? {
-        collect_surf_decl_names(&decl, &mut names);
+    for decl in decls {
+        collect_surf_decl_names(decl, type_env, &mut names);
     }
-    Ok(names)
+    names
 }
 
-fn collect_surf_decl_names(decl: &Decl, out: &mut Vec<String>) {
+fn collect_surf_decl_names(
+    decl: &Decl,
+    type_env: &HashMap<String, DeepExpr>,
+    out: &mut Vec<String>,
+) {
     match decl {
-        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => out.push(name.clone()),
+        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => {
+            extend_root_names(name, type_env.get(name), out)
+        }
         Decl::Module { decls, .. } => {
             for decl in decls {
-                collect_surf_decl_names(decl, out);
+                collect_surf_decl_names(decl, type_env, out);
             }
         }
         _ => {}
     }
 }
 
-fn lowered_decl_names_from_deep(exprs: &[DeepExpr]) -> Vec<String> {
+fn lowered_root_names_from_deep(
+    exprs: &[DeepExpr],
+    type_env: &HashMap<String, DeepExpr>,
+) -> Vec<String> {
     let mut names = Vec::new();
     for expr in exprs {
-        collect_deep_decl_names(expr, &mut names);
+        collect_deep_decl_names(expr, type_env, &mut names);
     }
     names
 }
 
-fn collect_deep_decl_names(expr: &DeepExpr, out: &mut Vec<String>) {
+fn collect_deep_decl_names(
+    expr: &DeepExpr,
+    type_env: &HashMap<String, DeepExpr>,
+    out: &mut Vec<String>,
+) {
     let DeepExpr::List(list, _) = expr else {
         return;
     };
@@ -410,16 +470,34 @@ fn collect_deep_decl_names(expr: &DeepExpr, out: &mut Vec<String>) {
     match tag {
         "module" => {
             for child in list.elements.iter().skip(3) {
-                collect_deep_decl_names(child, out);
+                collect_deep_decl_names(child, type_env, out);
             }
         }
         "def" => {
             if let Some(name) = list.elements.get(2).and_then(symbol_name) {
-                out.push(name.to_string());
+                extend_root_names(name, type_env.get(name), out);
             }
         }
         _ => {}
     }
+}
+
+fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
+    if let Some(DeepExpr::List(list, _)) = ty
+        && let Some(tag) = list_tag(list)
+    {
+        if tag == "t-fn" {
+            extend_root_names(name, list.elements.last(), out);
+            return;
+        }
+        if tag == "t-tuple" {
+            for (index, child) in list.elements.iter().skip(2).enumerate() {
+                extend_root_names(&format!("{name}.{index}"), Some(child), out);
+            }
+            return;
+        }
+    }
+    out.push(name.to_string());
 }
 
 fn list_tag(list: &chelis_deep::List) -> Option<&str> {
@@ -497,7 +575,7 @@ fn compile_result_hip(
         ],
         compile_flags: result.compile_flags,
         link_flags: result.link_flags,
-        peak_device_bytes_estimate: Some(result.peak_device_bytes_estimate),
+        peak_device_bytes_estimate: result.peak_device_bytes_estimate,
     }
 }
 
@@ -646,7 +724,9 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             import_kind: wire_import_kind(kind),
             span: span(*s),
         },
-        Decl::Sig { name, ty, span: s } => WireSurfDecl::Sig {
+        Decl::Sig {
+            name, ty, span: s, ..
+        } => WireSurfDecl::Sig {
             name: name.clone(),
             ty: wire_type_expr(ty),
             span: span(*s),
@@ -677,6 +757,17 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             ty: wire_type_expr(ty),
             span: span(*s),
         },
+        Decl::MacroDef {
+            name,
+            params,
+            body,
+            span: s,
+        } => WireSurfDecl::MacroDef {
+            name: name.clone(),
+            params: params.clone(),
+            body: wire_expr(body),
+            span: span(*s),
+        },
         Decl::FunDef {
             name,
             dim_params,
@@ -684,6 +775,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             ret_ty,
             body,
             span: s,
+            ..
         } => WireSurfDecl::FunDef {
             name: name.clone(),
             dim_params: dim_params.clone(),
@@ -835,8 +927,9 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
             ty: ty.clone(),
             span: span(*s),
         },
-        Expr::Grad(inner, s) => WireSurfExpr::Grad {
+        Expr::Grad(inner, wrt, s) => WireSurfExpr::Grad {
             expr: Box::new(wire_expr(inner)),
+            wrt: wrt.clone(),
             span: span(*s),
         },
         Expr::Vmap(inner, axis, s) => WireSurfExpr::Vmap {
@@ -854,6 +947,20 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
         },
         Expr::Copy(inner, s) => WireSurfExpr::Copy {
             expr: Box::new(wire_expr(inner)),
+            span: span(*s),
+        },
+        Expr::Borrow(inner, s) => WireSurfExpr::Borrow {
+            expr: Box::new(wire_expr(inner)),
+            span: span(*s),
+        },
+        Expr::WithSeed(seed, body, s) => WireSurfExpr::WithSeed {
+            seed: Box::new(wire_expr(seed)),
+            body: Box::new(wire_expr(body)),
+            span: span(*s),
+        },
+        Expr::WithDevice(device, body, s) => WireSurfExpr::WithDevice {
+            device: Box::new(wire_expr(device)),
+            body: Box::new(wire_expr(body)),
             span: span(*s),
         },
         Expr::Par(exprs, s) => WireSurfExpr::Par {
@@ -1109,6 +1216,10 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Log => WireRiscOp::Log,
         RiscOp::Sin => WireRiscOp::Sin,
         RiscOp::Sqrt => WireRiscOp::Sqrt,
+        RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
+            rate: *rate,
+            seed: *seed,
+        },
         RiscOp::Sum { axis } => WireRiscOp::Sum { axis: *axis },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
@@ -1117,7 +1228,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
             axis: *axis,
-            size: *size,
+            size: size.to_string(),
         },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
             padding: padding.clone(),

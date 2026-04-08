@@ -4,11 +4,14 @@
 
 use std::collections::HashMap;
 
+use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List};
-use chelis_types::{CheckedProgram, types::Prim};
+use chelis_types::{CheckedProgram, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use crate::grad::grad_dag;
 use crate::tier2;
+use crate::vmap;
 
 /// Lower a checked Phase 0e Deep program into a RISC DAG.
 pub fn lower_program(program: &CheckedProgram) -> Dag {
@@ -21,23 +24,33 @@ pub fn lower_program(program: &CheckedProgram) -> Dag {
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
-    let mut ctx = LowerCtx::new(program_types);
+    let program_defs = program
+        .exprs()
+        .iter()
+        .filter_map(|expr| match expr {
+            Expr::List(list, _) if matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(tag), _)) if tag == "def") => {
+                match (list.elements.get(2), list.elements.get(3)) {
+                    (Some(Expr::Atom(Atom::Symbol(name), _)), Some(body)) => {
+                        Some((name.clone(), body.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    let mut ctx = LowerCtx::new(program_types, program_defs, program.linearity().clone());
     for expr in program.exprs() {
-        if let Some(id) = ctx.lower_top_level(expr) {
-            ctx.dag.add_root(id);
-        }
+        ctx.lower_top_level(expr);
     }
-    ctx.dag
+    crate::optimize::dead_code_eliminate(&ctx.dag)
 }
 
 fn assert_phase0e_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && matches!(
-                    tag.as_str(),
-                    "if" | "tuple" | "tuple-get" | "match" | "grad" | "par" | "vmap" | "jit"
-                )
+                && matches!(tag.as_str(), "if" | "match" | "par" | "jit")
             {
                 panic!(
                     "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
@@ -70,8 +83,10 @@ fn assert_phase0e_typed(expr: &Expr) {
                 && is_shape_sensitive_builtin_app(list)
                 && !has_type_metadata(list)
             {
+                let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
+                    .replace('\n', " ");
                 panic!(
-                    "shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering"
+                    "shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering: {rendered}"
                 );
             }
             for elem in &list.elements {
@@ -131,26 +146,167 @@ fn is_shape_sensitive_builtin_app(list: &List) -> bool {
     )
 }
 
+fn get_tag(list: &List) -> Option<&str> {
+    match list.elements.first() {
+        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
+        _ => None,
+    }
+}
+
+fn children(list: &List) -> &[Expr] {
+    if list.elements.len() > 2 {
+        &list.elements[2..]
+    } else {
+        &[]
+    }
+}
+
+#[derive(Clone)]
+enum CallableExpr {
+    Plain(Expr),
+    Vmap {
+        fn_expr: Expr,
+        axis: usize,
+    },
+    VmapGrad {
+        fn_expr: Expr,
+        wrt: Option<Vec<usize>>,
+        axis: usize,
+    },
+    Grad {
+        fn_expr: Expr,
+        wrt: Option<Vec<usize>>,
+    },
+}
+
+#[derive(Clone)]
+enum LoweredValue {
+    Node(NodeId),
+    Tuple(Vec<LoweredValue>),
+}
+
+impl LoweredValue {
+    fn expect_node(&self, context: &str) -> NodeId {
+        match self {
+            Self::Node(id) => *id,
+            Self::Tuple(_) => panic!("{context} expected a single tensor value"),
+        }
+    }
+
+    fn flatten_nodes(&self) -> Vec<NodeId> {
+        match self {
+            Self::Node(id) => vec![*id],
+            Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
+        }
+    }
+
+    fn tuple_get(&self, index: usize) -> Option<LoweredValue> {
+        match self {
+            Self::Tuple(items) => items.get(index).cloned(),
+            Self::Node(_) => None,
+        }
+    }
+
+    fn from_flat(template: &LoweredValue, nodes: &mut dyn Iterator<Item = NodeId>) -> LoweredValue {
+        match template {
+            Self::Node(_) => Self::Node(nodes.next().expect("flattened lowered value mismatch")),
+            Self::Tuple(items) => Self::Tuple(
+                items
+                    .iter()
+                    .map(|item| Self::from_flat(item, nodes))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("fn") {
+        return None;
+    }
+    let params = children(list).first()?;
+    let Expr::List(params_list, _) = params else {
+        return None;
+    };
+    let param = children(params_list).get(index)?;
+    let Expr::List(param_list, _) = param else {
+        return None;
+    };
+    match param_list.elements.get(1) {
+        Some(Expr::Map(meta, _)) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn axis_to_front_perm(rank: usize, axis: usize) -> Vec<usize> {
+    let mut perm = Vec::with_capacity(rank);
+    perm.push(axis);
+    perm.extend((0..rank).filter(|candidate| *candidate != axis));
+    perm
+}
+
+fn front_to_axis_perm(rank: usize, axis: usize) -> Vec<usize> {
+    let mut perm: Vec<usize> = (1..rank).collect();
+    perm.insert(axis, 0);
+    perm
+}
+
+fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
+    TensorType {
+        dims: axes.iter().map(|axis| ty.dims[*axis].clone()).collect(),
+        precision: ty.precision,
+    }
+}
+
 struct LowerCtx {
     dag: Dag,
-    bindings: HashMap<String, NodeId>,
+    bindings: HashMap<String, LoweredValue>,
     program_types: HashMap<String, TensorType>,
+    program_defs: HashMap<String, Expr>,
     random_seed: Option<u64>,
+    linearity: LinearityInfo,
 }
 
 impl LowerCtx {
-    fn new(program_types: HashMap<String, TensorType>) -> Self {
+    fn new(
+        program_types: HashMap<String, TensorType>,
+        program_defs: HashMap<String, Expr>,
+        linearity: LinearityInfo,
+    ) -> Self {
         Self {
             dag: Dag::new(),
             bindings: HashMap::new(),
             program_types,
+            program_defs,
             random_seed: None,
+            linearity,
         }
     }
 
     /// Default tensor type when we don't have richer type info.
     fn default_type() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    fn attach_reuse_hint(
+        &mut self,
+        node: NodeId,
+        app_span: Span,
+        candidate_inputs: &[NodeId],
+    ) -> NodeId {
+        if let Some(input_index) = self.linearity.reusable_input_for_span(app_span)
+            && let Some(input) = candidate_inputs.get(input_index)
+        {
+            self.dag.set_reusable_input(node, *input);
+        }
+        node
     }
 
     /// Extract a type from a metadata map if one is present, otherwise return a default.
@@ -273,84 +429,159 @@ impl LowerCtx {
         None
     }
 
-    fn lower_top_level(&mut self, expr: &Expr) -> Option<NodeId> {
+    fn dim_info_from_dim_expr(size: &DimExpr) -> Option<DimInfo> {
+        match size {
+            DimExpr::Concrete(value) => Some(DimInfo::Lit(*value)),
+            DimExpr::Sym(name) => Some(DimInfo::Named(name.clone(), None)),
+            DimExpr::Mul(_, _) | DimExpr::Div(_, _) => None,
+        }
+    }
+
+    fn fallback_expand_type(
+        &self,
+        input: NodeId,
+        axis: usize,
+        size: &DimExpr,
+    ) -> Option<TensorType> {
+        let input_ty = self.dag.get(input)?.output_type.clone();
+        let inserted_dim = Self::dim_info_from_dim_expr(size)?;
+        let mut dims = input_ty.dims;
+        if axis > dims.len() {
+            return None;
+        }
+        dims.insert(axis, inserted_dim);
+        Some(TensorType {
+            dims,
+            precision: input_ty.precision,
+        })
+    }
+
+    fn lower_top_level(&mut self, expr: &Expr) {
         if let Expr::List(list, _) = expr
             && let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
         {
             match tag.as_str() {
                 // Skip type-level declarations.
-                "defsig" | "deftype" | "typealias" => return None,
+                "defsig" | "deftype" | "typealias" => return,
                 _ => {}
             }
         }
-        Some(self.lower_expr(expr))
+
+        let value = self.lower_expr(expr);
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(|expr| match expr {
+                Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+                _ => None,
+            })
+        {
+            self.add_named_roots(name, &value);
+        } else {
+            for id in value.flatten_nodes() {
+                self.dag.add_root(id);
+            }
+        }
     }
 
-    fn lower_expr(&mut self, expr: &Expr) -> NodeId {
+    fn lower_expr(&mut self, expr: &Expr) -> LoweredValue {
         match expr {
             Expr::Atom(atom, _) => self.lower_atom(atom),
-            Expr::List(list, _) => self.lower_list(list),
-            Expr::Map(_, _) => {
+            Expr::List(list, span) => self.lower_list(list, *span),
+            Expr::Map(_, _) => LoweredValue::Node({
                 // Bare metadata map -- shouldn't appear as an expression to lower.
                 self.dag
                     .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
-            }
+            }),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
         }
     }
 
-    fn lower_atom(&mut self, atom: &Atom) -> NodeId {
+    fn add_named_roots(&mut self, prefix: &str, value: &LoweredValue) {
+        match value {
+            LoweredValue::Node(id) if !prefix.contains('.') => self.dag.add_root(*id),
+            LoweredValue::Node(id) => {
+                let output_type = self
+                    .dag
+                    .get(*id)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                let stored = self.dag.add_node(
+                    RiscOp::Store {
+                        name: prefix.to_string(),
+                    },
+                    vec![*id],
+                    output_type,
+                );
+                self.dag.add_root(stored);
+            }
+            LoweredValue::Tuple(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    self.add_named_roots(&format!("{prefix}.{index}"), item);
+                }
+            }
+        }
+    }
+
+    fn lower_atom(&mut self, atom: &Atom) -> LoweredValue {
         match atom {
             Atom::Symbol(name) => {
-                if let Some(&id) = self.bindings.get(name) {
-                    id
+                if let Some(value) = self.bindings.get(name) {
+                    value.clone()
                 } else {
-                    self.dag.add_node(
+                    LoweredValue::Node(self.dag.add_node(
                         RiscOp::Load { name: name.clone() },
                         vec![],
                         Self::default_type(),
-                    )
+                    ))
                 }
             }
-            Atom::Int(n) => self.dag.add_node(
+            Atom::Int(n) => LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const { value: *n as f64 },
                 vec![],
                 Self::default_type(),
-            ),
-            Atom::Float(f) => {
-                self.dag
-                    .add_node(RiscOp::Const { value: *f }, vec![], Self::default_type())
-            }
-            Atom::Bool(b) => self.dag.add_node(
+            )),
+            Atom::Float(f) => LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: *f },
+                vec![],
+                Self::default_type(),
+            )),
+            Atom::Bool(b) => LoweredValue::Node(self.dag.add_node(
                 RiscOp::Const {
                     value: if *b { 1.0 } else { 0.0 },
                 },
                 vec![],
                 Self::default_type(),
-            ),
-            Atom::Str(_) | Atom::Keyword(_) => {
-                self.dag
-                    .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
-            }
+            )),
+            Atom::Str(_) | Atom::Keyword(_) => LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            )),
         }
     }
 
-    fn lower_list(&mut self, list: &List) -> NodeId {
+    fn lower_expr_node(&mut self, expr: &Expr, context: &str) -> NodeId {
+        self.lower_expr(expr).expect_node(context)
+    }
+
+    fn lower_list(&mut self, list: &List, span: Span) -> LoweredValue {
         let elems = &list.elements;
         if elems.is_empty() {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
 
         let tag = match &elems[0] {
             Expr::Atom(Atom::Symbol(s), _) => s.as_str(),
             _ => {
-                return self.dag.add_node(
+                return LoweredValue::Node(self.dag.add_node(
                     RiscOp::Const { value: 0.0 },
                     vec![],
                     Self::default_type(),
-                );
+                ));
             }
         };
 
@@ -359,7 +590,7 @@ impl LowerCtx {
             "let" => self.lower_let(elems),
             "lit" => self.lower_lit(elems),
             "var" => self.lower_var(elems),
-            "app" => self.lower_app(elems),
+            "app" => self.lower_app(elems, span),
             "fn" => self.lower_fn(elems),
             "pipe" => self.lower_pipe(elems),
             "cast" => self.lower_cast(elems),
@@ -368,19 +599,23 @@ impl LowerCtx {
             "par" => self.lower_par(elems),
             "realize" => self.lower_realize(elems),
             "copy" => self.lower_identity(elems),
+            "borrow" => self.lower_identity(elems),
             "tuple-get" => self.lower_tuple_get(elems),
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
             "handle-effect" => self.lower_handle_effect(elems),
             "vmap" | "jit" => self.lower_unsupported(tag, elems),
-            "defsig" | "deftype" | "typealias" => {
-                self.dag
-                    .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
-            }
+            "defsig" | "deftype" | "typealias" => LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            )),
             _ => {
-                let mut last =
-                    self.dag
-                        .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+                let mut last = LoweredValue::Node(self.dag.add_node(
+                    RiscOp::Const { value: 0.0 },
+                    vec![],
+                    Self::default_type(),
+                ));
                 for elem in &elems[2..] {
                     last = self.lower_expr(elem);
                 }
@@ -390,11 +625,13 @@ impl LowerCtx {
     }
 
     /// `(def {meta...} name body)`
-    fn lower_def(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_def(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
         let name = match &elems[2] {
             Expr::Atom(Atom::Symbol(s), _) => s.clone(),
@@ -402,17 +639,19 @@ impl LowerCtx {
         };
         let body_id = self.lower_expr(&elems[3]);
         if !name.is_empty() {
-            self.bindings.insert(name, body_id);
+            self.bindings.insert(name, body_id.clone());
         }
         body_id
     }
 
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
-    fn lower_let(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
         let saved = self.bindings.clone();
 
@@ -436,7 +675,7 @@ impl LowerCtx {
     }
 
     /// `(lit {type: T} value)`
-    fn lower_lit(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_lit(&mut self, elems: &[Expr]) -> LoweredValue {
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             Self::type_from_meta(&meta.entries)
         } else {
@@ -460,11 +699,11 @@ impl LowerCtx {
             0.0
         };
 
-        self.dag.add_node(RiscOp::Const { value }, vec![], ty)
+        LoweredValue::Node(self.dag.add_node(RiscOp::Const { value }, vec![], ty))
     }
 
     /// `(var {meta...} name)`
-    fn lower_var(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_var(&mut self, elems: &[Expr]) -> LoweredValue {
         // C6: Extract type from metadata if available, otherwise use checked top-level type info.
         let explicit_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             Self::type_from_meta(&meta.entries)
@@ -473,28 +712,35 @@ impl LowerCtx {
         };
 
         if let Some(Expr::Atom(Atom::Symbol(name), _)) = elems.get(2) {
-            if let Some(&id) = self.bindings.get(name) {
-                return id;
+            if let Some(id) = self.bindings.get(name) {
+                return id.clone();
             }
             let ty = if explicit_ty == Self::default_type() {
                 self.program_types.get(name).cloned().unwrap_or(explicit_ty)
             } else {
                 explicit_ty
             };
-            return self
-                .dag
-                .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Load { name: name.clone() },
+                vec![],
+                ty,
+            ));
         }
-        self.dag
-            .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+        LoweredValue::Node(self.dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            Self::default_type(),
+        ))
     }
 
     /// `(app {meta...} func arg1 arg2 ...)`
-    fn lower_app(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_app(&mut self, elems: &[Expr], app_span: Span) -> LoweredValue {
         if elems.len() < 4 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
 
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
@@ -509,7 +755,16 @@ impl LowerCtx {
             && func_tag == "var"
             && let Some(Expr::Atom(Atom::Symbol(func_name), _)) = func_list.elements.get(2)
         {
-            return self.lower_builtin_app(func_name, &elems[3..], &ty);
+            return LoweredValue::Node(self.lower_builtin_app(
+                func_name,
+                &elems[3..],
+                &ty,
+                app_span,
+            ));
+        }
+
+        if let Some(lowered) = self.try_lower_callable_app(&elems[2], &elems[3..], &ty, app_span) {
+            return lowered;
         }
 
         // Not a recognized built-in -- lower func and args, return last.
@@ -520,22 +775,596 @@ impl LowerCtx {
         last
     }
 
-    fn lower_builtin_app(&mut self, func_name: &str, args: &[Expr], ty: &TensorType) -> NodeId {
+    fn try_lower_callable_app(
+        &mut self,
+        func: &Expr,
+        args: &[Expr],
+        ty: &TensorType,
+        app_span: Span,
+    ) -> Option<LoweredValue> {
+        match self.resolve_callable_expr(func) {
+            Some(CallableExpr::Plain(fn_expr)) => {
+                Some(self.lower_plain_callable_app(&fn_expr, args, app_span))
+            }
+            Some(CallableExpr::Vmap { fn_expr, axis }) => {
+                Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
+            }
+            Some(CallableExpr::VmapGrad { fn_expr, wrt, axis }) => Some(
+                self.lower_vmap_grad_callable_app(&fn_expr, wrt.as_deref(), axis, args, app_span),
+            ),
+            Some(CallableExpr::Grad { fn_expr, wrt }) => {
+                Some(self.lower_grad_callable_app(&fn_expr, wrt.as_deref(), args, app_span))
+            }
+            None => None,
+        }
+    }
+
+    fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
+        let Expr::List(list, _) = expr else {
+            return None;
+        };
+        match get_tag(list) {
+            Some("fn") => Some(CallableExpr::Plain(expr.clone())),
+            Some("var") => children(list)
+                .first()
+                .and_then(|expr| match expr {
+                    Expr::Atom(Atom::Symbol(name), _) => self.program_defs.get(name),
+                    _ => None,
+                })
+                .and_then(|body| self.resolve_callable_expr(body)),
+            Some("vmap") => {
+                let kids = children(list);
+                let axis = kids
+                    .get(1)
+                    .and_then(|expr| self.extract_usize_value(expr))
+                    .unwrap_or(0);
+                if let Some(Expr::List(grad_list, _)) = kids.first()
+                    && get_tag(grad_list) == Some("grad")
+                {
+                    let wrt = self.extract_grad_wrt_indices(grad_list);
+                    return self
+                        .resolve_callable_expr(children(grad_list).first()?)
+                        .and_then(|inner| match inner {
+                            CallableExpr::Plain(fn_expr) => {
+                                Some(CallableExpr::VmapGrad { fn_expr, wrt, axis })
+                            }
+                            _ => None,
+                        });
+                }
+                self.resolve_callable_expr(kids.first()?)
+                    .and_then(|inner| match inner {
+                        CallableExpr::Plain(fn_expr) => Some(CallableExpr::Vmap { fn_expr, axis }),
+                        CallableExpr::Vmap { .. } => None,
+                        CallableExpr::VmapGrad { .. } => None,
+                        CallableExpr::Grad { fn_expr, wrt } => {
+                            Some(CallableExpr::Grad { fn_expr, wrt })
+                        }
+                    })
+            }
+            Some("grad") => self
+                .resolve_callable_expr(children(list).first()?)
+                .and_then(|inner| match inner {
+                    CallableExpr::Plain(fn_expr) => Some(CallableExpr::Grad {
+                        fn_expr,
+                        wrt: self.extract_grad_wrt_indices(list),
+                    }),
+                    _ => None,
+                }),
+            _ => None,
+        }
+    }
+
+    fn extract_grad_wrt_indices(&self, list: &List) -> Option<Vec<usize>> {
+        let wrt_expr = children(list).get(1)?;
+        if let Expr::List(tuple, _) = wrt_expr
+            && get_tag(tuple) == Some("tuple")
+        {
+            return Some(
+                children(tuple)
+                    .iter()
+                    .filter_map(|expr| self.extract_usize_value(expr))
+                    .collect(),
+            );
+        }
+        self.extract_usize_value(wrt_expr).map(|index| vec![index])
+    }
+
+    fn is_selected_wrt(
+        &self,
+        index: usize,
+        ty: &TensorType,
+        wrt_indices: Option<&[usize]>,
+    ) -> bool {
+        let differentiable = ty.precision.is_float();
+        match wrt_indices {
+            Some(indices) => differentiable && indices.contains(&index),
+            None => differentiable,
+        }
+    }
+
+    fn lower_grad_callable_app(
+        &mut self,
+        fn_expr: &Expr,
+        wrt_indices: Option<&[usize]>,
+        args: &[Expr],
+        app_span: Span,
+    ) -> LoweredValue {
+        let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
+            return self.lower_unrepresentable("grad", std::slice::from_ref(fn_expr));
+        };
+        let param_types: Vec<TensorType> = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                extract_param_type(fn_expr, index)
+                    .map(Self::type_from_type_expr)
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        let actual_args: Vec<NodeId> = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "grad arguments"))
+            .collect();
+        let mut subctx = LowerCtx::new(
+            self.program_types.clone(),
+            self.program_defs.clone(),
+            LinearityInfo::default(),
+        );
+        let mut wrt = Vec::new();
+        for (index, (name, param_ty)) in param_names
+            .iter()
+            .zip(param_types.iter().cloned())
+            .enumerate()
+        {
+            let load = subctx.dag.add_node(
+                RiscOp::Load { name: name.clone() },
+                vec![],
+                param_ty.clone(),
+            );
+            if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                wrt.push(load);
+            }
+            subctx
+                .bindings
+                .insert(name.clone(), LoweredValue::Node(load));
+        }
+        let output = subctx
+            .lower_expr(body)
+            .expect_node("grad requires a scalar floating output");
+        subctx.dag.add_root(output);
+        let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
+            panic!("`grad(...)` lowering requires a scalar floating forward output")
+        });
+
+        let arg_map = param_names
+            .iter()
+            .zip(actual_args.iter().copied())
+            .map(|(name, arg)| (name.clone(), arg))
+            .collect::<HashMap<_, _>>();
+        let remap = self.splice_dag(&grad_result.dag, &arg_map);
+        let flattened = wrt
+            .iter()
+            .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
+            .map(|grad_node| remap[grad_node])
+            .collect::<Vec<_>>();
+        match flattened.as_slice() {
+            [single] => LoweredValue::Node(self.attach_reuse_hint(*single, app_span, &actual_args)),
+            _ => LoweredValue::Tuple(flattened.into_iter().map(LoweredValue::Node).collect()),
+        }
+    }
+
+    fn lower_plain_callable_app(
+        &mut self,
+        fn_expr: &Expr,
+        args: &[Expr],
+        _app_span: Span,
+    ) -> LoweredValue {
+        let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
+            return self
+                .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
+        };
+        let arg_ids: Vec<LoweredValue> = args.iter().map(|arg| self.lower_expr(arg)).collect();
+        let saved = self.bindings.clone();
+        for (name, arg_id) in param_names.iter().zip(arg_ids.iter().cloned()) {
+            self.bindings.insert(name.clone(), arg_id);
+        }
+        let result = self.lower_expr(body);
+        self.bindings = saved;
+        result
+    }
+
+    fn lower_vmap_callable_app(
+        &mut self,
+        fn_expr: &Expr,
+        axis: usize,
+        args: &[Expr],
+        _ty: &TensorType,
+        app_span: Span,
+    ) -> LoweredValue {
+        let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
+            return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
+        };
+        let param_types: Vec<TensorType> = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                extract_param_type(fn_expr, index)
+                    .map(Self::type_from_type_expr)
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        let actual_args: Vec<NodeId> = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "vmap arguments"))
+            .collect();
+        let actual_types: Vec<TensorType> = actual_args
+            .iter()
+            .map(|id| {
+                self.dag
+                    .get(*id)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+
+        let mut canonical_args = Vec::with_capacity(actual_args.len());
+        let mut batch_dim = None;
+        for (arg_id, arg_ty) in actual_args.iter().copied().zip(actual_types.iter()) {
+            if axis < arg_ty.dims.len() {
+                let perm = axis_to_front_perm(arg_ty.dims.len(), axis);
+                let canon_ty = permuted_tensor_type(arg_ty, &perm);
+                let canonical = if axis == 0 {
+                    arg_id
+                } else {
+                    self.dag.add_node(
+                        RiscOp::Permute { axes: perm },
+                        vec![arg_id],
+                        canon_ty.clone(),
+                    )
+                };
+                batch_dim.get_or_insert_with(|| canon_ty.dims[0].clone());
+                canonical_args.push(canonical);
+            } else {
+                canonical_args.push(arg_id);
+            }
+        }
+
+        let Some(batch_dim) = batch_dim else {
+            return self.lower_unrepresentable(
+                "vmap with no tensor arguments",
+                std::slice::from_ref(fn_expr),
+            );
+        };
+
+        let mut subctx = LowerCtx::new(
+            self.program_types.clone(),
+            self.program_defs.clone(),
+            LinearityInfo::default(),
+        );
+        for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
+            let load = subctx
+                .dag
+                .add_node(RiscOp::Load { name: name.clone() }, vec![], param_expr);
+            subctx
+                .bindings
+                .insert(name.clone(), LoweredValue::Node(load));
+        }
+        let root_value = subctx.lower_expr(body);
+        for root in root_value.flatten_nodes() {
+            subctx.dag.add_root(root);
+        }
+
+        let vmapped = match vmap::vectorize_axis0(&subctx.dag, batch_dim.clone()) {
+            Ok(dag) => dag,
+            Err(message) => {
+                panic!("`vmap` lowering failed: {message}");
+            }
+        };
+
+        let mut arg_map = HashMap::new();
+        for ((name, param_ty), arg_id) in param_names
+            .iter()
+            .zip(param_types.iter())
+            .zip(canonical_args.iter().copied())
+        {
+            arg_map.insert(
+                name.clone(),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+            );
+        }
+
+        let remap = self.splice_dag(&vmapped, &arg_map);
+        let mut flattened = root_value
+            .flatten_nodes()
+            .into_iter()
+            .map(|node| remap[&node])
+            .collect::<Vec<_>>();
+        if axis > 0 {
+            for result in &mut flattened {
+                let result_ty = self
+                    .dag
+                    .get(*result)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                if axis < result_ty.dims.len() {
+                    let perm = front_to_axis_perm(result_ty.dims.len(), axis);
+                    let perm_ty = permuted_tensor_type(&result_ty, &perm);
+                    *result =
+                        self.dag
+                            .add_node(RiscOp::Permute { axes: perm }, vec![*result], perm_ty);
+                }
+            }
+        }
+        if flattened.len() == 1 {
+            let result = self.attach_reuse_hint(flattened[0], app_span, &canonical_args);
+            LoweredValue::Node(result)
+        } else {
+            let mut iter = flattened.into_iter();
+            LoweredValue::from_flat(&root_value, &mut iter)
+        }
+    }
+
+    fn lower_vmap_grad_callable_app(
+        &mut self,
+        fn_expr: &Expr,
+        wrt_indices: Option<&[usize]>,
+        axis: usize,
+        args: &[Expr],
+        app_span: Span,
+    ) -> LoweredValue {
+        let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
+            return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
+        };
+        let param_types: Vec<TensorType> = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                extract_param_type(fn_expr, index)
+                    .map(Self::type_from_type_expr)
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        let actual_args: Vec<NodeId> = args
+            .iter()
+            .map(|arg| self.lower_expr_node(arg, "vmap(grad) arguments"))
+            .collect();
+        let actual_types: Vec<TensorType> = actual_args
+            .iter()
+            .map(|id| {
+                self.dag
+                    .get(*id)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+
+        let mut canonical_args = Vec::with_capacity(actual_args.len());
+        let mut batch_dim = None;
+        for (arg_id, arg_ty) in actual_args.iter().copied().zip(actual_types.iter()) {
+            if axis < arg_ty.dims.len() {
+                let perm = axis_to_front_perm(arg_ty.dims.len(), axis);
+                let canon_ty = permuted_tensor_type(arg_ty, &perm);
+                let canonical = if axis == 0 {
+                    arg_id
+                } else {
+                    self.dag.add_node(
+                        RiscOp::Permute { axes: perm },
+                        vec![arg_id],
+                        canon_ty.clone(),
+                    )
+                };
+                batch_dim.get_or_insert_with(|| canon_ty.dims[0].clone());
+                canonical_args.push(canonical);
+            } else {
+                canonical_args.push(arg_id);
+            }
+        }
+
+        let Some(batch_dim) = batch_dim else {
+            return self.lower_unrepresentable(
+                "vmap(grad) with no tensor arguments",
+                std::slice::from_ref(fn_expr),
+            );
+        };
+
+        let mut subctx = LowerCtx::new(
+            self.program_types.clone(),
+            self.program_defs.clone(),
+            LinearityInfo::default(),
+        );
+        let mut wrt = Vec::new();
+        for (index, (name, param_ty)) in param_names
+            .iter()
+            .zip(param_types.iter().cloned())
+            .enumerate()
+        {
+            let load = subctx.dag.add_node(
+                RiscOp::Load { name: name.clone() },
+                vec![],
+                param_ty.clone(),
+            );
+            if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                wrt.push(load);
+            }
+            subctx
+                .bindings
+                .insert(name.clone(), LoweredValue::Node(load));
+        }
+
+        let output = subctx
+            .lower_expr(body)
+            .expect_node("vmap(grad(...)) requires a scalar floating output");
+        subctx.dag.add_root(output);
+        let grad_result = grad_dag(&subctx.dag, output, &wrt).unwrap_or_else(|| {
+            panic!("`vmap(grad(...))` lowering requires a scalar floating forward output")
+        });
+        let vmapped = match vmap::vectorize_axis0(&grad_result.dag, batch_dim.clone()) {
+            Ok(dag) => dag,
+            Err(message) => {
+                panic!("`vmap(grad(...))` lowering failed: {message}");
+            }
+        };
+
+        let mut arg_map = HashMap::new();
+        for ((name, param_ty), arg_id) in param_names
+            .iter()
+            .zip(param_types.iter())
+            .zip(canonical_args.iter().copied())
+        {
+            arg_map.insert(
+                name.clone(),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+            );
+        }
+
+        let remap = self.splice_dag(&vmapped, &arg_map);
+        let mut flattened = wrt
+            .iter()
+            .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
+            .map(|grad_node| remap[grad_node])
+            .collect::<Vec<_>>();
+        if axis > 0 {
+            for result in &mut flattened {
+                let result_ty = self
+                    .dag
+                    .get(*result)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                if axis < result_ty.dims.len() {
+                    let perm = front_to_axis_perm(result_ty.dims.len(), axis);
+                    let perm_ty = permuted_tensor_type(&result_ty, &perm);
+                    *result =
+                        self.dag
+                            .add_node(RiscOp::Permute { axes: perm }, vec![*result], perm_ty);
+                }
+            }
+        }
+        match flattened.as_slice() {
+            [single] => {
+                LoweredValue::Node(self.attach_reuse_hint(*single, app_span, &canonical_args))
+            }
+            _ => LoweredValue::Tuple(flattened.into_iter().map(LoweredValue::Node).collect()),
+        }
+    }
+
+    fn materialize_vmapped_arg(
+        &mut self,
+        arg_id: NodeId,
+        original_ty: &TensorType,
+        batch_dim: &DimInfo,
+    ) -> NodeId {
+        let actual_ty = self
+            .dag
+            .get(arg_id)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        if actual_ty.dims.len() > original_ty.dims.len() {
+            return arg_id;
+        }
+
+        let mut out_ty = actual_ty.clone();
+        out_ty.dims.insert(0, batch_dim.clone());
+        self.dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::from(batch_dim),
+            },
+            vec![arg_id],
+            out_ty,
+        )
+    }
+
+    fn splice_dag(
+        &mut self,
+        dag: &Dag,
+        arg_map: &HashMap<String, NodeId>,
+    ) -> HashMap<NodeId, NodeId> {
+        let mut remap = HashMap::<NodeId, NodeId>::new();
+        for node in dag.nodes() {
+            let new_id = match &node.op {
+                RiscOp::Load { name } => {
+                    if let Some(existing) = arg_map.get(name) {
+                        *existing
+                    } else {
+                        self.dag.add_node(
+                            RiscOp::Load { name: name.clone() },
+                            vec![],
+                            node.output_type.clone(),
+                        )
+                    }
+                }
+                op => {
+                    let inputs = node.inputs.iter().map(|id| remap[id]).collect::<Vec<_>>();
+                    let new_id = self
+                        .dag
+                        .add_node(op.clone(), inputs, node.output_type.clone());
+                    if let Some(reusable_input) = node.reusable_input
+                        && let Some(mapped_input) = remap.get(&reusable_input)
+                    {
+                        self.dag.set_reusable_input(new_id, *mapped_input);
+                    }
+                    new_id
+                }
+            };
+            remap.insert(node.id, new_id);
+        }
+        remap
+    }
+
+    fn extract_fn_parts<'a>(&self, expr: &'a Expr) -> Option<(Vec<String>, &'a Expr)> {
+        let Expr::List(list, _) = expr else {
+            return None;
+        };
+        if get_tag(list) != Some("fn") {
+            return None;
+        }
+        let kids = children(list);
+        let params = kids.first()?;
+        let body = kids.get(1)?;
+        let Expr::List(params_list, _) = params else {
+            return None;
+        };
+        if get_tag(params_list) != Some("params") {
+            return None;
+        }
+        let names = children(params_list)
+            .iter()
+            .filter_map(|param| match param {
+                Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+                Expr::List(list, _) => list.elements.first().and_then(|expr| match expr {
+                    Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        Some((names, body))
+    }
+
+    fn lower_builtin_app(
+        &mut self,
+        func_name: &str,
+        args: &[Expr],
+        ty: &TensorType,
+        app_span: Span,
+    ) -> NodeId {
         match func_name {
             // Tier 1: binary elementwise
             "add" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
-                self.dag.add_node(RiscOp::Add, vec![a, b], ty.clone())
+                let a = self.lower_expr_node(&args[0], "add lhs");
+                let b = self.lower_expr_node(&args[1], "add rhs");
+                let node = self.dag.add_node(RiscOp::Add, vec![a, b], ty.clone());
+                self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "mul" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
-                self.dag.add_node(RiscOp::Mul, vec![a, b], ty.clone())
+                let a = self.lower_expr_node(&args[0], "mul lhs");
+                let b = self.lower_expr_node(&args[1], "mul rhs");
+                let node = self.dag.add_node(RiscOp::Mul, vec![a, b], ty.clone());
+                self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "cmplt" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "cmplt lhs");
+                let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 // C5: CmpLt always produces Bool output regardless of input precision.
                 let bool_ty = TensorType {
                     dims: ty.dims.clone(),
@@ -544,64 +1373,76 @@ impl LowerCtx {
                 self.dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty)
             }
             "max_elem" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
-                self.dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone())
+                let a = self.lower_expr_node(&args[0], "max_elem lhs");
+                let b = self.lower_expr_node(&args[1], "max_elem rhs");
+                let node = self.dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone());
+                self.attach_reuse_hint(node, app_span, &[a, b])
             }
 
             // Tier 1: unary elementwise
             "neg" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                self.dag.add_node(RiscOp::Neg, vec![x], ty.clone())
+                let x = self.lower_expr_node(&args[0], "neg input");
+                let node = self.dag.add_node(RiscOp::Neg, vec![x], ty.clone());
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "exp" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                self.lower_transcendental(RiscOp::Exp, x, ty)
+                let x = self.lower_expr_node(&args[0], "exp input");
+                let node = self.lower_transcendental(RiscOp::Exp, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "log" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                self.lower_transcendental(RiscOp::Log, x, ty)
+                let x = self.lower_expr_node(&args[0], "log input");
+                let node = self.lower_transcendental(RiscOp::Log, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "sin" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                self.lower_transcendental(RiscOp::Sin, x, ty)
+                let x = self.lower_expr_node(&args[0], "sin input");
+                let node = self.lower_transcendental(RiscOp::Sin, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "sqrt" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                self.lower_transcendental(RiscOp::Sqrt, x, ty)
+                let x = self.lower_expr_node(&args[0], "sqrt input");
+                let node = self.lower_transcendental(RiscOp::Sqrt, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "dropout" if args.len() == 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "dropout input");
                 let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
                 let seed = self.random_seed.unwrap_or(0);
-                self.dag
-                    .add_node(RiscOp::Dropout { rate, seed }, vec![x], ty.clone())
+                let node = self
+                    .dag
+                    .add_node(RiscOp::Dropout { rate, seed }, vec![x], ty.clone());
+                self.attach_reuse_hint(node, app_span, &[x])
             }
 
             // Tier 2 decompositions
             "sub" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
-                tier2::lower_sub(&mut self.dag, a, b, ty)
+                let a = self.lower_expr_node(&args[0], "sub lhs");
+                let b = self.lower_expr_node(&args[1], "sub rhs");
+                let node = tier2::lower_sub(&mut self.dag, a, b, ty);
+                self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "relu" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                tier2::lower_relu(&mut self.dag, x, ty)
+                let x = self.lower_expr_node(&args[0], "relu input");
+                let node = tier2::lower_relu(&mut self.dag, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "sigmoid" if args.len() == 1 => {
-                let x = self.lower_expr(&args[0]);
-                tier2::lower_sigmoid(&mut self.dag, x, ty)
+                let x = self.lower_expr_node(&args[0], "sigmoid input");
+                let node = tier2::lower_sigmoid(&mut self.dag, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "div" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
-                tier2::lower_div(&mut self.dag, a, b, ty)
+                let a = self.lower_expr_node(&args[0], "div lhs");
+                let b = self.lower_expr_node(&args[1], "div rhs");
+                let node = tier2::lower_div(&mut self.dag, a, b, ty);
+                self.attach_reuse_hint(node, app_span, &[a, b])
             }
 
             // Tier 2 higher-level ops (spec §3.4, §4.1–4.2)
             "matmul" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "matmul lhs");
+                let b = self.lower_expr_node(&args[1], "matmul rhs");
                 let a_ty = self
                     .dag
                     .get(a)
@@ -615,29 +1456,31 @@ impl LowerCtx {
                 tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty)
             }
             "softmax" if args.len() == 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "softmax input");
                 let axis = self.extract_axis(&args[1]);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                tier2::lower_softmax(&mut self.dag, x, axis, &x_ty)
+                let node = tier2::lower_softmax(&mut self.dag, x, axis, &x_ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "mean" if args.len() == 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "mean input");
                 let axis = self.extract_axis(&args[1]);
                 let x_ty = self
                     .dag
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                tier2::lower_mean(&mut self.dag, x, axis, &x_ty)
+                let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty);
+                self.attach_reuse_hint(node, app_span, &[x])
             }
             "layer_norm" if args.len() == 3 => {
-                let x = self.lower_expr(&args[0]);
-                let gamma = self.lower_expr(&args[1]);
-                let beta = self.lower_expr(&args[2]);
+                let x = self.lower_expr_node(&args[0], "layer_norm input");
+                let gamma = self.lower_expr_node(&args[1], "layer_norm gamma");
+                let beta = self.lower_expr_node(&args[2], "layer_norm beta");
                 let x_ty = self
                     .dag
                     .get(x)
@@ -653,7 +1496,7 @@ impl LowerCtx {
                     .get(beta)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                tier2::lower_layer_norm(
+                let node = tier2::lower_layer_norm(
                     &mut self.dag,
                     x,
                     gamma,
@@ -662,11 +1505,12 @@ impl LowerCtx {
                     &gamma_ty,
                     &beta_ty,
                     1e-5,
-                )
+                );
+                self.attach_reuse_hint(node, app_span, &[x, gamma, beta])
             }
             "conv2d" if args.len() >= 2 => {
-                let input = self.lower_expr(&args[0]);
-                let kernel = self.lower_expr(&args[1]);
+                let input = self.lower_expr_node(&args[0], "conv2d input");
+                let kernel = self.lower_expr_node(&args[1], "conv2d kernel");
                 let stride = args
                     .get(2)
                     .and_then(|expr| self.extract_usize_value(expr))
@@ -699,60 +1543,60 @@ impl LowerCtx {
 
             // H1: Tier 2 comparison ops
             "gt" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "gt lhs");
+                let b = self.lower_expr_node(&args[1], "gt rhs");
                 tier2::lower_gt(&mut self.dag, a, b, ty)
             }
             "gte" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "gte lhs");
+                let b = self.lower_expr_node(&args[1], "gte rhs");
                 tier2::lower_gte(&mut self.dag, a, b, ty)
             }
             "lte" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "lte lhs");
+                let b = self.lower_expr_node(&args[1], "lte rhs");
                 tier2::lower_lte(&mut self.dag, a, b, ty)
             }
             "eq" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "eq lhs");
+                let b = self.lower_expr_node(&args[1], "eq rhs");
                 tier2::lower_eq(&mut self.dag, a, b, ty)
             }
             "neq" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "neq lhs");
+                let b = self.lower_expr_node(&args[1], "neq rhs");
                 tier2::lower_neq(&mut self.dag, a, b, ty)
             }
             "min_elem" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "min_elem lhs");
+                let b = self.lower_expr_node(&args[1], "min_elem rhs");
                 tier2::lower_min_elem(&mut self.dag, a, b, ty)
             }
 
             // H2: Boolean operators
             "and" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "and lhs");
+                let b = self.lower_expr_node(&args[1], "and rhs");
                 tier2::lower_and(&mut self.dag, a, b, ty)
             }
             "or" if args.len() == 2 => {
-                let a = self.lower_expr(&args[0]);
-                let b = self.lower_expr(&args[1]);
+                let a = self.lower_expr_node(&args[0], "or lhs");
+                let b = self.lower_expr_node(&args[1], "or rhs");
                 tier2::lower_or(&mut self.dag, a, b, ty)
             }
             "not" if args.len() == 1 => {
-                let a = self.lower_expr(&args[0]);
+                let a = self.lower_expr_node(&args[0], "not input");
                 tier2::lower_not(&mut self.dag, a, ty)
             }
 
             // Tier 1: reductions
             "sum" if args.len() == 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "sum input");
                 let axis = self.extract_axis(&args[1]);
                 self.dag.add_node(RiscOp::Sum { axis }, vec![x], ty.clone())
             }
             "max_reduce" if args.len() == 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "max_reduce input");
                 let axis = self.extract_axis(&args[1]);
                 self.dag
                     .add_node(RiscOp::MaxReduce { axis }, vec![x], ty.clone())
@@ -760,7 +1604,7 @@ impl LowerCtx {
 
             // H3: Movement ops -- extract parameters from Deep AST args where possible.
             "reshape" if !args.is_empty() => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "reshape input");
                 // Try to extract new_shape from the second arg; fall back to output type dims.
                 let new_shape = if args.len() >= 2 {
                     self.extract_dim_list(&args[1])
@@ -776,25 +1620,32 @@ impl LowerCtx {
                     .add_node(RiscOp::Reshape { new_shape }, vec![x], out_ty)
             }
             "permute" if args.len() >= 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "permute input");
                 // Extract axes ordering from remaining args.
                 let axes = self.extract_usize_list(&args[1..]);
                 self.dag
                     .add_node(RiscOp::Permute { axes }, vec![x], ty.clone())
             }
             "expand" if args.len() >= 2 => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "expand input");
                 let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
                 let size = if args.len() >= 3 {
-                    DimExpr::Concrete(self.extract_usize_value(&args[2]).unwrap_or(1))
+                    self.extract_dim_expr_value(&args[2])
+                        .unwrap_or(DimExpr::Concrete(1))
                 } else {
                     DimExpr::Concrete(1)
                 };
+                let out_ty = if *ty == Self::default_type() {
+                    self.fallback_expand_type(x, axis, &size)
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
                 self.dag
-                    .add_node(RiscOp::Expand { axis, size }, vec![x], ty.clone())
+                    .add_node(RiscOp::Expand { axis, size }, vec![x], out_ty)
             }
             "pad" if !args.is_empty() => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "pad input");
                 let padding = if args.len() >= 2 {
                     self.extract_pair_list(&args[1]).unwrap_or_default()
                 } else {
@@ -809,7 +1660,7 @@ impl LowerCtx {
                     .add_node(RiscOp::Pad { padding, fill }, vec![x], ty.clone())
             }
             "shrink" if !args.is_empty() => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "shrink input");
                 let bounds = if args.len() >= 2 {
                     self.extract_pair_list(&args[1]).unwrap_or_default()
                 } else {
@@ -819,7 +1670,7 @@ impl LowerCtx {
                     .add_node(RiscOp::Shrink { bounds }, vec![x], ty.clone())
             }
             "stride" if !args.is_empty() => {
-                let x = self.lower_expr(&args[0]);
+                let x = self.lower_expr_node(&args[0], "stride input");
                 let strides = if args.len() >= 2 {
                     self.extract_usize_list(&args[1..])
                 } else {
@@ -876,7 +1727,25 @@ impl LowerCtx {
         }
     }
 
-    fn lower_handle_effect(&mut self, elems: &[Expr]) -> NodeId {
+    fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
+        if let Some(value) = self.extract_usize_value(expr) {
+            return Some(DimExpr::Concrete(value));
+        }
+
+        match expr {
+            Expr::Atom(Atom::Symbol(name), _) => Some(DimExpr::Sym(name.clone())),
+            Expr::List(list, _) => match (list.elements.first(), list.elements.get(2)) {
+                (
+                    Some(Expr::Atom(Atom::Symbol(tag), _)),
+                    Some(Expr::Atom(Atom::Symbol(name), _)),
+                ) if tag == "var" => Some(DimExpr::Sym(name.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
         let effect = match elems.get(1) {
             Some(Expr::Map(meta, _)) => meta
                 .entries
@@ -898,9 +1767,11 @@ impl LowerCtx {
             }
             Some("resource") if elems.len() >= 4 => self.lower_expr(&elems[3]),
             _ if elems.len() >= 4 => self.lower_expr(&elems[3]),
-            _ => self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type()),
+            _ => LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            )),
         }
     }
 
@@ -1011,11 +1882,13 @@ impl LowerCtx {
     }
 
     /// `(fn {} (params {} p1 p2 ...) body)`
-    fn lower_fn(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_fn(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
         let saved = self.bindings.clone();
 
@@ -1028,7 +1901,8 @@ impl LowerCtx {
                         vec![],
                         Self::default_type(),
                     );
-                    self.bindings.insert(name.clone(), load_id);
+                    self.bindings
+                        .insert(name.clone(), LoweredValue::Node(load_id));
                 }
                 // Handle (param {} name) form.
                 if let Expr::List(param_list, _) = param
@@ -1043,7 +1917,8 @@ impl LowerCtx {
                     let load_id =
                         self.dag
                             .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
-                    self.bindings.insert(name.clone(), load_id);
+                    self.bindings
+                        .insert(name.clone(), LoweredValue::Node(load_id));
                 }
             }
         }
@@ -1054,11 +1929,13 @@ impl LowerCtx {
     }
 
     /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
-    fn lower_pipe(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_pipe(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 3 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
         let mut current = self.lower_expr(&elems[2]);
         for func_expr in &elems[3..] {
@@ -1068,14 +1945,29 @@ impl LowerCtx {
                 && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
             {
                 let ty = Self::default_type();
+                let current_node = current.expect_node("pipe stage");
                 current = match fname.as_str() {
-                    "neg" => self.dag.add_node(RiscOp::Neg, vec![current], ty),
-                    "exp" => self.dag.add_node(RiscOp::Exp, vec![current], ty),
-                    "log" => self.dag.add_node(RiscOp::Log, vec![current], ty),
-                    "sin" => self.dag.add_node(RiscOp::Sin, vec![current], ty),
-                    "sqrt" => self.dag.add_node(RiscOp::Sqrt, vec![current], ty),
-                    "relu" => tier2::lower_relu(&mut self.dag, current, &ty),
-                    "sigmoid" => tier2::lower_sigmoid(&mut self.dag, current, &ty),
+                    "neg" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Neg, vec![current_node], ty))
+                    }
+                    "exp" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Exp, vec![current_node], ty))
+                    }
+                    "log" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Log, vec![current_node], ty))
+                    }
+                    "sin" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Sin, vec![current_node], ty))
+                    }
+                    "sqrt" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Sqrt, vec![current_node], ty))
+                    }
+                    "relu" => {
+                        LoweredValue::Node(tier2::lower_relu(&mut self.dag, current_node, &ty))
+                    }
+                    "sigmoid" => {
+                        LoweredValue::Node(tier2::lower_sigmoid(&mut self.dag, current_node, &ty))
+                    }
                     _ => current,
                 };
                 continue;
@@ -1087,13 +1979,15 @@ impl LowerCtx {
     }
 
     /// `(cast {} expr (t-prim {} name))` -- precision cast.
-    fn lower_cast(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_cast(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() < 4 {
-            return self
-                .dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type());
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
         }
-        let x = self.lower_expr(&elems[2]);
+        let x = self.lower_expr_node(&elems[2], "cast input");
         let input_ty = self
             .dag
             .get(x)
@@ -1112,67 +2006,106 @@ impl LowerCtx {
             dims: input_ty.dims,
             precision: new_precision,
         };
-        self.dag
-            .add_node(RiscOp::Cast { new_precision }, vec![x], ty)
+        LoweredValue::Node(
+            self.dag
+                .add_node(RiscOp::Cast { new_precision }, vec![x], ty),
+        )
     }
 
     /// `(grad {} f)` -- rejected before lowering.
-    fn lower_grad(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_grad(&mut self, elems: &[Expr]) -> LoweredValue {
         self.lower_unrepresentable("grad", elems)
     }
 
     /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
-    fn lower_if(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
         self.lower_unrepresentable("if", elems)
     }
 
     /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
-    fn lower_tuple(&mut self, elems: &[Expr]) -> NodeId {
-        self.lower_unrepresentable("tuple", elems)
+    fn lower_tuple(&mut self, elems: &[Expr]) -> LoweredValue {
+        LoweredValue::Tuple(
+            elems
+                .iter()
+                .skip(2)
+                .map(|expr| self.lower_expr(expr))
+                .collect(),
+        )
     }
 
     /// `(par {} expr1 expr2 ...)` -- not representable in the Phase 0 RISC DAG.
-    fn lower_par(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_par(&mut self, elems: &[Expr]) -> LoweredValue {
         self.lower_unrepresentable("par", elems)
     }
 
     /// `(realize {} expr)` -- explicit materialization barrier.
-    fn lower_realize(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_realize(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() >= 3 {
             let input = self.lower_expr(&elems[2]);
+            if let LoweredValue::Tuple(items) = &input {
+                return LoweredValue::Tuple(
+                    items
+                        .iter()
+                        .map(|item| {
+                            let id = item.expect_node("realize tuple leaf");
+                            let output_type = self
+                                .dag
+                                .get(id)
+                                .map(|node| node.output_type.clone())
+                                .unwrap_or_else(Self::default_type);
+                            LoweredValue::Node(self.dag.add_node(
+                                RiscOp::Realize,
+                                vec![id],
+                                output_type,
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            let input = input.expect_node("realize input");
             let output_type = self
                 .dag
                 .get(input)
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type);
-            self.dag.add_node(RiscOp::Realize, vec![input], output_type)
+            LoweredValue::Node(self.dag.add_node(RiscOp::Realize, vec![input], output_type))
         } else {
-            self.dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ))
         }
     }
 
     /// `(copy {} expr)` -- identity in Phase 0/1.
-    fn lower_identity(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_identity(&mut self, elems: &[Expr]) -> LoweredValue {
         if elems.len() >= 3 {
             self.lower_expr(&elems[2])
         } else {
-            self.dag
-                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type())
+            LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ))
         }
     }
 
     /// `(tuple-get {} tuple_expr index)` -- not representable in the Phase 0 RISC DAG.
-    fn lower_tuple_get(&mut self, elems: &[Expr]) -> NodeId {
-        self.lower_unrepresentable("tuple-get", elems)
+    fn lower_tuple_get(&mut self, elems: &[Expr]) -> LoweredValue {
+        let tuple = self.lower_expr(&elems[2]);
+        let index = self.extract_usize_value(&elems[3]).unwrap_or(0);
+        tuple
+            .tuple_get(index)
+            .unwrap_or_else(|| panic!("tuple-get index {index} out of bounds during lowering"))
     }
 
     /// `(match {} scrutinee (arm {} pattern body) ...)` -- not representable in the Phase 0 RISC DAG.
-    fn lower_match(&mut self, elems: &[Expr]) -> NodeId {
+    fn lower_match(&mut self, elems: &[Expr]) -> LoweredValue {
         self.lower_unrepresentable("match", elems)
     }
 
-    fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> NodeId {
+    fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
         for expr in elems.iter().skip(2) {
             let _ = self.lower_expr(expr);
         }
@@ -1180,7 +2113,7 @@ impl LowerCtx {
     }
 
     /// Unsupported Phase 2 constructs (vmap, jit).
-    fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> NodeId {
+    fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> LoweredValue {
         panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
     }
 }
@@ -1194,6 +2127,10 @@ mod tests {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_phase0e_program(&exprs)
             .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         lower_program(&checked)
     }
 
@@ -1203,6 +2140,24 @@ mod tests {
         assert_eq!(dag.len(), 1);
         assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 1.0 });
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_reusable_input_from_linearity_hint() {
+        let src = r#"
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
+                   (var {} relu)
+                   (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x)))
+        "#;
+        let dag = parse_and_lower(src);
+        let node = dag
+            .roots()
+            .last()
+            .and_then(|id| dag.get(*id))
+            .expect("lowered root node");
+        assert_eq!(node.reusable_input, Some(NodeId(0)));
     }
 
     #[test]
@@ -1285,6 +2240,49 @@ mod tests {
             RiscOp::Load {
                 name: "weights".to_string()
             }
+        );
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn tuple_return_lowers_to_named_store_roots() {
+        let src = r#"
+            (def {} grads
+              (tuple {}
+                (lit {type: (t-prim {} f32)} 1.0)
+                (lit {type: (t-prim {} f32)} 2.0)))
+        "#;
+        let dag = parse_and_lower(src);
+        let roots = dag.roots();
+        assert_eq!(roots.len(), 2);
+        assert!(matches!(
+            dag.get(roots[0]).map(|node| &node.op),
+            Some(RiscOp::Store { name }) if name == "grads.0"
+        ));
+        assert!(matches!(
+            dag.get(roots[1]).map(|node| &node.op),
+            Some(RiscOp::Store { name }) if name == "grads.1"
+        ));
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn tuple_get_resolves_during_lowering_without_tuple_ir_node() {
+        let src = r#"
+            (def {} grads
+              (tuple {}
+                (lit {type: (t-prim {} f32)} 1.0)
+                (lit {type: (t-prim {} f32)} 2.0)))
+            (def {} answer
+              (tuple-get {}
+                (var {} grads)
+                1))
+        "#;
+        let dag = parse_and_lower(src);
+        assert!(
+            dag.nodes()
+                .iter()
+                .all(|node| { matches!(node.op, RiscOp::Const { .. } | RiscOp::Store { .. }) })
         );
         assert!(verify::verify(&dag).is_empty());
     }
@@ -1536,6 +2534,10 @@ mod regression_tests {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_phase0e_program(&exprs)
             .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         lower_program(&checked)
     }
 
@@ -1635,7 +2637,7 @@ mod regression_tests {
             "#,
         )
         .expect("parse failed");
-        let mut ctx = LowerCtx::new(HashMap::new());
+        let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
         let _ = ctx.lower_expr(&exprs[0]);
         let load_x = ctx
             .dag
@@ -1661,13 +2663,13 @@ mod regression_tests {
 
     // Fix 4: Unsupported constructs.
     #[test]
-    #[should_panic(expected = "`grad` is not supported by Phase 0e lowering")]
+    #[should_panic(expected = "`grad` is not representable in the Phase 0e RISC DAG")]
     fn fix4_grad_is_rejected_before_lowering() {
         let _ = parse_and_lower("(grad {} (var {} f))");
     }
 
     #[test]
-    #[should_panic(expected = "`vmap` is not supported by Phase 0e lowering")]
+    #[should_panic(expected = "`vmap` is not representable in the Phase 0e RISC DAG")]
     fn fix4_vmap_is_rejected_before_lowering() {
         let _ = parse_and_lower("(vmap {} (var {} f))");
     }
@@ -1772,13 +2774,28 @@ mod regression_tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "Phase 0e builtin `reshape` requires explicit type metadata on the app node"
-    )]
     fn shape_sensitive_app_without_type_metadata_is_rejected() {
-        let _ = parse_and_lower(
+        let exprs = chelis_deep::parser::parse_str(
             "(def {} x (lit {} 1.0))
              (def {} y (app {} (var {} reshape) (var {} x)))",
+        )
+        .expect("parse failed");
+        let err = std::panic::catch_unwind(|| {
+            for expr in &exprs {
+                assert_phase0e_typed(expr);
+            }
+        })
+        .expect_err("missing type metadata should panic during lowering preflight");
+        let message = if let Some(message) = err.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = err.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else {
+            String::new()
+        };
+        assert!(
+            message.contains("shape-sensitive Phase 0e app nodes must carry explicit type metadata before lowering"),
+            "unexpected panic message: {message}"
         );
     }
 }

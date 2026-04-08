@@ -1,6 +1,7 @@
 use chelis_e2e::data::*;
 use chelis_e2e::train::*;
 use chelis_ir::grad_then_fuse;
+use chelis_ir::verify;
 
 #[test]
 fn mnist_surf_pipeline_builds_trainable_program() {
@@ -13,6 +14,11 @@ fn mnist_surf_pipeline_builds_trainable_program() {
         program.param_nodes.len(),
         4,
         "expected 4 trainable parameters"
+    );
+    let verify_errors = verify::verify(&program.dag);
+    assert!(
+        verify_errors.is_empty(),
+        "compiled MNIST program lowered an invalid DAG: {verify_errors:?}"
     );
 }
 

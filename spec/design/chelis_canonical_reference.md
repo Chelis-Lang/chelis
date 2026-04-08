@@ -222,6 +222,13 @@ Core transforms remain first-class:
 - `grad(f)` for reverse-mode AD
 - `vmap(f)` for vectorization
 - `jit(f)` as a future compilation boundary marker
+- the shipped executable 2d subset supports direct `vmap(f)(args...)` and
+  `vmap(grad(f))(args...)` applications for named defs and inline lambdas, lowering the
+  transform away before ordinary DAG codegen
+- the shipped executable `vmap(grad(f))` path now also supports flat tuple-valued
+  gradient payloads from multi-parameter `grad(..., wrt=(...))`
+- first-class stored/returned transformed function values remain out of the executable
+  path for now
 
 Implementation-surface note:
 
@@ -241,6 +248,13 @@ only base tags.
 `vmap` remains a core compiler transform in the same sense as `grad`: a DAG rewrite
 whose semantics compose with the rest of the lowering pipeline rather than a library
 helper.
+
+Current 2d performance boundary:
+
+- batched `matmul` is correct on both backends but stays in the generic
+  `expand -> mul -> sum` decomposition
+- the existing HIP rank-2 BLAS fast path does not yet upgrade vmapped rank-3 matmul into
+  a batched BLAS call
 
 ---
 

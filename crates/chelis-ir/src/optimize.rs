@@ -102,6 +102,11 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
                 .map(|&old| *id_map.get(&old.0).unwrap())
                 .collect();
             let new_id = new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone());
+            if let Some(reusable_input) = node.reusable_input
+                && let Some(&mapped_input) = id_map.get(&reusable_input.0)
+            {
+                new_dag.set_reusable_input(new_id, mapped_input);
+            }
             id_map.insert(old_id, new_id);
         }
     }
@@ -137,6 +142,11 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
         } else {
             let new_id =
                 new_dag.add_node(node.op.clone(), remapped_inputs, node.output_type.clone());
+            if let Some(reusable_input) = node.reusable_input
+                && let Some(&mapped_input) = id_map.get(&reusable_input.0)
+            {
+                new_dag.set_reusable_input(new_id, mapped_input);
+            }
             id_map.insert(node.id.0, new_id);
             seen.insert(cse_key, new_id);
         }

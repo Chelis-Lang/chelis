@@ -331,6 +331,7 @@ dependencies = [
  "chelis-effects",
  "chelis-ir",
  "chelis-lsp",
+ "chelis-macros",
  "chelis-surf",
  "chelis-tide",
  "chelis-types",
@@ -373,6 +374,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-macros",
  "chelis-surf",
  "chelis-types",
  "predicates",
@@ -415,6 +417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-macros"
+version = "0.1.0"
+dependencies = [
+ "chelis-deep",
+ "chelis-effects",
+ "chelis-ir",
+ "chelis-surf",
+ "chelis-types",
+ "thiserror",
+]
+
+[[package]]
 name = "chelis-surf"
 version = "0.1.0"
 dependencies = [
@@ -433,7 +447,9 @@ dependencies = [
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",
+ "chelis-effects",
  "chelis-ir",
+ "chelis-macros",
  "chelis-surf",
  "chelis-types",
  "chelis-validate",
@@ -451,6 +467,7 @@ name = "chelis-types"
 version = "0.1.0"
 dependencies = [
  "chelis-deep",
+ "chelis-surf",
  "thiserror",
 ]
 
@@ -459,6 +476,7 @@ name = "chelis-validate"
 version = "0.1.0"
 dependencies = [
  "chelis-deep",
+ "chelis-macros",
  "chelis-surf",
  "pest",
  "pest_derive",

@@ -348,6 +348,12 @@ pub enum WireSurfDecl {
         ty: WireSurfTypeExpr,
         span: Span,
     },
+    MacroDef {
+        name: String,
+        params: Vec<String>,
+        body: WireSurfExpr,
+        span: Span,
+    },
     FunDef {
         name: String,
         dim_params: Vec<String>,
@@ -480,6 +486,8 @@ pub enum WireSurfExpr {
     },
     Grad {
         expr: Box<WireSurfExpr>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wrt: Option<Vec<String>>,
         span: Span,
     },
     Vmap {
@@ -497,6 +505,20 @@ pub enum WireSurfExpr {
     },
     Copy {
         expr: Box<WireSurfExpr>,
+        span: Span,
+    },
+    Borrow {
+        expr: Box<WireSurfExpr>,
+        span: Span,
+    },
+    WithSeed {
+        seed: Box<WireSurfExpr>,
+        body: Box<WireSurfExpr>,
+        span: Span,
+    },
+    WithDevice {
+        device: Box<WireSurfExpr>,
+        body: Box<WireSurfExpr>,
         span: Span,
     },
     Par {
@@ -730,6 +752,10 @@ pub enum WireRiscOp {
     Log,
     Sin,
     Sqrt,
+    Dropout {
+        rate: f64,
+        seed: u64,
+    },
     Sum {
         axis: usize,
     },
@@ -744,7 +770,7 @@ pub enum WireRiscOp {
     },
     Expand {
         axis: usize,
-        size: usize,
+        size: String,
     },
     Pad {
         padding: Vec<(usize, usize)>,

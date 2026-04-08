@@ -280,6 +280,7 @@ pub struct DagNode {
     pub op: RiscOp,
     pub inputs: Vec<NodeId>,
     pub output_type: TensorType,
+    pub reusable_input: Option<NodeId>,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -302,8 +303,15 @@ impl Dag {
             op,
             inputs,
             output_type,
+            reusable_input: None,
         });
         id
+    }
+
+    pub fn set_reusable_input(&mut self, id: NodeId, input: NodeId) {
+        if let Some(node) = self.nodes.get_mut(id.0) {
+            node.reusable_input = Some(input);
+        }
     }
 
     pub fn get(&self, id: NodeId) -> Option<&DagNode> {

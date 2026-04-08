@@ -51,6 +51,12 @@ pub enum Decl {
         value: Expr,
         span: Span,
     },
+    MacroDef {
+        name: String,
+        params: Vec<String>,
+        body: Expr,
+        span: Span,
+    },
     Export {
         names: Vec<String>,
         span: Span,
@@ -104,11 +110,12 @@ pub enum Expr {
     Lambda(Vec<Param>, Box<Expr>, Span),   // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
     Cast(Box<Expr>, String, Span), // cast(x, f64)
-    Grad(Box<Expr>, Span),
+    Grad(Box<Expr>, Option<Vec<String>>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),
     Realize(Box<Expr>, Span),
     Copy(Box<Expr>, Span),
+    Borrow(Box<Expr>, Span),
     WithSeed(Box<Expr>, Box<Expr>, Span),
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }

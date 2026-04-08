@@ -29,6 +29,7 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 | `loc` | `(loc file line col)` | Source location for error reporting |
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
+| `source` | macro invocation | Provenance: the macro call this node expanded from |
 
 **Reserved for later phases:**
 
@@ -36,7 +37,6 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 |---|---|---|
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
-| `source` | macro invocation | Provenance: the macro call this node expanded from |
 
 **Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
@@ -45,7 +45,8 @@ Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {typ
 Provenance is informational — it does not affect parsing, type checking, or evaluation.
 The node is a standard `app` node; the `source` key is ignored by all compiler passes
 except error reporting.
-The provenance format will be fully specified in Phase 2c.
+The shipped provenance format is `{source: (macro-name original-arg...)}` where the
+value is a plain Deep list recording the macro name and original invocation arguments.
 
 **Macro boundary rule (Phase 2c).** LLM-facing Deep is always expanded Deep. Macro
 definition and invocation forms may exist as compiler-internal or pre-expansion syntax,
@@ -53,6 +54,10 @@ but the AST surfaced to AI generation, repair, fitness scoring, decompilation
 workflows, or downstream transforms contains only ordinary Deep nodes plus optional
 `source` metadata. Macro syntax is a human-authoring layer that compiles away before
 those workflows begin.
+
+Compiler-internal macro tags such as `defmacro` and `macro-invoke` are intentionally
+outside the public Deep grammar. `chelis validate --deep` remains strict about the
+public vocabulary and rejects those internal pre-expansion forms.
 
 ### 1.2 Rationale
 
@@ -67,6 +72,8 @@ The universal 3-tuple means every node has identical shape. An agent constructin
 ## 2. Tag Vocabulary
 
 The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tags are parse errors.
+The compiler may use extra internal tags during pre-expansion phases, but they are not
+part of this public vocabulary.
 
 ### 2.1 Module Structure
 
@@ -147,12 +154,13 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `grad` | `(grad {} expr)` | Reverse-mode AD |
+| `grad` | `(grad {} expr)` or `(grad {wrt: ...} expr idx-or-idx-tuple)` | Reverse-mode AD; `wrt` child selects parameter indices |
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
 | `cast` | `(cast {} expr target-type)` | Precision cast |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication (Phase 2: linearity) |
+| `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
 ### 2.8 Metaprogramming
 
@@ -180,14 +188,14 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 |---|---|---|
 | Module | 4 | module, import, import-all, export |
 | Declarations | 7 | def, defsig, deftype, typealias, variant, field, defdim |
-| Expressions | 17 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect |
+| Expressions | 18 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect, borrow |
 | Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 7 | t-prim, t-fn, t-tensor, t-adt, t-var, t-unit, t-tuple |
 | Dimensions | 3 | d-name, d-var, d-lit |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
 | Helpers | 5 | params, bind, kv, effects, resource |
-| **Total** | **59** | |
+| **Total** | **60** | |
 
 ---
 

@@ -8,8 +8,9 @@ use std::io::Write;
 use std::process::Command;
 
 use chelis_deep::ast::{Atom, Expr};
+use chelis_e2e::pipeline::compile_surf;
 use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor};
+use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
 use chelis_ir::grad::grad_dag;
 use chelis_types::errors::CheckErrorKind;
 
@@ -26,6 +27,10 @@ fn lower_deep(src: &str) -> Dag {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep parse failed");
     let checked = chelis_types::check_phase0e_program(&exprs)
         .unwrap_or_else(|r| panic!("type check failed: {:?}", r.errors));
+    let checked = chelis_effects::check_program(&checked)
+        .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+    let checked = chelis_types::check_linearity(&checked)
+        .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
     chelis_ir::lower::lower_program(&checked)
 }
 
@@ -623,6 +628,185 @@ fn spec_grad_composed_chain() {
         (fd - analytic).abs() < 1e-4,
         "finite-difference d(exp(-x))/dx should be ~{analytic}, got {fd}"
     );
+}
+
+#[test]
+fn spec_vmap_grad_matches_per_example_loop_baseline() {
+    let src = r#"
+def loss(x: tensor[features, f32]) -> tensor[f32] =
+  sum(mul(copy(x), x), 0)
+
+def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
+  vmap(grad(loss))(xs)
+"#;
+    let compiled = compile_surf(src).expect("vmap(grad(...)) program should compile");
+    let root = compiled.root_nodes["per_example_grad"];
+    let xs = TensorValue::from_vec(
+        vec![3, 4],
+        vec![
+            1.0, -2.0, 3.0, -4.0, 0.5, 1.5, -2.5, 4.5, -3.0, 2.0, 1.0, -0.5,
+        ],
+    );
+    let inputs = HashMap::from([
+        ("xs".to_string(), xs.clone()),
+        (
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![0.0; 4]),
+        ),
+    ]);
+    let values =
+        eval_tensor(&compiled.dag, &inputs).expect("per-example grad evaluation should succeed");
+    let actual = values[&root].clone();
+
+    let mut single = Dag::new();
+    let x = single.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
+            precision: chelis_types::types::Prim::F32,
+        },
+    );
+    let sq = single.add_node(
+        RiscOp::Mul,
+        vec![x, x],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
+            precision: chelis_types::types::Prim::F32,
+        },
+    );
+    let loss = single.add_node(RiscOp::Sum { axis: 0 }, vec![sq], TensorType::scalar_f32());
+    single.add_root(loss);
+    let grad = grad_dag(&single, loss, &[x]).expect("single-example grad baseline should exist");
+    let grad_root = grad.grad_nodes[&x];
+
+    let mut expected = Vec::with_capacity(xs.data.len());
+    for example in xs.data.chunks(4) {
+        let baseline_inputs = HashMap::from([(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], example.to_vec()),
+        )]);
+        let baseline_values = eval_tensor_roots_with_strict(&grad.dag, &[grad_root], |name| {
+            baseline_inputs.get(name).cloned()
+        })
+        .expect("baseline grad evaluation should succeed");
+        expected.extend(baseline_values[&grad_root].data.iter().copied());
+    }
+
+    assert_eq!(actual.shape, vec![3, 4]);
+    assert_eq!(
+        actual.data.len(),
+        expected.len(),
+        "per-example gradient element count mismatch"
+    );
+    for (actual_value, expected_value) in actual.data.iter().zip(expected.iter()) {
+        assert!(
+            (actual_value - expected_value).abs() <= 1e-6,
+            "expected per-example gradient value {expected_value}, got {actual_value}"
+        );
+    }
+}
+
+#[test]
+fn spec_vmap_grad_multiple_wrt_matches_per_example_loop_baseline() {
+    let vmapped_src = r#"
+def loss(
+  x: tensor[4, f32],
+  w: tensor[4, f32],
+  v: tensor[4, f32]
+) -> tensor[f32] =
+  sum(mul(x, add(w, v)), 0)
+
+def per_example_grads(
+  xs: tensor[3, 4, f32],
+  ws: tensor[3, 4, f32],
+  vs: tensor[3, 4, f32]
+) -> (tensor[3, 4, f32], tensor[3, 4, f32]) =
+  vmap(grad(loss, wrt=(w, v)))(xs, ws, vs)
+"#;
+    let vmapped = compile_surf(vmapped_src).expect("vmapped multi-wrt grad program should compile");
+    let dw_root = vmapped.root_nodes["per_example_grads.0"];
+    let dv_root = vmapped.root_nodes["per_example_grads.1"];
+
+    let xs = TensorValue::from_vec(
+        vec![3, 4],
+        vec![
+            1.0, -2.0, 3.0, -4.0, 0.5, 1.5, -2.5, 4.5, -3.0, 2.0, 1.0, -0.5,
+        ],
+    );
+    let ws = TensorValue::from_vec(
+        vec![3, 4],
+        vec![
+            0.25, -0.5, 0.75, 1.25, 0.1, 0.2, 0.3, 0.4, -1.0, 0.0, 1.0, 2.0,
+        ],
+    );
+    let vs = TensorValue::from_vec(
+        vec![3, 4],
+        vec![
+            1.5, -1.0, 0.5, 2.0, 0.3, -0.7, 1.1, -1.3, 2.5, -2.0, 0.25, 0.75,
+        ],
+    );
+    let vmapped_values =
+        eval_tensor_roots_with_strict(&vmapped.dag, &[dw_root, dv_root], |name| match name {
+            "xs" => Some(xs.clone()),
+            "ws" => Some(ws.clone()),
+            "vs" => Some(vs.clone()),
+            _ => None,
+        })
+        .expect("vmapped multi-wrt grad evaluation should succeed");
+    let actual_dw = vmapped_values[&dw_root].clone();
+    let actual_dv = vmapped_values[&dv_root].clone();
+
+    let single_src = r#"
+def loss(
+  x: tensor[4, f32],
+  w: tensor[4, f32],
+  v: tensor[4, f32]
+) -> tensor[f32] =
+  sum(mul(x, add(w, v)), 0)
+
+def grads(x: tensor[4, f32], w: tensor[4, f32], v: tensor[4, f32])
+    -> (tensor[4, f32], tensor[4, f32]) =
+  grad(loss, wrt=(w, v))(x, w, v)
+"#;
+    let single =
+        compile_surf(single_src).expect("single-example multi-wrt grad program should compile");
+    let single_dw_root = single.root_nodes["grads.0"];
+    let single_dv_root = single.root_nodes["grads.1"];
+
+    let mut expected_dw = Vec::new();
+    let mut expected_dv = Vec::new();
+    for batch_index in 0..3 {
+        let x = TensorValue::from_vec(
+            vec![4],
+            xs.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+        );
+        let w = TensorValue::from_vec(
+            vec![4],
+            ws.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+        );
+        let v = TensorValue::from_vec(
+            vec![4],
+            vs.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+        );
+        let values =
+            eval_tensor_roots_with_strict(&single.dag, &[single_dw_root, single_dv_root], |name| {
+                match name {
+                    "x" => Some(x.clone()),
+                    "w" => Some(w.clone()),
+                    "v" => Some(v.clone()),
+                    _ => None,
+                }
+            })
+            .expect("single-example multi-wrt grad evaluation should succeed");
+        expected_dw.extend(values[&single_dw_root].data.iter().copied());
+        expected_dv.extend(values[&single_dv_root].data.iter().copied());
+    }
+
+    assert_eq!(actual_dw.shape, vec![3, 4]);
+    assert_eq!(actual_dv.shape, vec![3, 4]);
+    assert_eq!(actual_dw.data, expected_dw);
+    assert_eq!(actual_dv.data, expected_dv);
 }
 
 // =========================================================================

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-deep.workspace = true
+chelis-macros.workspace = true
 chelis-surf.workspace = true
 pest = "2"
 pest_derive = "2"

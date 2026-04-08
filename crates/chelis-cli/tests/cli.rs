@@ -20,6 +20,10 @@ fn hello_tensor_example() -> PathBuf {
     example_path("../../examples/hello_tensor.ch")
 }
 
+fn vmap_example() -> PathBuf {
+    example_path("../../examples/vmap_relu.ch")
+}
+
 fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
@@ -92,7 +96,7 @@ fn run_json_check(path: &Path) -> Value {
 
 #[test]
 fn check_accepts_executable_examples() {
-    for path in [mnist_example(), hello_tensor_example()] {
+    for path in [mnist_example(), hello_tensor_example(), vmap_example()] {
         let json = run_json_check(&path);
         assert_eq!(json["score"].as_f64().unwrap(), 1.0, "{path:?}");
         assert_eq!(json["errors"].as_array().unwrap().len(), 0, "{path:?}");
@@ -112,6 +116,25 @@ fn eval_rejects_missing_inputs() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("missing required input"));
+}
+
+#[test]
+fn eval_prints_labeled_tuple_components() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tuple_eval.ch");
+    write_file(
+        &path,
+        r#"let grads = (1.0, 2.5)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("grads.0 = 1"))
+        .stdout(predicate::str::contains("grads.1 = 2.5"));
 }
 
 #[test]
@@ -783,6 +806,40 @@ def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
         .assert()
         .success()
         .stdout(predicate::str::contains("validated desugar:"));
+}
+
+#[test]
+fn surf_rejects_internal_macro_tags_in_deep_input() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("internal_macro.dp");
+    write_file(
+        &path,
+        "(defmacro {} relu_ref (params {} x) (app {} (var {} max_elem) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown tag 'defmacro'"));
+}
+
+#[test]
+fn fmt_rejects_internal_macro_tags_in_deep_input() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("internal_macro.dp");
+    write_file(
+        &path,
+        "(defmacro {} relu_ref (params {} x) (app {} (var {} max_elem) (var {} x) (lit {type: (t-prim {} f32)} 0.0)))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown tag 'defmacro'"));
 }
 
 #[test]

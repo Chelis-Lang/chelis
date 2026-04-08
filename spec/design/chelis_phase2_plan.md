@@ -291,8 +291,9 @@ let shape = dims(&a)
 let b = relu(a)
 ```
 
-**Which types are linear?** All tensors. Scalars, booleans, integers, and ADT
-constructors are not linear - they are freely copyable.
+**Which values are tracked linearly?** Tensors, plus tuple/composite values that carry
+tensor payloads. Scalars, booleans, integers, and ordinary non-tensor payloads remain
+freely copyable.
 
 **Interaction with effects:**
 - `Resource(D)` effect tracks where a tensor is allocated
@@ -318,8 +319,9 @@ constructors are not linear - they are freely copyable.
   use-after-consume errors
 - Runs after effect inference (needs to know which ops consume vs borrow)
 - Linearity checking is intra-procedural - no cross-function lifetime analysis
-- Linearity errors carry repair suggestions: "Variable `a` was consumed by `relu` at
-  line 5. To use it again, insert `copy(a)` before the first consumption."
+- Linearity errors carry repair suggestions and source offsets: "Variable `a` was
+  consumed by `relu` at offset 42. To use it again, insert `copy(a)` before the first
+  consumption."
 
 **Surf syntax:**
 - `copy(x)` - explicit copy (desugars to a `(copy {} x)` Deep node)
@@ -332,7 +334,7 @@ constructors are not linear - they are freely copyable.
 
 **Compiler optimization (Phase 2b+):**
 - After linearity checking passes, the IR lowering pass can mark consumed tensors as
-  reusable buffers
+  reusable-input candidates on same-shape/same-dtype paths
 - The memory planner from Phase 1c already does buffer reuse based on lifetime analysis;
   linearity provides a guarantee that the buffer is dead, not just an estimate
 - For the HIP backend: in-place mutation when a consumed tensor feeds an op with same
@@ -346,7 +348,7 @@ constructors are not linear - they are freely copyable.
 - Pattern match consumes the scrutinee
 - Closure capturing a linear variable consumes it
 - Scalars are not linear
-- Linearity error includes line number and repair suggestion
+- Linearity error includes source location and repair suggestion
 - In-place buffer reuse triggered when linearity is satisfied
 - Interaction with effects: `Resource` + linearity tracks full tensor lifecycle
 
@@ -432,10 +434,10 @@ duplication.
 ### Implementation Plan
 
 **Crate: `chelis-macros` (new)**
-- `expand.rs`: macro expansion engine (iterative fixed point, hygiene renaming,
-  provenance annotation)
-- `parse.rs`: parse `defmacro` / `macro` definitions
-- `lib.rs`: public API: `expand_macros(ast, macro_defs) -> ast`
+- `lib.rs`: macro expansion engine, binder-only hygiene, provenance annotation, and
+  the shipped standard macro prelude
+- internal compiler forms are parsed/desugared as `defmacro` and expanded away before
+  any public Deep surface is emitted
 
 **Integration into pipeline:**
 
@@ -450,15 +452,31 @@ parse_surf -> desugar -> expand_macros -> type_check -> effect_infer
   expansion
 - Provenance: `{source: (relu x)}` metadata on expanded nodes
 
+Current shipped public-boundary rule:
+
+- `defmacro` / `macro-invoke` are compiler-internal only
+- `chelis deep`, `check`, `build`, `eval`, the e2e pipeline, and validation of
+  desugared output all run after expansion
+- strict public Deep validation still accepts only the ordinary Deep tag vocabulary
+
 **Surf syntax additions:**
 - `macro name(params) = body` - macro definition
 - Macro invocations look like function calls
 
+Current shipped resolution / hygiene behavior:
+
+- lexical bindings block macro expansion
+- then user-defined top-level macros are considered
+- then the standard prelude macros are considered
+- otherwise the form remains an ordinary call
+- hygiene renames only binders introduced by the expansion; free references in the
+  macro body remain free and resolve in the caller's scope
+
 **Standard macros shipped with the language:**
-- `relu(x)` -> `max_elem(x, 0.0)`
-- `gelu(x)` -> expanded GELU approximation
-- `dropout(x, rate)` -> conditional zeroing with `Random` effect
-- `@differentiable` -> annotation macro that asserts the `Diff` effect
+- `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
+- `residual(x, f)` -> `add(x, f(x))`
+- `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
+  composition used by the current executable corpus
 
 **Test strategy (~15 tests):**
 - Simple macro expands correctly
@@ -468,7 +486,7 @@ parse_surf -> desugar -> expand_macros -> type_check -> effect_infer
 - Expansion limit prevents infinite recursion
 - Type error in expanded code reports provenance
 - Linearity error in expanded code reports provenance
-- Standard macros (`relu`, `gelu`, `dropout`) expand and type-check
+- Standard macros (`linear_layer`, `residual`, `cross_entropy`) expand and type-check
 - LLM-facing output contains no macro tags
 
 ### Acceptance Gate
@@ -496,13 +514,20 @@ every operation in the DAG.
 node:
 - Elementwise ops: add the batch dimension to input/output shapes
 - Reductions: reduction axis shifts by 1
-- Matmul: becomes batched matmul (`bmm`) - the `expand` + `mul` + `sum` pattern with an
-  additional outer dimension
+- Matmul: keep the existing `expand` + `mul` + `sum` decomposition on the already-batched
+  shapes; do not add a new batched RISC op in 2d
 - Movement ops: dimension indices shift by 1
 
-**Interaction with `grad`:** `grad(vmap(f))` and `vmap(grad(f))` must produce the same
-result. Both are DAG-to-DAG rewrites, so they compose naturally; the order affects the
-intermediate DAG shape but the final result is mathematically equivalent.
+**Interaction with `grad`:** `vmap(grad(f))` means per-example gradients. Direct
+`grad(vmap(f))` remains rejected by the shipped source-level `grad` path because `vmap`
+turns a scalar-returning function into a batched tensor-returning function unless the
+caller explicitly reduces it back to a scalar first.
+
+The direct executable lowering path for `vmap(grad(f))` composes the existing rewrites in
+order: lower `f` to a single-example DAG, run `grad_dag`, then run the `vmap` rewrite on
+that gradient DAG. Phase 2db extends this path to flat tuple-valued gradient payloads
+from multi-parameter `grad(..., wrt=(...))` without introducing tuple nodes into the
+RISC DAG.
 
 **Interaction with effects:** `vmap` preserves effects. If `f` has `Random`, `vmap(f)`
 has `Random` (each batch element samples independently).
@@ -510,24 +535,30 @@ has `Random` (each batch element samples independently).
 ### Implementation Plan
 
 **Extend `chelis-ir`:**
-- `vmap.rs`: DAG-to-DAG rewrite that adds a batch dimension
-- Operates on the RISC DAG (after lowering, before codegen)
+- `vmap.rs`: DAG-to-DAG rewrite that adds a leading batch dimension in canonical axis-0
+  form
+- public nonzero axes canonicalize to axis-0 via `permute`, run the rewrite, then
+  `permute` outputs back
+- the executable subset lowers direct `vmap(f)(args...)` and `vmap(grad(f))(args...)`
+  applications away before ordinary DAG codegen
 
-**Surf syntax:** `vmap(f, axis=0)` - call-like syntax
+**Surf syntax:** `vmap(f, axis=0)` - call-like syntax, and the resulting function can be
+applied as `vmap(f)(xs)`
 
 **Deep syntax:** `(vmap {} fn axis)`
 
 **Test strategy (~10 tests):**
 - `vmap(elementwise_fn)` adds a batch dimension
 - `vmap(reduction_fn)` shifts the reduction axis
-- `grad(vmap(f))` matches `vmap(grad(f))` numerically
+- `vmap(grad(f))` matches a per-example loop baseline
 - `vmap` with explicit axis parameter
 - Nested `vmap` (batch + sequence dimensions)
+- batched matmul stays correct through the generic decomposition even without a batched
+  HIP BLAS fast path
 
 ### Acceptance Gate
 
-`cargo test -p chelis-ir --test vmap` - all pass, including `grad`/`vmap` composition
-tests.
+`cargo test -p chelis-ir --test vmap` - all pass.
 
 ---
 
@@ -767,7 +798,7 @@ After all sub-phases, before declaring Phase 2 complete:
 - [ ] Linearity error in expanded code includes provenance trace
 
 **`vmap`:**
-- [ ] `grad(vmap(f)) == vmap(grad(f))` numerically
+- [ ] `vmap(grad(f))` matches a per-example loop baseline numerically
 - [ ] Nested `vmap` works for batch + sequence dimensions
 
 **Agent API:**

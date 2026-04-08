@@ -1,5 +1,7 @@
 //! Chelis compiler CLI.
 
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
+use chelis_surf::ast::Decl;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
@@ -176,7 +178,7 @@ fn cmd_surf(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Err
     };
     let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
     if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_str(&source)?;
+        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
         let surf = chelis_surf::decompile::decompile_program_with_context(
             &deep_exprs,
             &options,
@@ -204,7 +206,7 @@ fn cmd_fmt(file: &PathBuf, inplace: bool, check: bool) -> Result<(), Box<dyn std
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let output = if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_str(&source)?;
+        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
         chelis_deep::printer::print_canonical(&deep_exprs)
     } else {
         // .ch: parse Surf -> desugar -> decompile back to Surf (idempotent)
@@ -665,30 +667,53 @@ fn try_eval(source: &str) -> Result<String, String> {
         return Err("empty program".into());
     }
 
+    let roots = dag.roots().to_vec();
     let inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
-    let vals = chelis_ir::eval::eval_tensor_with_strict(&dag, |name| inputs.get(name).cloned())
-        .map_err(|e| e.to_string())?;
+    let vals = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+        inputs.get(name).cloned()
+    })
+    .map_err(|e| e.to_string())?;
+    let root_names = lowered_root_names_from_decls(&decls, checked.type_env());
 
-    // Get the last root's value, or the last node's value
-    let roots = dag.roots();
-    let target_id = if roots.is_empty() {
-        chelis_ir::dag::NodeId(dag.len() - 1)
+    if roots.len() == 1 {
+        return vals
+            .get(&roots[0])
+            .map(format_tensor_value)
+            .ok_or_else(|| "no result".to_string());
+    }
+
+    if root_names.len() == roots.len() {
+        Ok(root_names
+            .into_iter()
+            .zip(roots)
+            .map(|(name, id)| {
+                let value = vals.get(&id).expect("root value missing");
+                format!("{name} = {}", format_tensor_value(value))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
     } else {
-        *roots.last().unwrap()
-    };
-    match vals.get(&target_id) {
-        Some(tv) => {
-            if tv.shape.is_empty() || tv.data.len() == 1 {
-                Ok(format!("{}", tv.data[0]))
-            } else {
-                Ok(format!(
-                    "tensor(shape={:?}, data={:?})",
-                    tv.shape,
-                    &tv.data[..tv.data.len().min(10)]
-                ))
-            }
-        }
-        None => Err("no result".into()),
+        Ok(roots
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let value = vals.get(&id).expect("root value missing");
+                format!("_{index} = {}", format_tensor_value(value))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
+fn format_tensor_value(value: &chelis_ir::eval::TensorValue) -> String {
+    if value.shape.is_empty() || value.data.len() == 1 {
+        format!("{}", value.data[0])
+    } else {
+        format!(
+            "tensor(shape={:?}, data={:?})",
+            value.shape,
+            &value.data[..value.data.len().min(10)]
+        )
     }
 }
 
@@ -746,6 +771,53 @@ fn fallback_symbolic_dims(
             .map(|binding| binding.name)
             .collect()
     }
+}
+
+fn lowered_root_names_from_decls(
+    decls: &[Decl],
+    type_env: &HashMap<String, DeepExpr>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for decl in decls {
+        collect_decl_root_names(decl, type_env, &mut names);
+    }
+    names
+}
+
+fn collect_decl_root_names(
+    decl: &Decl,
+    type_env: &HashMap<String, DeepExpr>,
+    out: &mut Vec<String>,
+) {
+    match decl {
+        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => {
+            extend_root_names(name, type_env.get(name), out)
+        }
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_decl_root_names(decl, type_env, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
+    if let Some(DeepExpr::List(list, _)) = ty
+        && let Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) = list.elements.first()
+    {
+        if tag == "t-fn" {
+            extend_root_names(name, list.elements.last(), out);
+            return;
+        }
+        if tag == "t-tuple" {
+            for (index, child) in list.elements.iter().skip(2).enumerate() {
+                extend_root_names(&format!("{name}.{index}"), Some(child), out);
+            }
+            return;
+        }
+    }
+    out.push(name.to_string());
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {

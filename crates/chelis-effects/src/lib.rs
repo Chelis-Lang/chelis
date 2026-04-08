@@ -141,6 +141,10 @@ fn infer_expr_effects(
                     .first()
                     .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
                     .unwrap_or_default(),
+                "vmap" => children(list)
+                    .first()
+                    .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
+                    .unwrap_or_default(),
                 "handle-effect" => infer_handle_effects(list, top_level_effects, locals),
                 _ => children(list)
                     .iter()

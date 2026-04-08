@@ -285,8 +285,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     });
                     i += 2;
                 } else {
-                    let ch = source[i..].chars().next().unwrap();
-                    return Err(LexError::UnexpectedChar { ch, offset: i });
+                    tokens.push(Token {
+                        kind: TokenKind::Amp,
+                        span: Span::new(start, 1),
+                    });
+                    i += 1;
                 }
             }
             b'.' => {
@@ -372,6 +375,7 @@ fn classify_ident(text: &str) -> TokenKind {
         "in" => TokenKind::In,
         "type" => TokenKind::Type,
         "dim" => TokenKind::Dim,
+        "macro" => TokenKind::Macro,
         "match" => TokenKind::Match,
         "with" => TokenKind::With,
         "fn" => TokenKind::Fn,
@@ -562,13 +566,15 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def let in type match with fn module import if then else grad vmap jit tensor cast export"
+                "def let in type dim macro match with fn module import if then else grad vmap jit tensor cast export"
             ),
             vec![
                 TokenKind::Def,
                 TokenKind::Let,
                 TokenKind::In,
                 TokenKind::Type,
+                TokenKind::Dim,
+                TokenKind::Macro,
                 TokenKind::Match,
                 TokenKind::With,
                 TokenKind::Fn,

@@ -11,6 +11,7 @@ use crate::adt::AdtRegistry;
 use crate::builtins;
 use crate::env::Env;
 use crate::errors::*;
+use crate::linearity::LinearityInfo;
 use crate::types::*;
 use crate::unify::*;
 
@@ -26,6 +27,7 @@ pub struct InferResult {
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,
+    linearity: LinearityInfo,
 }
 
 impl CheckedProgram {
@@ -36,6 +38,7 @@ impl CheckedProgram {
         Self {
             annotated_exprs,
             type_env,
+            linearity: LinearityInfo::default(),
         }
     }
 
@@ -49,6 +52,15 @@ impl CheckedProgram {
 
     pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
         &self.type_env
+    }
+
+    pub fn linearity(&self) -> &LinearityInfo {
+        &self.linearity
+    }
+
+    pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
+        self.linearity = linearity;
+        self
     }
 }
 
@@ -101,10 +113,24 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     if result.errors.is_empty() {
         let annotated_exprs = annotate_phase0e_program(exprs);
         let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
-        Ok(CheckedProgram {
+        Ok(CheckedProgram::from_parts(
             annotated_exprs,
-            type_env: annotated_type_env,
-        })
+            annotated_type_env,
+        ))
+    } else {
+        Err(result)
+    }
+}
+
+pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+    let result = infer_program(exprs);
+    if result.errors.is_empty() {
+        let annotated_exprs = annotate_phase0e_program(exprs);
+        let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
+        Ok(CheckedProgram::from_parts(
+            annotated_exprs,
+            annotated_type_env,
+        ))
     } else {
         Err(result)
     }
@@ -188,10 +214,7 @@ fn validate_phase0e_expr(
                 return;
             }
             if let Some(tag) = get_tag(list) {
-                if matches!(
-                    tag,
-                    "if" | "tuple" | "tuple-get" | "match" | "grad" | "par" | "vmap" | "jit"
-                ) {
+                if matches!(tag, "if" | "match" | "par" | "jit") {
                     errors.push(CheckError::new(
                         CheckErrorKind::Other,
                         format!("`{tag}` is not supported by Phase 0e lowering"),
@@ -247,8 +270,6 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
-        annotated.push(annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg));
-
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
@@ -262,6 +283,8 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
             &mut typed_nodes,
             &mut total_nodes,
         );
+
+        annotated.push(annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg));
     }
 
     annotated
@@ -927,6 +950,27 @@ fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
+fn with_macro_provenance(expr: &deep::Expr, message: String) -> String {
+    let Some(source) = macro_source(expr) else {
+        return message;
+    };
+    format!("{message} (in expansion of {source})")
+}
+
+fn macro_source(expr: &deep::Expr) -> Option<String> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    let meta = get_meta(list)?;
+    let source = meta
+        .entries
+        .iter()
+        .find(|(key, _)| key == "source")
+        .map(|(_, value)| value)?;
+    let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(source));
+    Some(rendered.replace('\n', " ").trim().to_string())
+}
+
 fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry) -> Type {
     let mut seen = HashSet::new();
     resolve_type_aliases_inner(ty, adt_reg, &mut seen)
@@ -1255,6 +1299,16 @@ fn infer_expr(
                     typed_nodes,
                     total_nodes,
                 ),
+                Some("vmap") => infer_vmap(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                ),
                 Some("def") => infer_def(
                     list,
                     env,
@@ -1337,6 +1391,37 @@ fn infer_expr(
                         Type::Error
                     }
                 }
+                Some("borrow") => {
+                    let kids = children(list);
+                    if let Some(inner) = kids.first() {
+                        let inner_ty = infer_expr(
+                            inner,
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            typed_nodes,
+                            total_nodes,
+                        );
+                        let resolved = subst.apply(&inner_ty);
+                        match resolved {
+                            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
+                                inner_ty
+                            }
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!("borrow requires tensor or tensor-carrying input, got {resolved}"),
+                                    vec!["Use `&x` only with tensor values".to_string()],
+                                ));
+                                Type::Error
+                            }
+                        }
+                    } else {
+                        Type::Error
+                    }
+                }
                 _ => {
                     // Unknown tag -- try to infer children
                     Type::Error
@@ -1389,7 +1474,10 @@ fn infer_var(
         } else {
             errors.push(CheckError::new(
                 CheckErrorKind::UnboundVariable,
-                format!("unbound variable: {name}"),
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("unbound variable: {name}"),
+                ),
                 vec![format!("Check spelling of '{}'", name)],
             ));
             Type::Error
@@ -1456,6 +1544,19 @@ fn infer_app(
         None
     };
 
+    if matches!(func_name.as_deref(), Some("permute")) {
+        return infer_permute_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
     let func_ty = infer_expr(
         &kids[0],
         env,
@@ -1468,7 +1569,26 @@ fn infer_app(
     );
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
-        .map(|a| infer_expr(a, env, vg, subst, adt_reg, errors, typed_nodes, total_nodes))
+        .enumerate()
+        .map(|(index, arg)| {
+            if matches!(func_name.as_deref(), Some("expand"))
+                && index == 2
+                && symbolic_dim_ref_name(arg).is_some()
+            {
+                Type::Prim(Prim::Int32)
+            } else {
+                infer_expr(
+                    arg,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                )
+            }
+        })
         .collect();
 
     // If func or any arg is Error, propagate
@@ -1524,7 +1644,10 @@ fn infer_app(
                         _ => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!("{} expects tensor arguments, got {}", fname, resolved),
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{} expects tensor arguments, got {}", fname, resolved),
+                                ),
                                 vec![],
                             ));
                             return Type::Error;
@@ -1543,7 +1666,10 @@ fn infer_app(
                         _ => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!("{} expects tensor input, got {}", fname, resolved),
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{} expects tensor input, got {}", fname, resolved),
+                                ),
                                 vec![],
                             ));
                             return Type::Error;
@@ -1558,7 +1684,10 @@ fn infer_app(
                         _ => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!("{} expects int32 axis, got {}", fname, resolved),
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{} expects int32 axis, got {}", fname, resolved),
+                                ),
                                 vec![],
                             ));
                             return Type::Error;
@@ -1577,7 +1706,10 @@ fn infer_app(
                         _ => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!("dropout expects tensor input, got {}", resolved),
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("dropout expects tensor input, got {}", resolved),
+                                ),
                                 vec![],
                             ));
                             return Type::Error;
@@ -1592,7 +1724,10 @@ fn infer_app(
                         _ => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!("dropout expects f32 rate, got {}", resolved),
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("dropout expects f32 rate, got {}", resolved),
+                                ),
                                 vec![],
                             ));
                             return Type::Error;
@@ -1612,9 +1747,12 @@ fn infer_app(
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "conv2d expects tensor inputs for args 1-2, got {}",
-                                        resolved
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "conv2d expects tensor inputs for args 1-2, got {}",
+                                            resolved
+                                        ),
                                     ),
                                     vec![],
                                 ));
@@ -1627,9 +1765,12 @@ fn infer_app(
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    format!(
-                                        "conv2d expects int32 stride/padding, got {}",
-                                        resolved
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "conv2d expects int32 stride/padding, got {}",
+                                            resolved
+                                        ),
                                     ),
                                     vec![],
                                 ));
@@ -1681,10 +1822,13 @@ fn infer_app(
                         Type::Tensor(_, prec) => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                format!(
-                                    "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
-                                    fname,
-                                    prec.name()
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
+                                        fname,
+                                        prec.name()
+                                    ),
                                 ),
                                 vec!["Logical ops only work on bool tensors".to_string()],
                             ));
@@ -1715,6 +1859,149 @@ fn infer_app(
             Type::Error
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_permute_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 2 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "permute expects a tensor followed by one or more axis indices".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let axis_tys: Vec<Type> = kids[2..]
+        .iter()
+        .map(|arg| {
+            infer_expr(
+                arg,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                typed_nodes,
+                total_nodes,
+            )
+        })
+        .collect();
+
+    if matches!(input_ty, Type::Error) || axis_tys.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Type::Error;
+    }
+
+    for axis_ty in &axis_tys {
+        let resolved = subst.apply(axis_ty);
+        match resolved {
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            other => {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("permute expects int32 axis indices, got {other}"),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+        }
+    }
+
+    let input_ty = subst.apply(&input_ty);
+    let Type::Tensor(dims, prec) = input_ty else {
+        if matches!(input_ty, Type::Var(_) | Type::Error) {
+            return input_ty;
+        }
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("permute expects tensor input, got {input_ty}"),
+            vec![],
+        ));
+        return Type::Error;
+    };
+
+    let Some(axes) = kids[2..]
+        .iter()
+        .map(extract_int_literal)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Type::Tensor(dims, prec);
+    };
+
+    if axes.len() != dims.len() {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "permute expects {} axis indices for rank {} tensor, got {}",
+                dims.len(),
+                dims.len(),
+                axes.len()
+            ),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let mut seen = HashSet::new();
+    let mut reordered = Vec::with_capacity(dims.len());
+    for axis in axes {
+        if axis < 0 || axis as usize >= dims.len() {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "permute axis {axis} is out of bounds for rank {} tensor",
+                    dims.len()
+                ),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        let axis = axis as usize;
+        if !seen.insert(axis) {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("permute axis {axis} appears more than once"),
+                vec![],
+            ));
+            return Type::Error;
+        }
+        reordered.push(dims[axis].clone());
+    }
+
+    Type::Tensor(reordered, prec)
 }
 
 fn check_layer_norm_signature(
@@ -2149,7 +2436,10 @@ fn check_expand_signature(
             ));
             return Type::Error;
         }
-        None => return subst.apply(result_ty),
+        None => match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
+            Some(name) => Dim::Name(name.to_string()),
+            None => return subst.apply(result_ty),
+        },
     };
 
     let resolved_result = subst.apply(result_ty);
@@ -2240,6 +2530,16 @@ fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
         }
         _ => None,
     }
+}
+
+fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2554,7 +2854,10 @@ fn infer_match(
                 let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
                 errors.push(CheckError::new(
                     CheckErrorKind::NonExhaustiveMatch,
-                    format!("non-exhaustive match: missing variants {:?}", names),
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("non-exhaustive match: missing variants {:?}", names),
+                    ),
                     vec![],
                 ));
             }
@@ -2946,9 +3249,10 @@ fn infer_grad(
                 return Type::Error;
             }
 
-            let grad_payload = grad_argument_payload(&args);
-            let grad_ret = Type::Tuple(vec![ret, grad_payload]);
-            Type::Fn(args, Box::new(grad_ret))
+            match grad_result_type(list, &args, errors) {
+                Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
+                None => Type::Error,
+            }
         }
         Type::Error => Type::Error,
         _ => {
@@ -2966,19 +3270,226 @@ fn grad_output_supported(ty: &Type) -> bool {
     }
 }
 
-fn grad_argument_payload(args: &[Type]) -> Type {
-    if args.len() == 1 {
-        grad_argument_type(&args[0])
+fn grad_result_type(
+    list: &deep::List,
+    args: &[Type],
+    errors: &mut Vec<CheckError>,
+) -> Option<Type> {
+    let targets = if let Some(indices) = grad_wrt_indices(list, errors)? {
+        let mut selected = Vec::with_capacity(indices.len());
+        for index in indices {
+            let Some(arg) = args.get(index) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::ArityMismatch,
+                    format!(
+                        "grad `wrt` index {} is out of bounds for function with {} parameters",
+                        index,
+                        args.len()
+                    ),
+                    vec![],
+                ));
+                return None;
+            };
+            let Some(grad_ty) = grad_argument_type(arg) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("grad `wrt` index {index} is not differentiable"),
+                    vec!["Select floating scalar or tensor parameters in `wrt`".to_string()],
+                ));
+                return None;
+            };
+            selected.push(grad_ty);
+        }
+        selected
     } else {
-        Type::Tuple(args.iter().map(grad_argument_type).collect())
+        args.iter().filter_map(grad_argument_type).collect()
+    };
+
+    Some(match targets.as_slice() {
+        [] => Type::Unit,
+        [single] => single.clone(),
+        _ => Type::Tuple(targets),
+    })
+}
+
+fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<Option<Vec<usize>>> {
+    let kids = children(list);
+    let Some(wrt_expr) = kids.get(1) else {
+        return Some(None);
+    };
+
+    match wrt_expr {
+        deep::Expr::List(tuple, _) if get_tag(tuple) == Some("tuple") => {
+            let mut indices = Vec::new();
+            for item in children(tuple) {
+                let Some(index) = extract_int_literal(item) else {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        "grad `wrt` tuple must contain integer parameter indices".to_string(),
+                        vec![],
+                    ));
+                    return None;
+                };
+                if index < 0 {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!("grad `wrt` index must be non-negative, got {index}"),
+                        vec![],
+                    ));
+                    return None;
+                }
+                indices.push(index as usize);
+            }
+            Some(Some(indices))
+        }
+        other => {
+            let Some(index) = extract_int_literal(other) else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    "grad `wrt` must be an integer parameter index or tuple of indices".to_string(),
+                    vec![],
+                ));
+                return None;
+            };
+            if index < 0 {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("grad `wrt` index must be non-negative, got {index}"),
+                    vec![],
+                ));
+                return None;
+            }
+            Some(Some(vec![index as usize]))
+        }
     }
 }
 
-fn grad_argument_type(arg: &Type) -> Type {
+fn grad_argument_type(arg: &Type) -> Option<Type> {
     match arg {
-        Type::Prim(prim) if prim.is_float() => Type::Prim(*prim),
-        Type::Tensor(dims, prim) if prim.is_float() => Type::Tensor(dims.clone(), *prim),
-        _ => Type::Unit,
+        Type::Prim(prim) if prim.is_float() => Some(Type::Prim(*prim)),
+        Type::Tensor(dims, prim) if prim.is_float() => Some(Type::Tensor(dims.clone(), *prim)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_vmap(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.is_empty() {
+        return Type::Error;
+    }
+
+    let axis = kids.get(1).and_then(extract_int_literal).unwrap_or(0);
+    if axis < 0 {
+        errors.push(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!("vmap axis must be non-negative, got {axis}"),
+            vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
+        ));
+        return Type::Error;
+    }
+    let axis = axis as usize;
+
+    let f_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let resolved = subst.apply(&f_ty);
+
+    match resolved {
+        Type::Fn(args, ret) => {
+            let batch_dim = Dim::Var(vg.fresh_dvar());
+            let args = args
+                .iter()
+                .map(|arg| vmap_transform_param_type(arg, axis, &batch_dim))
+                .collect::<Result<Vec<_>, _>>();
+            let ret = vmap_transform_result_type(&ret, axis, &batch_dim);
+
+            match (args, ret) {
+                (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
+                (Err(message), _) | (_, Err(message)) => {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        message,
+                        vec![
+                            "Choose an axis that is in bounds for every vmapped tensor".to_string(),
+                        ],
+                    ));
+                    Type::Error
+                }
+            }
+        }
+        Type::Error => Type::Error,
+        other => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("vmap expects a function, got {other}"),
+                vec!["Apply `vmap` to a named function or inline lambda".to_string()],
+            ));
+            Type::Error
+        }
+    }
+}
+
+fn vmap_transform_param_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<Type, String> {
+    match ty {
+        Type::Tensor(dims, precision) => {
+            if axis > dims.len() {
+                return Err(format!(
+                    "vmap axis {axis} is out of bounds for rank {} tensor",
+                    dims.len()
+                ));
+            }
+            let mut dims = dims.clone();
+            dims.insert(axis, batch_dim.clone());
+            Ok(Type::Tensor(dims, *precision))
+        }
+        Type::Tuple(elements) => Ok(Type::Tuple(
+            elements
+                .iter()
+                .map(|element| vmap_transform_param_type(element, axis, batch_dim))
+                .collect::<Result<_, _>>()?,
+        )),
+        other => Ok(other.clone()),
+    }
+}
+
+fn vmap_transform_result_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<Type, String> {
+    match ty {
+        Type::Prim(precision) => Ok(Type::Tensor(vec![batch_dim.clone()], *precision)),
+        Type::Tensor(dims, precision) => {
+            if axis > dims.len() {
+                return Err(format!(
+                    "vmap axis {axis} is out of bounds for rank {} tensor",
+                    dims.len()
+                ));
+            }
+            let mut dims = dims.clone();
+            dims.insert(axis, batch_dim.clone());
+            Ok(Type::Tensor(dims, *precision))
+        }
+        Type::Tuple(elements) => Ok(Type::Tuple(
+            elements
+                .iter()
+                .map(|element| vmap_transform_result_type(element, axis, batch_dim))
+                .collect::<Result<_, _>>()?,
+        )),
+        other => Ok(other.clone()),
     }
 }
 
@@ -3172,6 +3683,60 @@ mod tests {
     fn check(src: &str) -> InferResult {
         let exprs = chelis_deep::parser::parse_str(src).unwrap();
         infer_program(&exprs)
+    }
+
+    fn checked_surf(src: &str) -> CheckedProgram {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        check_phase0e_program(&exprs).expect("phase 0e check")
+    }
+
+    fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
+        match expr {
+            deep::Expr::List(list, _) => {
+                if get_tag(list) == Some("app")
+                    && is_shape_sensitive_app(list)
+                    && !list
+                        .elements
+                        .get(1)
+                        .and_then(|expr| match expr {
+                            deep::Expr::Map(meta, _) => Some(meta),
+                            _ => None,
+                        })
+                        .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
+                {
+                    return Some(
+                        chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
+                            .replace('\n', " ")
+                            .trim()
+                            .to_string(),
+                    );
+                }
+                for child in &list.elements {
+                    if let Some(missing) = missing_shape_sensitive_app(child) {
+                        return Some(missing);
+                    }
+                }
+                None
+            }
+            deep::Expr::Map(map, _) => map
+                .entries
+                .iter()
+                .find_map(|(_, value)| missing_shape_sensitive_app(value)),
+            deep::Expr::MetaExpr(meta, _) => {
+                missing_shape_sensitive_app(&meta.expr).or_else(|| {
+                    meta.entries
+                        .iter()
+                        .find_map(|(_, value)| missing_shape_sensitive_app(value))
+                })
+            }
+            deep::Expr::Atom(_, _) => None,
+        }
+    }
+
+    fn is_shape_sensitive_app(list: &deep::List) -> bool {
+        get_tag(list) == Some("app")
+            && phase0e_builtin_name(list).is_some_and(super::is_phase0e_shape_sensitive_builtin)
     }
 
     fn check_ok(src: &str) {
@@ -3467,18 +4032,20 @@ mod tests {
     }
 
     #[test]
-    fn grad_non_float_param_gets_unit_gradient() {
+    fn grad_non_float_param_is_ignored_by_default() {
         let exprs = chelis_deep::parser::parse_str(
             "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
              (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
              (def {} g (grad {} (var {} f)))",
         )
         .unwrap();
-        let result = infer_program(&exprs);
-        assert!(
-            result.errors.is_empty(),
-            "unexpected errors: {:?}",
-            result.errors
+        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let ty = checked.type_env().get("g").expect("g type");
+        assert_eq!(
+            chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+                .trim()
+                .to_string(),
+            "(t-fn {} (t-prim {} bool) (t-unit {}))"
         );
     }
 
@@ -3492,6 +4059,170 @@ mod tests {
                 (fn {} (params {} x)
                   (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 1.0)))
              (def {} g (grad {} (var {} f)))",
+            CheckErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn grad_with_explicit_wrt_returns_selected_gradient_only() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} loss
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} hidden) (t-prim {} f32))
+                    (t-prim {} f32)))
+             (def {} loss
+                (fn {} (params {} x w)
+                    (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} dw
+                (grad {} (var {} loss) (lit {type: (t-prim {} int32)} 1)))",
+        )
+        .unwrap();
+        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let ty = checked.type_env().get("dw").expect("dw type");
+        assert_eq!(
+            chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+                .trim()
+                .to_string(),
+            "(t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (t-prim {} f32)))"
+        );
+    }
+
+    #[test]
+    fn grad_with_multiple_wrt_returns_flat_tuple() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} loss
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} hidden) (t-prim {} f32))
+                    (t-prim {} f32)))
+             (def {} loss
+                (fn {} (params {} x w)
+                    (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} grads
+                (grad {} (var {} loss)
+                    (tuple {}
+                        (lit {type: (t-prim {} int32)} 0)
+                        (lit {type: (t-prim {} int32)} 1))))",
+        )
+        .unwrap();
+        let checked = check_phase0e_program(&exprs).expect("phase 0e check");
+        let ty = checked.type_env().get("grads").expect("grads type");
+        assert_eq!(
+            chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
+                .trim()
+                .to_string(),
+            "(t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (t-prim {} f32)) (t-tuple {} (t-tensor {} (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} hidden) (t-prim {} f32))))"
+        );
+    }
+
+    #[test]
+    fn grad_rejects_nondifferentiable_explicit_wrt_target() {
+        check_err(
+            "(defsig {} f (t-fn {} (t-prim {} bool) (t-prim {} f32)))
+             (def {} f (fn {} (params {} x) (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g (grad {} (var {} f) (lit {type: (t-prim {} int32)} 0)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn vmap_function_inserts_axis_zero_batch_dim() {
+        check_ok(
+            "(defsig {} process
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))))
+             (def {} process
+                (fn {} (params {} x)
+                    (var {} x)))
+             (defsig {} batch_process
+                (t-fn {}
+                    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+             (def {} batch_process
+                (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0)))",
+        );
+    }
+
+    #[test]
+    fn vmap_non_function_is_rejected() {
+        check_err(
+            "(def {} x (lit {type: (t-prim {} f32)} 1.0))
+             (def {} y (vmap {} (var {} x) (lit {type: (t-prim {} int32)} 0)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn vmap_axis_out_of_bounds_is_rejected() {
+        check_err(
+            "(defsig {} process
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))))
+             (def {} process
+                (fn {} (params {} x)
+                    (var {} x)))
+             (def {} batch_process
+                (vmap {} (var {} process) (lit {type: (t-prim {} int32)} 2)))",
+            CheckErrorKind::DimensionMismatch,
+        );
+    }
+
+    #[test]
+    fn vmap_grad_single_tensor_param_type_checks() {
+        check_ok(
+            "(defsig {} loss
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-prim {} f32)))
+             (def {} loss
+                (fn {} (params {} x)
+                    (app {type: (t-prim {} f32)} (var {} sum) (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x) (lit {type: (t-prim {} int32)} 0)))
+             )
+             (defsig {} per_example_grad
+                (t-fn {}
+                    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+             (def {} per_example_grad
+                (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))",
+        );
+    }
+
+    #[test]
+    fn vmap_grad_multiple_params_type_checks_with_tuple_result() {
+        check_ok(
+            "(defsig {} loss
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-prim {} f32)))
+             (def {} loss
+                (fn {} (params {} x y)
+                        (app {type: (t-prim {} f32)} (var {} sum)
+                            (app {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} (var {} add)
+                                (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} x)
+                                (var {type: (t-tensor {} (d-name {} features) (t-prim {} f32))} y))
+                        (lit {type: (t-prim {} int32)} 0)))
+             )
+             (def {} per_example_grad
+                (vmap {} (grad {} (var {} loss)) (lit {type: (t-prim {} int32)} 0)))",
+        );
+    }
+
+    #[test]
+    fn grad_of_vmap_is_rejected_for_non_scalar_output() {
+        check_err(
+            "(defsig {} loss
+                (t-fn {}
+                    (t-tensor {} (d-name {} features) (t-prim {} f32))
+                    (t-prim {} f32)))
+             (def {} loss
+                (fn {} (params {} x)
+                    (lit {type: (t-prim {} f32)} 1.0)))
+             (def {} g
+                (grad {} (vmap {} (var {} loss) (lit {type: (t-prim {} int32)} 0))))",
             CheckErrorKind::Other,
         );
     }
@@ -4107,6 +4838,48 @@ mod tests {
                 .any(|error| error.message.contains("concrete normalized axis extent")),
             "expected layer_norm symbolic normalized-axis error, got: {:?}",
             err.errors
+        );
+    }
+
+    #[test]
+    fn checked_program_annotates_symbolic_expand_apps_from_surf() {
+        let checked = checked_surf(
+            r#"
+def predict(
+  x: tensor[batch, 64, f32],
+  w: tensor[64, 1, f32],
+  b: tensor[1, f32]
+) -> tensor[batch, 1, f32] =
+  add(matmul(x, w), expand(b, 0, batch))
+"#,
+        );
+        let missing = checked
+            .annotated_exprs()
+            .iter()
+            .find_map(missing_shape_sensitive_app);
+        assert!(
+            missing.is_none(),
+            "expected all shape-sensitive apps to be annotated, missing: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn surf_permute_with_axis_arguments_type_checks() {
+        let checked = checked_surf(
+            r#"
+def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
+  permute(x, 1, 0)
+"#,
+        );
+        let missing = checked
+            .annotated_exprs()
+            .iter()
+            .find_map(missing_shape_sensitive_app);
+        assert!(
+            missing.is_none(),
+            "expected typed shape-sensitive apps after permute, missing: {:?}",
+            missing
         );
     }
 }

@@ -357,7 +357,9 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 
 | Surf | Deep | Notes |
 |------|------|-------|
-| `grad(f)` | `(grad {} f')` | Accepts named functions or inline lambdas |
+| `grad(f)` | `(grad {} f')` | Returns gradients only |
+| `grad(f, wrt=w)` | `(grad {wrt: ...} f' idx)` | `wrt` names one parameter of `f` |
+| `grad(f, wrt=(w, b))` | `(grad {wrt: ...} f' (tuple {} idx₁ idx₂))` | Multi-parameter `wrt` preserves the written order |
 | `jit(f)` | `(jit {} f')` | |
 | `vmap(f, n)` | `(vmap {} f' n')` | Axis positional, defaults to 0 if omitted |
 | `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} int32)} 0))` | |
@@ -367,6 +369,13 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `&x` | `(borrow {} (var {} x))` | Only valid as a direct call argument in Phase 2b |
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
+When `grad` targets one differentiable parameter, the result is that gradient value.
+When it targets multiple parameters, the result is a flat tuple of gradients rather than
+`(value, grad)` or nested tuples.
+
+Transforms can be called after construction when they produce a function value.
+Example: `vmap(process)(xs)` parses as an ordinary application whose callee is the
+transform node `vmap(process)`.
 
 Transforms must always be applied — `let g = grad` bare is a parse error.
 

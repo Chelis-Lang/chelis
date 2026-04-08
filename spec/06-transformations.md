@@ -25,7 +25,8 @@ Given a function `f`:
 
 ```
 If   f : A -> B
-Then grad(f) : A -> (B, dA)
+and  B is a scalar floating result
+Then grad(f) : A -> dA
 ```
 
 where `dA` is the gradient type:
@@ -33,19 +34,21 @@ where `dA` is the gradient type:
 - If `A` is a tuple `(T1, T2, ..., Tn)`, then `dA = (dT1, dT2, ..., dTn)`.
 - If a component of `A` is non-differentiable (e.g., `bool`, `i32`, ADT), then its gradient component is `unit`.
 
-The output is always a tuple of the original result and the gradients. For a scalar-output loss function:
+Chelis's shipped source-level `grad` returns gradients only, not `(value, grad)`.
+For a multi-parameter function, the gradient payload is flattened:
 
 ```
 If   loss : (tensor[D1, P], tensor[D2, P]) -> tensor[P]
-Then grad(loss) : (tensor[D1, P], tensor[D2, P]) -> (tensor[P], (tensor[D1, P], tensor[D2, P]))
+Then grad(loss) : (tensor[D1, P], tensor[D2, P]) -> (tensor[D1, P], tensor[D2, P])
 ```
 
 ### 2.2 The `wrt` Parameter
 
-By default, `grad(f)` differentiates with respect to all tensor-typed parameters of `f`. The optional `wrt` parameter restricts differentiation to specific parameters:
+By default, `grad(f)` differentiates with respect to all differentiable parameters of
+`f`. The optional `wrt` parameter restricts differentiation to specific parameters:
 
 ```
-grad(f, wrt=[param1, param2])
+grad(f, wrt=(param1, param2))
 ```
 
 Parameters not in `wrt` are treated as constants (they receive no gradient). This is useful when a function has both parameters (to be optimized) and data (fixed inputs):
@@ -54,10 +57,12 @@ Parameters not in `wrt` are treated as constants (they receive no gradient). Thi
 def loss(w: tensor[D, P], x: tensor[D2, P], y: tensor[P]): tensor[P] = ...
 
 -- Differentiate only w.r.t. weights:
-let (loss_val, dw) = grad(loss, wrt=[w])(w, x, y)
+let dw = grad(loss, wrt=(w))(w, x, y)
 ```
 
-When `wrt` is specified, the gradient tuple contains entries only for the listed parameters, in the order they appear in `wrt`.
+When `wrt` is specified, the gradient result contains entries only for the listed
+parameters, in the order they appear in `wrt`. One listed parameter returns one
+gradient value directly; multiple listed parameters return a flat tuple.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 
@@ -98,10 +103,10 @@ adjoint[n_j] = Add(adjoint[n_j], contribution_from_n_i)
 
 **Step 3 -- Emit output.**
 
-The backward DAG returns:
+The backward DAG returns the requested gradient payload:
 
 ```
-(forward_output, (adjoint[p_1], adjoint[p_2], ..., adjoint[p_m]))
+adjoint[p_1], ..., adjoint[p_m]
 ```
 
 where `p_1, ..., p_m` are the parameters specified by `wrt` (or all tensor-typed Load nodes if `wrt` is not specified).
@@ -147,7 +152,7 @@ Process n2 (Mul(n1, n1)):
 - Contribution to n1 from second input: `Mul([1,1,1], n1) = n1`
 - `adjoint[n1] = Add(n1, n1) = [2*x_0, 2*x_1, 2*x_2]`
 
-**Result:** `grad(f)(x) = (sum(x*x), 2*x)`
+**Result:** `grad(f)(x) = 2*x`
 
 For `x = [1.0, 2.0, 3.0]`: forward output = 14.0, gradient = [2.0, 4.0, 6.0].
 
@@ -179,7 +184,7 @@ Process n2 (Mul(n1, n1)):
 - Rule: `(Mul(g, n1), Mul(g, n1))` -- both inputs are n1, accumulate
 - `adjoint[n1] = Add(Mul([n4, n4], n1), Mul([n4, n4], n1)) = 2 * n4 * n1`
 
-**Result:** `grad(f)(x) = (exp(sum(x*x)), 2 * x * exp(sum(x*x)))`
+**Result:** `grad(f)(x) = 2 * x * exp(sum(x*x))`
 
 For `x = [1.0, 1.0]`: forward = exp(2) ~ 7.389, gradient = [14.778, 14.778].
 
@@ -200,10 +205,11 @@ The compiler does **not** error on non-differentiable operations in the forward 
 
 Example: `f(x) = x^3` (using `Mul(x, Mul(x, x))`)
 
-- `grad(f)(x) = (x^3, 3*x^2)`
-- `grad(grad(f))(x) = ((x^3, 3*x^2), (3*x^2, 6*x))`
+- `grad(f)(x) = 3*x^2`
+- `grad(grad(f))(x) = 6*x`
 
-The second application of `grad` differentiates the entire output of the first `grad`, including both the forward value and the first gradient.
+The second application of `grad` differentiates the gradient payload produced by the
+first `grad`.
 
 **Implementation note:** The backward DAG may share nodes with the forward DAG (e.g., `Exp(x)` reused in its own adjoint). These shared references must be preserved as-is -- the DAG is a graph, not a tree. The second `grad` application must correctly handle these shared nodes.
 
@@ -237,23 +243,27 @@ resource regions, and `chelis build --target hip` rejects CPU-only regions.
 
 ## 3. vmap -- Vectorized Map
 
-**Status:** Phase 2 implementation. Semantics specified here for forward compatibility.
+**Status:** Phase 2 shipped subset.
 
 ### 3.1 Signature
 
 ```
 If   f : tensor[D, P] -> tensor[D', P]
-Then vmap(f, axis=name) : tensor[{name} + D, P] -> tensor[{name} + D', P]
+Then vmap(f, axis=n) : tensor[D with batch inserted at n, P]
+                      -> tensor[D' with batch inserted at n, P]
 ```
 
-`vmap` takes a function that operates on a single example and produces a function that operates on a batch of examples. The new `name` dimension is added to all input and output tensors.
+`vmap` takes a function that operates on a single example and produces a function that
+operates on a batch of examples. The new batch dimension is inserted at the requested
+integer axis position. The implementation canonicalizes nonzero axes to axis 0 with
+`permute`, applies the axis-0 rewrite, then permutes outputs back.
 
 ### 3.2 Semantics
 
-Conceptually, `vmap(f, axis=batch)` is equivalent to:
+Conceptually, `vmap(f, axis=0)` is equivalent to:
 
 ```
-vmap(f, axis=batch)(x) = stack([f(x[i]) for i in batch_dimension])
+vmap(f, axis=0)(x) = stack([f(x[i]) for i in batch_dimension])
 ```
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
@@ -271,7 +281,7 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `ReduceMax(x, axis=d)` | `ReduceMax(x', axis=d)` -- same |
 | `Reshape(x, D2)` | `Reshape(x', {batch} + D2)` -- preserve batch dim |
 | `Expand(x, dim, size)` | `Expand(x', dim, size)` -- expand within each batch element |
-| `Const(v, D, P)` | `Expand(Const(v, D, P), batch, batch_size)` -- broadcast constant |
+| `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(buf)` | Load with batch dimension added to buffer type |
 
 The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension.
@@ -280,9 +290,9 @@ The key principle: the batch dimension passes through all operations without bei
 
 ```
       G |- f : tensor[D, P] -> tensor[D', P]
-      name is a fresh dimension name
       ---------------------------------------------------
-      G |- vmap(f, axis=name) : tensor[{name} + D, P] -> tensor[{name} + D', P]
+      G |- vmap(f, axis=n) : tensor[D with batch inserted at n, P]
+                            -> tensor[D' with batch inserted at n, P]
 ```
 
 If `f` takes multiple arguments, each tensor argument gains the batch dimension:
@@ -290,43 +300,43 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
 ```
       G |- f : (tensor[D1, P], tensor[D2, P]) -> tensor[D3, P]
       ---------------------------------------------------
-      G |- vmap(f, axis=batch) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
-                                 -> tensor[{batch} + D3, P]
+      G |- vmap(f, axis=0) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
+                             -> tensor[{batch} + D3, P]
 ```
 
 ### 3.5 Composition
 
-**vmap of vmap:**
-
-```
-vmap(vmap(f, axis="inner"), axis="outer")
-```
-
-Vectorizes `f` over two dimensions. The result operates on tensors with both `outer` and `inner` dimensions. The order of `vmap` applications determines the nesting: `outer` is the outermost batch dimension.
+**vmap of vmap:** repeated application adds multiple batch axes. The shipped IR rewrite
+supports nested vectorization. The executable source subset currently targets direct
+`vmap(f)(args...)` applications rather than arbitrary stored higher-order transform
+values.
 
 **vmap of grad:**
 
-```
-vmap(grad(f), axis="batch")
-```
+`vmap(grad(f))` computes per-example gradients when the inner `grad(f)` function is
+otherwise available.
 
 Computes **per-example gradients**: each example in the batch gets its own independent gradient. This is useful for per-example gradient clipping or differential privacy.
 
+In the shipped executable subset, the direct lowering path supports both the
+single-gradient case and flat tuple-valued gradient payloads from multi-parameter
+`grad(..., wrt=(...))`. Tuple construction and projection are resolved before the DAG
+surface, so the executable DAG still carries only ordinary tensor roots.
+
 **grad of vmap:**
 
-```
-grad(vmap(f, axis="batch"))
-```
+Direct source-level `grad(vmap(f))` remains rejected in the shipped subset unless the
+caller explicitly reduces the vmapped result back to a scalar first.
 
-Computes the gradient of the **batched** function. This is the gradient of the sum over the batch (the standard training gradient). Equivalent to the average of per-example gradients.
-
-These two are **not** equivalent:
-- `vmap(grad(f), "batch")` returns a batch of gradient vectors (one per example).
-- `grad(vmap(f, "batch"))` returns a single gradient vector (summed over the batch).
+These two are distinct concepts:
+- `vmap(grad(f))` returns a batch of gradient vectors (one per example).
+- `grad(fn(xs) = sum(vmap(f)(xs)))` is the batched gradient pattern once source-level
+  `grad` lowering reaches that path.
 
 ### 3.6 Error Conditions
 
-- `dimension_not_found`: The axis name specified in `vmap` does not exist as a valid dimension name. (Note: `vmap` creates the dimension; this error fires if there is a name conflict with an existing dimension.)
+- `axis_out_of_bounds`: The integer axis is out of bounds for one of the vmapped tensor
+  arguments or results.
 - If `f` has non-tensor arguments, those arguments are broadcast (shared across the batch). They are not vmapped.
 
 ---
@@ -523,14 +533,14 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 |-----------|---------|-------|-------|
 | `grad(f)` | Reverse-mode AD | 0 | Core operation |
 | `grad(grad(f))` | Second derivatives | 0 | Nested AD |
-| `grad(f, wrt=[w])` | Gradient w.r.t. specific params | 0 | Selective differentiation |
-| `vmap(f, axis=a)` | Vectorize over axis `a` | 2 | Batch dimension added |
+| `grad(f, wrt=(w))` | Gradient w.r.t. specific params | 0 | Selective differentiation |
+| `vmap(f, axis=a)` | Vectorize over integer axis `a` | 2 | Batch dimension inserted at `a` |
 | `jit(f)` | Compile and cache | 2 | Shape-specialized |
 | `jit(grad(f))` | Compile gradient function | 2 | Most common pattern |
 | `grad(jit(f))` | Differentiate through jit | 2 | Equivalent to `jit(grad(f))` |
-| `vmap(grad(f), "b")` | Per-example gradients | 2 | Each example gets its own grad |
-| `grad(vmap(f, "b"))` | Gradient of batched function | 2 | Standard training gradient |
-| `jit(vmap(grad(f), "b"))` | Compiled per-example gradients | 2 | Full composition |
+| `vmap(grad(f))` | Per-example gradients | 2 | Direct executable path supports flat tuple-valued gradient payloads |
+| `grad(vmap(f))` | Rejected in shipped source subset | 2 | Reduce the vmapped result to a scalar first |
+| `jit(vmap(grad(f)))` | Future compiled per-example gradients | 2 | `jit` remains non-executable today |
 
 ### 6.2 Commutativity Rules
 
@@ -545,7 +555,7 @@ jit(jit(f))   =  jit(f)             -- jit is idempotent
 The following are **not** equivalent:
 
 ```
-vmap(grad(f), "b")  !=  grad(vmap(f, "b"))
+vmap(grad(f))  !=  grad(vmap(f))
 ```
 
 The left side computes per-example gradients (a batch of gradient vectors). The right side computes the gradient of the sum over the batch (a single gradient vector equal to the sum of per-example gradients).
@@ -705,11 +715,11 @@ Transformations can produce the following errors:
 
 **Repair:** Suggest wrapping the function output in a ReduceSum or computing a loss value.
 
-### 8.4 `dimension_not_found` (vmap)
+### 8.4 `axis_out_of_bounds` (vmap)
 
-**Trigger:** `vmap(f, axis=name)` where `name` conflicts with an existing dimension in `f`'s input type.
+**Trigger:** `vmap(f, axis=n)` where `n` is out of bounds for one of the vmapped tensor types.
 
-**Message:** `"Dimension 'batch' already exists in the input type tensor[{batch, hidden}, f32]. Choose a different axis name for vmap."`
+**Message:** `"vmap axis 2 is out of bounds for rank 1 tensor. Choose an axis between 0 and 1."`
 
 ### 8.5 `shape_mismatch_in_jit`
 

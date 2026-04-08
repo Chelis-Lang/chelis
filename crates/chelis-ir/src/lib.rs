@@ -16,6 +16,7 @@ pub mod optimize;
 pub mod pipeline;
 pub mod tier2;
 pub mod verify;
+pub mod vmap;
 
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use lower::lower_program;

@@ -26,6 +26,8 @@ pub enum CheckErrorKind {
     OccursCheck,
     CastNonTensor,
     TupleIndexOutOfBounds,
+    UseAfterConsume,
+    InvalidBorrow,
     Other,
 }
 
@@ -41,6 +43,8 @@ impl CheckErrorKind {
             CheckErrorKind::OccursCheck => 0.5,
             CheckErrorKind::CastNonTensor => 0.6,
             CheckErrorKind::TupleIndexOutOfBounds => 0.7,
+            CheckErrorKind::UseAfterConsume => 0.9,
+            CheckErrorKind::InvalidBorrow => 0.8,
             CheckErrorKind::Other => 0.5,
         }
     }

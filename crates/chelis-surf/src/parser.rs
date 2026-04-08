@@ -136,6 +136,59 @@ impl Parser {
         }
     }
 
+    fn block_expr_end(&self) -> usize {
+        let mut pos = self.pos;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        while let Some(token) = self.tokens.get(pos) {
+            match token.kind {
+                TokenKind::Newline | TokenKind::Semicolon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    break;
+                }
+                TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                    break;
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket if bracket_depth > 0 => bracket_depth -= 1,
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace if brace_depth > 0 => brace_depth -= 1,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+        pos
+    }
+
+    fn parse_expr_until_block_separator(&mut self) -> Result<Expr, ParseError> {
+        let end = self.block_expr_end();
+        let mut expr_tokens = self.tokens[self.pos..end].to_vec();
+        expr_tokens.push(Token {
+            kind: TokenKind::Eof,
+            span: Span::new(self.current_offset(), 0),
+        });
+        let mut nested = Parser {
+            tokens: expr_tokens,
+            pos: 0,
+            module_allowed: false,
+        };
+        let expr = nested.parse_expr(0)?;
+        if !nested.at_eof() {
+            return Err(ParseError::Expected {
+                expected: "end of block expression".into(),
+                found: format!("{:?}", nested.peek()),
+                offset: nested.current_offset(),
+            });
+        }
+        self.pos = end;
+        Ok(expr)
+    }
+
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
         match self.peek().clone() {
             TokenKind::Ident(name) => {
@@ -705,114 +758,106 @@ impl Parser {
             return Err(ParseError::UnexpectedEof);
         }
 
-        match self.peek().clone() {
+        let expr = match self.peek().clone() {
             TokenKind::Int(n) => {
                 let tok = self.advance();
-                Ok(Expr::Lit(Literal::Int(n), tok.span))
+                Expr::Lit(Literal::Int(n), tok.span)
             }
             TokenKind::Float(f) => {
                 let tok = self.advance();
-                Ok(Expr::Lit(Literal::Float(f), tok.span))
+                Expr::Lit(Literal::Float(f), tok.span)
             }
             TokenKind::Str(s) => {
                 let tok = self.advance();
-                Ok(Expr::Lit(Literal::Str(s), tok.span))
+                Expr::Lit(Literal::Str(s), tok.span)
             }
             TokenKind::True => {
                 let tok = self.advance();
-                Ok(Expr::Lit(Literal::Bool(true), tok.span))
+                Expr::Lit(Literal::Bool(true), tok.span)
             }
             TokenKind::False => {
                 let tok = self.advance();
-                Ok(Expr::Lit(Literal::Bool(false), tok.span))
+                Expr::Lit(Literal::Bool(false), tok.span)
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
-                let mut expr = Expr::Var(name, tok.span);
-                // Check for parenthesized application f(x, y)
-                if *self.peek() == TokenKind::LParen {
-                    self.advance();
-                    let args = self.parse_expr_list(TokenKind::RParen)?;
-                    let end = self.expect(&TokenKind::RParen)?;
-                    let span = tok.span.merge(end.span);
-                    expr = Expr::Apply(Box::new(expr), args, span);
-                }
-                // Juxtaposition application: f x y
-                expr = self.parse_juxtaposition_args(expr)?;
-                Ok(expr)
+                Expr::Var(name, tok.span)
             }
             TokenKind::TypeIdent(name) => {
                 let tok = self.advance();
                 if *self.peek() == TokenKind::LBrace {
-                    return self.parse_record_expr(name, tok.span);
+                    self.parse_record_expr(name, tok.span)?
+                } else {
+                    Expr::Constructor(name, tok.span)
                 }
-                let mut expr = Expr::Constructor(name, tok.span);
-                // Juxtaposition application: Foo x y
-                expr = self.parse_juxtaposition_args(expr)?;
-                Ok(expr)
             }
             TokenKind::Minus => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
-                Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), span))
+                return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), span));
             }
             TokenKind::Bang => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
-                Ok(Expr::Unary(UnaryOp::Not, Box::new(operand), span))
+                return Ok(Expr::Unary(UnaryOp::Not, Box::new(operand), span));
             }
             TokenKind::Amp => {
                 let tok = self.advance();
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
-                Ok(Expr::Borrow(Box::new(operand), span))
+                return Ok(Expr::Borrow(Box::new(operand), span));
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
                 if *self.peek() == TokenKind::RParen {
                     let end = self.advance().span;
-                    return Ok(Expr::Tuple(Vec::new(), start.merge(end)));
-                }
-                let first = self.parse_expr(0)?;
-                if *self.peek() == TokenKind::Comma {
-                    // Tuple
-                    let mut elems = vec![first];
-                    while *self.peek() == TokenKind::Comma {
-                        self.advance();
-                        if *self.peek() == TokenKind::RParen {
-                            break;
-                        }
-                        elems.push(self.parse_expr(0)?);
-                    }
-                    let end = self.expect(&TokenKind::RParen)?;
-                    Ok(Expr::Tuple(elems, start.merge(end.span)))
+                    Expr::Tuple(Vec::new(), start.merge(end))
                 } else {
-                    // Grouping
-                    self.expect(&TokenKind::RParen)?;
-                    Ok(first)
+                    let first = self.parse_expr(0)?;
+                    if *self.peek() == TokenKind::Comma {
+                        // Tuple
+                        let mut elems = vec![first];
+                        while *self.peek() == TokenKind::Comma {
+                            self.advance();
+                            if *self.peek() == TokenKind::RParen {
+                                break;
+                            }
+                            elems.push(self.parse_expr(0)?);
+                        }
+                        let end = self.expect(&TokenKind::RParen)?;
+                        Expr::Tuple(elems, start.merge(end.span))
+                    } else {
+                        // Grouping
+                        self.expect(&TokenKind::RParen)?;
+                        first
+                    }
                 }
             }
-            TokenKind::If => self.parse_if(),
-            TokenKind::Match => self.parse_match(),
-            TokenKind::Let => self.parse_let_expr(),
-            TokenKind::Fn => self.parse_lambda(),
-            TokenKind::Cast => self.parse_cast(),
-            TokenKind::Grad => self.parse_grad(),
-            TokenKind::Vmap => self.parse_vmap(),
-            TokenKind::Jit => self.parse_jit(),
-            TokenKind::Realize => self.parse_realize(),
-            TokenKind::Copy => self.parse_copy(),
-            TokenKind::With => self.parse_with_handler(),
-            TokenKind::Par => self.parse_par(),
-            TokenKind::LBrace => self.parse_block(),
-            _ => Err(ParseError::Expected {
-                expected: "expression".into(),
-                found: format!("{:?}", self.peek()),
-                offset: self.current_offset(),
-            }),
-        }
+            TokenKind::If => self.parse_if()?,
+            TokenKind::Match => self.parse_match()?,
+            TokenKind::Let => self.parse_let_expr()?,
+            TokenKind::Fn => self.parse_lambda()?,
+            TokenKind::Cast => self.parse_cast()?,
+            TokenKind::Grad => self.parse_grad()?,
+            TokenKind::Vmap => self.parse_vmap()?,
+            TokenKind::Jit => self.parse_jit()?,
+            TokenKind::Realize => self.parse_realize()?,
+            TokenKind::Copy => self.parse_copy()?,
+            TokenKind::With => self.parse_with_handler()?,
+            TokenKind::Par => self.parse_par()?,
+            TokenKind::LBrace => self.parse_block()?,
+            _ => {
+                return Err(ParseError::Expected {
+                    expected: "expression".into(),
+                    found: format!("{:?}", self.peek()),
+                    offset: self.current_offset(),
+                });
+            }
+        };
+
+        self.parse_juxtaposition_args(expr)
     }
 
     fn can_start_juxtaposition_arg(&self) -> bool {
@@ -833,15 +878,30 @@ impl Parser {
     }
 
     fn parse_juxtaposition_args(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
-        while self.can_start_juxtaposition_arg()
-            && self.infix_bp().is_none()
-            && *self.peek() != TokenKind::Pipe
-        {
-            let arg = self.parse_primary_atom()?;
-            let start = expr_span(&expr);
-            let end = expr_span(&arg);
-            expr = Expr::Apply(Box::new(expr), vec![arg], start.merge(end));
+        loop {
+            if *self.peek() == TokenKind::LParen {
+                let start = expr_span(&expr);
+                self.advance();
+                let args = self.parse_expr_list(TokenKind::RParen)?;
+                let end = self.expect(&TokenKind::RParen)?;
+                expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+                continue;
+            }
+
+            if self.can_start_juxtaposition_arg()
+                && self.infix_bp().is_none()
+                && *self.peek() != TokenKind::Pipe
+            {
+                let arg = self.parse_primary_atom()?;
+                let start = expr_span(&expr);
+                let end = expr_span(&arg);
+                expr = Expr::Apply(Box::new(expr), vec![arg], start.merge(end));
+                continue;
+            }
+
+            break;
         }
+
         Ok(expr)
     }
 
@@ -1046,8 +1106,44 @@ impl Parser {
         let start = self.advance().span; // consume Grad
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        let wrt = if *self.peek() == TokenKind::Comma {
+            self.advance();
+            let (kw, kw_span) = self.expect_ident()?;
+            if kw != "wrt" {
+                return Err(ParseError::Expected {
+                    expected: "`wrt`".into(),
+                    found: kw,
+                    offset: kw_span.offset,
+                });
+            }
+            self.expect(&TokenKind::Eq)?;
+            Some(self.parse_grad_wrt_targets()?)
+        } else {
+            None
+        };
         let end = self.expect(&TokenKind::RParen)?;
-        Ok(Expr::Grad(Box::new(expr), start.merge(end.span)))
+        Ok(Expr::Grad(Box::new(expr), wrt, start.merge(end.span)))
+    }
+
+    fn parse_grad_wrt_targets(&mut self) -> Result<Vec<String>, ParseError> {
+        if *self.peek() == TokenKind::LParen {
+            self.advance();
+            let mut names = Vec::new();
+            loop {
+                let (name, _) = self.expect_ident()?;
+                names.push(name);
+                if *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            self.expect(&TokenKind::RParen)?;
+            Ok(names)
+        } else {
+            let (name, _) = self.expect_ident()?;
+            Ok(vec![name])
+        }
     }
 
     fn parse_vmap(&mut self) -> Result<Expr, ParseError> {
@@ -1207,7 +1303,7 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
-        let value = self.parse_expr(0)?;
+        let value = self.parse_expr_until_block_separator()?;
         Ok(LetBinding { pattern, ty, value })
     }
 
@@ -1701,7 +1797,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Lambda(_, _, s) => *s,
         Expr::Tuple(_, s) => *s,
         Expr::Cast(_, _, s) => *s,
-        Expr::Grad(_, s) => *s,
+        Expr::Grad(_, _, s) => *s,
         Expr::Vmap(_, _, s) => *s,
         Expr::Jit(_, s) => *s,
         Expr::Realize(_, s) => *s,
@@ -2377,7 +2473,27 @@ mod tests {
     #[test]
     fn grad_expr() {
         let e = body("let x = grad(f)");
-        assert!(matches!(e, Expr::Grad(_, _)));
+        assert!(matches!(e, Expr::Grad(_, None, _)));
+    }
+
+    #[test]
+    fn grad_expr_with_single_wrt() {
+        let e = body("let x = grad(f, wrt=w)");
+        match e {
+            Expr::Grad(_, Some(wrt), _) => assert_eq!(wrt, vec!["w".to_string()]),
+            _ => panic!("expected Grad with wrt, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn grad_expr_with_multiple_wrt() {
+        let e = body("let x = grad(f, wrt=(w, b))");
+        match e {
+            Expr::Grad(_, Some(wrt), _) => {
+                assert_eq!(wrt, vec!["w".to_string(), "b".to_string()])
+            }
+            _ => panic!("expected Grad with wrt tuple, got {e:?}"),
+        }
     }
 
     #[test]
@@ -2395,6 +2511,25 @@ mod tests {
         match e {
             Expr::Vmap(_, axis, _) => assert_eq!(axis, Some(1)),
             _ => panic!("expected Vmap, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn vmap_result_can_be_applied() {
+        let e = body("let x = vmap(f)(xs)");
+        match e {
+            Expr::Apply(func, args, _) => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], Expr::Var(name, _) if name == "xs"));
+                match func.as_ref() {
+                    Expr::Vmap(inner, axis, _) => {
+                        assert!(axis.is_none());
+                        assert!(matches!(inner.as_ref(), Expr::Var(name, _) if name == "f"));
+                    }
+                    other => panic!("expected Vmap function, got {other:?}"),
+                }
+            }
+            _ => panic!("expected Apply, got {e:?}"),
         }
     }
 

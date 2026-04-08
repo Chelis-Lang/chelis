@@ -1,0 +1,700 @@
+use std::collections::{HashMap, HashSet};
+
+use chelis_deep::Span;
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+
+use crate::CheckedProgram;
+use crate::errors::{CheckError, CheckErrorKind};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinearityInfo {
+    reusable_inputs_by_offset: HashMap<usize, usize>,
+}
+
+impl LinearityInfo {
+    pub fn reusable_input_for_span(&self, span: Span) -> Option<usize> {
+        self.reusable_inputs_by_offset.get(&span.offset).copied()
+    }
+
+    fn mark_reusable_input(&mut self, span: Span, input_index: usize) {
+        self.reusable_inputs_by_offset
+            .entry(span.offset)
+            .or_insert(input_index);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BindingState {
+    Live,
+    Consumed(ConsumeSite),
+}
+
+#[derive(Debug, Clone)]
+struct ConsumeSite {
+    description: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LinearScope {
+    bindings: HashMap<String, Vec<BindingState>>,
+}
+
+impl LinearScope {
+    fn declare<S: Into<String>>(&mut self, name: S) {
+        self.bindings
+            .entry(name.into())
+            .or_default()
+            .push(BindingState::Live);
+    }
+
+    fn pop(&mut self, name: &str) {
+        if let Some(stack) = self.bindings.get_mut(name) {
+            stack.pop();
+            if stack.is_empty() {
+                self.bindings.remove(name);
+            }
+        }
+    }
+
+    fn top(&self, name: &str) -> Option<&BindingState> {
+        self.bindings.get(name).and_then(|stack| stack.last())
+    }
+
+    fn consume(&mut self, name: &str, site: ConsumeSite) {
+        if let Some(stack) = self.bindings.get_mut(name)
+            && let Some(top) = stack.last_mut()
+        {
+            *top = BindingState::Consumed(site);
+        }
+    }
+
+    fn visible_names(&self) -> Vec<String> {
+        self.bindings.keys().cloned().collect()
+    }
+}
+
+struct Checker {
+    errors: Vec<CheckError>,
+    info: LinearityInfo,
+}
+
+pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+    let mut checker = Checker {
+        errors: Vec::new(),
+        info: LinearityInfo::default(),
+    };
+    let mut scope = LinearScope::default();
+
+    for expr in program.annotated_exprs() {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            scope.declare(name);
+        }
+    }
+
+    for expr in program.annotated_exprs() {
+        checker.check_top_level(expr, &mut scope);
+    }
+
+    if checker.errors.is_empty() {
+        Ok(program.clone().with_linearity(checker.info))
+    } else {
+        Err(checker.errors)
+    }
+}
+
+impl Checker {
+    fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+        {
+            let kids = children(list);
+            if let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
+                && !(is_var_expr(body) && var_name(body) == Some(name))
+            {
+                self.check_expr(body, scope);
+            }
+            return;
+        }
+        self.check_expr(expr, scope);
+    }
+
+    fn check_expr(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        match expr {
+            Expr::Atom(_, _) => {}
+            Expr::Map(map, _) => {
+                for (_, value) in &map.entries {
+                    self.check_expr(value, scope);
+                }
+            }
+            Expr::MetaExpr(meta, _) => self.check_expr(&meta.expr, scope),
+            Expr::List(list, _) => match get_tag(list) {
+                Some("var") => self.consume_var_expr(expr, scope, generic_site(expr)),
+                Some("copy") => self.check_copy(list, scope),
+                Some("borrow") => {
+                    self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
+                }
+                Some("app") => self.check_app(expr, list, scope),
+                Some("let") => self.check_let(list, scope),
+                Some("fn") => self.check_fn(expr, list, scope),
+                Some("if") => self.check_if(list, scope),
+                Some("match") => self.check_match(list, scope),
+                _ => {
+                    for child in children(list) {
+                        self.check_expr(child, scope);
+                    }
+                }
+            },
+        }
+    }
+
+    fn check_copy(&mut self, list: &List, scope: &mut LinearScope) {
+        if let Some(child) = children(list).first() {
+            if is_var_expr(child) && expr_is_linear(child) {
+                self.read_var_expr(child, scope);
+            } else {
+                self.check_expr(child, scope);
+            }
+        }
+    }
+
+    fn check_app(&mut self, expr: &Expr, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if let Some(func) = kids.first() {
+            self.check_expr(func, scope);
+        }
+        for arg in kids.iter().skip(1) {
+            if let Some(borrowed) = borrow_inner(arg) {
+                self.check_borrow_arg(arg, borrowed, scope);
+            } else if is_var_expr(arg) && expr_is_linear(arg) {
+                self.consume_var_expr(arg, scope, app_site(expr, list));
+            } else {
+                self.check_expr(arg, scope);
+            }
+        }
+        self.maybe_mark_reusable_app_input(expr, kids);
+    }
+
+    fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
+        if !is_var_expr(inner) {
+            self.invalid_borrow(
+                borrow_expr,
+                "borrowed arguments must be direct variable references",
+            );
+            return;
+        }
+        if !expr_is_linear(inner) {
+            self.invalid_borrow(
+                borrow_expr,
+                "borrowed arguments must be tensor or tensor-carrying values",
+            );
+            return;
+        }
+        self.read_var_expr(inner, scope);
+    }
+
+    fn check_let(&mut self, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if kids.len() < 2 {
+            return;
+        }
+        let mut pushed = Vec::new();
+        if let Expr::List(bind_list, _) = &kids[0] {
+            let bind_kids = children(bind_list);
+            let mut index = 0;
+            while index + 1 < bind_kids.len() {
+                let Some(name) = symbol_name(&bind_kids[index]) else {
+                    index += 2;
+                    continue;
+                };
+                let value = &bind_kids[index + 1];
+                if is_var_expr(value) && expr_is_linear(value) {
+                    self.consume_var_expr(
+                        value,
+                        scope,
+                        ConsumeSite {
+                            description: format!(
+                                "binding `{name}` at offset {}",
+                                value.span().offset
+                            ),
+                        },
+                    );
+                } else if matches!(get_tag_expr(value), Some("borrow")) {
+                    self.invalid_borrow(value, "borrow cannot be stored in a binding");
+                } else {
+                    self.check_expr(value, scope);
+                }
+                scope.declare(name);
+                pushed.push(name.to_string());
+                index += 2;
+            }
+        }
+        self.check_expr(&kids[1], scope);
+        for name in pushed.into_iter().rev() {
+            scope.pop(&name);
+        }
+    }
+
+    fn check_fn(&mut self, expr: &Expr, list: &List, outer_scope: &mut LinearScope) {
+        let kids = children(list);
+        if kids.len() < 2 {
+            return;
+        }
+
+        let params = param_names(&kids[0]);
+        let captured = free_vars_with_linearity(&kids[1], &params);
+        let mut inner_scope = outer_scope.clone();
+        for (name, is_linear) in captured {
+            if is_linear {
+                self.read_or_error(name.as_str(), expr, outer_scope);
+                outer_scope.consume(
+                    &name,
+                    ConsumeSite {
+                        description: format!("closure capture at offset {}", expr.span().offset),
+                    },
+                );
+                inner_scope.declare(name);
+            }
+        }
+
+        let mut pushed = Vec::new();
+        for param in params {
+            inner_scope.declare(param.clone());
+            pushed.push(param);
+        }
+        self.check_expr(&kids[1], &mut inner_scope);
+        for name in pushed.into_iter().rev() {
+            inner_scope.pop(&name);
+        }
+    }
+
+    fn check_if(&mut self, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if kids.len() < 3 {
+            return;
+        }
+        self.check_expr(&kids[0], scope);
+        let visible_names = scope.visible_names();
+        let mut then_scope = scope.clone();
+        let mut else_scope = scope.clone();
+        self.check_expr(&kids[1], &mut then_scope);
+        self.check_expr(&kids[2], &mut else_scope);
+        self.join_branch_states(scope, &visible_names, &[then_scope, else_scope]);
+    }
+
+    fn check_match(&mut self, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if kids.is_empty() {
+            return;
+        }
+        if is_var_expr(&kids[0]) && expr_is_linear(&kids[0]) {
+            self.consume_var_expr(
+                &kids[0],
+                scope,
+                ConsumeSite {
+                    description: format!("match scrutinee at offset {}", kids[0].span().offset),
+                },
+            );
+        } else {
+            self.check_expr(&kids[0], scope);
+        }
+
+        let visible_names = scope.visible_names();
+        let mut arm_scopes = Vec::new();
+        for arm in kids.iter().skip(1) {
+            let Expr::List(arm_list, _) = arm else {
+                continue;
+            };
+            if get_tag(arm_list) != Some("arm") {
+                continue;
+            }
+            let arm_kids = children(arm_list);
+            if arm_kids.len() < 3 {
+                continue;
+            }
+            let mut arm_scope = scope.clone();
+            let pattern_names = pattern_names(&arm_kids[0]);
+            for name in &pattern_names {
+                arm_scope.declare(name.clone());
+            }
+            self.check_expr(&arm_kids[1], &mut arm_scope);
+            self.check_expr(&arm_kids[2], &mut arm_scope);
+            for name in pattern_names.into_iter().rev() {
+                arm_scope.pop(&name);
+            }
+            arm_scopes.push(arm_scope);
+        }
+        self.join_branch_states(scope, &visible_names, &arm_scopes);
+    }
+
+    fn join_branch_states(
+        &mut self,
+        scope: &mut LinearScope,
+        visible_names: &[String],
+        branches: &[LinearScope],
+    ) {
+        for name in visible_names {
+            let consumed_site = branches.iter().find_map(|branch| match branch.top(name) {
+                Some(BindingState::Consumed(site)) => Some(site.clone()),
+                _ => None,
+            });
+            if let Some(site) = consumed_site
+                && matches!(scope.top(name), Some(BindingState::Live))
+            {
+                scope.consume(name, site);
+            }
+        }
+    }
+
+    fn maybe_mark_reusable_app_input(&mut self, expr: &Expr, kids: &[Expr]) {
+        if !expr_is_linear(expr) {
+            return;
+        }
+        let Some(output_ty) = type_metadata(expr) else {
+            return;
+        };
+        for (index, arg) in kids.iter().skip(1).enumerate() {
+            if borrow_inner(arg).is_some() || !is_var_expr(arg) || !expr_is_linear(arg) {
+                continue;
+            }
+            if type_metadata(arg).is_some_and(|arg_ty| type_expr_eq(arg_ty, output_ty)) {
+                self.info.mark_reusable_input(expr.span(), index);
+                break;
+            }
+        }
+    }
+
+    fn consume_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope, site: ConsumeSite) {
+        let Some(name) = var_name(expr) else {
+            return;
+        };
+        if !expr_is_linear(expr) {
+            return;
+        }
+        match scope.top(name) {
+            Some(BindingState::Live) => scope.consume(name, site),
+            Some(BindingState::Consumed(consumed_at)) => self.errors.push(CheckError::new(
+                CheckErrorKind::UseAfterConsume,
+                with_macro_provenance(
+                    expr,
+                    format!(
+                        "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                        consumed_at.description,
+                        expr.span().offset
+                    ),
+                ),
+                vec![format!(
+                    "Insert `copy({name})` before the first consuming use if you need to reuse it"
+                )],
+            )),
+            None => {}
+        }
+    }
+
+    fn read_var_expr(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        let Some(name) = var_name(expr) else {
+            return;
+        };
+        if !expr_is_linear(expr) {
+            return;
+        }
+        self.read_or_error(name, expr, scope);
+    }
+
+    fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
+        if let Some(BindingState::Consumed(site)) = scope.top(name) {
+            self.errors.push(CheckError::new(
+                CheckErrorKind::UseAfterConsume,
+                with_macro_provenance(
+                    expr,
+                    format!(
+                        "variable `{name}` was already consumed by {}; later use at offset {} is invalid",
+                        site.description,
+                        expr.span().offset
+                    ),
+                ),
+                vec![format!(
+                    "Insert `copy({name})` before the first consuming use if you need to reuse it"
+                )],
+            ));
+        }
+    }
+
+    fn invalid_borrow(&mut self, expr: &Expr, message: &str) {
+        self.errors.push(CheckError::new(
+            CheckErrorKind::InvalidBorrow,
+            with_macro_provenance(expr, format!("{message} (offset {})", expr.span().offset)),
+            vec!["Use `&x` only as a direct function-call argument".to_string()],
+        ));
+    }
+}
+
+fn get_tag(list: &List) -> Option<&str> {
+    match list.elements.first() {
+        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
+        _ => None,
+    }
+}
+
+fn with_macro_provenance(expr: &Expr, message: String) -> String {
+    let Some(source) = macro_source(expr) else {
+        return message;
+    };
+    format!("{message} (in expansion of {source})")
+}
+
+fn macro_source(expr: &Expr) -> Option<String> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    let Expr::Map(meta, _) = list.elements.get(1)? else {
+        return None;
+    };
+    let source = meta
+        .entries
+        .iter()
+        .find(|(key, _)| key == "source")
+        .map(|(_, value)| value)?;
+    let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(source));
+    Some(rendered.replace('\n', " ").trim().to_string())
+}
+
+fn get_tag_expr(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::List(list, _) => get_tag(list),
+        _ => None,
+    }
+}
+
+fn children(list: &List) -> &[Expr] {
+    if list.elements.len() > 2 {
+        &list.elements[2..]
+    } else {
+        &[]
+    }
+}
+
+fn symbol_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn is_var_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::List(list, _) if get_tag(list) == Some("var"))
+}
+
+fn var_name(expr: &Expr) -> Option<&str> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+fn borrow_inner(expr: &Expr) -> Option<&Expr> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("borrow") {
+        return None;
+    }
+    children(list).first()
+}
+
+fn param_names(expr: &Expr) -> Vec<String> {
+    let Expr::List(list, _) = expr else {
+        return Vec::new();
+    };
+    if get_tag(list) != Some("params") {
+        return Vec::new();
+    }
+    children(list)
+        .iter()
+        .filter_map(|param| match param {
+            Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+            Expr::List(param_list, _) => param_list
+                .elements
+                .first()
+                .and_then(symbol_name)
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pattern_names(expr: &Expr) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_pattern_names(expr, &mut names);
+    names
+}
+
+fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("pat-var") => {
+            if let Some(name) = children(list).first().and_then(symbol_name) {
+                names.push(name.to_string());
+            }
+        }
+        Some("pat-as") => {
+            let kids = children(list);
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                names.push(name.to_string());
+            }
+            if let Some(inner) = kids.get(1) {
+                collect_pattern_names(inner, names);
+            }
+        }
+        _ => {
+            for child in children(list) {
+                collect_pattern_names(child, names);
+            }
+        }
+    }
+}
+
+fn free_vars_with_linearity(expr: &Expr, params: &[String]) -> HashMap<String, bool> {
+    let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
+    let mut free = HashMap::new();
+    collect_free_vars(expr, &mut bound, &mut free);
+    free
+}
+
+fn collect_free_vars(
+    expr: &Expr,
+    bound: &mut Vec<HashSet<String>>,
+    free: &mut HashMap<String, bool>,
+) {
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::MetaExpr(meta, _) => collect_free_vars(&meta.expr, bound, free),
+        Expr::List(list, _) => match get_tag(list) {
+            Some("var") => {
+                if let Some(name) = children(list).first().and_then(symbol_name)
+                    && !bound.iter().rev().any(|scope| scope.contains(name))
+                {
+                    let is_linear = expr_is_linear(expr);
+                    free.entry(name.to_string())
+                        .and_modify(|existing| *existing |= is_linear)
+                        .or_insert(is_linear);
+                }
+            }
+            Some("fn") => {
+                let kids = children(list);
+                if kids.len() >= 2 {
+                    bound.push(param_names(&kids[0]).into_iter().collect());
+                    collect_free_vars(&kids[1], bound, free);
+                    bound.pop();
+                }
+            }
+            Some("let") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return;
+                }
+                let mut let_scope = HashSet::new();
+                if let Expr::List(bind_list, _) = &kids[0] {
+                    let bind_kids = children(bind_list);
+                    let mut index = 0;
+                    while index + 1 < bind_kids.len() {
+                        collect_free_vars(&bind_kids[index + 1], bound, free);
+                        if let Some(name) = symbol_name(&bind_kids[index]) {
+                            let_scope.insert(name.to_string());
+                        }
+                        index += 2;
+                    }
+                }
+                bound.push(let_scope);
+                collect_free_vars(&kids[1], bound, free);
+                bound.pop();
+            }
+            Some("match") => {
+                let kids = children(list);
+                if kids.is_empty() {
+                    return;
+                }
+                collect_free_vars(&kids[0], bound, free);
+                for arm in kids.iter().skip(1) {
+                    let Expr::List(arm_list, _) = arm else {
+                        continue;
+                    };
+                    if get_tag(arm_list) != Some("arm") {
+                        continue;
+                    }
+                    let arm_kids = children(arm_list);
+                    if arm_kids.len() < 3 {
+                        continue;
+                    }
+                    bound.push(pattern_names(&arm_kids[0]).into_iter().collect());
+                    collect_free_vars(&arm_kids[1], bound, free);
+                    collect_free_vars(&arm_kids[2], bound, free);
+                    bound.pop();
+                }
+            }
+            _ => {
+                for child in children(list) {
+                    collect_free_vars(child, bound, free);
+                }
+            }
+        },
+    }
+}
+
+fn expr_is_linear(expr: &Expr) -> bool {
+    type_metadata(expr).is_some_and(type_expr_contains_tensor)
+}
+
+fn type_metadata(expr: &Expr) -> Option<&Expr> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    match list.elements.get(1) {
+        Some(Expr::Map(MetaMap { entries }, _)) => entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn type_expr_contains_tensor(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    match get_tag(list) {
+        Some("t-tensor") => true,
+        Some("t-tuple") | Some("t-adt") => children(list).iter().any(type_expr_contains_tensor),
+        Some("t-fn") => false,
+        _ => false,
+    }
+}
+
+fn type_expr_eq(lhs: &Expr, rhs: &Expr) -> bool {
+    chelis_deep::printer::print_canonical(std::slice::from_ref(lhs))
+        == chelis_deep::printer::print_canonical(std::slice::from_ref(rhs))
+}
+
+fn app_site(expr: &Expr, list: &List) -> ConsumeSite {
+    let name = children(list)
+        .first()
+        .and_then(var_name)
+        .map(|name| format!("call to `{name}`"))
+        .unwrap_or_else(|| "call".to_string());
+    ConsumeSite {
+        description: format!("{name} at offset {}", expr.span().offset),
+    }
+}
+
+fn generic_site(expr: &Expr) -> ConsumeSite {
+    ConsumeSite {
+        description: format!("use at offset {}", expr.span().offset),
+    }
+}

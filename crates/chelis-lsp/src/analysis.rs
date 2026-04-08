@@ -337,7 +337,7 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
                 }
             }
         }
-        Decl::Sig { name, ty, span } => {
+        Decl::Sig { name, ty, span, .. } => {
             index.defs.insert(
                 name.clone(),
                 TopLevelSymbol {
@@ -433,6 +433,17 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
                         .map(|ty| format!("let {}: {}", name, format_type_expr(ty)))
                         .unwrap_or_else(|| format!("let {name}")),
                     kind: CompletionItemKind::VARIABLE,
+                },
+            );
+        }
+        Decl::MacroDef { name, span, .. } => {
+            index.defs.insert(
+                name.clone(),
+                TopLevelSymbol {
+                    name: name.clone(),
+                    range: range_for_span(text, *span),
+                    hover: format!("macro {name}(...)"),
+                    kind: CompletionItemKind::FUNCTION,
                 },
             );
         }
@@ -618,8 +629,9 @@ fn collect_expr_symbols(
         }
         Expr::Access(base, _, _)
         | Expr::TupleGet(base, _, _)
+        | Expr::Borrow(base, _)
         | Expr::Unary(_, base, _)
-        | Expr::Grad(base, _)
+        | Expr::Grad(base, _, _)
         | Expr::Jit(base, _)
         | Expr::Realize(base, _)
         | Expr::Copy(base, _)
@@ -628,6 +640,46 @@ fn collect_expr_symbols(
             collect_expr_symbols(
                 text,
                 base,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+        }
+        Expr::WithSeed(body, seed, _) => {
+            collect_expr_symbols(
+                text,
+                body,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+            collect_expr_symbols(
+                text,
+                seed,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+        }
+        Expr::WithDevice(body, device, _) => {
+            collect_expr_symbols(
+                text,
+                body,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+            collect_expr_symbols(
+                text,
+                device,
                 top_level,
                 locals,
                 references,
@@ -1132,7 +1184,8 @@ fn first_decl_range(text: &str, decls: &[Decl]) -> Option<Range> {
         | Decl::TypeAlias { span, .. }
         | Decl::FunDef { span, .. }
         | Decl::LetDef { span, .. }
-        | Decl::Export { span, .. } => range_for_span(text, *span),
+        | Decl::Export { span, .. }
+        | Decl::MacroDef { span, .. } => range_for_span(text, *span),
     })
 }
 
@@ -1172,11 +1225,14 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
         | Expr::Cast(_, _, span)
-        | Expr::Grad(_, span)
+        | Expr::Grad(_, _, span)
         | Expr::Vmap(_, _, span)
         | Expr::Jit(_, span)
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
+        | Expr::Borrow(_, span)
+        | Expr::WithSeed(_, _, span)
+        | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Annotate(_, _, span)
         | Expr::Block(_, _, span) => *span,

@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 chelis-deep.workspace = true
+chelis-macros.workspace = true
 chelis-surf.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true

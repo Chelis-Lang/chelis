@@ -243,6 +243,17 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     Γ ⊢ (tuple-get {} e k) : τₖ
 ```
 
+**grad (shipped 2db result shape):**
+If `f` has scalar floating output, `grad(f)` returns gradients only.
+The gradient payload shape is:
+
+- one differentiable target => that gradient type directly
+- multiple differentiable targets => flat `t-tuple` in target order
+- explicit `wrt` on a non-differentiable parameter => type error
+
+The forward value is not bundled into the `grad(...)` result in the shipped language
+surface.
+
 ---
 
 ## 4. Tensor Type Algebra
@@ -507,17 +518,14 @@ the active Phase 2a extension points.
 
 ---
 
-## 8. Forward Compatibility: Linear Types (Phase 2 Design Direction)
+## 8. Linearity (Phase 2b)
 
 ### 8.1 Model
 
-The current Phase 2b starting point is lightweight uniqueness, not a full Rust-style
-ownership-and-lifetimes system. Tensors are the linear values. Scalars and ordinary ADT
-payloads remain freely copyable.
-
-Operational rule of thumb: a tensor consumed by a RISC op is dead unless it is
-explicitly `copy()`'d. Borrowing provides temporary read-only access without
-consumption.
+Phase 2b uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
+system. Tensor values are consume-by-default. A consuming use makes the binding dead
+unless the program inserted `copy(...)` before that use. Borrowing with `&x` provides
+temporary read-only access without consumption.
 
 ### 8.2 Type Representation
 
@@ -529,15 +537,29 @@ consumption.
 (t-tensor {lin: borrow} (d-name {} batch) (t-prim {} f32))
 ```
 
-Phase 0 ignores the `lin` key. All tensors are treated as unrestricted today. The Phase
-2 design intends borrow usage to stay temporary and non-storable: borrows are for one
-call-site view, not general aliasing.
+The `lin` metadata key remains a representation hook, but the shipped Phase 2b user
+surface is expression-based:
+
+- `copy(x)` is the only explicit duplication form
+- `&x` is only valid as a direct call argument
+- passing a tensor to a normal call consumes it unless the caller wrote `&x`
+- borrows cannot be stored, returned, rebound for later use, or captured by closures
+
+Linearity is checked after effect inference, before lowering:
+
+`parse -> desugar -> type infer/check -> effect infer/check -> linearity check -> lower`
 
 Linearity is expected to compose with effects, especially `Resource(Device)`: the
 effect system tracks where a tensor lives, while linearity tracks when it is consumed.
 That gives the compiler a stronger basis for safe in-place buffer reuse.
 
-### 8.3 Phase 0 Extension Point
+### 8.3 Static Rules
 
-The `lin` meta key on `t-tensor` nodes. Phase 0 parser accepts it, Phase 0 type checker
-ignores it.
+- A bare linear binding is consumed on use.
+- `copy(x)` reads `x` without consuming it and yields a fresh tensor value.
+- Pattern matching on a tuple or other value carrying tensor payloads consumes the
+  scrutinee; any tensor payloads bound by the pattern become the new live bindings.
+- Creating a closure that captures a tensor consumes that outer binding at closure
+  creation time.
+- Diagnostics report the consume site and suggest inserting `copy(...)` when reuse was
+  intended.

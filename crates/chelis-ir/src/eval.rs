@@ -809,6 +809,8 @@ mod tests {
             .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         lower_program(&checked)
     }
 

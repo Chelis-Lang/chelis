@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/chelis-deep",
+    "crates/chelis-macros",
     "crates/chelis-surf",
     "crates/chelis-types",
     "crates/chelis-effects",
@@ -25,6 +26,7 @@ repository = "https://github.com/jeffreyksmithjr/chelis"
 
 [workspace.dependencies]
 chelis-deep = { path = "crates/chelis-deep" }
+chelis-macros = { path = "crates/chelis-macros" }
 chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }
 chelis-effects = { path = "crates/chelis-effects" }

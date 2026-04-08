@@ -62,6 +62,10 @@ fn check_surf(source: &str) {
     match parse {
         Ok(decls) => {
             let deep = desugar_program(&decls);
+            let deep =
+                chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
+                    .expect("macro expansion should succeed for snippet checking")
+                    .into_exprs();
             let report = check_phase0e_fitness(&deep);
             json.push('{');
             json.push_str("\"lang\":\"surf\",");

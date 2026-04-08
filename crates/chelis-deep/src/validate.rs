@@ -14,7 +14,7 @@ const VALID_TAGS: &[&str] = &[
     "variant",
     "field",
     "defdim",
-    // Expressions (16)
+    // Expressions (17)
     "fn",
     "app",
     "let",
@@ -30,6 +30,7 @@ const VALID_TAGS: &[&str] = &[
     "tuple",
     "tuple-get",
     "par",
+    "borrow",
     // Patterns (7)
     "pat-var",
     "pat-lit",
@@ -122,7 +123,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
                                 message: format!(
-                                    "unknown tag '{tag}' — not in the 59-tag vocabulary"
+                                    "unknown tag '{tag}' — not in the 60-tag vocabulary"
                                 ),
                             });
                         } else {

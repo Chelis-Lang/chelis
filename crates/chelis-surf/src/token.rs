@@ -15,6 +15,7 @@ pub enum TokenKind {
     In,
     Type,
     Dim,
+    Macro,
     Match,
     With,
     Fn,
@@ -49,6 +50,7 @@ pub enum TokenKind {
     Eq,         // =
     Dot,        // .
     At,         // @
+    Amp,        // &
     Semicolon,  // ;
     Newline,    // \n
     Underscore, // _

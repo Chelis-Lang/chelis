@@ -108,6 +108,41 @@ fn meta(list: &List) -> Option<&MetaMap> {
     }
 }
 
+fn extract_grad_wrt_meta(list: &List) -> Option<Vec<String>> {
+    let wrt_expr = meta(list)?
+        .entries
+        .iter()
+        .find(|(key, _)| key == "wrt")
+        .map(|(_, value)| value)?;
+    match wrt_expr {
+        Expr::List(tuple, _) if tag(tuple) == Some("tuple") => {
+            children(tuple).iter().map(extract_grad_wrt_name).collect()
+        }
+        other => extract_grad_wrt_name(other).map(|name| vec![name]),
+    }
+}
+
+fn extract_grad_wrt_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::List(list, _) if tag(list) == Some("var") => {
+            children(list).first().and_then(sym_str).map(str::to_string)
+        }
+        Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+fn format_grad_expr(target: Option<String>, wrt: Option<Vec<String>>) -> String {
+    let Some(target) = target else {
+        return "grad()".to_string();
+    };
+    match wrt {
+        None => format!("grad({target})"),
+        Some(wrt) if wrt.len() == 1 => format!("grad({target}, wrt={})", wrt[0]),
+        Some(wrt) => format!("grad({target}, wrt=({}))", wrt.join(", ")),
+    }
+}
+
 fn sym_str(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
@@ -512,10 +547,10 @@ impl<'a> IdiomaticDecompiler<'a> {
                     decompile_type_expr(&kids[1])
                 )
             }
-            Some("grad") => children(list)
-                .first()
-                .map(|expr| format!("grad({})", self.decompile_expr(expr)))
-                .unwrap_or_else(|| "grad()".to_string()),
+            Some("grad") => format_grad_expr(
+                children(list).first().map(|expr| self.decompile_expr(expr)),
+                extract_grad_wrt_meta(list),
+            ),
             Some("vmap") => {
                 let kids = children(list);
                 if kids.len() >= 2 {
@@ -1098,14 +1133,10 @@ fn decompile_list_expr(list: &List) -> String {
             let ty = decompile_type_expr(&kids[1]);
             format!("({e} as {ty})")
         }
-        Some("grad") => {
-            let kids = children(list);
-            if let Some(child) = kids.first() {
-                format!("grad({})", decompile_expr(child))
-            } else {
-                "grad()".to_string()
-            }
-        }
+        Some("grad") => format_grad_expr(
+            children(list).first().map(decompile_expr),
+            extract_grad_wrt_meta(list),
+        ),
         Some("vmap") => {
             let kids = children(list);
             if kids.len() >= 2 {

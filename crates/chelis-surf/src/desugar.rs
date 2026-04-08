@@ -3,7 +3,7 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
@@ -15,15 +15,46 @@ use crate::ast::*;
 // ---------------------------------------------------------------------------
 
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
-    decls.iter().flat_map(desugar_decl).collect()
+    let ctx = DesugarCtx::new(decls);
+    decls
+        .iter()
+        .flat_map(|decl| ctx.desugar_decl(decl))
+        .collect()
 }
 
 pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
-    desugar_decl(decl)
+    DesugarCtx::default().desugar_decl(decl)
 }
 
 pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
-    desugar_expr(expr)
+    DesugarCtx::default().desugar_expr(expr)
+}
+
+#[derive(Default)]
+struct DesugarCtx {
+    top_level_fn_params: HashMap<String, Vec<String>>,
+}
+
+impl DesugarCtx {
+    fn new(decls: &[Decl]) -> Self {
+        let mut top_level_fn_params = HashMap::new();
+        for decl in decls {
+            collect_top_level_fn_params(decl, &mut top_level_fn_params);
+        }
+        Self {
+            top_level_fn_params,
+        }
+    }
+}
+
+#[cfg(test)]
+fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
+    DesugarCtx::default().desugar_decl(decl)
+}
+
+#[cfg(test)]
+fn desugar_expr(expr: &Expr) -> deep::Expr {
+    DesugarCtx::default().desugar_expr(expr)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,143 +192,185 @@ const PRIMITIVES: &[&str] = &[
 // Declarations
 // ---------------------------------------------------------------------------
 
-fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
+fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String>>) {
     match decl {
-        Decl::FunDef {
-            name,
-            dim_params,
-            params,
-            ret_ty,
-            effects,
-            body,
-            ..
-        } => desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
-
-        Decl::LetDef {
-            name,
-            ty: Some(t),
-            value,
-            ..
-        } => {
-            vec![
-                node("defsig", vec![sym(name), desugar_type(t)]),
-                node("def", vec![sym(name), desugar_expr(value)]),
-            ]
+        Decl::FunDef { name, params, .. } => {
+            out.insert(
+                name.clone(),
+                params.iter().map(|param| param.name.clone()).collect(),
+            );
         }
-
-        Decl::LetDef {
-            name,
-            ty: None,
-            value,
-            ..
-        } => {
-            vec![node("def", vec![sym(name), desugar_expr(value)])]
-        }
-
-        Decl::TypeDef {
-            name,
-            params,
-            variants,
-            ..
-        } => vec![desugar_type_def(name, params, variants)],
-
-        Decl::TypeAlias {
-            name, params, ty, ..
-        } => {
-            let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
-            vec![node(
-                "typealias",
-                vec![sym(name), param_list, desugar_type(ty)],
-            )]
-        }
-
-        Decl::Sig {
-            name, ty, effects, ..
-        } => vec![node(
-            "defsig",
-            vec![sym(name), apply_effect_metadata(desugar_type(ty), effects)],
-        )],
-
-        Decl::Dim { names, .. } => names
-            .iter()
-            .map(|name| node("defdim", vec![sym(name)]))
-            .collect(),
-
-        Decl::Module { name, decls, .. } => {
-            let mut children = vec![sym(&lower_module_path(name))];
-            for d in decls {
-                children.extend(desugar_decl(d));
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_top_level_fn_params(decl, out);
             }
-            vec![node("module", children)]
         }
-
-        Decl::Import { module, kind, .. } => match kind {
-            ImportKind::Names(ns) => {
-                let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
-                vec![node(
-                    "import",
-                    vec![sym(&lower_module_path(module)), name_list],
-                )]
-            }
-            ImportKind::Qualified => vec![node(
-                "import",
-                vec![sym(&lower_module_path(module)), bare_list(vec![])],
-            )],
-            ImportKind::All => vec![node("import-all", vec![sym(&lower_module_path(module))])],
-        },
-
-        Decl::Export { names, .. } => {
-            let mut children = Vec::new();
-            for n in names {
-                children.push(sym(n));
-            }
-            vec![node("export", children)]
-        }
+        _ => {}
     }
 }
 
-fn desugar_fun_def(
-    name: &str,
-    dim_params: &[String],
-    params: &[Param],
-    ret_ty: &Option<TypeExpr>,
-    effects: &Option<Vec<EffectExpr>>,
-    body: &Expr,
-) -> Vec<deep::Expr> {
-    // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
-    // Build a set so desugar_type_with_dims treats them as d-var.
-    let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+impl DesugarCtx {
+    fn desugar_decl(&self, decl: &Decl) -> Vec<deep::Expr> {
+        match decl {
+            Decl::FunDef {
+                name,
+                dim_params,
+                params,
+                ret_ty,
+                effects,
+                body,
+                ..
+            } => self.desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
 
-    let param_names: Vec<deep::Expr> = params
-        .iter()
-        .map(|param| desugar_param_with_dims(param, &dim_set))
-        .collect();
-    let params_node = node("params", param_names);
-    let fn_node = node("fn", vec![params_node, desugar_expr(body)]);
-    let def_node = node("def", vec![sym(name), fn_node]);
+            Decl::LetDef {
+                name,
+                ty: Some(t),
+                value,
+                ..
+            } => {
+                vec![
+                    node("defsig", vec![sym(name), desugar_type(t)]),
+                    node("def", vec![sym(name), self.desugar_expr(value)]),
+                ]
+            }
 
-    if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
-        let mut type_parts: Vec<deep::Expr> = params
+            Decl::LetDef {
+                name,
+                ty: None,
+                value,
+                ..
+            } => {
+                vec![node("def", vec![sym(name), self.desugar_expr(value)])]
+            }
+
+            Decl::MacroDef {
+                name, params, body, ..
+            } => {
+                let params = node("params", params.iter().map(|param| sym(param)).collect());
+                vec![node(
+                    "defmacro",
+                    vec![sym(name), params, self.desugar_expr(body)],
+                )]
+            }
+
+            Decl::TypeDef {
+                name,
+                params,
+                variants,
+                ..
+            } => vec![desugar_type_def(name, params, variants)],
+
+            Decl::TypeAlias {
+                name, params, ty, ..
+            } => {
+                let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+                vec![node(
+                    "typealias",
+                    vec![sym(name), param_list, desugar_type(ty)],
+                )]
+            }
+
+            Decl::Sig {
+                name, ty, effects, ..
+            } => vec![node(
+                "defsig",
+                vec![sym(name), apply_effect_metadata(desugar_type(ty), effects)],
+            )],
+
+            Decl::Dim { names, .. } => names
+                .iter()
+                .map(|name| node("defdim", vec![sym(name)]))
+                .collect(),
+
+            Decl::Module { name, decls, .. } => {
+                let mut children = vec![sym(&lower_module_path(name))];
+                for d in decls {
+                    children.extend(self.desugar_decl(d));
+                }
+                vec![node("module", children)]
+            }
+
+            Decl::Import { module, kind, .. } => match kind {
+                ImportKind::Names(ns) => {
+                    let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
+                    vec![node(
+                        "import",
+                        vec![sym(&lower_module_path(module)), name_list],
+                    )]
+                }
+                ImportKind::Qualified => vec![node(
+                    "import",
+                    vec![sym(&lower_module_path(module)), bare_list(vec![])],
+                )],
+                ImportKind::All => vec![node("import-all", vec![sym(&lower_module_path(module))])],
+            },
+
+            Decl::Export { names, .. } => {
+                let mut children = Vec::new();
+                for n in names {
+                    children.push(sym(n));
+                }
+                vec![node("export", children)]
+            }
+        }
+    }
+
+    fn desugar_fun_def(
+        &self,
+        name: &str,
+        dim_params: &[String],
+        params: &[Param],
+        ret_ty: &Option<TypeExpr>,
+        effects: &Option<Vec<EffectExpr>>,
+        body: &Expr,
+    ) -> Vec<deep::Expr> {
+        // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
+        // Build a set so desugar_type_with_dims treats them as d-var.
+        let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+
+        let param_names: Vec<deep::Expr> = params
             .iter()
-            .map(|p| match &p.ty {
-                Some(ty) => desugar_type_with_dims(ty, &dim_set),
-                None => node("t-var", vec![sym("_")]),
-            })
+            .map(|param| desugar_param_with_dims(param, &dim_set))
             .collect();
-        type_parts.push(match ret_ty {
-            Some(ty) => desugar_type_with_dims(ty, &dim_set),
-            None => node("t-var", vec![sym("_")]),
-        });
-        let sig = node(
-            "defsig",
+        let params_node = node("params", param_names);
+        let fn_node = node(
+            "fn",
             vec![
-                sym(name),
-                apply_effect_metadata(node("t-fn", type_parts), effects),
+                params_node,
+                self.desugar_expr_with_scope(
+                    body,
+                    &params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect::<Vec<_>>(),
+                ),
             ],
         );
-        vec![sig, def_node]
-    } else {
-        vec![def_node]
+        let def_node = node("def", vec![sym(name), fn_node]);
+
+        if params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() {
+            let mut type_parts: Vec<deep::Expr> = params
+                .iter()
+                .map(|p| match &p.ty {
+                    Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                    None => node("t-var", vec![sym("_")]),
+                })
+                .collect();
+            type_parts.push(match ret_ty {
+                Some(ty) => desugar_type_with_dims(ty, &dim_set),
+                None => node("t-var", vec![sym("_")]),
+            });
+            let sig = node(
+                "defsig",
+                vec![
+                    sym(name),
+                    apply_effect_metadata(node("t-fn", type_parts), effects),
+                ],
+            );
+            vec![sig, def_node]
+        } else {
+            vec![def_node]
+        }
     }
 }
 
@@ -333,150 +406,311 @@ fn desugar_variant(variant: &Variant) -> deep::Expr {
 // Expressions
 // ---------------------------------------------------------------------------
 
-fn desugar_expr(expr: &Expr) -> deep::Expr {
-    match expr {
-        Expr::Lit(lit, _) => desugar_literal(lit),
-        Expr::Var(name, _) => dvar(name),
-        Expr::Constructor(name, _) => dvar(name),
-        Expr::Record(name, fields, _) => {
-            let mut fields = fields.clone();
-            fields.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut children = vec![sym(name)];
-            for (field, value) in fields {
-                children.push(node("kv", vec![sym(&field), desugar_expr(&value)]));
-            }
-            node("record", children)
-        }
-        Expr::Access(target, field, _) => node("access", vec![desugar_expr(target), sym(field)]),
-        Expr::TupleGet(target, index, _) => node(
-            "tuple-get",
-            vec![
-                desugar_expr(target),
-                node_meta(
-                    "lit",
-                    meta_with_type(node("t-prim", vec![sym("int32")])),
-                    vec![deep::Expr::Atom(deep::Atom::Int(*index), sp())],
-                ),
-            ],
-        ),
+impl DesugarCtx {
+    fn desugar_expr(&self, expr: &Expr) -> deep::Expr {
+        self.desugar_expr_with_scope(expr, &[])
+    }
 
-        Expr::Apply(func, args, _) => desugar_apply(func, args),
+    fn resolve_grad_wrt_indices(
+        &self,
+        f: &Expr,
+        wrt: &[String],
+        local_fn_params: &[String],
+    ) -> Option<Vec<i64>> {
+        let params = match f {
+            Expr::Var(name, _) => self.top_level_fn_params.get(name)?.clone(),
+            Expr::Lambda(params, _, _) => params.iter().map(|param| param.name.clone()).collect(),
+            _ if !local_fn_params.is_empty() => local_fn_params.to_vec(),
+            _ => return None,
+        };
 
-        Expr::Binary(op, lhs, rhs, _) => {
-            let op_name = binop_name(*op);
-            // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
-            match op {
-                BinOp::Gt => node(
-                    "app",
-                    vec![dvar(op_name), desugar_expr(rhs), desugar_expr(lhs)],
-                ),
-                _ => node(
-                    "app",
-                    vec![dvar(op_name), desugar_expr(lhs), desugar_expr(rhs)],
-                ),
-            }
-        }
+        wrt.iter()
+            .map(|name| {
+                params
+                    .iter()
+                    .position(|param| param == name)
+                    .map(|index| index as i64)
+            })
+            .collect()
+    }
 
-        Expr::Unary(op, operand, _) => {
-            let op_name = match op {
-                UnaryOp::Neg => "neg",
-                UnaryOp::Not => "not",
-            };
-            node("app", vec![dvar(op_name), desugar_expr(operand)])
-        }
+    fn desugar_grad(
+        &self,
+        f: &Expr,
+        wrt: Option<&[String]>,
+        local_fn_params: &[String],
+    ) -> deep::Expr {
+        let desugared_fn = self.desugar_expr_with_scope(f, local_fn_params);
+        let Some(wrt) = wrt else {
+            return node("grad", vec![desugared_fn]);
+        };
 
-        Expr::Pipe(head, stages, _) => {
-            let mut children = vec![desugar_expr(head)];
-            children.extend(stages.iter().map(desugar_expr));
-            node("pipe", children)
-        }
+        let indices = self
+            .resolve_grad_wrt_indices(f, wrt, local_fn_params)
+            .unwrap_or_else(|| (0..wrt.len()).map(|index| index as i64).collect());
 
-        Expr::If(cond, then_e, else_e, _) => node(
-            "if",
-            vec![
-                desugar_expr(cond),
-                desugar_expr(then_e),
-                desugar_expr(else_e),
-            ],
-        ),
-
-        Expr::Match(scrutinee, arms, _) => {
-            let mut children = vec![desugar_expr(scrutinee)];
-            for arm in arms {
-                let guard = arm
-                    .guard
-                    .as_ref()
-                    .map(desugar_expr)
-                    .unwrap_or_else(|| bare_list(vec![]));
-                children.push(node(
-                    "arm",
-                    vec![
-                        desugar_pattern(&arm.pattern),
-                        guard,
-                        desugar_expr(&arm.body),
-                    ],
-                ));
-            }
-            node("match", children)
-        }
-
-        Expr::Let(bindings, body, _) => desugar_let_bindings(bindings, desugar_expr(body)),
-
-        Expr::Lambda(params, body, _) => {
-            let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
-            let params_node = node("params", param_names);
-            node("fn", vec![params_node, desugar_expr(body)])
-        }
-
-        Expr::Tuple(elems, _) if elems.is_empty() => node_meta(
-            "lit",
-            meta_with_type(node("t-unit", vec![])),
-            vec![bare_list(vec![])],
-        ),
-        Expr::Tuple(elems, _) => node("tuple", elems.iter().map(desugar_expr).collect()),
-
-        Expr::Cast(e, prec, _) => node(
-            "cast",
-            vec![desugar_expr(e), node("t-prim", vec![sym(prec)])],
-        ),
-
-        Expr::Grad(f, _) => node("grad", vec![desugar_expr(f)]),
-
-        Expr::Vmap(f, axis, _) => {
-            let axis_node = node_meta(
+        let wrt_meta = if wrt.len() == 1 {
+            dvar(&wrt[0])
+        } else {
+            node("tuple", wrt.iter().map(|name| dvar(name)).collect())
+        };
+        let index_expr = if indices.len() == 1 {
+            node_meta(
                 "lit",
                 meta_with_type(node("t-prim", vec![sym("int32")])),
-                vec![deep::Expr::Atom(deep::Atom::Int(axis.unwrap_or(0)), sp())],
-            );
-            node("vmap", vec![desugar_expr(f), axis_node])
-        }
+                vec![int(indices[0])],
+            )
+        } else {
+            node(
+                "tuple",
+                indices
+                    .into_iter()
+                    .map(|index| {
+                        node_meta(
+                            "lit",
+                            meta_with_type(node("t-prim", vec![sym("int32")])),
+                            vec![int(index)],
+                        )
+                    })
+                    .collect(),
+            )
+        };
 
-        Expr::Jit(f, _) => node("jit", vec![desugar_expr(f)]),
-        Expr::Realize(f, _) => node("realize", vec![desugar_expr(f)]),
-        Expr::Copy(f, _) => node("copy", vec![desugar_expr(f)]),
-        Expr::WithSeed(seed, body, _) => node_meta(
-            "handle-effect",
-            meta_with_entries(vec![("effect".to_string(), sym("random"))]),
-            vec![desugar_expr(seed), desugar_expr(body)],
-        ),
-        Expr::WithDevice(device, body, _) => node_meta(
-            "handle-effect",
-            meta_with_entries(vec![("effect".to_string(), sym("resource"))]),
-            vec![desugar_expr(device), desugar_expr(body)],
-        ),
-        Expr::Par(exprs, _) => node("par", exprs.iter().map(desugar_expr).collect()),
+        node_meta(
+            "grad",
+            meta_with_entries(vec![("wrt".to_string(), wrt_meta)]),
+            vec![desugared_fn, index_expr],
+        )
+    }
 
-        Expr::Annotate(e, ty, _) => {
-            // Type annotation pushed into metadata of the desugared expression
-            let desugared = desugar_expr(e);
-            inject_type_metadata(desugared, desugar_type(ty))
-        }
+    fn desugar_expr_with_scope(&self, expr: &Expr, local_fn_params: &[String]) -> deep::Expr {
+        match expr {
+            Expr::Lit(lit, _) => desugar_literal(lit),
+            Expr::Var(name, _) => dvar(name),
+            Expr::Constructor(name, _) => dvar(name),
+            Expr::Record(name, fields, _) => {
+                let mut fields = fields.clone();
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut children = vec![sym(name)];
+                for (field, value) in fields {
+                    children.push(node(
+                        "kv",
+                        vec![
+                            sym(&field),
+                            self.desugar_expr_with_scope(&value, local_fn_params),
+                        ],
+                    ));
+                }
+                node("record", children)
+            }
+            Expr::Access(target, field, _) => node(
+                "access",
+                vec![
+                    self.desugar_expr_with_scope(target, local_fn_params),
+                    sym(field),
+                ],
+            ),
+            Expr::TupleGet(target, index, _) => node(
+                "tuple-get",
+                vec![
+                    self.desugar_expr_with_scope(target, local_fn_params),
+                    node_meta(
+                        "lit",
+                        meta_with_type(node("t-prim", vec![sym("int32")])),
+                        vec![deep::Expr::Atom(deep::Atom::Int(*index), sp())],
+                    ),
+                ],
+            ),
 
-        Expr::Block(bindings, final_expr, _) => {
-            if bindings.is_empty() {
-                desugar_expr(final_expr)
-            } else {
-                desugar_let_bindings(bindings, desugar_expr(final_expr))
+            Expr::Apply(func, args, _) => self.desugar_apply(func, args, local_fn_params),
+
+            Expr::Binary(op, lhs, rhs, _) => {
+                let op_name = binop_name(*op);
+                // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
+                match op {
+                    BinOp::Gt => node(
+                        "app",
+                        vec![
+                            dvar(op_name),
+                            self.desugar_expr_with_scope(rhs, local_fn_params),
+                            self.desugar_expr_with_scope(lhs, local_fn_params),
+                        ],
+                    ),
+                    _ => node(
+                        "app",
+                        vec![
+                            dvar(op_name),
+                            self.desugar_expr_with_scope(lhs, local_fn_params),
+                            self.desugar_expr_with_scope(rhs, local_fn_params),
+                        ],
+                    ),
+                }
+            }
+
+            Expr::Unary(op, operand, _) => {
+                let op_name = match op {
+                    UnaryOp::Neg => "neg",
+                    UnaryOp::Not => "not",
+                };
+                node(
+                    "app",
+                    vec![
+                        dvar(op_name),
+                        self.desugar_expr_with_scope(operand, local_fn_params),
+                    ],
+                )
+            }
+
+            Expr::Pipe(head, stages, _) => {
+                let mut children = vec![self.desugar_expr_with_scope(head, local_fn_params)];
+                children.extend(
+                    stages
+                        .iter()
+                        .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params)),
+                );
+                node("pipe", children)
+            }
+
+            Expr::If(cond, then_e, else_e, _) => node(
+                "if",
+                vec![
+                    self.desugar_expr_with_scope(cond, local_fn_params),
+                    self.desugar_expr_with_scope(then_e, local_fn_params),
+                    self.desugar_expr_with_scope(else_e, local_fn_params),
+                ],
+            ),
+
+            Expr::Match(scrutinee, arms, _) => {
+                let mut children = vec![self.desugar_expr_with_scope(scrutinee, local_fn_params)];
+                for arm in arms {
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
+                        .unwrap_or_else(|| bare_list(vec![]));
+                    children.push(node(
+                        "arm",
+                        vec![
+                            desugar_pattern(&arm.pattern),
+                            guard,
+                            self.desugar_expr_with_scope(&arm.body, local_fn_params),
+                        ],
+                    ));
+                }
+                node("match", children)
+            }
+
+            Expr::Let(bindings, body, _) => self.desugar_let_bindings(
+                bindings,
+                self.desugar_expr_with_scope(body, local_fn_params),
+            ),
+
+            Expr::Lambda(params, body, _) => {
+                let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
+                let params_node = node("params", param_names);
+                let lambda_params = params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect::<Vec<_>>();
+                node(
+                    "fn",
+                    vec![
+                        params_node,
+                        self.desugar_expr_with_scope(body, &lambda_params),
+                    ],
+                )
+            }
+
+            Expr::Tuple(elems, _) if elems.is_empty() => node_meta(
+                "lit",
+                meta_with_type(node("t-unit", vec![])),
+                vec![bare_list(vec![])],
+            ),
+            Expr::Tuple(elems, _) => node(
+                "tuple",
+                elems
+                    .iter()
+                    .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
+                    .collect(),
+            ),
+
+            Expr::Cast(e, prec, _) => node(
+                "cast",
+                vec![
+                    self.desugar_expr_with_scope(e, local_fn_params),
+                    node("t-prim", vec![sym(prec)]),
+                ],
+            ),
+
+            Expr::Grad(f, wrt, _) => self.desugar_grad(f, wrt.as_deref(), local_fn_params),
+
+            Expr::Vmap(f, axis, _) => {
+                let axis_node = node_meta(
+                    "lit",
+                    meta_with_type(node("t-prim", vec![sym("int32")])),
+                    vec![deep::Expr::Atom(deep::Atom::Int(axis.unwrap_or(0)), sp())],
+                );
+                node(
+                    "vmap",
+                    vec![self.desugar_expr_with_scope(f, local_fn_params), axis_node],
+                )
+            }
+
+            Expr::Jit(f, _) => node(
+                "jit",
+                vec![self.desugar_expr_with_scope(f, local_fn_params)],
+            ),
+            Expr::Realize(f, _) => node(
+                "realize",
+                vec![self.desugar_expr_with_scope(f, local_fn_params)],
+            ),
+            Expr::Copy(f, _) => node(
+                "copy",
+                vec![self.desugar_expr_with_scope(f, local_fn_params)],
+            ),
+            Expr::Borrow(f, _) => node(
+                "borrow",
+                vec![self.desugar_expr_with_scope(f, local_fn_params)],
+            ),
+            Expr::WithSeed(seed, body, _) => node_meta(
+                "handle-effect",
+                meta_with_entries(vec![("effect".to_string(), sym("random"))]),
+                vec![
+                    self.desugar_expr_with_scope(seed, local_fn_params),
+                    self.desugar_expr_with_scope(body, local_fn_params),
+                ],
+            ),
+            Expr::WithDevice(device, body, _) => node_meta(
+                "handle-effect",
+                meta_with_entries(vec![("effect".to_string(), sym("resource"))]),
+                vec![
+                    self.desugar_expr_with_scope(device, local_fn_params),
+                    self.desugar_expr_with_scope(body, local_fn_params),
+                ],
+            ),
+            Expr::Par(exprs, _) => node(
+                "par",
+                exprs
+                    .iter()
+                    .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
+                    .collect(),
+            ),
+
+            Expr::Annotate(e, ty, _) => {
+                // Type annotation pushed into metadata of the desugared expression
+                let desugared = self.desugar_expr_with_scope(e, local_fn_params);
+                inject_type_metadata(desugared, desugar_type(ty))
+            }
+
+            Expr::Block(bindings, final_expr, _) => {
+                if bindings.is_empty() {
+                    self.desugar_expr_with_scope(final_expr, local_fn_params)
+                } else {
+                    self.desugar_let_bindings(
+                        bindings,
+                        self.desugar_expr_with_scope(final_expr, local_fn_params),
+                    )
+                }
             }
         }
     }
@@ -524,28 +758,34 @@ fn destructure_pattern(
     }
 }
 
-fn desugar_let_bindings(bindings: &[LetBinding], body: deep::Expr) -> deep::Expr {
-    let mut out = body;
-    let mut next_tmp = 0usize;
-    for binding in bindings.iter().rev() {
-        match &binding.pattern {
-            LetPattern::Var(name, _) => {
-                let value = desugar_expr(&binding.value);
-                if let Some(ty) = &binding.ty {
-                    out = bind_name_value(name, inject_type_metadata(value, desugar_type(ty)), out);
-                } else {
-                    out = bind_name_value(name, value, out);
+impl DesugarCtx {
+    fn desugar_let_bindings(&self, bindings: &[LetBinding], body: deep::Expr) -> deep::Expr {
+        let mut out = body;
+        let mut next_tmp = 0usize;
+        for binding in bindings.iter().rev() {
+            match &binding.pattern {
+                LetPattern::Var(name, _) => {
+                    let value = self.desugar_expr(&binding.value);
+                    if let Some(ty) = &binding.ty {
+                        out = bind_name_value(
+                            name,
+                            inject_type_metadata(value, desugar_type(ty)),
+                            out,
+                        );
+                    } else {
+                        out = bind_name_value(name, value, out);
+                    }
+                }
+                pattern => {
+                    let temp_name = format!("__chelis_tmp{}", next_tmp);
+                    next_tmp += 1;
+                    out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
+                    out = bind_name_value(&temp_name, self.desugar_expr(&binding.value), out);
                 }
             }
-            pattern => {
-                let temp_name = format!("__chelis_tmp{}", next_tmp);
-                next_tmp += 1;
-                out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
-                out = bind_name_value(&temp_name, desugar_expr(&binding.value), out);
-            }
         }
+        out
     }
-    out
 }
 
 fn desugar_literal(lit: &Literal) -> deep::Expr {
@@ -573,28 +813,35 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
     }
 }
 
-fn desugar_apply(func: &Expr, args: &[Expr]) -> deep::Expr {
-    // Flatten nested Apply chains
-    let mut all_args = Vec::new();
-    let base_func = collect_apply_chain(func, &mut all_args);
-    for arg in args {
-        all_args.push(desugar_expr(arg));
-    }
-    let mut children = vec![desugar_expr(base_func)];
-    children.extend(all_args);
-    node("app", children)
-}
-
-fn collect_apply_chain<'a>(expr: &'a Expr, args: &mut Vec<deep::Expr>) -> &'a Expr {
-    match expr {
-        Expr::Apply(inner_func, inner_args, _) => {
-            let base = collect_apply_chain(inner_func, args);
-            for arg in inner_args {
-                args.push(desugar_expr(arg));
-            }
-            base
+impl DesugarCtx {
+    fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
+        // Flatten nested Apply chains
+        let mut all_args = Vec::new();
+        let base_func = self.collect_apply_chain(func, &mut all_args, local_fn_params);
+        for arg in args {
+            all_args.push(self.desugar_expr_with_scope(arg, local_fn_params));
         }
-        other => other,
+        let mut children = vec![self.desugar_expr_with_scope(base_func, local_fn_params)];
+        children.extend(all_args);
+        node("app", children)
+    }
+
+    fn collect_apply_chain<'a>(
+        &self,
+        expr: &'a Expr,
+        args: &mut Vec<deep::Expr>,
+        local_fn_params: &[String],
+    ) -> &'a Expr {
+        match expr {
+            Expr::Apply(inner_func, inner_args, _) => {
+                let base = self.collect_apply_chain(inner_func, args, local_fn_params);
+                for arg in inner_args {
+                    args.push(self.desugar_expr_with_scope(arg, local_fn_params));
+                }
+                base
+            }
+            other => other,
+        }
     }
 }
 
@@ -1145,8 +1392,34 @@ mod tests {
 
     #[test]
     fn test_grad() {
-        let expr = Expr::Grad(Box::new(tvar("f")), s());
-        assert_eq!(print_expr(&desugar_expr(&expr)), "(grad {} (var {} f))");
+        let expr = Expr::Grad(Box::new(tvar("f")), None, s());
+        assert_eq!(
+            print_expr(&DesugarCtx::default().desugar_expr(&expr)),
+            "(grad {} (var {} f))"
+        );
+    }
+
+    #[test]
+    fn test_grad_with_wrt() {
+        let expr = Expr::Grad(
+            Box::new(tvar("loss")),
+            Some(vec!["w".to_string(), "b".to_string()]),
+            s(),
+        );
+        let ctx = DesugarCtx {
+            top_level_fn_params: HashMap::from([(
+                "loss".to_string(),
+                vec!["x".to_string(), "w".to_string(), "b".to_string()],
+            )]),
+        };
+        let actual = print_expr(&ctx.desugar_expr(&expr))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            actual,
+            "(grad {wrt: (tuple {} (var {} w) (var {} b))} (var {} loss) (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))"
+        );
     }
 
     #[test]
