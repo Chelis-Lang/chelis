@@ -4,9 +4,8 @@
 
 Phase 1 is structurally complete. The GPU backend works, real models compile and run
 correctly, and the benchmark suite proves correctness across CPU/HIP/PyTorch. Known
-limitations carried forward: `pad`/`shrink` not implemented in HIP, symbolic
-dimensions not implemented in either backend (recompilation required for shape
-changes), dotted Deep path round-trip gap.
+limitations carried forward: `pad`/`shrink` not implemented in HIP, `layer_norm`
+still requiring a concrete normalized-axis extent, dotted Deep path round-trip gap.
 
 **Phase 2 deliverable:** The language is usable by researchers. Effects, linear types,
 macros, the agent API, and tooling make Chelis a credible alternative to PyTorch for
@@ -25,7 +24,7 @@ ecosystem complete.
 
 ```text
 Phase 1 carry-forward fixes ----------------------------------------------+
-  (symbolic dims, pad/shrink, Deep round-trip)                            |
+  (layer_norm symbolic-axis follow-up, pad/shrink, Deep round-trip)       |
                                                                           |
 2a: Algebraic Effects --> 2b: Linear Types --> 2c: Macros                |
         |                        |                    |                   |
@@ -46,7 +45,7 @@ rules). Tooling (2e -> 2f -> 2g) can run in parallel with the type-system track 
 2e has enough compiler API surface.
 
 **Recommended execution order:**
-1. Phase 1 carry-forward fixes (symbolic dims - high value, unblocks dynamic batching)
+1. Phase 1 carry-forward fixes (remaining backend follow-ups)
 2. 2a: Effects (long lead, spec-heavy, informs everything else)
 3. 2e: Agent API (unblocks tooling track and SKILL.md-based workflows)
 4. 2b: Linear types (depends on effect system design for interaction rules)
@@ -64,20 +63,20 @@ rules). Tooling (2e -> 2f -> 2g) can run in parallel with the type-system track 
 Before starting Phase 2 proper, address the known limitations that affect Phase 2
 work:
 
-### Symbolic Dimensions in Both Backends
+### Symbolic Runtime-Axis Follow-Up
 
-**Problem:** Both C and HIP backends require concrete tensor extents at codegen time.
-Named dimensions with unresolved sizes (`DimInfo::Named(name, None)`) are rejected.
-This means every shape change requires recompilation.
+**Current state:** symbolic dimensions now ship in both backends through the stable
+tensor ABI, with bindings inferred from input tensor metadata at runtime. Batch and
+sequence-style dims no longer require recompilation on the supported Phase 1 surface.
 
-**Solution:**
-- IR: `DimInfo::Named(name, None)` stays in the DAG as a symbolic dimension
-- Codegen (both backends): emit shape parameters as function arguments (`int batch`,
-  `int seq`, ...)
-- Kernel launch: grid/block sizes computed from runtime shape values
-- Memory planning: buffer sizes computed from runtime shape values (requires a runtime
-  `malloc` instead of a compile-time constant)
-- Matmul hipBLAS path: `m`/`n`/`k` come from runtime parameters
+**Remaining gap:** `mean`/`layer_norm` still require a concrete normalized-axis extent,
+so a symbolic hidden size is not yet supported.
+
+**Follow-up direction:**
+- carry a runtime divisor for axis-size-dependent normalization paths
+- keep the stable tensor ABI: derive bindings from input metadata rather than adding
+  scalar function parameters
+- preserve the existing repeated-occurrence validation across inputs
 
 **Scope:** ~2 weeks. This is an IR-through-codegen change that touches both backends,
 the memory planner, and the CLI. Test: same MNIST program works with `batch=32` and
@@ -116,14 +115,15 @@ reporting.
 
 Produce `spec/04-type-system.md` effects coverage with:
 
-**Effect vocabulary (built-in):**
+**Settled design decisions:**
 
-| Effect | Meaning | Handler | Compiler use |
-|---|---|---|---|
-| `Diff` | Function body contains differentiable operations | `grad` | AD engine verifies all ops in the body have adjoint rules |
-| `Random` | Function body uses stochastic operations | `withSeed(seed, f)` | Ensures reproducibility; can eliminate randomness for deterministic inference |
-| `Accum` | Function body uses associative accumulation | implicit in `grad` backward pass | GPU backend knows these loops are parallelizable |
-| `Resource(D)` | Function allocates on device `D` | `withDevice(device, f)` | Device placement; prevents cross-device operations without explicit transfer |
+| Design point | Decision |
+|---|---|
+| `Diff` | compiler capability, not a user-visible boundary effect |
+| `Accum` | internal-only in v1; the user does not handle it directly |
+| Boundary effects | `Random` and `Resource(D)` |
+| Crate split | effect types in `chelis-types`; inference/checking in `chelis-effects` |
+| Compiler pipeline | upgrade `CheckedProgram` first so downstream passes consume annotated Deep |
 
 **Why `Accum` (from Dex):** Gradient accumulation (`sum` of adjoint contributions from
 multiple consumers) is an `Accum` pattern. Typing it as `Accum` rather than general
@@ -131,91 +131,123 @@ multiple consumers) is an `Accum` pattern. Typing it as `Accum` rather than gene
 distinction, the compiler would have to conservatively sequentialize gradient
 accumulation.
 
-**No user-defined effects in v1.** Four built-in effects cover the ML domain.
+**No user-defined effects in v1.** The shipped Phase 2a surface is intentionally
+closed and compiler-known.
 User-defined effects (Phase 3+) add handler semantics, effect polymorphism, and
 resumable computations - complexity that is hard for both humans and LLMs.
 
-**Effect inference rules:**
-- A function's effect is the union of effects of all operations in its body
-- Effect composition is row-polymorphic: `map(f, xs)` has whatever effects `f` has
-- Row variables are implicit - the programmer never writes effect annotations unless
-  they want documentation
-- Effect inference runs after HM type inference on the same typed Deep AST
+**Current shipped Phase 2a subset:**
+- effect inference runs after HM type inference on the same annotated Deep tree
+- `CheckedProgram` carries annotated Deep with `type` metadata written onto the returned
+  tree, and downstream passes consume that upgraded representation
+- `dropout(x, rate)` is the minimum concrete `Random` source
+- `with seed(42) { ... }` handles `Random`
+- `with device("gpu:0") { ... }` marks a resource region validated against
+  `chelis build --target ...`
+- unhandled top-level `Random` is a check error with repair guidance
+- seeded `dropout` is implemented in lowering/eval/AD, but not yet in emitted C/HIP
+  codegen
 
-**Handler rules:**
-- A handler eliminates an effect from the type: `grad(f)` takes
-  `f: A -> B ! {Diff, e}` and produces `g: A -> (B, A) ! {e}`
-- `withSeed(42, f)` takes `f: A -> B ! {Random, e}` and produces `g: A -> B ! {e}`
-- `withDevice("gpu:0", f)` takes `f: A -> B ! {Resource(gpu:0), e}` and produces
-  `g: A -> B ! {e}`
-- Unhandled effects at the program boundary are compile errors with repair suggestions
+**What this plan does NOT yet claim as shipped:**
+- full row-polymorphic higher-order effect inference
+- user-visible `Diff` effect checking
+- user-visible `Accum` inference/handling
+- backend codegen for seeded `dropout`
 
 **Interaction with existing type system:**
 - Effects do NOT change HM inference - types are inferred first, effects inferred second
 - Effect annotations in Surf are optional:
-  `sig f: tensor[n, f32] -> tensor[n, f32] ! {Diff}` is valid but never required
-- Effect annotations in Deep: new metadata key `{effects: [diff, random]}` on `fn`
-  nodes - informational, not required, validated if present
+  `sig f: tensor[n, f32] -> tensor[n, f32] ! {Random}` is valid but never required
+- Effect annotations in Deep:
+  - `t-fn` type expressions may carry `eff: (effects {} ...)`
+  - checked `fn` nodes may carry inferred `effects: (effects {} ...)` for the effect
+    information the checker synthesizes today
+  - `Resource(Device)` is currently enforced at the handler/build boundary rather than
+    being synthesized back onto checked `fn` metadata
 
 **Error messages (the LLM-facing concern):**
-- "Function `predict` has unhandled effect `Random` - `dropout` at line 42 introduces
-  randomness. Wrap the call site with `withSeed(seed, ...)` for deterministic
-  inference, or propagate the effect by declaring it in the caller's signature."
-- "Cannot differentiate function `step` - `argmax` at line 17 is not differentiable.
-  Replace with a differentiable approximation like `softmax` or use
-  `stop_grad(argmax(...))` to exclude it from the gradient computation."
-- Repair suggestions must reference specific line numbers and concrete fix patterns.
-  The fitness score should degrade proportionally to the number of unhandled effects.
+- Current shipped shape:
+  "Function `predict` has unhandled effect `Random`; `dropout` requires
+  `with seed(...)`."
+- Current shipped repair suggestions are concrete but not yet source-located.
+- Line-numbered effect diagnostics remain a follow-up rather than a shipped guarantee.
+- The fitness score should degrade proportionally to the number of unhandled effects.
 
 ### Implementation Plan
 
-**Crate: `chelis-effects` (new)**
-- `infer.rs`: walk typed Deep AST, collect effects per function
-- `check.rs`: verify handlers eliminate effects, report unhandled effects
-- `types.rs`: effect types, row variables, composition rules
-- `errors.rs`: structured effect errors with repair suggestions
+**Crate split**
+- `chelis-types`: effect vocabulary / shared type-layer representation
+- `chelis-effects`: effect inference, handler validation, build-boundary validation,
+  structured effect errors
 
 **Integration points:**
-- After `chelis-types::infer()` succeeds, run `chelis-effects::infer()` on the typed AST
-- Effect information stored as metadata on function nodes in the typed AST
-- `chelis-ir::lower()` uses effect information to validate AD applicability (`Diff`),
-  insert seed threading (`Random`), and annotate device placement (`Resource`)
+- `chelis-types::check_phase0e_program()` returns the upgraded `CheckedProgram`
+- after type checking succeeds, run `chelis-effects::check_program()` on the annotated AST
+- inferred effect information is stored as metadata on checked `fn` nodes where the
+  checker synthesizes it today
+- `chelis-ir::lower()` threads handler-provided seeds into `dropout`
+- `chelis-cli build` validates `with device(...)` regions against the requested target
 - Fitness scoring extended: unhandled effects reduce fitness proportionally
 
 **Surf syntax additions:**
-- `sig f: A -> B ! {Diff, Random}` - optional effect annotation on signatures
+- `sig f: A -> B ! {Random}` - optional effect annotation on signatures
 - `with seed(42) { ... }` - handler block syntax
 - `with device("gpu:0") { ... }` - handler block syntax
-- `grad(f)` - already exists, now formally an effect handler
+- `grad(f)` remains a compiler transform, not an effect handler
 
 **Deep syntax additions:**
-- `(handle-effect {} (lit {} diff) (fn {} ...body...))` - handler node
-- `(effect-ann {} (eff {} diff) (eff {} random))` - optional annotation on `fn` nodes
-- New tags: `handle-effect`, `effect-ann`, `eff`
+- `(handle-effect {effect: random} seed-expr body)` - seeded stochastic region
+- `(handle-effect {effect: resource} device-expr body)` - resource region
+- `(effects {} random (resource {} "gpu:0"))` - effect-set helper form used in metadata
+- New Deep tags in the shipped subset: `handle-effect`, `effects`, `resource`
 
-**Test strategy (~25 tests):**
+**Test strategy (shipped subset):**
 - Pure function has empty effect set
 - Function calling `dropout` has `Random` effect
-- Function calling differentiable ops has `Diff` effect
-- `grad(f)` eliminates `Diff`, produces gradient function
-- `withSeed(42, f)` eliminates `Random`
+- `with seed(42) { ... }` eliminates `Random`
 - Unhandled `Random` at program boundary -> error with repair suggestion
-- Non-differentiable op inside `grad` -> error citing the specific op
-- Effect propagation through higher-order functions: `map(f, xs)` inherits `f`'s effects
-- Effect composition: function with both `Diff` and `Random` needs both handlers
 - Fitness score degrades with unhandled effects
-- Deep metadata validation: `{effects: [diff]}` on `fn` node is accepted
-- `Accum` effect inferred for reduction operations in backward pass
+- Deep metadata validation: `(effects {} random)` on `fn` metadata is accepted
+- seeded lowering/eval is deterministic for same seed and observably different for
+  different seeds
+- build-target mismatch is reported for incompatible `with device(...)` regions
 
 ### Acceptance Gate
 
-`cargo test -p chelis-effects --test effect_inference` - all pass.
+Current shipped-subset oracle:
 
-Manual: write a Surf program with dropout in training, `grad` for differentiation, and
-explicit seed for deterministic inference. Compile. Verify:
-- effect errors appear when handlers are missing
-- effect errors disappear when handlers are added
-- the compiled program produces deterministic output with a fixed seed
+```sh
+cargo test --workspace
+```
+
+Supporting manual gates for the local HIP-capable validation path:
+
+```sh
+cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+```
+
+Expected success condition: all ignored HIP correctness tests pass on a machine with a
+working ROCm + `hipcc` environment.
+
+Concrete Phase 2a effect-surface manual check:
+
+```sh
+tmpdir="$(mktemp -d)"
+cat > "$tmpdir/unhandled_random.ch" <<'EOF'
+let x: tensor[32, f32] = x
+let y: tensor[32, f32] = dropout(x, 0.5)
+EOF
+cat > "$tmpdir/handled_random.ch" <<'EOF'
+let x: tensor[32, f32] = x
+let y: tensor[32, f32] = with seed(42) { dropout(x, 0.5) }
+EOF
+cargo run -q -p chelis-cli -- check "$tmpdir/unhandled_random.ch"
+cargo run -q -p chelis-cli -- check "$tmpdir/handled_random.ch"
+```
+
+Expected success condition:
+- the first `check` output reports `UnhandledEffect` / `Random`
+- the second `check` output reports no effect errors
 
 ---
 
@@ -717,7 +749,7 @@ After all sub-phases, before declaring Phase 2 complete:
 
 **Effects:**
 - [ ] Construct a program with unhandled effects that the compiler does not catch
-- [ ] Verify `Random` effect is eliminated by `withSeed` (deterministic output)
+- [ ] Verify `Random` effect is eliminated by `with seed(...)` (deterministic output)
 - [ ] Verify `Diff` effect prevents non-differentiable ops in `grad` body
 - [ ] `Accum`-typed loops in backward pass are parallelized (not sequentialized)
 

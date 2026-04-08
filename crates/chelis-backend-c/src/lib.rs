@@ -21,6 +21,8 @@ pub struct CodegenResult {
     /// Phase 0f treats `Store(name)` as a named exported output. Non-store roots
     /// are appended afterward as `root{index}`.
     pub output_labels: Vec<String>,
+    /// Unresolved symbolic dimensions that the generated function binds from input metadata.
+    pub symbolic_dims: Vec<String>,
 }
 
 /// Optional backend features for C code generation.
@@ -68,6 +70,7 @@ pub fn codegen_with_options(
     }
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
+    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
     compile_flags.sort();
     compile_flags.dedup();
     link_flags.sort();
@@ -79,6 +82,7 @@ pub fn codegen_with_options(
         link_flags,
         input_labels,
         output_labels,
+        symbolic_dims,
     }
 }
 
@@ -195,7 +199,10 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -203,7 +210,10 @@ mod tests {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -230,7 +240,10 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -238,7 +251,10 @@ mod tests {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1031,7 +1047,14 @@ int main(void) {{
         // add with a 1D tensor [1.0, 1.0, 1.0] -> [4.0, 4.0, 4.0]
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(1));
-        let expanded = dag.add_node(RiscOp::Expand { axis: 0, size: 3 }, vec![a], vec_f32(3));
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(3),
+            },
+            vec![a],
+            vec_f32(3),
+        );
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3));
         dag.add_node(RiscOp::Add, vec![expanded, b], vec_f32(3));
         let out = compile_and_run(&dag, "test_expand_add");
@@ -1181,6 +1204,155 @@ int main(void) {{
     }
 
     #[test]
+    fn symbolic_batch_codegen_reuses_one_artifact_for_multiple_input_shapes() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let batch_vec = TensorType {
+            dims: vec![DimInfo::Named("batch".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            batch_vec.clone(),
+        );
+        let y = dag.add_node(
+            RiscOp::Load {
+                name: "y".to_string(),
+            },
+            vec![],
+            batch_vec.clone(),
+        );
+        dag.add_node(RiscOp::Add, vec![x, y], batch_vec);
+
+        let result = codegen(&dag, "test_symbolic_batch");
+        assert_eq!(result.symbolic_dims, vec!["batch"]);
+        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
+
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_symbolic_batch",
+            CodegenOptions::default(),
+            &[
+                vec![
+                    TestInput::new("x", &[2], &[1.0, 2.0]),
+                    TestInput::new("y", &[2], &[3.0, 4.0]),
+                ],
+                vec![
+                    TestInput::new("x", &[3], &[1.0, 2.0, 3.0]),
+                    TestInput::new("y", &[3], &[4.0, 5.0, 6.0]),
+                ],
+            ],
+        );
+        assert_eq!(
+            lines,
+            vec!["4.000000 6.000000", "5.000000 7.000000 9.000000"]
+        );
+    }
+
+    #[test]
+    fn symbolic_matmul_codegen_reuses_one_artifact_for_multiple_batch_sizes() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let a_ty = TensorType {
+            dims: vec![DimInfo::Named("batch".to_string(), None), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let b_ty = TensorType {
+            dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load {
+                name: "a".to_string(),
+            },
+            vec![],
+            a_ty.clone(),
+        );
+        let b = dag.add_node(
+            RiscOp::Load {
+                name: "b".to_string(),
+            },
+            vec![],
+            b_ty.clone(),
+        );
+        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+        dag.add_root(out);
+
+        let result = codegen(&dag, "test_symbolic_matmul");
+        assert_eq!(result.symbolic_dims, vec!["batch"]);
+        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_symbolic_matmul",
+            CodegenOptions::default(),
+            &[
+                vec![
+                    TestInput::new("a", &[1, 3], &[1.0, 2.0, 3.0]),
+                    TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ],
+                vec![
+                    TestInput::new("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                    TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ],
+            ],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "22.000000 28.000000",
+                "22.000000 28.000000 49.000000 64.000000"
+            ]
+        );
+    }
+
+    #[test]
+    fn symbolic_preamble_checks_every_non_canonical_occurrence() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("batch".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(
+            RiscOp::Load {
+                name: "x".to_string(),
+            },
+            vec![],
+            symbolic.clone(),
+        );
+        let y = dag.add_node(
+            RiscOp::Load {
+                name: "y".to_string(),
+            },
+            vec![],
+            symbolic.clone(),
+        );
+        let z = dag.add_node(
+            RiscOp::Load {
+                name: "z".to_string(),
+            },
+            vec![],
+            symbolic.clone(),
+        );
+        let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone());
+        let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic);
+        dag.add_root(xyz);
+
+        let result = codegen(&dag, "test_symbolic_occurrences");
+        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
+        assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
+    }
+
+    #[test]
     fn multiple_roots_return_multiple_outputs() {
         if !gcc_available() {
             return;
@@ -1320,7 +1492,10 @@ int main(void) {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1328,7 +1503,10 @@ int main(void) {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1392,7 +1570,10 @@ int main(void) {
         let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1400,7 +1581,10 @@ int main(void) {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1435,7 +1619,10 @@ int main(void) {
         let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1443,7 +1630,10 @@ int main(void) {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],

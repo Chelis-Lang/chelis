@@ -46,6 +46,7 @@ const VALID_TAGS: &[&str] = &[
     "tuple",
     "tuple-get",
     "par",
+    "handle-effect",
     "pat-var",
     "pat-lit",
     "pat-ctor",
@@ -76,6 +77,8 @@ const VALID_TAGS: &[&str] = &[
     "params",
     "bind",
     "kv",
+    "effects",
+    "resource",
 ];
 
 #[derive(Debug, Error)]
@@ -108,6 +111,9 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     let decls = chelis_surf::parser::parse_str(source)
         .map_err(|err| ValidationError::Failed(format!("compiler parse failed: {err}")))?;
     let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
+        .map_err(|err| ValidationError::Failed(format!("macro expansion failed: {err}")))?
+        .into_exprs();
     let canonical = print_canonical(&deep);
     validate_deep(&canonical)
 }
@@ -188,6 +194,7 @@ fn validate_tag_shape(
 
     match tag {
         "if" | "arm" if child_count != 3 => Err(wrong_arity("exactly 3 children")),
+        "handle-effect" if child_count != 2 => Err(wrong_arity("exactly 2 children")),
         "fn" => {
             if child_count != 2 {
                 return Err(wrong_arity("exactly 2 children"));
@@ -282,6 +289,12 @@ mod tests {
     }
 
     #[test]
+    fn surf_accepts_arrow_return_types() {
+        let source = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
+        validate_surf(source).expect("validator should accept arrow return types");
+    }
+
+    #[test]
     fn deep_rejects_unknown_tag() {
         let source = "(mystery {} x)";
         let error = validate_deep(source).expect_err("unknown tag should fail");
@@ -296,7 +309,7 @@ mod tests {
 
     #[test]
     fn desugared_accepts_executable_example_shape() {
-        let source = "module HelloTensor\n\ndef main(): unit = let a = 1 in a\n";
+        let source = "module HelloTensor\n\ndef main() -> tensor[f32] = 1\n";
         validate_desugared(source).expect("desugared Deep should validate");
     }
 }

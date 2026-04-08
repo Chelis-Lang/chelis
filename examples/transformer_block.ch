@@ -1,79 +1,60 @@
 -- Phase 1e executable benchmark: sequence-only transformer-block-style forward pass.
--- Shapes: seq_len=128, d_model=256, n_heads=4, head_dim=64, d_ff=1024.
+-- Shapes: d_model=256, n_heads=4, head_dim=64, d_ff=1024.
 
-let x = (x : tensor[128, 256, f32])
+def forward(
+  x: tensor[seq, 256, f32],
+  wq0: tensor[256, 64, f32],
+  wk0: tensor[256, 64, f32],
+  wv0: tensor[256, 64, f32],
+  wo0: tensor[64, 256, f32],
+  wq1: tensor[256, 64, f32],
+  wk1: tensor[256, 64, f32],
+  wv1: tensor[256, 64, f32],
+  wo1: tensor[64, 256, f32],
+  wq2: tensor[256, 64, f32],
+  wk2: tensor[256, 64, f32],
+  wv2: tensor[256, 64, f32],
+  wo2: tensor[64, 256, f32],
+  wq3: tensor[256, 64, f32],
+  wk3: tensor[256, 64, f32],
+  wv3: tensor[256, 64, f32],
+  wo3: tensor[64, 256, f32],
+  ff1: tensor[256, 1024, f32],
+  ff2: tensor[1024, 256, f32],
+  gamma1: tensor[256, f32],
+  beta1: tensor[256, f32],
+  gamma2: tensor[256, f32],
+  beta2: tensor[256, f32]
+) -> tensor[seq, 256, f32] =
+  let q0 = matmul(x, wq0)
+  let k0 = matmul(x, wk0)
+  let v0 = matmul(x, wv0)
+  let scores0 = matmul(q0, permute(k0, 1, 0))
+  let probs0 = softmax(scores0, 1)
+  let head0 = matmul(matmul(probs0, v0), wo0)
 
-let wq0 = (wq0 : tensor[256, 64, f32])
-let wk0 = (wk0 : tensor[256, 64, f32])
-let wv0 = (wv0 : tensor[256, 64, f32])
-let wo0 = (wo0 : tensor[64, 256, f32])
+  let q1 = matmul(x, wq1)
+  let k1 = matmul(x, wk1)
+  let v1 = matmul(x, wv1)
+  let scores1 = matmul(q1, permute(k1, 1, 0))
+  let probs1 = softmax(scores1, 1)
+  let head1 = matmul(matmul(probs1, v1), wo1)
 
-let wq1 = (wq1 : tensor[256, 64, f32])
-let wk1 = (wk1 : tensor[256, 64, f32])
-let wv1 = (wv1 : tensor[256, 64, f32])
-let wo1 = (wo1 : tensor[64, 256, f32])
+  let q2 = matmul(x, wq2)
+  let k2 = matmul(x, wk2)
+  let v2 = matmul(x, wv2)
+  let scores2 = matmul(q2, permute(k2, 1, 0))
+  let probs2 = softmax(scores2, 1)
+  let head2 = matmul(matmul(probs2, v2), wo2)
 
-let wq2 = (wq2 : tensor[256, 64, f32])
-let wk2 = (wk2 : tensor[256, 64, f32])
-let wv2 = (wv2 : tensor[256, 64, f32])
-let wo2 = (wo2 : tensor[64, 256, f32])
+  let q3 = matmul(x, wq3)
+  let k3 = matmul(x, wk3)
+  let v3 = matmul(x, wv3)
+  let scores3 = matmul(q3, permute(k3, 1, 0))
+  let probs3 = softmax(scores3, 1)
+  let head3 = matmul(matmul(probs3, v3), wo3)
 
-let wq3 = (wq3 : tensor[256, 64, f32])
-let wk3 = (wk3 : tensor[256, 64, f32])
-let wv3 = (wv3 : tensor[256, 64, f32])
-let wo3 = (wo3 : tensor[64, 256, f32])
-
-let ff1 = (ff1 : tensor[256, 1024, f32])
-let ff2 = (ff2 : tensor[1024, 256, f32])
-let gamma1 = (gamma1 : tensor[256, f32])
-let beta1 = (beta1 : tensor[256, f32])
-let gamma2 = (gamma2 : tensor[256, f32])
-let beta2 = (beta2 : tensor[256, f32])
-
-let q0 = (matmul(x, wq0) : tensor[128, 64, f32])
-let k0 = (matmul(x, wk0) : tensor[128, 64, f32])
-let v0 = (matmul(x, wv0) : tensor[128, 64, f32])
-let kt0 = (permute(k0, 1, 0) : tensor[64, 128, f32])
-let scores0 = (matmul(q0, kt0) : tensor[128, 128, f32])
-let probs0 = (softmax(scores0, 1) : tensor[128, 128, f32])
-let ctx0 = (matmul(probs0, v0) : tensor[128, 64, f32])
-let proj0 = (matmul(ctx0, wo0) : tensor[128, 256, f32])
-
-let q1 = (matmul(x, wq1) : tensor[128, 64, f32])
-let k1 = (matmul(x, wk1) : tensor[128, 64, f32])
-let v1 = (matmul(x, wv1) : tensor[128, 64, f32])
-let kt1 = (permute(k1, 1, 0) : tensor[64, 128, f32])
-let scores1 = (matmul(q1, kt1) : tensor[128, 128, f32])
-let probs1 = (softmax(scores1, 1) : tensor[128, 128, f32])
-let ctx1 = (matmul(probs1, v1) : tensor[128, 64, f32])
-let proj1 = (matmul(ctx1, wo1) : tensor[128, 256, f32])
-
-let q2 = (matmul(x, wq2) : tensor[128, 64, f32])
-let k2 = (matmul(x, wk2) : tensor[128, 64, f32])
-let v2 = (matmul(x, wv2) : tensor[128, 64, f32])
-let kt2 = (permute(k2, 1, 0) : tensor[64, 128, f32])
-let scores2 = (matmul(q2, kt2) : tensor[128, 128, f32])
-let probs2 = (softmax(scores2, 1) : tensor[128, 128, f32])
-let ctx2 = (matmul(probs2, v2) : tensor[128, 64, f32])
-let proj2 = (matmul(ctx2, wo2) : tensor[128, 256, f32])
-
-let q3 = (matmul(x, wq3) : tensor[128, 64, f32])
-let k3 = (matmul(x, wk3) : tensor[128, 64, f32])
-let v3 = (matmul(x, wv3) : tensor[128, 64, f32])
-let kt3 = (permute(k3, 1, 0) : tensor[64, 128, f32])
-let scores3 = (matmul(q3, kt3) : tensor[128, 128, f32])
-let probs3 = (softmax(scores3, 1) : tensor[128, 128, f32])
-let ctx3 = (matmul(probs3, v3) : tensor[128, 64, f32])
-let proj3 = (matmul(ctx3, wo3) : tensor[128, 256, f32])
-
-let heads01 = (add(proj0, proj1) : tensor[128, 256, f32])
-let heads23 = (add(proj2, proj3) : tensor[128, 256, f32])
-let attn_out = (add(heads01, heads23) : tensor[128, 256, f32])
-let resid1 = (add(x, attn_out) : tensor[128, 256, f32])
-let norm1 = (layer_norm(resid1, gamma1, beta1) : tensor[128, 256, f32])
-
-let ff_hidden = (matmul(norm1, ff1) : tensor[128, 1024, f32])
-let ff_act = (relu(ff_hidden) : tensor[128, 1024, f32])
-let ff_out = (matmul(ff_act, ff2) : tensor[128, 256, f32])
-let resid2 = (add(norm1, ff_out) : tensor[128, 256, f32])
-let out = (layer_norm(resid2, gamma2, beta2) : tensor[128, 256, f32])
+  let attn_out = add(add(head0, head1), add(head2, head3))
+  let norm1 = layer_norm(add(x, attn_out), gamma1, beta1)
+  let ff_out = matmul(relu(matmul(norm1, ff1)), ff2)
+  in layer_norm(add(norm1, ff_out), gamma2, beta2)

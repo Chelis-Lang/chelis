@@ -128,12 +128,18 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             tensor3_f32(2, 3, 4),
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             tensor3_f32(2, 3, 4),
         );

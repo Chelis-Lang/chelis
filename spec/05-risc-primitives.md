@@ -100,6 +100,15 @@ Together, the two tiers define everything the compiler has special knowledge of.
 
 `const` is not differentiable (it produces a constant — gradient is zero). `load` is not differentiable.
 
+### 2.6 Effectful Primitive
+
+| Name | Signature | Semantics | AD / effect note |
+|---|---|---|---|
+| `dropout` | `(tensor[D, f32], f32) → tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
+
+Operational note: the evaluator and lowering path implement seeded `dropout`, but
+`chelis build` does not yet codegen it for the `c` or `hip` backend targets.
+
 ---
 
 ## 3. Derived Built-Ins (Tier 2)

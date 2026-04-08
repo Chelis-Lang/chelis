@@ -239,6 +239,7 @@ impl Parser {
             TokenKind::Let => self.parse_let_def(),
             TokenKind::Type => self.parse_type_decl(),
             TokenKind::Dim => self.parse_dim_decl(),
+            TokenKind::Macro => self.parse_macro_def(),
             TokenKind::Module => {
                 if self.module_allowed {
                     self.parse_module()
@@ -254,7 +255,8 @@ impl Parser {
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
             _ => Err(ParseError::Expected {
-                expected: "declaration (def, sig, let, type, dim, module, import, export)".into(),
+                expected: "declaration (def, sig, let, type, dim, macro, module, import, export)"
+                    .into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -285,12 +287,13 @@ impl Parser {
             Vec::new()
         };
 
-        let ret_ty = if *self.peek() == TokenKind::Colon {
+        let ret_ty = if matches!(self.peek(), TokenKind::Colon | TokenKind::Arrow) {
             self.advance();
             Some(self.parse_type()?)
         } else {
             None
         };
+        let effects = self.parse_optional_effects()?;
 
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr(0)?;
@@ -301,6 +304,7 @@ impl Parser {
             dim_params,
             params,
             ret_ty,
+            effects,
             body,
             span,
         })
@@ -311,8 +315,19 @@ impl Parser {
         let (name, _) = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
-        let span = start.merge(type_span(&ty));
-        Ok(Decl::Sig { name, ty, span })
+        let effects = self.parse_optional_effects()?;
+        let end = effects
+            .as_ref()
+            .and_then(|effects| effects.last())
+            .map(EffectExpr::span)
+            .unwrap_or_else(|| type_span(&ty));
+        let span = start.merge(end);
+        Ok(Decl::Sig {
+            name,
+            ty,
+            effects,
+            span,
+        })
     }
 
     fn parse_dim_decl(&mut self) -> Result<Decl, ParseError> {
@@ -354,6 +369,21 @@ impl Parser {
         })
     }
 
+    fn parse_plain_ident_params(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut params = Vec::new();
+        if *self.peek() == TokenKind::RParen {
+            return Ok(params);
+        }
+        let (name, _) = self.expect_ident()?;
+        params.push(name);
+        while *self.peek() == TokenKind::Comma {
+            self.advance();
+            let (name, _) = self.expect_ident()?;
+            params.push(name);
+        }
+        Ok(params)
+    }
+
     fn parse_let_def(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Let
         let (name, _) = self.expect_ident()?;
@@ -370,6 +400,23 @@ impl Parser {
             name,
             ty,
             value,
+            span,
+        })
+    }
+
+    fn parse_macro_def(&mut self) -> Result<Decl, ParseError> {
+        let start = self.advance().span; // consume Macro
+        let (name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::LParen)?;
+        let params = self.parse_plain_ident_params()?;
+        self.expect(&TokenKind::RParen)?;
+        self.expect(&TokenKind::Eq)?;
+        let body = self.parse_expr(0)?;
+        let span = start.merge(expr_span(&body));
+        Ok(Decl::MacroDef {
+            name,
+            params,
+            body,
             span,
         })
     }
@@ -716,6 +763,12 @@ impl Parser {
                 let span = tok.span.merge(expr_span(&operand));
                 Ok(Expr::Unary(UnaryOp::Not, Box::new(operand), span))
             }
+            TokenKind::Amp => {
+                let tok = self.advance();
+                let operand = self.parse_expr(13)?;
+                let span = tok.span.merge(expr_span(&operand));
+                Ok(Expr::Borrow(Box::new(operand), span))
+            }
             TokenKind::LParen => {
                 let start = self.advance().span;
                 if *self.peek() == TokenKind::RParen {
@@ -751,6 +804,7 @@ impl Parser {
             TokenKind::Jit => self.parse_jit(),
             TokenKind::Realize => self.parse_realize(),
             TokenKind::Copy => self.parse_copy(),
+            TokenKind::With => self.parse_with_handler(),
             TokenKind::Par => self.parse_par(),
             TokenKind::LBrace => self.parse_block(),
             _ => Err(ParseError::Expected {
@@ -772,6 +826,7 @@ impl Parser {
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::LParen
+                | TokenKind::Amp
                 | TokenKind::Fn
                 | TokenKind::If
         )
@@ -859,6 +914,12 @@ impl Parser {
                 }
             }
             TokenKind::If => self.parse_if(),
+            TokenKind::Amp => {
+                let tok = self.advance();
+                let operand = self.parse_expr(13)?;
+                let span = tok.span.merge(expr_span(&operand));
+                Ok(Expr::Borrow(Box::new(operand), span))
+            }
             TokenKind::Fn => self.parse_lambda(),
             _ => Err(ParseError::Expected {
                 expected: "expression atom".into(),
@@ -1054,6 +1115,25 @@ impl Parser {
         let expr = self.parse_expr(0)?;
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Copy(Box::new(expr), start.merge(end.span)))
+    }
+
+    fn parse_with_handler(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().span; // consume With
+        let (handler_name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::LParen)?;
+        let arg = self.parse_expr(0)?;
+        self.expect(&TokenKind::RParen)?;
+        let body = self.parse_block()?;
+        let span = start.merge(expr_span(&body));
+        match handler_name.as_str() {
+            "seed" => Ok(Expr::WithSeed(Box::new(arg), Box::new(body), span)),
+            "device" => Ok(Expr::WithDevice(Box::new(arg), Box::new(body), span)),
+            _ => Err(ParseError::Expected {
+                expected: "`seed` or `device` effect handler".into(),
+                found: handler_name,
+                offset: self.current_offset(),
+            }),
+        }
     }
 
     fn parse_par(&mut self) -> Result<Expr, ParseError> {
@@ -1522,6 +1602,81 @@ impl Parser {
                 | TokenKind::LParen
         )
     }
+
+    fn parse_optional_effects(&mut self) -> Result<Option<Vec<EffectExpr>>, ParseError> {
+        if *self.peek() != TokenKind::Bang {
+            return Ok(None);
+        }
+        self.advance();
+        self.expect(&TokenKind::LBrace)?;
+        let mut effects = Vec::new();
+        if *self.peek() != TokenKind::RBrace {
+            effects.push(self.parse_effect_expr()?);
+            while *self.peek() == TokenKind::Comma {
+                self.advance();
+                if *self.peek() == TokenKind::RBrace {
+                    break;
+                }
+                effects.push(self.parse_effect_expr()?);
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Some(effects))
+    }
+
+    fn parse_effect_expr(&mut self) -> Result<EffectExpr, ParseError> {
+        match self.peek().clone() {
+            TokenKind::Ident(name) => {
+                let tok = self.advance();
+                match name.as_str() {
+                    "Diff" | "diff" => Ok(EffectExpr::Diff(tok.span)),
+                    "Random" | "random" => Ok(EffectExpr::Random(tok.span)),
+                    "Accum" | "accum" => Ok(EffectExpr::Accum(tok.span)),
+                    _ => Err(ParseError::Expected {
+                        expected: "effect name".into(),
+                        found: name,
+                        offset: tok.span.offset,
+                    }),
+                }
+            }
+            TokenKind::TypeIdent(name) => {
+                let tok = self.advance();
+                match name.as_str() {
+                    "Diff" => Ok(EffectExpr::Diff(tok.span)),
+                    "Random" => Ok(EffectExpr::Random(tok.span)),
+                    "Accum" => Ok(EffectExpr::Accum(tok.span)),
+                    "Resource" => {
+                        self.expect(&TokenKind::LParen)?;
+                        let device = match self.peek().clone() {
+                            TokenKind::Str(device) => {
+                                self.advance();
+                                device
+                            }
+                            _ => {
+                                return Err(ParseError::Expected {
+                                    expected: "device string".into(),
+                                    found: format!("{:?}", self.peek()),
+                                    offset: self.current_offset(),
+                                });
+                            }
+                        };
+                        let end = self.expect(&TokenKind::RParen)?;
+                        Ok(EffectExpr::Resource(device, tok.span.merge(end.span)))
+                    }
+                    _ => Err(ParseError::Expected {
+                        expected: "effect name".into(),
+                        found: name,
+                        offset: tok.span.offset,
+                    }),
+                }
+            }
+            _ => Err(ParseError::Expected {
+                expected: "effect name".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,6 +1706,9 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Jit(_, s) => *s,
         Expr::Realize(_, s) => *s,
         Expr::Copy(_, s) => *s,
+        Expr::Borrow(_, s) => *s,
+        Expr::WithSeed(_, _, s) => *s,
+        Expr::WithDevice(_, _, s) => *s,
         Expr::Par(_, s) => *s,
         Expr::Annotate(_, _, s) => *s,
         Expr::Block(_, _, s) => *s,
@@ -1590,6 +1748,7 @@ fn decl_span(d: &Decl) -> Span {
         Decl::TypeAlias { span, .. } => *span,
         Decl::FunDef { span, .. } => *span,
         Decl::LetDef { span, .. } => *span,
+        Decl::MacroDef { span, .. } => *span,
         Decl::Export { span, .. } => *span,
     }
 }
@@ -1678,6 +1837,36 @@ mod tests {
     }
 
     #[test]
+    fn sig_effect_annotation() {
+        let decls = p("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}");
+        match &decls[0] {
+            Decl::Sig { effects, .. } => {
+                let effects = effects.as_ref().expect("effects");
+                assert_eq!(effects.len(), 3);
+                assert!(matches!(effects[0], EffectExpr::Diff(_)));
+                assert!(matches!(effects[1], EffectExpr::Random(_)));
+                assert!(
+                    matches!(effects[2], EffectExpr::Resource(ref device, _) if device == "gpu:0")
+                );
+            }
+            _ => panic!("expected Sig"),
+        }
+    }
+
+    #[test]
+    fn fun_def_effect_annotation() {
+        let decls = p("def f(x: f32): f32 ! {Diff} = x");
+        match &decls[0] {
+            Decl::FunDef { effects, .. } => {
+                let effects = effects.as_ref().expect("effects");
+                assert_eq!(effects.len(), 1);
+                assert!(matches!(effects[0], EffectExpr::Diff(_)));
+            }
+            _ => panic!("expected FunDef"),
+        }
+    }
+
+    #[test]
     fn top_level_let() {
         let decls = p("let x = 42");
         match &decls[0] {
@@ -1698,6 +1887,18 @@ mod tests {
                 assert!(ty.is_some());
             }
             _ => panic!("expected LetDef"),
+        }
+    }
+
+    #[test]
+    fn macro_def() {
+        let decls = p("macro relu_ref(x) = max_elem(x, 0.0)");
+        match &decls[0] {
+            Decl::MacroDef { name, params, .. } => {
+                assert_eq!(name, "relu_ref");
+                assert_eq!(params, &["x"]);
+            }
+            _ => panic!("expected MacroDef"),
         }
     }
 
@@ -2023,6 +2224,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn with_seed_handler_expr() {
+        let e = body("def f() = with seed(42) { dropout(x, 0.5) }");
+        match e {
+            Expr::WithSeed(seed, body, _) => {
+                assert!(matches!(*seed, Expr::Lit(Literal::Int(42), _)));
+                assert!(matches!(*body, Expr::Block(_, _, _)));
+            }
+            _ => panic!("expected WithSeed, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn with_device_handler_expr() {
+        let e = body("def f() = with device(\"gpu:0\") { x }");
+        match e {
+            Expr::WithDevice(device, body, _) => {
+                assert!(
+                    matches!(*device, Expr::Lit(Literal::Str(ref value), _) if value == "gpu:0")
+                );
+                assert!(matches!(*body, Expr::Block(_, _, _)));
+            }
+            _ => panic!("expected WithDevice, got {e:?}"),
+        }
+    }
+
     // ===== Type expression tests =====
 
     #[test]
@@ -2080,6 +2307,18 @@ mod tests {
                 other => panic!("expected Arrow type, got {other:?}"),
             },
             _ => panic!("expected FunDef"),
+        }
+    }
+
+    #[test]
+    fn fun_def_accepts_arrow_return_type() {
+        let decls = p("def f(x: f32) -> bool = x");
+        match &decls[0] {
+            Decl::FunDef {
+                ret_ty: Some(TypeExpr::Named(name, _)),
+                ..
+            } => assert_eq!(name, "bool"),
+            other => panic!("expected arrow return type, got {other:?}"),
         }
     }
 
@@ -2360,6 +2599,32 @@ mod tests {
                 assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
                 assert_eq!(args.len(), 1);
                 assert!(matches!(&args[0], Expr::Binary(BinOp::Add, _, _, _)));
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn borrow_prefix_parses() {
+        let e = body("let y = f(&x)");
+        match &e {
+            Expr::Apply(_, args, _) => {
+                assert!(
+                    matches!(&args[0], Expr::Borrow(inner, _) if matches!(inner.as_ref(), Expr::Var(name, _) if name == "x"))
+                );
+            }
+            _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn borrow_juxtaposition_argument_parses() {
+        let e = body("let y = f &x");
+        match &e {
+            Expr::Apply(_, args, _) => {
+                assert!(
+                    matches!(&args[0], Expr::Borrow(inner, _) if matches!(inner.as_ref(), Expr::Var(name, _) if name == "x"))
+                );
             }
             _ => panic!("expected Apply, got {e:?}"),
         }

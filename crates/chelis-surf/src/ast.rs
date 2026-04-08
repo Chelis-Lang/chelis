@@ -17,6 +17,7 @@ pub enum Decl {
     Sig {
         name: String,
         ty: TypeExpr,
+        effects: Option<Vec<EffectExpr>>,
         span: Span,
     },
     Dim {
@@ -40,6 +41,7 @@ pub enum Decl {
         dim_params: Vec<String>, // [a, b] dimension parameters
         params: Vec<Param>,
         ret_ty: Option<TypeExpr>,
+        effects: Option<Vec<EffectExpr>>,
         body: Expr,
         span: Span,
     },
@@ -107,6 +109,8 @@ pub enum Expr {
     Jit(Box<Expr>, Span),
     Realize(Box<Expr>, Span),
     Copy(Box<Expr>, Span),
+    WithSeed(Box<Expr>, Box<Expr>, Span),
+    WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
     Annotate(Box<Expr>, TypeExpr, Span),     // expr : Type
     Block(Vec<LetBinding>, Box<Expr>, Span), // { let ...; expr }
@@ -186,4 +190,22 @@ pub enum TypeExpr {
     App(String, Vec<TypeExpr>, Span),          // Option f32
     Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
     Infer(Span),                               // _
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EffectExpr {
+    Diff(Span),
+    Random(Span),
+    Accum(Span),
+    Resource(String, Span),
+}
+
+impl EffectExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Diff(span) | Self::Random(span) | Self::Accum(span) | Self::Resource(_, span) => {
+                *span
+            }
+        }
+    }
 }

@@ -39,6 +39,44 @@ const TRANSFORMER_D_FF: usize = 1024;
 const TRANSFORMER_ITERS: usize = 5;
 const FORWARD_TOL: f32 = 1e-4;
 const PYTORCH_SETUP_HINT: &str = "run `uv venv --python 3.12 py/.venv` and `uv pip install --python py/.venv/bin/python --index-url https://rocm.nightlies.amd.com/v2/gfx1151/ --prerelease allow torch torchaudio torchvision`";
+const BENCH_PROFILE_ENV: &str = "CHELIS_BENCH_PROFILE";
+
+#[derive(Clone, Copy)]
+struct LinregWorkload {
+    train_batches: usize,
+    test_batches: usize,
+    batch_size: usize,
+    features: usize,
+    epochs: usize,
+    lr: f32,
+}
+
+impl LinregWorkload {
+    fn current() -> Self {
+        Self::for_profile(env::var(BENCH_PROFILE_ENV).ok().as_deref())
+    }
+
+    fn for_profile(profile: Option<&str>) -> Self {
+        match profile {
+            Some("smoke") => Self {
+                train_batches: 1,
+                test_batches: 1,
+                batch_size: 8,
+                features: LINREG_FEATURES,
+                epochs: 1,
+                lr: LINREG_LR,
+            },
+            _ => Self {
+                train_batches: LINREG_TRAIN_BATCHES,
+                test_batches: LINREG_TEST_BATCHES,
+                batch_size: LINREG_BATCH_SIZE,
+                features: LINREG_FEATURES,
+                epochs: LINREG_EPOCHS,
+                lr: LINREG_LR,
+            },
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum Model {
@@ -107,6 +145,7 @@ pub struct BackendReport {
     pub reason: Option<String>,
     pub compile_ms: Option<f64>,
     pub run_ms: Option<f64>,
+    pub peak_device_bytes_formula: Option<String>,
     pub peak_device_bytes_estimate: Option<usize>,
     pub loss_history: Option<Vec<f32>>,
     pub final_loss: Option<f32>,
@@ -189,23 +228,39 @@ fn oracle_command(models: &[Model], emit_json: Option<&Path>) -> String {
 }
 
 fn run_linreg() -> Result<ModelReport, String> {
+    let workload = LinregWorkload::current();
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
     let data_path = temp.path().join("linreg.bin");
     write_linreg_data(&data_path)?;
-    let programs = build_linreg_programs()?;
-
-    let cpu = run_training_backend(Backend::Cpu, "linreg_train", &data_path, &programs, false);
-    let hip = run_training_backend(Backend::Hip, "linreg_train", &data_path, &programs, false);
     let pytorch = run_pytorch("benchmarks/pytorch/linreg.py", &data_path, None, "linreg");
+    let (cpu, hip) = match build_linreg_programs() {
+        Ok(programs) => (
+            run_training_backend(Backend::Cpu, "linreg_train", &data_path, &programs, false),
+            run_training_backend(Backend::Hip, "linreg_train", &data_path, &programs, false),
+        ),
+        Err(reason) => {
+            let cpu = skipped(format!(
+                "linreg benchmark training DAG unavailable: {reason}"
+            ));
+            let hip = if let Some(hip_reason) = hip_prerequisite_skip_reason() {
+                skipped(hip_reason)
+            } else {
+                skipped(format!(
+                    "linreg benchmark training DAG unavailable: {reason}"
+                ))
+            };
+            (cpu, hip)
+        }
+    };
 
     Ok(ModelReport {
         name: "linreg".to_string(),
         workload: WorkloadReport {
             summary: "Synthetic linear regression training".to_string(),
-            batch_size: Some(LINREG_BATCH_SIZE),
-            train_batches: Some(LINREG_TRAIN_BATCHES),
-            test_batches: Some(LINREG_TEST_BATCHES),
-            epochs: Some(LINREG_EPOCHS),
+            batch_size: Some(workload.batch_size),
+            train_batches: Some(workload.train_batches),
+            test_batches: Some(workload.test_batches),
+            epochs: Some(workload.epochs),
             seq_len: None,
             d_model: None,
             n_heads: None,
@@ -230,11 +285,26 @@ fn run_mnist() -> Result<ModelReport, String> {
             format!("MNIST benchmark data unavailable: {err}"),
         ));
     }
-    let programs = build_mnist_programs()?;
-
-    let cpu = run_training_backend(Backend::Cpu, "mnist_train", &data_path, &programs, true);
-    let hip = run_training_backend(Backend::Hip, "mnist_train", &data_path, &programs, true);
     let pytorch = run_pytorch("benchmarks/pytorch/mnist.py", &data_path, None, "mnist");
+    let (cpu, hip) = match build_mnist_programs() {
+        Ok(programs) => (
+            run_training_backend(Backend::Cpu, "mnist_train", &data_path, &programs, true),
+            run_training_backend(Backend::Hip, "mnist_train", &data_path, &programs, true),
+        ),
+        Err(reason) => {
+            let cpu = skipped(format!(
+                "mnist benchmark training DAG unavailable: {reason}"
+            ));
+            let hip = if let Some(hip_reason) = hip_prerequisite_skip_reason() {
+                skipped(hip_reason)
+            } else {
+                skipped(format!(
+                    "mnist benchmark training DAG unavailable: {reason}"
+                ))
+            };
+            (cpu, hip)
+        }
+    };
 
     Ok(ModelReport {
         name: "mnist".to_string(),
@@ -463,7 +533,7 @@ fn run_training_backend(
         &train.compile_flags,
         &train.link_flags,
     ) {
-        Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+        Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
         Err(err) => failed(err),
     }
 }
@@ -492,9 +562,12 @@ fn run_training_backend_hip(
         &train.compile_flags,
         &train.link_flags,
     ) {
-        Ok((compile_ms, stdout)) => {
-            parse_run_output(stdout, compile_ms, Some(train.peak_device_bytes_estimate))
-        }
+        Ok((compile_ms, stdout)) => parse_run_output(
+            stdout,
+            compile_ms,
+            Some(train.peak_device_bytes_formula.clone()),
+            train.peak_device_bytes_estimate,
+        ),
         Err(err) => failed(err),
     }
 }
@@ -520,7 +593,7 @@ fn run_forward_backend(
                 &programs.cpu.compile_flags,
                 &programs.cpu.link_flags,
             ) {
-                Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+                Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
                 Err(err) => failed(err),
             }
         }
@@ -544,7 +617,8 @@ fn run_forward_backend(
                 Ok((compile_ms, stdout)) => parse_run_output(
                     stdout,
                     compile_ms,
-                    Some(programs.hip.peak_device_bytes_estimate),
+                    Some(programs.hip.peak_device_bytes_formula.clone()),
+                    programs.hip.peak_device_bytes_estimate,
                 ),
                 Err(err) => failed(err),
             }
@@ -608,6 +682,7 @@ fn run_pytorch_with_python(
         String::from_utf8_lossy(&output.stdout).into_owned(),
         compile_ms,
         None,
+        None,
     )
 }
 
@@ -637,6 +712,7 @@ fn apply_pytorch_env(cmd: &mut Command) {
 fn parse_run_output(
     stdout: String,
     compile_ms: f64,
+    peak_device_bytes_formula: Option<String>,
     peak_device_bytes_estimate: Option<usize>,
 ) -> RunArtifacts {
     #[derive(serde::Deserialize)]
@@ -661,6 +737,7 @@ fn parse_run_output(
                     reason: None,
                     compile_ms: Some(compile_ms),
                     run_ms: Some(raw.run_ms),
+                    peak_device_bytes_formula,
                     peak_device_bytes_estimate,
                     loss_history: if raw.loss_history.is_empty() {
                         None
@@ -730,6 +807,7 @@ fn skipped(reason: String) -> RunArtifacts {
             reason: Some(reason),
             compile_ms: None,
             run_ms: None,
+            peak_device_bytes_formula: None,
             peak_device_bytes_estimate: None,
             loss_history: None,
             final_loss: None,
@@ -749,6 +827,7 @@ fn failed(reason: String) -> RunArtifacts {
             reason: Some(reason),
             compile_ms: None,
             run_ms: None,
+            peak_device_bytes_formula: None,
             peak_device_bytes_estimate: None,
             loss_history: None,
             final_loss: None,
@@ -764,14 +843,8 @@ fn failed(reason: String) -> RunArtifacts {
 fn build_linreg_programs() -> Result<TrainingPrograms, String> {
     let src = include_str!("../../../examples/linreg.ch");
     let compiled = compile_surf(src)?;
-    let loss = *compiled
-        .root_nodes
-        .get("loss")
-        .ok_or("linreg example missing `loss` root")?;
-    let pred = *compiled
-        .root_nodes
-        .get("pred")
-        .ok_or("linreg example missing `pred` root")?;
+    let loss = *require_named_root(&compiled.root_nodes, &["loss"])?;
+    let pred = *require_named_root(&compiled.root_nodes, &["predict", "pred"])?;
     build_training_programs_from_compiled(compiled.dag, loss, pred, &["w", "b"])
 }
 
@@ -831,10 +904,7 @@ fn build_training_programs_from_compiled(
 fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     let src = include_str!("../../../examples/transformer_block.ch");
     let compiled = compile_surf(src)?;
-    let out = *compiled
-        .root_nodes
-        .get("out")
-        .ok_or("transformer example missing `out` root")?;
+    let out = *require_named_root(&compiled.root_nodes, &["forward", "out"])?;
     let mut dag = compiled.dag;
     add_named_store(&mut dag, "out", out);
     let fused = fuse::fuse(&dag);
@@ -894,6 +964,21 @@ fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
         .collect()
 }
 
+fn require_named_root<'a>(
+    roots: &'a HashMap<String, NodeId>,
+    candidates: &[&str],
+) -> Result<&'a NodeId, String> {
+    for candidate in candidates {
+        if let Some(node) = roots.get(*candidate) {
+            return Ok(node);
+        }
+    }
+    Err(format!(
+        "missing expected root; tried {}",
+        candidates.join(", ")
+    ))
+}
+
 fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
     CCodegenResult {
         c_source: hip.c_source.clone(),
@@ -902,6 +987,7 @@ fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
         link_flags: hip.link_flags.clone(),
         input_labels: hip.input_labels.clone(),
         output_labels: hip.output_labels.clone(),
+        symbolic_dims: hip.symbolic_dims.clone(),
     }
 }
 
@@ -1138,39 +1224,45 @@ fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
 }
 
 fn write_linreg_data(path: &Path) -> Result<(), String> {
+    let workload = LinregWorkload::current();
     let mut buf = Vec::new();
-    push_u64(&mut buf, LINREG_TRAIN_BATCHES as u64);
-    push_u64(&mut buf, LINREG_TEST_BATCHES as u64);
-    push_u64(&mut buf, LINREG_BATCH_SIZE as u64);
-    push_u64(&mut buf, LINREG_FEATURES as u64);
-    push_u64(&mut buf, LINREG_EPOCHS as u64);
-    push_f32(&mut buf, LINREG_LR);
+    push_u64(&mut buf, workload.train_batches as u64);
+    push_u64(&mut buf, workload.test_batches as u64);
+    push_u64(&mut buf, workload.batch_size as u64);
+    push_u64(&mut buf, workload.features as u64);
+    push_u64(&mut buf, workload.epochs as u64);
+    push_f32(&mut buf, workload.lr);
 
-    let true_w: Vec<f32> = (0..LINREG_FEATURES)
+    let true_w: Vec<f32> = (0..workload.features)
         .map(|i| ((i % 13) as f32 - 6.0) * 0.07)
         .collect();
     let true_b = 0.3f32;
 
-    let train_total = LINREG_TRAIN_BATCHES * LINREG_BATCH_SIZE;
-    let test_total = LINREG_TEST_BATCHES * LINREG_BATCH_SIZE;
-    let x_train = generate_linreg_inputs(train_total);
-    let y_train = generate_linreg_targets(&x_train, &true_w, true_b);
-    let x_test = generate_linreg_inputs(train_total + test_total);
-    let y_test = generate_linreg_targets(&x_test[train_total * LINREG_FEATURES..], &true_w, true_b);
+    let train_total = workload.train_batches * workload.batch_size;
+    let test_total = workload.test_batches * workload.batch_size;
+    let x_train = generate_linreg_inputs(train_total, workload.features);
+    let y_train = generate_linreg_targets(&x_train, &true_w, true_b, workload.features);
+    let x_test = generate_linreg_inputs(train_total + test_total, workload.features);
+    let y_test = generate_linreg_targets(
+        &x_test[train_total * workload.features..],
+        &true_w,
+        true_b,
+        workload.features,
+    );
     push_f32s(&mut buf, &x_train);
     push_f32s(&mut buf, &y_train);
-    push_f32s(&mut buf, &x_test[train_total * LINREG_FEATURES..]);
+    push_f32s(&mut buf, &x_test[train_total * workload.features..]);
     push_f32s(&mut buf, &y_test);
-    push_f32s(&mut buf, &vec![0.0; LINREG_FEATURES]);
+    push_f32s(&mut buf, &vec![0.0; workload.features]);
     push_f32(&mut buf, 0.0);
     fs::write(path, buf).map_err(|e| format!("write linreg data failed: {e}"))
 }
 
-fn generate_linreg_inputs(samples: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(samples * LINREG_FEATURES);
+fn generate_linreg_inputs(samples: usize, features: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(samples * features);
     for sample in 0..samples {
-        for feature in 0..LINREG_FEATURES {
-            let idx = sample * LINREG_FEATURES + feature;
+        for feature in 0..features {
+            let idx = sample * features + feature;
             let value = ((idx as f32) * 0.013).sin() + ((sample as f32) * 0.031).cos() * 0.25;
             out.push(value);
         }
@@ -1178,11 +1270,11 @@ fn generate_linreg_inputs(samples: usize) -> Vec<f32> {
     out
 }
 
-fn generate_linreg_targets(x: &[f32], w: &[f32], b: f32) -> Vec<f32> {
-    let samples = x.len() / LINREG_FEATURES;
+fn generate_linreg_targets(x: &[f32], w: &[f32], b: f32, features: usize) -> Vec<f32> {
+    let samples = x.len() / features;
     let mut out = Vec::with_capacity(samples);
     for sample in 0..samples {
-        let row = &x[sample * LINREG_FEATURES..(sample + 1) * LINREG_FEATURES];
+        let row = &x[sample * features..(sample + 1) * features];
         let value = row.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f32>() + b;
         out.push(value);
     }
@@ -1353,7 +1445,7 @@ fn build_training_main_c(
     let grad_w2_idx = train_labels.get("grad_w2").copied();
     let grad_b2_idx = train_labels.get("grad_b2").copied();
 
-    let (param_allocs, param_fills, update_code, free_params, infer_output_len) = if uses_accuracy {
+    let (param_allocs, param_fills, update_code, free_params) = if uses_accuracy {
         (
             r#"
     chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_F32);
@@ -1385,7 +1477,6 @@ fn build_training_main_c(
     chelis_free(w2_tensor);
     chelis_free(b2_tensor);
 "#,
-            MNIST_TEST_BATCHES * MNIST_BATCH_SIZE * 10,
         )
     } else {
         (
@@ -1409,7 +1500,6 @@ fn build_training_main_c(
     chelis_free(w_tensor);
     chelis_free(b_tensor);
 "#,
-            LINREG_TEST_BATCHES * LINREG_BATCH_SIZE,
         )
     };
 
@@ -1568,7 +1658,7 @@ int main(void) {{
 {param_fills}
 
     float *loss_history = (float*)calloc(epochs, sizeof(float));
-    int eval_output_len = {infer_output_len};
+    int eval_output_len = (int)(test_batches * batch_size * y_dim);
     float *eval_output = (float*)calloc((size_t)eval_output_len, sizeof(float));
     float final_accuracy = 0.0f;
 
@@ -1611,7 +1701,11 @@ int main(void) {{
 "#,
         data_path = escape_c_string(data_path),
         train_header = train.h_header,
-        x_dim = if uses_accuracy { 784 } else { LINREG_FEATURES },
+        x_dim = if uses_accuracy {
+            "784"
+        } else {
+            "(int)features"
+        },
         y_dim = if uses_accuracy { 10 } else { 1 },
         shape_decls = if uses_accuracy {
             r#"
@@ -1648,7 +1742,6 @@ int main(void) {{
         },
         param_allocs = param_allocs,
         param_fills = param_fills,
-        infer_output_len = infer_output_len,
         train_outs = train.output_labels.len(),
         train_ins = train.input_labels.len(),
         train_input_slots = train_input_slots,
@@ -1915,6 +2008,7 @@ mod tests {
                 reason: None,
                 compile_ms: None,
                 run_ms: None,
+                peak_device_bytes_formula: None,
                 peak_device_bytes_estimate: None,
                 loss_history: Some(losses),
                 final_loss: None,
@@ -1966,5 +2060,15 @@ mod tests {
         assert_eq!(result.report.status, "skipped");
         let reason = result.report.reason.expect("skip reason");
         assert!(reason.contains("PyTorch import failed"));
+    }
+
+    #[test]
+    fn linreg_workload_smoke_profile_is_small() {
+        let workload = LinregWorkload::for_profile(Some("smoke"));
+
+        assert_eq!(workload.train_batches, 1);
+        assert_eq!(workload.test_batches, 1);
+        assert_eq!(workload.batch_size, 8);
+        assert_eq!(workload.epochs, 1);
     }
 }

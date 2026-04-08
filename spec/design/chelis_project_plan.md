@@ -153,7 +153,10 @@ deliverable is met for the shipped models.
 they do not block Phase 2 language work.
 
 - HIP codegen still does not implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
-- unresolved symbolic dimensions are not implemented in either codegen backend, so changing batch/shape still requires recompilation
+- symbolic dimensions are implemented on the stable tensor ABI in both backends, so
+  supported Phase 1 models bind batch/sequence-style dims from input metadata at runtime
+- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
+  are supported, but a symbolic hidden size remains follow-up debt
 - the compiler emits dotted Deep module/import paths that `chelis validate` accepts, but the compiler-side Deep parser does not yet fully round-trip that emitted form
 
 These limitations matter for future serving, dynamic batching, and full backend
@@ -231,7 +234,7 @@ parallel with the type-system track once 2e has enough compiler API surface.
 | Sub-phase | Doc | Summary |
 |---|---|---|
 | Phase 1 carry-forward fixes | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dims, HIP `pad`/`shrink`, dotted Deep round-trip |
-| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | `Diff`, `Random`, `Accum`, `Resource(D)` with handlers and row-polymorphic inference |
+| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | shipped subset: `Random` / `Resource(D)` boundary effects, `Diff` as capability, `Accum` internal-only |
 | 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
 | 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |
 | 2d: `vmap` | [chelis_phase2_plan.md](chelis_phase2_plan.md) | DAG rewrite for automatic vectorization with correct `grad` interaction |
@@ -242,10 +245,12 @@ parallel with the type-system track once 2e has enough compiler API surface.
 
 ### 2a: Algebraic Effects
 
-- `Diff`, `Random`, and `Resource(Device)`
-- inferred rather than manually declared
-- handled through explicit effect handlers
-- `Accum` is the design hook for parallelism-preserving gradient accumulation
+- `Diff` is a compiler capability, not a boundary effect
+- `Random` and `Resource(Device)` are the user-visible Phase 2a boundary effects
+- `Accum` is the design hook for parallelism-preserving gradient accumulation, but it
+  remains internal-only in the shipped subset
+- implementation split: effect types live in `chelis-types`; inference/checking lives in
+  `chelis-effects`
 
 ### 2b: Linear Types
 
@@ -274,7 +279,7 @@ pure tape-only or pure full-recompute AD.
 **LLM representation constraint:** The macro system must produce clean expanded Deep
 with provenance metadata in the `{}` slot.
 Macro expansion is a compilation step that happens before any LLM-facing operation.
-The expanded form uses only the base 56-tag vocabulary.
+The expanded form uses only the base 59-tag vocabulary.
 LLMs never see, generate, or reason about unexpanded macro invocations.
 This is a settled design decision, not an open question for Phase 2c.
 The Phase 2c design task is: expansion rules, hygiene, phase separation, and the
@@ -374,7 +379,7 @@ This is the compiler-in-the-loop workflow for frontier models such as Claude and
 
 What ships:
 
-- the 56-tag Deep grammar and arity rules
+- the 59-tag Deep grammar and arity rules
 - the Surf→Deep desugaring table
 - canonical form rules
 - built-in scope and core type signatures
@@ -555,7 +560,7 @@ depends on it.
 |---|---|---|---|
 | **Effect system design** | effect typing rules, handler syntax, HM interaction; investigate Dex's Accum effect for parallelism-preserving gradient accumulation, and distinguish parallelism-preserving effects from sequentializing ones | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
-| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 56-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
+| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 59-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
 | **GPU memory model** | device-memory semantics and ownership model | Phase 1 / 2a | **MEDIUM** |
 | **Effect handler syntax** | Surf and Deep syntax for handling effects | Phase 2a | **MEDIUM** |

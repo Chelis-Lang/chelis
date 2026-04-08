@@ -11,6 +11,9 @@ Phases 0a-0i are complete.
 Phases 1a-1f are implemented.
 Phase 1 is structurally complete for the shipped fixed-workload deliverable, with known
 backend limitations carried forward explicitly in the design docs.
+Phase 2a has shipped its first bounded subset: effect syntax in Surf/Deep, annotated
+checked Deep as the downstream contract, `Random` via `dropout` + `with seed(...)` in
+the evaluator path, and `Resource(Device)` validation on the build boundary.
 
 ## Prerequisites
 
@@ -81,19 +84,34 @@ Deep formatting now defaults to canonical pretty-printed `.dp` output:
 - `chelis fmt file.dp --check` verifies canonical `.dp` formatting without rewriting the
   file
 
-The current shipped surface includes the Phase 1 HIP backend work plus
-`chelis validate` for executable grammar conformance, the Phase 2e Tide
-machine-facing API surface, the Phase 2f Tide LSP/editor package surface in
-`editors/vscode/`, and the Phase 2g `chelis cove` terminal UI plus checked-in
-tree-sitter grammars for Surf and Deep.
+The current shipped surface includes the Phase 1 HIP backend work,
+`chelis validate` for executable grammar conformance, and the first Phase 2a effect
+surface:
+
+- optional effect annotations on `sig` and `def`
+- `with seed(...) { ... }` and `with device(...) { ... }` Surf handler syntax
+- checked programs now flow downstream as annotated Deep, with type metadata written
+  onto the returned tree
+- `dropout(x, rate)` as the concrete `Random` source in evaluation/lowering
+- build-target validation for resource regions such as `with device("gpu:0") { ... }`
+- the Phase 2e Tide machine-facing API surface (`chelis tide serve` and
+  `chelis tide mcp`)
+- the Phase 2f Tide LSP/editor package surface in `editors/vscode/`
+- the Phase 2g `chelis cove` terminal UI plus checked-in tree-sitter grammars for Surf
+  and Deep
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
 - HIP does not yet implement `pad` / `shrink`; no current Phase 1 model uses them
-- unresolved symbolic dimensions are not implemented in either codegen backend, so
-  shape changes still require recompilation
+- symbolic dimensions now ship on both backends through the stable tensor ABI:
+  generated functions bind symbolic names from input tensor metadata at runtime, so
+  batch/sequence changes do not require recompilation on the supported Phase 1 surface
+- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
+  are supported, but a symbolic hidden size remains a follow-up
 - compiler-emitted dotted Deep module/import paths still do not fully round-trip through
   the compiler-side Deep parser
+- `chelis build` does not yet codegen `dropout` for either `c` or `hip`; seeded dropout
+  currently ships on the evaluator path only
 
 These limitations are real debt, but they do not block the Phase 2 language work.
 AI assistance planning is split cleanly:
@@ -131,6 +149,7 @@ crates/
   chelis-deep/       Deep parser and canonical printer
   chelis-surf/       Surf parser, desugaring, decompilation
   chelis-types/      Type checker, dimensions, precision, fitness
+  chelis-effects/    Effect inference/checking over annotated Deep
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
   chelis-backend-c/  C backend and runtime
   chelis-tide/       Tide HTTP/JSON API and MCP server

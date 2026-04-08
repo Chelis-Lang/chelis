@@ -43,6 +43,41 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+fn write_symbolic_matmul_program(path: &Path) {
+    write_file(
+        path,
+        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]): tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
+    );
+}
+
+fn write_symbolic_softmax_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, seq, f32]): tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
+    );
+}
+
+fn write_symbolic_row_sum_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, seq, f32]): tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
+    );
+}
+
+fn write_symbolic_layer_norm_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]): tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
+    );
+}
+
+fn write_symbolic_hidden_layer_norm_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]): tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
+    );
+}
+
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -189,6 +224,61 @@ fn fmt_rejects_check_and_inplace_together() {
 }
 
 #[test]
+fn surf_default_collapses_load_program_into_typed_def() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("forward.ch");
+    write_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "def forward(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] =",
+        ))
+        .stdout(predicate::str::contains("matmul(a, b)"))
+        .stdout(predicate::str::contains("let a").not());
+}
+
+#[test]
+fn surf_verbose_preserves_debug_style_annotations() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("forward.ch");
+    write_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap(), "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("let a = (a : tensor[2, 3, f32])"))
+        .stdout(predicate::str::contains(
+            "(matmul(a, b) : tensor[2, 4, f32])",
+        ));
+}
+
+#[test]
+fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("typed.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "def f(x: tensor[n, f32]) -> tensor[n, f32] =",
+        ))
+        .stdout(predicate::str::contains("sig f").not());
+}
+
+#[test]
 fn check_does_not_report_perfect_score_with_errors() {
     let json = run_json_check(&illustrative_example("pattern_matching.ch"));
     assert!(json["score"].as_f64().unwrap() < 1.0);
@@ -218,9 +308,10 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
-fn build_hip_rejects_symbolic_dims_without_panic() {
+fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic.ch");
+    let out_dir = dir.path().join("hip-out");
     write_file(
         &path,
         "def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
@@ -228,13 +319,178 @@ fn build_hip_rejects_symbolic_dims_without_panic() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, features"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int features = inputs[0]->shape[1];"));
+}
+
+#[test]
+fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_matmul.ch");
+    let c_out = dir.path().join("c-out");
+    let hip_out = dir.path().join("hip-out");
+    write_symbolic_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            c_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Symbolic dims: batch, in_dim, out_dim",
+        ));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            hip_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Symbolic dims: batch, in_dim, out_dim",
+        ))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
+    assert!(c_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(c_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
+
+    let hip_source =
+        fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
+    assert!(hip_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(hip_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_softmax() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_softmax.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_softmax_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, seq"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("kernel_maxred_ax1"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_row_sum() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_sum.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_row_sum_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, seq"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_layer_norm.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_layer_norm_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_hidden_layer_norm.ch");
+    write_symbolic_hidden_layer_norm_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
         .args(["build", path.to_str().unwrap(), "--target", "hip"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "does not yet support unresolved named dimensions",
-        ))
-        .stderr(predicate::str::contains("symbolic dimension `batch`"));
+            "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent",
+        ));
 }
 
 #[test]
@@ -277,6 +533,7 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .stdout(predicate::str::contains(
             out_dir.join("chelis_runtime.c").display().to_string(),
         ))
+        .stdout(predicate::str::contains("Peak device memory formula:"))
         .stdout(predicate::str::contains("Estimated peak device memory:"));
 
     assert!(out_dir.join("mnist_hip.cpp").exists());
@@ -341,6 +598,205 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
         hip_src.contains("chelis_hipblas_sgemm_row_major"),
         "HIP build should surface hipBLAS specialization for a simple matmul program"
     );
+}
+
+#[test]
+fn check_reports_unhandled_random_effect() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("dropout.ch");
+    write_file(
+        &path,
+        "let x: tensor[32, f32] = x\nlet y: tensor[32, f32] = dropout(x, 0.5)\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UnhandledEffect")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Random"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn check_reports_linearity_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("linearity.ch");
+    write_file(
+        &path,
+        "def bad(x: tensor[4, f32]): tensor[4, f32] = let y: tensor[4, f32] = relu(x) in add(x, y)\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("relu"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn check_reports_macro_provenance_for_type_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_type_error.ch");
+    write_file(
+        &path,
+        r#"
+macro bad_bool(x) = and(x, x)
+def bad(x: tensor[4, f32]): tensor[4, f32] = bad_bool(x)
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("in expansion of (bad_bool"))
+    }));
+}
+
+#[test]
+fn check_reports_macro_provenance_for_linearity_errors() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_linearity.ch");
+    write_file(
+        &path,
+        r#"
+macro dup_relu(x) = add(relu(x), x)
+def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("in expansion of (dup_relu"))
+    }));
+}
+
+#[test]
+fn check_reports_match_linearity_even_when_phase0e_rejects_match() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("match_linearity.ch");
+    write_file(
+        &path,
+        r#"def bad(pair: (tensor[4, f32], int32)): int32 =
+  let n: int32 = match pair with {
+    | (x, _) => 1
+  }
+  let again: (tensor[4, f32], int32) = pair
+  in n
+"#,
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["message"].as_str().is_some_and(|message| {
+            message.contains("`match` is not supported by Phase 0e lowering")
+        })
+    }));
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UseAfterConsume")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("pair"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn deep_expands_macros_and_emits_provenance() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_deep.ch");
+    write_file(
+        &path,
+        r#"
+macro relu_ref(x) = max_elem(x, 0.0)
+def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).expect("utf8");
+    assert!(!text.contains("defmacro"));
+    assert!(!text.contains("macro-invoke"));
+    assert!(text.contains("source: (relu_ref"));
+    assert!(text.contains("max_elem"));
+}
+
+#[test]
+fn fmt_preserves_macro_syntax() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_fmt.ch");
+    write_file(
+        &path,
+        r#"
+macro keep(x)=x
+def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--inplace"])
+        .assert()
+        .success();
+
+    let formatted = fs::read_to_string(&path).expect("formatted");
+    assert!(formatted.contains("macro keep(x) = x"));
+    let json = run_json_check(&path);
+    assert_eq!(json["errors"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn validate_desugar_accepts_macro_program() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro_validate.ch");
+    write_file(
+        &path,
+        r#"
+macro relu_ref(x) = max_elem(x, 0.0)
+def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--desugar", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("validated desugar:"));
+}
+
+#[test]
+fn build_rejects_gpu_device_region_for_c_target() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("device.ch");
+    write_file(&path, "let x: int32 = with device(\"gpu:0\") { 1 }\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "c"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot satisfy resource region"));
 }
 
 #[test]

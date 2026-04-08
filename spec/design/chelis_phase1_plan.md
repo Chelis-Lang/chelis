@@ -28,7 +28,10 @@ correctly on both backends, and the validator work from 1f is shipped. The remai
 backend gaps are explicit carried-forward limitations rather than hidden blockers:
 
 - HIP does not yet implement `pad` / `shrink`; none of the current Phase 1 benchmark models uses those ops
-- unresolved symbolic dimensions are not implemented in either codegen backend, so shape changes still require recompilation
+- symbolic dimensions are implemented on the stable tensor ABI in both backends; the
+  supported Phase 1 surface binds symbolic names from input metadata at runtime
+- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
+  are supported, but a symbolic hidden size remains follow-up debt
 - the dotted Deep module/import round-trip gap remains a documented Phase 2 parser/decompiler follow-up
 
 These limitations should stay visible, but they do not block Phase 2 language work.

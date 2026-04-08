@@ -4,6 +4,7 @@ members = [
     "crates/chelis-deep",
     "crates/chelis-surf",
     "crates/chelis-types",
+    "crates/chelis-effects",
     "crates/chelis-ir",
     "crates/chelis-backend-c",
     "crates/chelis-backend-hip",
@@ -26,6 +27,7 @@ repository = "https://github.com/jeffreyksmithjr/chelis"
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }
+chelis-effects = { path = "crates/chelis-effects" }
 chelis-ir = { path = "crates/chelis-ir" }
 chelis-backend-c = { path = "crates/chelis-backend-c" }
 chelis-backend-hip = { path = "crates/chelis-backend-hip" }

@@ -35,6 +35,9 @@ cargo fmt --all -- --check
 - verify top-level executable examples still pass `chelis fmt` and `chelis check`
 - check that docs do not overclaim behavior the repo does not ship
 - verify that the named phase oracle is reflected consistently in plan docs and current-state docs
+- On the current repo workstation, HIP manual gates should be treated as locally runnable:
+  `rocminfo` exposes a `gfx1100` AMD Radeon 8060S GPU and `hipcc` is installed.
+  Do not excuse ignored HIP suites on the assumption that this machine is CPU-only.
 
 ## Completion Rule
 

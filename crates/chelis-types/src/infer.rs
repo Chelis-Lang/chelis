@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chelis_deep::Span;
 use chelis_deep::ast as deep;
 
 use crate::adt::AdtRegistry;
@@ -23,13 +24,27 @@ pub struct InferResult {
 
 #[derive(Debug, Clone)]
 pub struct CheckedProgram {
-    exprs: Vec<deep::Expr>,
+    annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,
 }
 
 impl CheckedProgram {
+    pub fn from_parts(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+    ) -> Self {
+        Self {
+            annotated_exprs,
+            type_env,
+        }
+    }
+
     pub fn exprs(&self) -> &[deep::Expr] {
-        &self.exprs
+        &self.annotated_exprs
+    }
+
+    pub fn annotated_exprs(&self) -> &[deep::Expr] {
+        &self.annotated_exprs
     }
 
     pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
@@ -84,9 +99,11 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     let mut result = infer_phase0e_program_with_env(exprs, &type_env);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
     if result.errors.is_empty() {
+        let annotated_exprs = annotate_phase0e_program(exprs);
+        let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
         Ok(CheckedProgram {
-            exprs: exprs.to_vec(),
-            type_env,
+            annotated_exprs,
+            type_env: annotated_type_env,
         })
     } else {
         Err(result)
@@ -163,6 +180,13 @@ fn validate_phase0e_expr(
 ) {
     match expr {
         deep::Expr::List(list, _) => {
+            if get_tag(list) == Some("fn") {
+                let scoped_env = extend_phase0e_env_with_fn_params(list, type_env);
+                for elem in &list.elements {
+                    validate_phase0e_expr(elem, &scoped_env, errors);
+                }
+                return;
+            }
             if let Some(tag) = get_tag(list) {
                 if matches!(
                     tag,
@@ -177,49 +201,11 @@ fn validate_phase0e_expr(
 
                 if tag == "app"
                     && let Some(func_name) = phase0e_builtin_name(list)
+                    && is_phase0e_shape_sensitive_builtin(func_name)
                 {
-                    if is_phase0e_shape_sensitive_builtin(func_name) {
-                        if !has_type_metadata(list) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::Other,
-                                format!(
-                                    "Phase 0e builtin `{func_name}` requires explicit type metadata on the app node"
-                                ),
-                                vec!["Run lowering only on checked/annotated Deep".to_string()],
-                            ));
-                        }
-                        if !app_result_type_is_concrete(list) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::Other,
-                                format!(
-                                    "Phase 0e builtin `{func_name}` requires concrete output tensor dimensions"
-                                ),
-                                vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
-                            ));
-                        }
-                    }
-
-                    let tensor_arg_count = match func_name {
-                        "matmul" => 2,
-                        "softmax" | "mean" => 1,
-                        "layer_norm" => 3,
-                        "conv2d" => 2,
-                        _ => 0,
-                    };
-                    if tensor_arg_count > 0 {
-                        for arg in list.elements.iter().skip(3).take(tensor_arg_count) {
-                            if !expr_tensor_type_is_concrete(arg, type_env) {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::Other,
-                                    format!(
-                                        "Phase 0e builtin `{func_name}` requires concrete tensor argument metadata"
-                                    ),
-                                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
-                                ));
-                                break;
-                            }
-                        }
-                    }
+                    validate_phase0e_builtin_symbolic_requirements(
+                        list, func_name, type_env, errors,
+                    );
                 }
             }
 
@@ -242,8 +228,438 @@ fn validate_phase0e_expr(
     }
 }
 
-fn has_type_metadata(list: &deep::List) -> bool {
-    matches!(get_meta(list), Some(meta) if meta.entries.iter().any(|(k, _)| k == "type"))
+fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    let (mut env, mut vg) = builtins::builtin_env();
+    let mut subst = Subst::new();
+    let mut adt_reg = AdtRegistry::new();
+    let mut declaration_errors = Vec::new();
+
+    for expr in exprs {
+        collect_declarations(
+            expr,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &mut adt_reg,
+            &mut declaration_errors,
+        );
+    }
+
+    let mut annotated = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        annotated.push(annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg));
+
+        let mut step_errors = Vec::new();
+        let mut typed_nodes = 0;
+        let mut total_nodes = 0;
+        infer_top_level(
+            expr,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &adt_reg,
+            &mut step_errors,
+            &mut typed_nodes,
+            &mut total_nodes,
+        );
+    }
+
+    annotated
+}
+
+fn annotate_expr_with_scope(
+    expr: &deep::Expr,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> deep::Expr {
+    match expr {
+        deep::Expr::Atom(_, _) => expr.clone(),
+        deep::Expr::Map(map, span) => deep::Expr::Map(
+            deep::MetaMap {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
+                        )
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                expr: Box::new(annotate_expr_with_scope(
+                    &meta.expr, env, vg, subst, adt_reg,
+                )),
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
+                        )
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
+        deep::Expr::List(list, span) => {
+            if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
+                return deep::Expr::List(
+                    deep::List {
+                        elements: list
+                            .elements
+                            .iter()
+                            .map(|element| {
+                                annotate_expr_with_scope(element, env, vg, subst, adt_reg)
+                            })
+                            .collect(),
+                    },
+                    *span,
+                );
+            }
+
+            let tag = get_tag(list);
+            let annotated_children = match tag {
+                Some("fn") => annotate_fn_children(list, env, vg, subst, adt_reg),
+                Some("let") => annotate_let_children(list, env, vg, subst, adt_reg),
+                Some("match") => annotate_match_children(list, env, vg, subst, adt_reg),
+                _ => children(list)
+                    .iter()
+                    .map(|child| annotate_expr_with_scope(child, env, vg, subst, adt_reg))
+                    .collect(),
+            };
+
+            let mut elements = vec![
+                list.elements[0].clone(),
+                annotated_meta_map(list, expr, env, vg, subst, adt_reg),
+            ];
+            elements.extend(annotated_children);
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+    }
+}
+
+fn annotate_fn_children(
+    list: &deep::List,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> Vec<deep::Expr> {
+    let kids = children(list);
+    if kids.is_empty() {
+        return vec![];
+    }
+
+    let fn_ty = infer_expr_in_scope(
+        &deep::Expr::List(list.clone(), span_of_list(list)),
+        env,
+        vg,
+        subst,
+        adt_reg,
+    );
+    let resolved_fn_ty = subst.apply(&fn_ty);
+    let param_types = match resolved_fn_ty {
+        Type::Fn(args, _) => args,
+        _ => Vec::new(),
+    };
+
+    let mut param_vg = vg.clone();
+    let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
+    let mut fn_env = env.clone();
+    for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
+        let ty = maybe_ty
+            .clone()
+            .or_else(|| param_types.get(index).cloned())
+            .unwrap_or(Type::Error);
+        fn_env.bind(name.clone(), Scheme::mono(ty));
+    }
+
+    let mut result = vec![annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg)];
+    if let Some(body) = kids.get(1) {
+        result.push(annotate_expr_with_scope(body, &fn_env, vg, subst, adt_reg));
+    }
+    result
+}
+
+fn annotate_let_children(
+    list: &deep::List,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> Vec<deep::Expr> {
+    let kids = children(list);
+    if kids.len() < 2 {
+        return kids.to_vec();
+    }
+
+    let mut let_env = env.clone();
+    let annotated_bind = if let deep::Expr::List(bind_list, bind_span) = &kids[0] {
+        let bind_kids = children(bind_list);
+        let mut bind_elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
+        let mut i = 0;
+        while i + 1 < bind_kids.len() {
+            bind_elements.push(bind_kids[i].clone());
+            let value = annotate_expr_with_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
+            let value_ty = infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
+            if let Some(name) = symbol_name(&bind_kids[i]) {
+                let_env.bind(name.to_string(), let_env.generalize(&value_ty, subst));
+            }
+            bind_elements.push(value);
+            i += 2;
+        }
+        deep::Expr::List(
+            deep::List {
+                elements: bind_elements,
+            },
+            *bind_span,
+        )
+    } else {
+        annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg)
+    };
+
+    vec![
+        annotated_bind,
+        annotate_expr_with_scope(&kids[1], &let_env, vg, subst, adt_reg),
+    ]
+}
+
+fn annotate_match_children(
+    list: &deep::List,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> Vec<deep::Expr> {
+    let kids = children(list);
+    if kids.is_empty() {
+        return vec![];
+    }
+
+    let scrutinee = annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg);
+    let scrutinee_ty = infer_expr_in_scope(&kids[0], env, vg, subst, adt_reg);
+    let mut result = vec![scrutinee];
+
+    for arm in &kids[1..] {
+        if let deep::Expr::List(arm_list, arm_span) = arm
+            && get_tag(arm_list) == Some("arm")
+        {
+            let arm_kids = children(arm_list);
+            let mut arm_env = env.clone();
+            let mut pattern_vg = vg.clone();
+            let mut pattern_subst = subst.clone();
+            let mut pattern_errors = Vec::new();
+            let mut covered = Vec::new();
+            let mut wildcard = false;
+            if let Some(pattern) = arm_kids.first() {
+                pattern_bindings(
+                    pattern,
+                    &scrutinee_ty,
+                    &mut arm_env,
+                    &mut pattern_vg,
+                    &mut pattern_subst,
+                    adt_reg,
+                    &mut pattern_errors,
+                    &mut covered,
+                    &mut wildcard,
+                );
+            }
+
+            let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
+            if let Some(pattern) = arm_kids.first() {
+                elements.push(annotate_expr_with_scope(pattern, env, vg, subst, adt_reg));
+            }
+            if let Some(guard) = arm_kids.get(1) {
+                elements.push(annotate_expr_with_scope(
+                    guard, &arm_env, vg, subst, adt_reg,
+                ));
+            }
+            if let Some(body) = arm_kids.get(2) {
+                elements.push(annotate_expr_with_scope(body, &arm_env, vg, subst, adt_reg));
+            }
+            result.push(deep::Expr::List(deep::List { elements }, *arm_span));
+            continue;
+        }
+        result.push(annotate_expr_with_scope(arm, env, vg, subst, adt_reg));
+    }
+
+    result
+}
+
+fn annotated_meta_map(
+    list: &deep::List,
+    expr: &deep::Expr,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> deep::Expr {
+    let meta_span = match list.elements.get(1) {
+        Some(deep::Expr::Map(_, span)) => *span,
+        _ => span_of_expr(expr),
+    };
+    let mut entries = get_meta(list)
+        .map(|meta| meta.entries.clone())
+        .unwrap_or_default();
+
+    if let Some(tag) = get_tag(list)
+        && should_attach_type_metadata(tag)
+    {
+        let ty = infer_expr_in_scope(expr, env, vg, subst, adt_reg);
+        if !matches!(ty, Type::Error) {
+            let ty_expr = type_to_deep_expr(&ty);
+            if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
+                *existing = ty_expr;
+            } else {
+                entries.push(("type".to_string(), ty_expr));
+            }
+        }
+    }
+
+    deep::Expr::Map(deep::MetaMap { entries }, meta_span)
+}
+
+fn infer_expr_in_scope(
+    expr: &deep::Expr,
+    env: &Env,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+) -> Type {
+    let mut env = env.clone();
+    let mut vg = vg.clone();
+    let mut subst = subst.clone();
+    let mut errors = Vec::new();
+    let mut typed_nodes = 0;
+    let mut total_nodes = 0;
+    let ty = infer_expr(
+        expr,
+        &mut env,
+        &mut vg,
+        &mut subst,
+        adt_reg,
+        &mut errors,
+        &mut typed_nodes,
+        &mut total_nodes,
+    );
+    subst.apply(&ty)
+}
+
+fn should_attach_type_metadata(tag: &str) -> bool {
+    !matches!(
+        tag,
+        "module"
+            | "import"
+            | "import-all"
+            | "export"
+            | "defsig"
+            | "deftype"
+            | "typealias"
+            | "variant"
+            | "field"
+            | "defdim"
+            | "params"
+            | "bind"
+            | "kv"
+            | "arm"
+            | "effects"
+            | "resource"
+            | "pat-var"
+            | "pat-lit"
+            | "pat-ctor"
+            | "pat-tuple"
+            | "pat-record"
+            | "pat-wild"
+            | "pat-as"
+            | "t-prim"
+            | "t-fn"
+            | "t-tensor"
+            | "t-adt"
+            | "t-var"
+            | "t-unit"
+            | "t-tuple"
+            | "d-name"
+            | "d-var"
+            | "d-lit"
+    )
+}
+
+fn type_to_deep_expr(ty: &Type) -> deep::Expr {
+    match ty {
+        Type::Prim(prim) => node_expr("t-prim", vec![symbol_expr(prim.name())]),
+        Type::Fn(args, ret) => {
+            let mut children: Vec<deep::Expr> = args.iter().map(type_to_deep_expr).collect();
+            children.push(type_to_deep_expr(ret));
+            node_expr("t-fn", children)
+        }
+        Type::Tensor(dims, prim) => {
+            let mut children: Vec<deep::Expr> = dims.iter().map(dim_to_deep_expr).collect();
+            children.push(type_to_deep_expr(&Type::Prim(*prim)));
+            node_expr("t-tensor", children)
+        }
+        Type::Adt(name, args) => {
+            let mut children = vec![symbol_expr(name)];
+            children.extend(args.iter().map(type_to_deep_expr));
+            node_expr("t-adt", children)
+        }
+        Type::Var(var) => node_expr("t-var", vec![symbol_expr(&format!("t{}", var.0))]),
+        Type::Tuple(types) => node_expr("t-tuple", types.iter().map(type_to_deep_expr).collect()),
+        Type::Unit => node_expr("t-unit", vec![]),
+        Type::Error => node_expr("t-var", vec![symbol_expr("_")]),
+    }
+}
+
+fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
+    match dim {
+        Dim::Name(name) => node_expr("d-name", vec![symbol_expr(name)]),
+        Dim::Var(var) => node_expr("d-var", vec![symbol_expr(&format!("d{}", var.0))]),
+        Dim::Lit(value) => node_expr(
+            "d-lit",
+            vec![deep::Expr::Atom(deep::Atom::Int(*value), zero_span())],
+        ),
+        Dim::Wildcard => node_expr("d-name", vec![symbol_expr("*")]),
+    }
+}
+
+fn node_expr(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
+    let mut elements = vec![
+        symbol_expr(tag),
+        deep::Expr::Map(deep::MetaMap::default(), zero_span()),
+    ];
+    elements.extend(children);
+    deep::Expr::List(deep::List { elements }, zero_span())
+}
+
+fn symbol_expr(name: &str) -> deep::Expr {
+    deep::Expr::Atom(deep::Atom::Symbol(name.to_string()), zero_span())
+}
+
+fn zero_span() -> Span {
+    Span::new(0, 0)
+}
+
+fn span_of_expr(expr: &deep::Expr) -> Span {
+    match expr {
+        deep::Expr::Atom(_, span)
+        | deep::Expr::List(_, span)
+        | deep::Expr::Map(_, span)
+        | deep::Expr::MetaExpr(_, span) => *span,
+    }
+}
+
+fn span_of_list(list: &deep::List) -> Span {
+    list.elements
+        .first()
+        .map(span_of_expr)
+        .unwrap_or_else(zero_span)
 }
 
 fn phase0e_builtin_name(list: &deep::List) -> Option<&str> {
@@ -280,13 +696,6 @@ fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-fn app_result_type_is_concrete(list: &deep::List) -> bool {
-    get_meta(list)
-        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
-        .unwrap_or(false)
-}
-
 fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::Expr> {
     match expr {
         deep::Expr::List(list, _) => {
@@ -307,10 +716,137 @@ fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::
     }
 }
 
+fn extend_phase0e_env_with_fn_params(
+    fn_list: &deep::List,
+    type_env: &Phase0eTypeEnv,
+) -> Phase0eTypeEnv {
+    let mut scoped = type_env.clone();
+    let Some(params_expr) = children(fn_list).first() else {
+        return scoped;
+    };
+    let deep::Expr::List(params_list, _) = params_expr else {
+        return scoped;
+    };
+    if get_tag(params_list) != Some("params") {
+        return scoped;
+    }
+    for param in children(params_list) {
+        let deep::Expr::List(param_list, _) = param else {
+            continue;
+        };
+        let Some(name) = param_list.elements.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(meta) = get_meta(param_list) else {
+            continue;
+        };
+        let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
+            continue;
+        };
+        scoped.insert(name.to_string(), ty.clone());
+    }
+    scoped
+}
+
 fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> bool {
     expr_type_expr(expr, type_env)
         .map(|ty| type_expr_is_phase0e_concrete(&ty))
         .unwrap_or(false)
+}
+
+fn validate_phase0e_builtin_symbolic_requirements(
+    list: &deep::List,
+    func_name: &str,
+    type_env: &Phase0eTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    match func_name {
+        "conv2d" => {
+            if !app_result_type_is_concrete(list) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `conv2d` requires concrete output tensor dimensions"
+                        .to_string(),
+                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                ));
+            }
+            for arg in list.elements.iter().skip(3).take(2) {
+                if !expr_tensor_type_is_concrete(arg, type_env) {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::Other,
+                        "Phase 0e builtin `conv2d` requires concrete tensor argument metadata"
+                            .to_string(),
+                        vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                    ));
+                    break;
+                }
+            }
+        }
+        "mean" => {
+            if phase0e_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `mean` requires a concrete reduced axis extent".to_string(),
+                    vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
+                ));
+            }
+        }
+        "layer_norm" => {
+            let x_dims = list
+                .elements
+                .get(3)
+                .and_then(|expr| expr_type_expr(expr, type_env))
+                .and_then(|ty| tensor_dims_from_type_expr(&ty));
+            if matches!(
+                x_dims.as_ref().and_then(|dims| dims.last()),
+                Some(DeepDimKind::NonConcrete)
+            ) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent"
+                        .to_string(),
+                    vec!["Use a concrete d-lit dimension for the final axis".to_string()],
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn phase0e_builtin_axis_dim(
+    list: &deep::List,
+    type_env: &Phase0eTypeEnv,
+    tensor_arg_index: usize,
+    axis_arg_index: usize,
+) -> Option<DeepDimKind> {
+    let tensor_dims = list
+        .elements
+        .get(3 + tensor_arg_index)
+        .and_then(|expr| expr_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
+    let axis = list
+        .elements
+        .get(3 + axis_arg_index)
+        .and_then(extract_axis_literal)?;
+    tensor_dims.get(axis).copied()
+}
+
+fn app_result_type_is_concrete(list: &deep::List) -> bool {
+    get_meta(list)
+        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
+        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
+        .unwrap_or(false)
+}
+
+fn extract_axis_literal(expr: &deep::Expr) -> Option<usize> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n as usize),
+        deep::Expr::List(list, _) => match list.elements.get(2) {
+            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => Some(*n as usize),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1023,6 +1559,40 @@ fn infer_app(
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 format!("{} expects int32 axis, got {}", fname, resolved),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name
+                && fname == "dropout"
+            {
+                if let Some(first_arg) = arg_tys.first() {
+                    let resolved = subst.apply(first_arg);
+                    match &resolved {
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("dropout expects tensor input, got {}", resolved),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+
+                if let Some(rate_arg) = arg_tys.get(1) {
+                    let resolved = subst.apply(rate_arg);
+                    match &resolved {
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("dropout expects f32 rate, got {}", resolved),
                                 vec![],
                             ));
                             return Type::Error;
@@ -3486,6 +4056,57 @@ mod tests {
             (report.components.structure - 1.0).abs() < 0.01,
             "valid program structure should be ~1.0, got {}",
             report.components.structure
+        );
+    }
+
+    #[test]
+    fn checked_program_annotates_fn_bodies() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
+        )
+        .unwrap();
+        let checked = check_phase0e_program(&exprs).expect("checked program");
+        let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+        assert!(
+            text.contains("(fn {type: (t-fn {} (t-prim {} f32) (t-prim {} f32))}"),
+            "expected typed fn metadata, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn checked_program_annotates_apps_and_updates_type_env() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} a (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} b (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} c (app {} (var {} add) (var {} a) (var {} b)))",
+        )
+        .unwrap();
+        let checked = check_phase0e_program(&exprs).expect("checked program");
+        let text = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+        assert!(
+            text.contains("(app {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))}"),
+            "expected typed app metadata, got:\n{text}"
+        );
+        assert!(checked.type_env().contains_key("c"));
+    }
+
+    #[test]
+    fn phase0e_rejects_symbolic_normalized_axis_for_layer_norm() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+        )
+        .unwrap();
+        let err =
+            check_phase0e_program(&exprs).expect_err("symbolic hidden axis should be rejected");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("concrete normalized axis extent")),
+            "expected layer_norm symbolic normalized-axis error, got: {:?}",
+            err.errors
         );
     }
 }

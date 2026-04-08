@@ -105,9 +105,10 @@ Current implementation:
 - planner-driven cleanup: every metadata wrapper freed once, every backing slot freed once
 - movement ops and `store` remain metadata aliases over the chosen backing slot
 - kernel outputs iterate over logical element count (`d_t->size`), while input guard checks still use backing `storage_size`
-- HIP codegen reports `peak_device_bytes_estimate`, and `chelis build --target hip` prints that estimate
-- the estimate now includes inline staged-reduction scratch chains used by Phase 1d scalar reductions
-- no runtime memory-budget comparison or checkpoint insertion yet; Phase 1c ships estimate-only reporting
+- HIP codegen reports a peak-memory formula plus an optional concrete estimate when every slot size is statically known
+- `chelis build --target hip` prints the formula unconditionally and the concrete estimate when available
+- the reporting surface includes inline staged-reduction scratch chains used by Phase 1d scalar reductions
+- no runtime memory-budget comparison or checkpoint insertion yet; Phase 1c ships reporting-only visibility
 
 ### Phase 1d: Optimized Reductions + hipBLAS (complete)
 
@@ -119,12 +120,10 @@ cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-thre
 
 Current implementation:
 
-- segmented reductions use three strategies keyed by static segment size:
-  tiny (`<= 8`), small (`9..=64`), and large (`>= 65`)
-- small and large segmented reductions use shared-memory block cooperation; tiny segments stay on the simple per-segment loop
-- fused elementwise→reduction kernels reuse the same tiny/small/large strategy split
+- segmented reductions use a single runtime-sized axis-specific kernel for the generic path
+- fused elementwise→reduction kernels reuse that same runtime-sized segmented reduction path
 - scalar contiguous reductions use a staged scratch-chain reduction with inline `hipMalloc`/`hipFree`, outside the Phase 1c slot planner
-- `peak_device_bytes_estimate` includes the worst single staged scratch chain alongside the slot-plan estimate
+- the peak-memory formula includes the worst single staged scratch chain alongside the slot-plan terms
 - rank-2 contiguous `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to `chelis_hipblas_sgemm_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
 - `chelis build --target hip` surfaces the required `-lhipblas` link flag when hipBLAS specialization is emitted
@@ -156,6 +155,9 @@ Current implementation:
   - `transformer` forward pass
 - missing HIP, PyTorch, or MNIST dataset prerequisites are surfaced as explicit skips in the emitted JSON rather than aborting the oracle
 - CI keeps PyTorch out of the default gate; the local checked-in artifact is the PyTorch comparison proof
+- the full `bench_phase1e --model all` integration test is `#[ignore]` and run manually via
+  `cargo test -p chelis-e2e --test bench_phase1e -- --ignored`; the default workspace gate
+  keeps only the fast structural smoke coverage
 
 ### Phase 1f: Executable Grammar (complete)
 
@@ -180,11 +182,25 @@ Phase 1e compile and run on both backends, and the executable-grammar surface fr
 is shipped. Known carried-forward limitations remain explicit:
 
 - HIP does not yet implement `pad` / `shrink`; no current Phase 1 benchmark model uses them
-- unresolved symbolic dimensions are not implemented in either codegen backend, so shape changes still require recompilation
+- symbolic dimensions are implemented on the stable tensor ABI for both backends:
+  generated functions bind symbolic names from input tensor metadata at runtime and
+  validate repeated occurrences across all participating inputs
+- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
+  are supported, but a symbolic hidden size remains a follow-up
 - dotted Deep module/import round-trip remains a separate Phase 2 parser/decompiler follow-up
 
 These are real backend limitations, not hidden caveats, but they do not block Phase 2
 language work.
+
+### Phase 2a backend-boundary checks
+
+The first shipped effect surface interacts with backend selection in two explicit ways:
+
+- `chelis build --target c` rejects resource regions such as
+  `with device("gpu:0") { ... }`
+- `chelis build --target hip` rejects incompatible non-GPU resource regions
+- `chelis build` for either target currently rejects lowered `dropout`; seeded dropout
+  is implemented on the evaluator path, not yet on emitted C/HIP code
 
 ## 4. Later Integration Backends
 

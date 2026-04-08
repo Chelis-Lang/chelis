@@ -3,13 +3,22 @@
 //! Generates C source that includes HIP runtime, embeds kernel source strings,
 //! and walks the DAG in topological order launching kernels on GPU.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{
+    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType, symbolic_bindings,
+};
 use chelis_types::types::Prim;
 
 use crate::blas;
 use crate::kernels;
 use crate::launch;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
+
+pub(crate) struct PeakDeviceBytesBreakdown {
+    pub formula: String,
+    pub estimate: Option<usize>,
+    pub terms: Vec<DimExpr>,
+    pub extra_bytes: usize,
+}
 
 /// Emits C/HIP host source code from a RISC DAG.
 pub struct HipEmitter {
@@ -35,7 +44,7 @@ struct OutputSpec {
 
 impl HipEmitter {
     /// Emit complete C/HIP source for a DAG as a function.
-    pub fn emit_dag(dag: &Dag, func_name: &str) -> (String, usize) {
+    pub(crate) fn emit_dag(dag: &Dag, func_name: &str) -> (String, PeakDeviceBytesBreakdown) {
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
         let output_specs = Self::output_specs(dag);
         let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
@@ -95,6 +104,9 @@ impl HipEmitter {
         e.indent -= 1;
         e.line("}");
 
+        e.line("");
+
+        e.emit_input_shape_preamble(dag, &input_slots, func_name);
         e.line("");
 
         // Emit static kernel module caches
@@ -168,10 +180,25 @@ impl HipEmitter {
 
         e.indent = 0;
         e.line("}");
-        (
-            e.lines.join("\n"),
-            e.plan.peak_device_bytes_estimate() + e.extra_peak_device_bytes_estimate,
-        )
+        let mut formula = e.plan.peak_device_bytes_formula();
+        if e.extra_peak_device_bytes_estimate > 0 {
+            formula = if formula == "0" {
+                e.extra_peak_device_bytes_estimate.to_string()
+            } else {
+                format!("{formula} + {}", e.extra_peak_device_bytes_estimate)
+            };
+        }
+        let estimate = e
+            .plan
+            .peak_device_bytes_estimate()
+            .map(|bytes| bytes + e.extra_peak_device_bytes_estimate);
+        let breakdown = PeakDeviceBytesBreakdown {
+            formula,
+            estimate,
+            terms: e.plan.peak_device_bytes_terms(),
+            extra_bytes: e.extra_peak_device_bytes_estimate,
+        };
+        (e.lines.join("\n"), breakdown)
     }
 
     // ------------------------------------------------------------------
@@ -207,6 +234,91 @@ impl HipEmitter {
         }
     }
 
+    fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
+        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op {
+                seen.entry(name.clone())
+                    .or_insert_with(|| node.output_type.clone());
+            }
+        }
+        seen
+    }
+
+    fn emit_input_shape_preamble(
+        &mut self,
+        dag: &Dag,
+        input_slots: &std::collections::HashMap<String, usize>,
+        func_name: &str,
+    ) {
+        let input_types = Self::input_types(dag);
+        for (label, ty) in &input_types {
+            let slot = input_slots[label];
+            self.line(&format!("if (inputs[{slot}] == NULL) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}: input `{label}` at slot {slot} is NULL\\n\");"
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!(
+                "if (inputs[{slot}]->ndim != {}) {{",
+                Self::ndim(ty)
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                Self::ndim(ty)
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            for (axis, dim) in ty.dims.iter().enumerate() {
+                if let Some(expected) = Self::known_dim_size(dim) {
+                    self.line(&format!(
+                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "fprintf(stderr, \"{func_name}: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                    ));
+                    self.line("abort();");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+
+        for binding in symbolic_bindings(dag) {
+            let canonical_slot = input_slots[&binding.canonical.input_label];
+            self.line(&format!(
+                "int {} = inputs[{canonical_slot}]->shape[{}];",
+                binding.name, binding.canonical.axis
+            ));
+            for occurrence in binding.others {
+                let slot = input_slots[&occurrence.input_label];
+                self.line(&format!(
+                    "if (inputs[{slot}]->shape[{}] != {}) {{",
+                    occurrence.axis, binding.name
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"{func_name}: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
+                    binding.name,
+                    occurrence.input_label,
+                    occurrence.axis,
+                    binding.name,
+                    occurrence.axis,
+                    binding.name
+                ));
+                self.line("abort();");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
+    }
+
     fn reduction_kernel_sources(
         &self,
         node: &DagNode,
@@ -222,42 +334,8 @@ impl HipEmitter {
         if self.reduction_inlined.contains(&input_id.0) {
             let fused_node = dag.get(input_id).unwrap();
             let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-            let axis_size = Self::dim_size(&fused_node.output_type.dims[axis]);
-            let launch = launch::segmented_launch(Self::total_size(&node.output_type), axis_size);
-            let (name, source) = match launch.strategy {
-                launch::SegmentedStrategy::Tiny => {
-                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "tiny");
-                    let source = kernels::reduce_fused(&name, axis, axis_size, steps, n_ext, kind);
-                    (name, source)
-                }
-                launch::SegmentedStrategy::Small => {
-                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "small");
-                    let source = kernels::segmented_reduce_small_fused(
-                        &name,
-                        axis,
-                        axis_size,
-                        launch.threads_per_segment,
-                        launch.segments_per_block,
-                        steps,
-                        n_ext,
-                        kind,
-                    );
-                    (name, source)
-                }
-                launch::SegmentedStrategy::Large => {
-                    let name = Self::fused_reduction_kernel_name(node.id.0, kind, "large");
-                    let source = kernels::segmented_reduce_large_fused(
-                        &name,
-                        axis,
-                        axis_size,
-                        launch.block,
-                        steps,
-                        n_ext,
-                        kind,
-                    );
-                    (name, source)
-                }
-            };
+            let name = Self::fused_reduction_kernel_name(node.id.0, kind);
+            let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind);
             return vec![(name, source)];
         }
 
@@ -268,63 +346,15 @@ impl HipEmitter {
             return Vec::new();
         }
 
-        let input_node = dag.get(input_id).unwrap();
-        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
-        if Self::supports_staged_scalar_reduction(node, input_node, axis, dag) {
-            let block = launch::reduction_block_size(Self::total_size(&input_node.output_type));
-            return vec![
-                (
-                    Self::scalar_stage1_kernel_name(kind, block),
-                    kernels::staged_reduce_stage1(
-                        &Self::scalar_stage1_kernel_name(kind, block),
-                        block,
-                        kind,
-                    ),
-                ),
-                (
-                    Self::scalar_stage_n_kernel_name(kind, block),
-                    kernels::staged_reduce_stage_n(
-                        &Self::scalar_stage_n_kernel_name(kind, block),
-                        block,
-                        kind,
-                    ),
-                ),
-            ];
-        }
-
-        let launch = launch::segmented_launch(Self::total_size(&node.output_type), axis_size);
-        let (name, source) = match launch.strategy {
-            launch::SegmentedStrategy::Tiny => {
-                let name = Self::reduction_kernel_name(kind, axis, axis_size, "tiny");
-                let source = match kind {
-                    kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis, axis_size),
-                    kernels::ReduceKind::Max => kernels::reduce_max(&name, axis, axis_size),
-                };
-                (name, source)
-            }
-            launch::SegmentedStrategy::Small => {
-                let name = Self::reduction_kernel_name(kind, axis, axis_size, "small");
-                let source = kernels::segmented_reduce_small(
-                    &name,
-                    axis,
-                    axis_size,
-                    launch.threads_per_segment,
-                    launch.segments_per_block,
-                    kind,
-                );
-                (name, source)
-            }
-            launch::SegmentedStrategy::Large => {
-                let name = Self::reduction_kernel_name(kind, axis, axis_size, "large");
-                let source =
-                    kernels::segmented_reduce_large(&name, axis, axis_size, launch.block, kind);
-                (name, source)
-            }
+        let name = Self::reduction_kernel_name(kind, axis);
+        let source = match kind {
+            kernels::ReduceKind::Sum => kernels::reduce_sum(&name, axis),
+            kernels::ReduceKind::Max => kernels::reduce_max(&name, axis),
         };
         vec![(name, source)]
     }
 
-    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, dag: &Dag) -> Option<String> {
+    fn kernel_name_for_op(&self, op: &RiscOp, node: &DagNode, _dag: &Dag) -> Option<String> {
         match op {
             RiscOp::Add => Some("kernel_add".into()),
             RiscOp::Mul => Some("kernel_mul".into()),
@@ -335,25 +365,27 @@ impl HipEmitter {
             RiscOp::Log => Some("kernel_log".into()),
             RiscOp::Sin => Some("kernel_sin".into()),
             RiscOp::Sqrt => Some("kernel_sqrt".into()),
+            RiscOp::Dropout { .. } => None,
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
-                    // Fused reduction: unique kernel per node ID
-                    Some(format!("kernel_fused_sum_{}", node.id.0))
+                    Some(Self::fused_reduction_kernel_name(
+                        node.id.0,
+                        kernels::ReduceKind::Sum,
+                    ))
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    Some(format!("kernel_sum_ax{axis}_sz{axis_size}"))
+                    Some(Self::reduction_kernel_name(kernels::ReduceKind::Sum, *axis))
                 }
             }
             RiscOp::MaxReduce { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
-                    Some(format!("kernel_fused_maxred_{}", node.id.0))
+                    Some(Self::fused_reduction_kernel_name(
+                        node.id.0,
+                        kernels::ReduceKind::Max,
+                    ))
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    Some(format!("kernel_maxred_ax{axis}_sz{axis_size}"))
+                    Some(Self::reduction_kernel_name(kernels::ReduceKind::Max, *axis))
                 }
             }
             RiscOp::Const { .. } => Some("kernel_fill".into()),
@@ -388,20 +420,9 @@ impl HipEmitter {
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-                    // axis_size comes from the FusedElem's output type (the reduction input shape)
-                    let axis_size = Self::dim_size(&fused_node.output_type.dims[*axis]);
-                    kernels::reduce_fused(
-                        name,
-                        *axis,
-                        axis_size,
-                        steps,
-                        n_ext,
-                        kernels::ReduceKind::Sum,
-                    )
+                    kernels::reduce_fused(name, *axis, steps, n_ext, kernels::ReduceKind::Sum)
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    kernels::reduce_sum(name, *axis, axis_size)
+                    kernels::reduce_sum(name, *axis)
                 }
             }
             RiscOp::MaxReduce { axis } => {
@@ -409,19 +430,9 @@ impl HipEmitter {
                 if self.reduction_inlined.contains(&input_id.0) {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
-                    let axis_size = Self::dim_size(&fused_node.output_type.dims[*axis]);
-                    kernels::reduce_fused(
-                        name,
-                        *axis,
-                        axis_size,
-                        steps,
-                        n_ext,
-                        kernels::ReduceKind::Max,
-                    )
+                    kernels::reduce_fused(name, *axis, steps, n_ext, kernels::ReduceKind::Max)
                 } else {
-                    let input_node = dag.get(input_id).unwrap();
-                    let axis_size = Self::dim_size(&input_node.output_type.dims[*axis]);
-                    kernels::reduce_max(name, *axis, axis_size)
+                    kernels::reduce_max(name, *axis)
                 }
             }
             RiscOp::Const { .. } => kernels::fill(name),
@@ -506,6 +517,9 @@ impl HipEmitter {
             RiscOp::Sqrt => {
                 self.emit_unary_launch(id, "kernel_sqrt", &node.inputs, &node.output_type)
             }
+            RiscOp::Dropout { .. } => {
+                unreachable!("dropout should be rejected before HIP code generation")
+            }
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -543,7 +557,7 @@ impl HipEmitter {
                 self.emit_permute(id, axes, &node.inputs, &node.output_type);
             }
             RiscOp::Expand { axis, size } => {
-                self.emit_expand(id, *axis, *size, &node.inputs, &node.output_type);
+                self.emit_expand(id, *axis, size, &node.inputs, &node.output_type);
             }
             RiscOp::Pad { .. } => {
                 todo!("Pad on GPU requires a kernel — deferred to Phase 1a iteration 2")
@@ -620,7 +634,6 @@ impl HipEmitter {
     }
 
     fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) {
-        let (grid, block) = launch::grid_1d(Self::total_size(ty));
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
@@ -629,7 +642,13 @@ impl HipEmitter {
         self.line(&format!(
             "void *fill_args[] = {{ &d_t{id}->data, &fill_val, &fill_size }};"
         ));
-        self.emit_kernel_launch("mod_kernel_fill", "kernel_fill", grid, block, "fill_args");
+        self.emit_kernel_launch_expr(
+            "mod_kernel_fill",
+            "kernel_fill",
+            "(fill_size + 255) / 256",
+            "256",
+            "fill_args",
+        );
         self.indent -= 1;
         self.line("}");
     }
@@ -671,9 +690,6 @@ impl HipEmitter {
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
-        let size = Self::total_size(ty);
-        let (grid, block) = launch::grid_1d(size);
-
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
@@ -698,11 +714,11 @@ impl HipEmitter {
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch(
+        self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            grid,
-            block,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
             "args",
         );
         self.indent -= 1;
@@ -721,9 +737,6 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        let size = Self::total_size(ty);
-        let (grid, block) = launch::grid_1d(size);
-
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
@@ -739,11 +752,11 @@ impl HipEmitter {
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch(
+        self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            grid,
-            block,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
             "args",
         );
         self.indent -= 1;
@@ -762,9 +775,6 @@ impl HipEmitter {
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
     ) {
-        let size = Self::total_size(ty);
-        let (grid, block) = launch::grid_1d(size);
-
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
@@ -800,11 +810,11 @@ impl HipEmitter {
         arg_parts.push(format!("&t{id}_size"));
 
         self.line(&format!("void *args[] = {{ {} }};", arg_parts.join(", ")));
-        self.emit_kernel_launch(
+        self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            grid,
-            block,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
             "args",
         );
         self.indent -= 1;
@@ -825,8 +835,6 @@ impl HipEmitter {
         kind: kernels::ReduceKind,
     ) {
         let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-
         if matches!(kind, kernels::ReduceKind::Sum)
             && let Some(matmul) = blas::detect_matmul_pattern(dag, NodeId(id))
             && Self::supports_static_hipblas_matmul(dag, &matmul, ty)
@@ -834,35 +842,13 @@ impl HipEmitter {
             self.emit_blas_matmul(id, &matmul, ty);
             return;
         }
-
-        if Self::supports_staged_scalar_reduction(
-            dag.get(NodeId(id)).unwrap(),
-            input_node,
-            axis,
-            dag,
-        ) {
-            self.emit_staged_scalar_reduce_launch(id, a, input_node, ty, kind);
-            return;
-        }
-
-        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
-        let launch_cfg = launch::segmented_launch(Self::total_size(ty), axis_size);
-        let kernel_name = match launch_cfg.strategy {
-            launch::SegmentedStrategy::Tiny => {
-                Self::reduction_kernel_name(kind, axis, axis_size, "tiny")
-            }
-            launch::SegmentedStrategy::Small => {
-                Self::reduction_kernel_name(kind, axis, axis_size, "small")
-            }
-            launch::SegmentedStrategy::Large => {
-                Self::reduction_kernel_name(kind, axis, axis_size, "large")
-            }
-        };
+        let kernel_name = Self::reduction_kernel_name(kind, axis);
 
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
         self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
+        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
         self.emit_stride_vars(id, "a", a);
         self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
         self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
@@ -870,15 +856,15 @@ impl HipEmitter {
         self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
             "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size }};",
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch(
+        self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            launch_cfg.grid,
-            launch_cfg.block,
+            &format!("(t{id}_out_size + 255) / 256"),
+            "256",
             "args",
         );
         self.indent -= 1;
@@ -899,26 +885,20 @@ impl HipEmitter {
     ) {
         let fused_node = dag.get(reduction_inputs[0]).unwrap();
         let ext_inputs = &fused_node.inputs;
-        let axis_size = Self::dim_size(&fused_node.output_type.dims[axis]);
-        let launch_cfg = launch::segmented_launch(Self::total_size(ty), axis_size);
         let kind = match dag.get(NodeId(id)).unwrap().op {
             RiscOp::Sum { .. } => kernels::ReduceKind::Sum,
             RiscOp::MaxReduce { .. } => kernels::ReduceKind::Max,
             _ => unreachable!("emit_fused_reduce_launch called on non-reduction"),
         };
-        let kernel_name = match launch_cfg.strategy {
-            launch::SegmentedStrategy::Tiny => Self::fused_reduction_kernel_name(id, kind, "tiny"),
-            launch::SegmentedStrategy::Small => {
-                Self::fused_reduction_kernel_name(id, kind, "small")
-            }
-            launch::SegmentedStrategy::Large => {
-                Self::fused_reduction_kernel_name(id, kind, "large")
-            }
-        };
+        let kernel_name = Self::fused_reduction_kernel_name(id, kind);
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
         self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
+        self.line(&format!(
+            "int t{id}_axis_size = d_t{}->shape[{axis}];",
+            reduction_inputs[0].0
+        ));
 
         // Emit stride vars for each external input of the fused chain
         for (i, inp) in ext_inputs.iter().enumerate() {
@@ -948,19 +928,21 @@ impl HipEmitter {
         arg_parts.push(self.shape_arg_refs(id, "out"));
         arg_parts.push(format!("&t{id}_out_ndim"));
         arg_parts.push(format!("&t{id}_out_size"));
+        arg_parts.push(format!("&t{id}_axis_size"));
 
         self.line(&format!("void *args[] = {{ {} }};", arg_parts.join(", ")));
-        self.emit_kernel_launch(
+        self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            launch_cfg.grid,
-            launch_cfg.block,
+            &format!("(t{id}_out_size + 255) / 256"),
+            "256",
             "args",
         );
         self.indent -= 1;
         self.line("}");
     }
 
+    #[allow(dead_code)]
     fn emit_blas_matmul(&mut self, id: usize, info: &blas::MatmulInfo, ty: &TensorType) {
         let a = info.a.0;
         let b = info.b.0;
@@ -971,6 +953,7 @@ impl HipEmitter {
         ));
     }
 
+    #[allow(dead_code)]
     fn emit_staged_scalar_reduce_launch(
         &mut self,
         id: usize,
@@ -1089,7 +1072,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
-        _size: usize,
+        _size: &DimExpr,
         inputs: &[NodeId],
         ty: &TensorType,
     ) {
@@ -1194,6 +1177,7 @@ impl HipEmitter {
             .join(", ")
     }
 
+    #[allow(dead_code)]
     fn emit_kernel_launch(
         &mut self,
         module_var: &str,
@@ -1202,36 +1186,49 @@ impl HipEmitter {
         block: usize,
         args_var: &str,
     ) {
+        self.emit_kernel_launch_expr(
+            module_var,
+            kernel_name,
+            &grid.to_string(),
+            &block.to_string(),
+            args_var,
+        );
+    }
+
+    fn emit_kernel_launch_expr(
+        &mut self,
+        module_var: &str,
+        kernel_name: &str,
+        grid_expr: &str,
+        block_expr: &str,
+        args_var: &str,
+    ) {
         self.line(&format!("chelis_prepare_kernel_launch({module_var});"));
         self.line(&format!(
-            "chelis_launch_kernel({module_var}, \"{kernel_name}\", dim3({grid}), dim3({block}), {args_var});"
+            "chelis_launch_kernel({module_var}, \"{kernel_name}\", dim3({grid_expr}), dim3({block_expr}), {args_var});"
         ));
         self.line(&format!(
             "chelis_finalize_kernel_launch({module_var}, \"{kernel_name}\");"
         ));
     }
 
-    fn reduction_kernel_name(
-        kind: kernels::ReduceKind,
-        axis: usize,
-        axis_size: usize,
-        strategy: &str,
-    ) -> String {
+    fn reduction_kernel_name(kind: kernels::ReduceKind, axis: usize) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "sum",
             kernels::ReduceKind::Max => "maxred",
         };
-        format!("kernel_{op}_ax{axis}_sz{axis_size}_{strategy}")
+        format!("kernel_{op}_ax{axis}")
     }
 
-    fn fused_reduction_kernel_name(id: usize, kind: kernels::ReduceKind, strategy: &str) -> String {
+    fn fused_reduction_kernel_name(id: usize, kind: kernels::ReduceKind) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "fused_sum",
             kernels::ReduceKind::Max => "fused_maxred",
         };
-        format!("kernel_{op}_{id}_{strategy}")
+        format!("kernel_{op}_{id}")
     }
 
+    #[allow(dead_code)]
     fn scalar_stage1_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "sum",
@@ -1240,6 +1237,7 @@ impl HipEmitter {
         format!("kernel_{op}_scalar_stage1_bs{block}")
     }
 
+    #[allow(dead_code)]
     fn scalar_stage_n_kernel_name(kind: kernels::ReduceKind, block: usize) -> String {
         let op = match kind {
             kernels::ReduceKind::Sum => "sum",
@@ -1248,6 +1246,7 @@ impl HipEmitter {
         format!("kernel_{op}_scalar_stage_n_bs{block}")
     }
 
+    #[allow(dead_code)]
     fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
         ty.precision == Prim::F32
             && ty.dims.len() == 2
@@ -1257,6 +1256,7 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, info.b)
     }
 
+    #[allow(dead_code)]
     fn supports_staged_scalar_reduction(
         node: &DagNode,
         input_node: &DagNode,
@@ -1269,6 +1269,7 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, input_node.id)
     }
 
+    #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
             RiscOp::Load { .. }
@@ -1282,6 +1283,7 @@ impl HipEmitter {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::Dropout { .. }
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
             | RiscOp::Realize
@@ -1298,6 +1300,7 @@ impl HipEmitter {
         }
     }
 
+    #[allow(dead_code)]
     fn bytes_per_element(dtype: Prim) -> usize {
         match dtype {
             Prim::F32 | Prim::Bool => 4,
@@ -1318,17 +1321,7 @@ impl HipEmitter {
     }
 
     fn shape_literal(ty: &TensorType) -> String {
-        let dims: Vec<String> = ty
-            .dims
-            .iter()
-            .map(|d| match d {
-                DimInfo::Lit(n) => n.to_string(),
-                DimInfo::Named(_, Some(n)) => n.to_string(),
-                DimInfo::Named(name, None) => {
-                    panic!("unsized named dimension '{name}' in HIP codegen")
-                }
-            })
-            .collect();
+        let dims: Vec<String> = ty.dims.iter().map(Self::emit_dim_info).collect();
         if dims.is_empty() {
             "(int[]){1}".to_string()
         } else {
@@ -1340,21 +1333,34 @@ impl HipEmitter {
         if ty.dims.is_empty() { 1 } else { ty.dims.len() }
     }
 
-    fn dim_size(dim: &DimInfo) -> usize {
+    fn known_dim_size(dim: &DimInfo) -> Option<usize> {
         match dim {
-            DimInfo::Lit(n) => *n,
-            DimInfo::Named(_, Some(n)) => *n,
-            DimInfo::Named(name, None) => {
-                panic!("unsized named dimension '{name}' in HIP codegen")
-            }
+            DimInfo::Lit(n) => Some(*n),
+            DimInfo::Named(_, Some(n)) => Some(*n),
+            DimInfo::Named(_, None) => None,
         }
     }
 
+    fn emit_dim_info(dim: &DimInfo) -> String {
+        match dim {
+            DimInfo::Lit(n) => n.to_string(),
+            DimInfo::Named(_, Some(n)) => n.to_string(),
+            DimInfo::Named(name, None) => name.clone(),
+        }
+    }
+
+    #[allow(dead_code)]
     fn total_size(ty: &TensorType) -> usize {
         if ty.dims.is_empty() {
             1
         } else {
-            ty.dims.iter().map(Self::dim_size).product()
+            ty.dims
+                .iter()
+                .map(|dim| {
+                    Self::known_dim_size(dim)
+                        .unwrap_or_else(|| panic!("unsized named dimension in static total_size"))
+                })
+                .product()
         }
     }
 

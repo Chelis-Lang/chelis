@@ -1,25 +1,26 @@
 ## Phase 1 Symbolic Dimensions
 
-**Goal:** Support dimension-polymorphic compilation for the GPU backend.
+**Goal:** Support dimension-polymorphic compilation for the C and HIP backends.
 
 Phase 0 required concrete dimensions at IR lowering time. The GPU backend needs runtime shape parameters — you don't recompile a kernel for each batch size. This means the IR must support symbolic dimensions that become concrete at runtime.
 
 ### What Changes
 
 **IR (`chelis-ir`):**
-- Dimension values in the DAG can be `Concrete(usize)` or `Symbolic(DimName)`
-- Kernel code emission uses symbolic dimensions as function parameters: `void kernel(int batch, int seq, ...)`
-- Allocation, indexing, and launch configuration compute sizes from symbolic dims at runtime
+- Dimension values in the DAG can remain symbolic through lowering and backend emission
+- runtime shape calculations are expressed with `DimExpr` (`Concrete`, `Sym`, `Mul`, `Div`)
+- allocation, indexing, and launch configuration compute sizes from symbolic dims at runtime
 
 **Type checker (`chelis-types`):**
 - Already supports named dimensions at the type level
 - The change: when lowering to IR, named dims that aren't bound to concrete values stay symbolic instead of erroring
 
-**C backend (`chelis-backend-c`):**
-- Also benefits: generated C functions accept shape parameters instead of hardcoding sizes
-- Same MNIST program works with batch=32 or batch=128 without recompilation
+**Backends (`chelis-backend-c`, `chelis-backend-hip`):**
+- generated functions keep the stable tensor ABI and bind symbolic names from input tensor metadata at runtime
+- repeated occurrences of the same symbolic dim are validated across all inputs before execution
+- the same compiled artifact works for batch=32 or batch=128 without recompilation on the supported Phase 1 surface
 
-**This is NOT full dependent types or symbolic arithmetic.** The dimensions are runtime integers, not type-level expressions. `tensor[batch, hidden, f32]` means "a tensor whose first dimension is called batch and has some runtime size." The compiler emits `int batch` as a function parameter.
+**This is NOT full dependent types or symbolic arithmetic.** The dimensions are runtime integers discovered from input metadata, not type-level expressions. `tensor[batch, hidden, f32]` means "a tensor whose first dimension is called batch and has some runtime size."
 
 ### Test Strategy (~6 tests)
 
@@ -27,7 +28,13 @@ Phase 0 required concrete dimensions at IR lowering time. The GPU backend needs 
 - [ ] Kernel launch grid size is computed from runtime dim values
 - [ ] Matmul with symbolic dims: `[batch, in] × [in, out]` → correct shape
 - [ ] Reduction with symbolic axis size: `sum([batch, seq], axis=1)` works for varying seq
+- [ ] `softmax([batch, seq], axis=1)` preserves the symbolic axis size through lowering/codegen
 - [ ] CPU and GPU backends agree with symbolic dims
+
+### Current shipped boundary
+
+- implemented: symbolic dims on the stable tensor ABI, repeated symbolic-occurrence validation, symbolic `sum`/`max_reduce`/`softmax`, symbolic matmul/expand/reshape/permute paths, HIP memory formulas
+- not yet implemented: symbolic normalized-axis support for `mean`/`layer_norm`, HIP `pad`/`shrink`
 
 ### Execution Strategy
 

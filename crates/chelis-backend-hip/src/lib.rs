@@ -3,6 +3,10 @@
 //! Generates C host code with embedded HIP kernel source strings.
 //! At runtime, `hiprtc` JIT-compiles the kernels and dispatches them to GPU.
 
+use std::collections::HashMap;
+
+use chelis_ir::dag::DimExpr;
+
 pub mod blas;
 pub mod emit;
 pub mod kernels;
@@ -23,8 +27,24 @@ pub struct HipCodegenResult {
     pub input_labels: Vec<String>,
     /// Output slot labels in positional order.
     pub output_labels: Vec<String>,
-    /// Estimated peak device memory from the slot plan plus inline staged-reduction scratch.
-    pub peak_device_bytes_estimate: usize,
+    /// Unresolved symbolic dimensions that the generated function binds from input metadata.
+    pub symbolic_dims: Vec<String>,
+    /// Human-readable peak device-memory formula from the slot plan plus inline staged-reduction scratch.
+    pub peak_device_bytes_formula: String,
+    /// Concrete peak device-memory estimate when every term is statically known.
+    pub peak_device_bytes_estimate: Option<usize>,
+    peak_device_bytes_terms: Vec<DimExpr>,
+    peak_device_bytes_static_extra: usize,
+}
+
+impl HipCodegenResult {
+    pub fn peak_device_bytes_at(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+        self.peak_device_bytes_terms
+            .iter()
+            .try_fold(self.peak_device_bytes_static_extra, |acc, term| {
+                Ok(acc + term.evaluate(bindings)?)
+            })
+    }
 }
 
 /// Return the path to the HIP runtime directory (relative to the crate root).
@@ -43,12 +63,13 @@ pub fn runtime_dir() -> &'static str {
 /// Inputs arrive as host tensors, are transferred to GPU, processed via
 /// HIP kernels, and results are transferred back to host tensors in outputs.
 pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResult {
-    let (c_source, peak_device_bytes_estimate) = emit::HipEmitter::emit_dag(dag, func_name);
+    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name);
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
     let input_labels = emit::HipEmitter::input_labels(dag);
     let output_labels = emit::HipEmitter::output_labels(dag);
+    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
     let mut link_flags = vec!["-lhiprtc".to_string()];
     if c_source.contains("chelis_hipblas_sgemm_row_major(") {
         link_flags.push("-lhipblas".to_string());
@@ -60,6 +81,10 @@ pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResu
         link_flags,
         input_labels,
         output_labels,
-        peak_device_bytes_estimate,
+        symbolic_dims,
+        peak_device_bytes_formula: peak_device_bytes.formula,
+        peak_device_bytes_estimate: peak_device_bytes.estimate,
+        peak_device_bytes_terms: peak_device_bytes.terms,
+        peak_device_bytes_static_extra: peak_device_bytes.extra_bytes,
     }
 }

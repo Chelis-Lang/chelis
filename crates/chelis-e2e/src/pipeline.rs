@@ -24,6 +24,13 @@ pub fn compile_surf(source: &str) -> Result<PipelineResult, String> {
     // 3. Type check (Phase 0e)
     let checked = chelis_types::check_phase0e_program(&deep_exprs)
         .map_err(|r| format!("Type errors: {:?}", r.errors))?;
+    let checked = chelis_effects::check_program(&checked).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
 
     // 4. Lower to RISC DAG
     let dag = chelis_ir::lower::lower_program(&checked);

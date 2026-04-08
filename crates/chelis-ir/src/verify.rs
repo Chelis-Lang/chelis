@@ -97,6 +97,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::Dropout { .. }
             | RiscOp::Realize
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
@@ -276,7 +277,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             node.id.0, axis, input_rank
                         ));
                     }
-                    if *size == 0 {
+                    if matches!(size.as_concrete(), Some(0)) {
                         errors.push(format!("expand at node {}: size must be > 0", node.id.0));
                     }
                     if node.output_type.precision != input.output_type.precision {
@@ -290,7 +291,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             if out_i == *axis {
                                 if let Some(out_size) =
                                     dim_known_size(&node.output_type.dims[out_i])
-                                    && out_size != *size
+                                    && size.as_concrete().is_some_and(|size| out_size != size)
                                 {
                                     errors.push(format!(
                                         "expand at node {}: inserted axis {} has size {}, expected {}",
@@ -326,7 +327,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 ));
                             }
                             if let Some(out_size) = dim_known_size(&node.output_type.dims[*axis])
-                                && out_size != *size
+                                && size.as_concrete().is_some_and(|size| out_size != size)
                             {
                                 errors.push(format!(
                                     "expand at node {}: output axis {} has size {}, expected {}",
@@ -833,7 +834,10 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
         dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: crate::dag::DimExpr::Concrete(4),
+            },
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -853,7 +857,10 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
         dag.add_node(
-            RiscOp::Expand { axis: 0, size: 4 },
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Concrete(4),
+            },
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(4)],
@@ -872,7 +879,10 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
         dag.add_node(
-            RiscOp::Expand { axis: 0, size: 4 },
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Concrete(4),
+            },
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(4)],

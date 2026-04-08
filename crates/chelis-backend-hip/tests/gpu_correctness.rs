@@ -513,6 +513,86 @@ fn g4_max_reduce_gpu_matches_cpu() {
     );
 }
 
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_row_sum_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("seq".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty);
+    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_sum",
+        &[TestInput::new(
+            "x",
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_softmax_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("seq".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+    let out = chelis_ir::tier2::lower_softmax(&mut dag, x, 1, &x_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_softmax",
+        &[TestInput::new(
+            "x",
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 0.0, -1.0, 4.0],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_matmul_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty.clone());
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty.clone());
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_matmul",
+        &[
+            TestInput::new("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        ],
+    );
+}
+
 // ===========================================================================
 // G5: expand then add — stride-0 correct on GPU
 // ===========================================================================
@@ -522,7 +602,14 @@ fn g4_max_reduce_gpu_matches_cpu() {
 fn g5_expand_add_stride_zero() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3));
-    let expanded = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], mat_f32(4, 3));
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
+        vec![x],
+        mat_f32(4, 3),
+    );
     let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(4, 3));
     let out = dag.add_node(RiscOp::Add, vec![expanded, c], mat_f32(4, 3));
     dag.add_root(out);
@@ -809,12 +896,18 @@ fn g15_hipblas_matmul_matches_eval() {
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );
@@ -854,12 +947,18 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
     );
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );

@@ -125,10 +125,10 @@ fn rt3_scalar_only_dag() {
         src.contains("chelis_gpu_alloc(1, (int[]){1}"),
         "Scalar must be allocated as ndim=1 size=1"
     );
-    // Grid should be ceil(1/256) = 1
+    // Grid should be derived from the runtime size even for scalar tensors.
     assert!(
-        src.contains("dim3(1)"),
-        "Scalar kernel launch should have grid=1"
+        src.contains("dim3((fill_size + 255) / 256)"),
+        "Scalar kernel launch should use the runtime size expression"
     );
 }
 
@@ -247,14 +247,14 @@ fn rt7_different_reductions_different_kernels() {
     let result = codegen_hip(&dag, "test_diff_reductions");
     let src = &result.c_source;
 
-    // These must be DIFFERENT kernels (different axis, different axis_size)
+    // These must be DIFFERENT kernels (different reduction axis).
     assert!(
-        src.contains("kernel_sum_ax0_sz3"),
-        "Sum on axis 0 with axis_size=3 should have unique kernel name"
+        src.contains("kernel_sum_ax0"),
+        "Sum on axis 0 should have a unique kernel name"
     );
     assert!(
-        src.contains("kernel_sum_ax1_sz4"),
-        "Sum on axis 1 with axis_size=4 should have unique kernel name"
+        src.contains("kernel_sum_ax1"),
+        "Sum on axis 1 should have a unique kernel name"
     );
 }
 
@@ -308,7 +308,14 @@ fn rt8_load_as_output_with_store() {
 fn rt9_expand_sets_stride_zero() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3));
-    let e = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], mat_f32(4, 3));
+    let e = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
+        vec![x],
+        mat_f32(4, 3),
+    );
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_expand_stride");
     let src = &result.c_source;
@@ -411,7 +418,7 @@ fn rt13_zero_size_grid() {
 }
 
 // ===========================================================================
-// RT14: scalar staged reduction scratch stays inline, outside slot planner
+// RT14: scalar reductions use the generic runtime-sized kernel path
 // ===========================================================================
 
 #[test]
@@ -423,14 +430,8 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
     let result = codegen_hip(&dag, "test_stage_scratch");
     let src = &result.c_source;
 
-    assert!(
-        src.contains("hipMalloc(&t1_partials0"),
-        "staged scalar reductions should allocate scratch inline"
-    );
-    assert!(
-        src.contains("hipFree(t1_partials0)"),
-        "inline staged scratch must be freed in the same emission block"
-    );
+    assert!(src.contains("kernel_sum_ax0"));
+    assert!(!src.contains("hipMalloc(&t1_partials0"));
     assert!(
         !src.contains("chelis_slot2"),
         "staged scratch must not be routed through the slot planner"
@@ -447,12 +448,18 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let a = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
     let b = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
     let ea = contiguous.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = contiguous.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );
@@ -474,12 +481,18 @@ fn rt15_matmul_specialization_respects_contiguity() {
     );
     let b = fallback.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
     let ea = fallback.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a_perm],
         tensor3_f32(2, 3, 4),
     );
     let eb = fallback.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );

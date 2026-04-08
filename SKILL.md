@@ -176,7 +176,7 @@ validated automatically.
 | `kv` | 2 | key, value | `(kv {} lr (var {} lr))` |
 
 This vocabulary is complete and closed. User-defined macros do not add new tags — macros
-expand to combinations of these 56 tags before any LLM interaction.
+expand to combinations of these 59 tags before any LLM interaction.
 
 ### 2c. Built-in Scope
 
@@ -258,6 +258,17 @@ def sig let in type dim match with fn module import export if then else
 grad vmap jit cast realize copy par true false
 ```
 
+### Surf Style
+
+Prefer idiomatic Surf when you are generating `.ch` source for humans:
+
+- use `def ... -> T = ...` for typed function definitions
+- put input types on parameters, not on top-level load-style `let` bindings
+- use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
+- do not annotate intermediate expressions when the checker can infer them
+- keep meaningful intermediate names like `logits`, `probs`, and `loss`
+- combine short tensor operations when the composition is clearer than one-binding-per-op
+
 ### Operator Precedence
 
 From lowest to highest:
@@ -277,7 +288,7 @@ From lowest to highest:
 
 | Surf | Deep |
 |---|---|
-| `def f(x: T): U = body` | `defsig` + `def` with typed `params` |
+| `def f(x: T) -> U = body` | `defsig` + `def` with typed `params` |
 | `let x = e in body` | `(let {} (bind {} x e') body')` |
 | `{ let x = e; body }` | same `let` shape after block desugaring |
 | `match x with { | P => b }` | `(match {} x' (arm {} P' () b'))` |
@@ -328,7 +339,7 @@ test suite.
 Surf:
 
 ```chelis-surf
-def square(x: tensor[f32]): tensor[f32] = mul(x, x)
+def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
 ```
 
 Deep:
@@ -348,7 +359,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]): tensor[n, f32] = add(x, y)
+def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
 Deep:
@@ -375,7 +386,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def twice_then_relu(x: tensor[n, f32]): tensor[n, f32] =
+def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
   let y = add(x, x)
   in relu(y)
 ```
@@ -403,7 +414,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def relu_then_softmax(x: tensor[n, f32]): tensor[n, f32] =
+def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
   softmax(relu(x), 0)
 ```
 
@@ -431,7 +442,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def classify(x: tensor[n, f32]): tensor[n, f32] =
+def classify(x: tensor[n, f32]) -> tensor[n, f32] =
   x |> relu |> fn (v) -> softmax(v, 0)
 ```
 
@@ -459,7 +470,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def logistic_step(x: tensor[n, f32]): tensor[n, f32] =
+def logistic_step(x: tensor[n, f32]) -> tensor[n, f32] =
   sigmoid(x)
 ```
 
@@ -484,7 +495,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def clamp_low(x: tensor[n, f32], low: tensor[n, f32]): tensor[n, f32] = max_elem(x, low)
+def clamp_low(x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] = max_elem(x, low)
 ```
 
 Deep:
@@ -511,7 +522,7 @@ Deep:
 Surf:
 
 ```chelis-surf
-def identity[a](x: tensor[a, f32]): tensor[a, f32] = x
+def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
 ```
 
 Deep:
@@ -537,7 +548,7 @@ Surf:
 ```chelis-surf
 type Weights = tensor[n, f32]
 
-def keep(w: Weights): Weights = w
+def keep(w: Weights) -> Weights = w
 ```
 
 Deep:
@@ -563,7 +574,7 @@ type Optimizer =
   | Sgd { lr: tensor[f32] }
   | Adam { lr: tensor[f32], beta1: tensor[f32], beta2: tensor[f32], eps: tensor[f32] }
 
-def learning_rate(opt: Optimizer): tensor[f32] =
+def learning_rate(opt: Optimizer) -> tensor[f32] =
   match opt with {
     | Sgd { lr } => lr
     | Adam { lr, beta1, beta2, eps } => lr
@@ -613,7 +624,7 @@ type Activation =
   | Relu
   | Sigmoid
 
-def activate(act: Activation, x: tensor[n, f32]): tensor[n, f32] =
+def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
     | Sigmoid => sigmoid(x)

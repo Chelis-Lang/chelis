@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
+use crate::dag::{
+    Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType, bind_symbolic_dims,
+    symbolic_bindings,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TensorValue {
@@ -49,6 +52,143 @@ fn default_value(ty: &TensorType) -> TensorValue {
     }
 }
 
+fn validate_shape_against_type(
+    input_name: &str,
+    value: &TensorValue,
+    ty: &TensorType,
+) -> Result<(), String> {
+    if value.shape.len() != ty.dims.len() {
+        return Err(format!(
+            "input `{input_name}` rank mismatch: expected {}, got {}",
+            ty.dims.len(),
+            value.shape.len()
+        ));
+    }
+    for (axis, (actual, dim)) in value.shape.iter().zip(&ty.dims).enumerate() {
+        match dim {
+            DimInfo::Lit(expected) => {
+                if actual != expected {
+                    return Err(format!(
+                        "input `{input_name}` axis {axis} mismatch: expected {expected}, got {actual}"
+                    ));
+                }
+            }
+            DimInfo::Named(name, Some(expected)) => {
+                if actual != expected {
+                    return Err(format!(
+                        "input `{input_name}` axis {axis} named dim `{name}` mismatch: expected {expected}, got {actual}"
+                    ));
+                }
+            }
+            DimInfo::Named(_, None) => {}
+        }
+    }
+    Ok(())
+}
+
+fn infer_symbolic_bindings_from_inputs(
+    dag: &Dag,
+    inputs: &HashMap<String, TensorValue>,
+) -> Result<HashMap<String, usize>, String> {
+    let mut bindings = HashMap::new();
+    let mut load_types = HashMap::<String, TensorType>::new();
+
+    for node in dag.nodes() {
+        if let RiscOp::Load { name } = &node.op {
+            load_types
+                .entry(name.clone())
+                .or_insert_with(|| node.output_type.clone());
+        }
+    }
+
+    for (name, ty) in &load_types {
+        if let Some(value) = inputs.get(name) {
+            validate_shape_against_type(name, value, ty)?;
+        }
+    }
+
+    for binding in symbolic_bindings(dag) {
+        let canonical_value = inputs.get(&binding.canonical.input_label).ok_or_else(|| {
+            format!(
+                "missing required input `{}` for symbolic dimension `{}`",
+                binding.canonical.input_label, binding.name
+            )
+        })?;
+        let value = *canonical_value
+            .shape
+            .get(binding.canonical.axis)
+            .ok_or_else(|| {
+                format!(
+                    "input `{}` is missing axis {} for symbolic dimension `{}`",
+                    binding.canonical.input_label, binding.canonical.axis, binding.name
+                )
+            })?;
+        bindings.insert(binding.name.clone(), value);
+
+        for occurrence in &binding.others {
+            let other_value = inputs.get(&occurrence.input_label).ok_or_else(|| {
+                format!(
+                    "missing required input `{}` for symbolic dimension `{}`",
+                    occurrence.input_label, binding.name
+                )
+            })?;
+            let other = *other_value.shape.get(occurrence.axis).ok_or_else(|| {
+                format!(
+                    "input `{}` is missing axis {} for symbolic dimension `{}`",
+                    occurrence.input_label, occurrence.axis, binding.name
+                )
+            })?;
+            if other != value {
+                return Err(format!(
+                    "symbolic dimension `{}` mismatch: canonical {}[{}] = {}, but {}[{}] = {}",
+                    binding.name,
+                    binding.canonical.input_label,
+                    binding.canonical.axis,
+                    value,
+                    occurrence.input_label,
+                    occurrence.axis,
+                    other
+                ));
+            }
+        }
+    }
+
+    Ok(bindings)
+}
+
+fn resolve_load_inputs<F>(
+    dag: &Dag,
+    live: Option<&[bool]>,
+    strict_loads: bool,
+    mut load_input: F,
+) -> Result<HashMap<String, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let mut inputs = HashMap::new();
+    for node in dag.nodes() {
+        if let Some(mask) = live
+            && !mask[node.id.0]
+        {
+            continue;
+        }
+        let RiscOp::Load { name } = &node.op else {
+            continue;
+        };
+        if inputs.contains_key(name) {
+            continue;
+        }
+        match load_input(name) {
+            Some(value) => {
+                inputs.insert(name.clone(), value);
+            }
+            None if strict_loads => return Err(format!("missing required input `{name}`")),
+            None => {}
+        }
+    }
+    Ok(inputs)
+}
+
 fn linear_to_index(mut linear: usize, shape: &[usize]) -> Vec<usize> {
     if shape.is_empty() {
         return vec![];
@@ -75,6 +215,41 @@ fn unary_map(input: &TensorValue, f: impl Fn(f64) -> f64) -> TensorValue {
         data: input.data.iter().copied().map(f).collect(),
         shape: input.shape.clone(),
     }
+}
+
+fn dropout(input: &TensorValue, rate: f64, seed: u64) -> TensorValue {
+    let keep_scale = if rate >= 1.0 {
+        0.0
+    } else {
+        1.0 / (1.0 - rate.max(0.0))
+    };
+    let data = input
+        .data
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let sample = dropout_sample(seed, index as u64);
+            if sample < rate {
+                0.0
+            } else {
+                value * keep_scale
+            }
+        })
+        .collect();
+    TensorValue {
+        data,
+        shape: input.shape.clone(),
+    }
+}
+
+fn dropout_sample(seed: u64, index: u64) -> f64 {
+    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
 fn binary_map(lhs: &TensorValue, rhs: &TensorValue, f: impl Fn(f64, f64) -> f64) -> TensorValue {
@@ -264,9 +439,32 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    let resolved_inputs = resolve_load_inputs(dag, live, strict_loads, &mut load_input)?;
+    let bound_dag = if dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(&node.op, RiscOp::Expand { size, .. } if !size.is_concrete()))
+        || dag.nodes().iter().any(|node| {
+            node.output_type
+                .dims
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(_, None)))
+        })
+        || dag.nodes().iter().any(|node| match &node.op {
+            RiscOp::Reshape { new_shape } => new_shape
+                .iter()
+                .any(|dim| matches!(dim, DimInfo::Named(_, None))),
+            _ => false,
+        }) {
+        let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
+        bind_symbolic_dims(dag, &bindings)?
+    } else {
+        dag.clone()
+    };
+
     let mut values: HashMap<NodeId, TensorValue> = HashMap::new();
 
-    for node in dag.nodes() {
+    for node in bound_dag.nodes() {
         if let Some(mask) = live
             && !mask[node.id.0]
         {
@@ -281,11 +479,9 @@ where
                     shape,
                 }
             }
-            RiscOp::Load { name } => match load_input(name) {
-                Some(value) => value,
-                None if strict_loads => {
-                    return Err(format!("missing required input `{name}`"));
-                }
+            RiscOp::Load { name } => match resolved_inputs.get(name) {
+                Some(value) => value.clone(),
+                None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),
             },
             RiscOp::Store { .. } | RiscOp::Realize => values[&node.inputs[0]].clone(),
@@ -304,6 +500,7 @@ where
             RiscOp::Log => unary_map(&values[&node.inputs[0]], f64::ln),
             RiscOp::Sin => unary_map(&values[&node.inputs[0]], f64::sin),
             RiscOp::Sqrt => unary_map(&values[&node.inputs[0]], f64::sqrt),
+            RiscOp::Dropout { rate, seed } => dropout(&values[&node.inputs[0]], *rate, *seed),
             RiscOp::MaxElem => {
                 binary_map(&values[&node.inputs[0]], &values[&node.inputs[1]], f64::max)
             }
@@ -335,7 +532,8 @@ where
             RiscOp::Expand { axis, size } => expand(
                 &values[&node.inputs[0]],
                 *axis,
-                *size,
+                size.as_concrete()
+                    .expect("symbolic expands must be rebound before evaluation"),
                 concrete_shape(&node.output_type)?,
             ),
             RiscOp::Pad { padding, fill } => pad(&values[&node.inputs[0]], padding, *fill),
@@ -532,7 +730,14 @@ mod tests {
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty);
-        let y = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], out_ty);
+        let y = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Concrete(4),
+            },
+            vec![x],
+            out_ty,
+        );
         let mut inputs = HashMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
         let vals = eval_tensor(&dag, &inputs).unwrap();
@@ -602,6 +807,8 @@ mod tests {
         let exprs = parse_str(src).expect("parse failed");
         let checked = chelis_types::check_phase0e_program(&exprs)
             .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         lower_program(&checked)
     }
 
@@ -758,5 +965,53 @@ mod tests {
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])
         );
+    }
+
+    #[test]
+    fn lowered_dropout_is_deterministic_for_same_seed() {
+        let src = r#"
+            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
+            (def {} y
+              (handle-effect {effect: random}
+                (lit {type: (t-prim {} int32)} 42)
+                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
+        "#;
+        let dag = lower(src);
+        let vals_a = eval_tensor(&dag, &HashMap::new()).unwrap();
+        let vals_b = eval_tensor(&dag, &HashMap::new()).unwrap();
+        let out_a = vals_a.get(&NodeId(dag.len() - 1)).unwrap();
+        let out_b = vals_b.get(&NodeId(dag.len() - 1)).unwrap();
+        assert_eq!(out_a, out_b);
+        assert!(out_a.data.contains(&0.0));
+        assert!(out_a.data.iter().any(|value| *value > 0.0));
+    }
+
+    #[test]
+    fn lowered_dropout_changes_with_different_seed() {
+        let src_a = r#"
+            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
+            (def {} y
+              (handle-effect {effect: random}
+                (lit {type: (t-prim {} int32)} 42)
+                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
+        "#;
+        let src_b = r#"
+            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
+            (def {} y
+              (handle-effect {effect: random}
+                (lit {type: (t-prim {} int32)} 43)
+                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
+        "#;
+        let dag_a = lower(src_a);
+        let dag_b = lower(src_b);
+        let out_a = eval_tensor(&dag_a, &HashMap::new())
+            .unwrap()
+            .remove(&NodeId(dag_a.len() - 1))
+            .unwrap();
+        let out_b = eval_tensor(&dag_b, &HashMap::new())
+            .unwrap()
+            .remove(&NodeId(dag_b.len() - 1))
+            .unwrap();
+        assert_ne!(out_a, out_b);
     }
 }

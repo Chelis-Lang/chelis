@@ -30,6 +30,7 @@ fn bench_phase1e_rejects_unknown_model() {
 }
 
 #[test]
+#[ignore = "manual gate: real benchmark scope; run `cargo test -p chelis-e2e --test bench_phase1e -- --ignored`"]
 fn bench_phase1e_all_emits_structured_json_for_real_scope() {
     let json = run_bench("all");
     let oracle = json["oracle"].as_str().expect("oracle string");
@@ -56,6 +57,62 @@ fn bench_phase1e_all_emits_structured_json_for_real_scope() {
             "expected at least one comparison entry"
         );
     }
+}
+
+#[test]
+fn bench_phase1e_linreg_smoke_emits_structured_json() {
+    let json = run_bench_with_env(
+        "linreg",
+        &[
+            ("CHELIS_BENCH_PROFILE", "smoke"),
+            ("ROCR_VISIBLE_DEVICES", ""),
+            (
+                "CHELIS_BENCH_PYTHON",
+                "/tmp/chelis-phase1e-missing-python-interpreter",
+            ),
+        ],
+    );
+    let oracle = json["oracle"].as_str().expect("oracle string");
+    assert!(oracle.contains("--model linreg"));
+    assert!(oracle.contains("--emit-json"));
+
+    let models = json["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 1, "expected only linreg benchmark model");
+    let model = &models[0];
+    assert_eq!(model["name"].as_str(), Some("linreg"));
+    assert_eq!(model["workload"]["train_batches"].as_u64(), Some(1));
+    assert_eq!(model["workload"]["test_batches"].as_u64(), Some(1));
+    assert_eq!(model["workload"]["epochs"].as_u64(), Some(1));
+    assert!(model["cpu"].is_object(), "cpu backend report missing");
+    assert!(model["hip"].is_object(), "hip backend report missing");
+    assert!(
+        model["pytorch"].is_object(),
+        "pytorch backend report missing"
+    );
+
+    let hip = &model["hip"];
+    assert_eq!(hip["status"].as_str(), Some("skipped"));
+    let hip_reason = hip["reason"].as_str().unwrap_or("");
+    assert!(
+        hip_reason.contains("HIP runtime unavailable")
+            || hip_reason.contains("no HIP devices visible")
+            || hip_reason.contains("hipcc not available"),
+        "unexpected HIP skip reason: {hip_reason}"
+    );
+
+    let pytorch = &model["pytorch"];
+    assert_eq!(pytorch["status"].as_str(), Some("skipped"));
+    let pytorch_reason = pytorch["reason"].as_str().unwrap_or("");
+    assert!(
+        pytorch_reason.contains("CHELIS_BENCH_PYTHON points to a missing interpreter"),
+        "unexpected PyTorch skip reason: {pytorch_reason}"
+    );
+
+    let comparisons = model["comparisons"].as_array().expect("comparisons array");
+    assert!(
+        !comparisons.is_empty(),
+        "expected at least one comparison entry"
+    );
 }
 
 #[test]
@@ -118,7 +175,9 @@ fn bench_phase1e_hidden_hip_device_emits_structured_skip_report() {
     assert_eq!(hip["status"].as_str(), Some("skipped"));
     let reason = hip["reason"].as_str().unwrap_or("");
     assert!(
-        reason.contains("HIP runtime unavailable") || reason.contains("no HIP devices visible"),
+        reason.contains("HIP runtime unavailable")
+            || reason.contains("no HIP devices visible")
+            || reason.contains("hipcc not available"),
         "unexpected HIP skip reason: {reason}"
     );
 }

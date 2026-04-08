@@ -1,7 +1,26 @@
 # spec/04-type-system.md — Chelis Type System
 
-**Status:** v0.2 (post design sprint)
-**Scope:** Phase 0 type system: ADTs, Hindley-Milner inference, numeric precision types, named tensor dimensions, fitness scoring. Effects and linearity are sketched for forward compatibility but NOT implemented in Phase 0.
+**Status:** v0.3
+**Scope:** Phase 0 type system plus the shipped Phase 2a effect subset: ADTs,
+Hindley-Milner inference, numeric precision types, named tensor dimensions, fitness
+scoring, annotated checked Deep, and bounded `Random` / `Resource(Device)` effect
+checking.
+
+---
+
+## 0. Checked Deep Contract
+
+The type checker is the first pass that upgrades raw Deep into the downstream
+compiler-facing representation.
+
+- `check_phase0e_program(...)` returns a `CheckedProgram`, not just a success/failure bit
+- a `CheckedProgram` carries annotated Deep, with `type` metadata written onto the
+  returned tree
+- lowering, evaluation, effect checking, and CLI build/eval paths consume that
+  annotated tree rather than the original raw Deep
+
+This contract matters for Phase 2a because effect inference/checking runs after HM type
+inference on the same annotated tree.
 
 ---
 
@@ -416,48 +435,75 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ---
 
-## 7. Forward Compatibility: Effects (Phase 2 Design Direction)
-
-NOT implemented in Phase 0. This section records the active Phase 2 design direction so
-the current representation and docs stay aligned.
+## 7. Effects (Phase 2a Shipped Subset)
 
 ### 7.1 Effect Model
 
-Algebraic effects via row polymorphism. The current Phase 2 design vocabulary has four
-built-in effects:
+The long-term effect design still points toward row-polymorphic effect inference, but
+the shipped Phase 2a subset is narrower and explicit about its boundaries.
 
-- `Diff` -- differentiability
-- `Random` -- stochasticity
-- `Accum` -- associative accumulation that preserves parallelism in backward passes
-- `Resource(Device)` -- allocation / placement on a concrete device
+Built-in effect vocabulary in the type layer:
 
-Effects are inferred rather than required annotations. A function's effects are the
-union of the effects of the operations in its body. `grad` handles `Diff`.
-`withSeed(seed, f)` handles `Random`. `withDevice(device, f)` handles
-`Resource(Device)`. Unhandled effects at the program boundary are compile errors.
+- `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
+- `Accum` -- internal-only hook for associative gradient accumulation
+- `Resource(Device)` -- allocation / placement region on a concrete device
 
-Effects are inferred after ordinary HM type inference on the typed Deep AST. A
-higher-order function propagates the callee effect row rather than erasing it.
+Settled Phase 2a design decisions:
+
+- `Diff` is a compiler capability, not a user-visible boundary effect
+- `Accum` is internal-only in v1; users do not handle it directly
+- `Random` and `Resource(Device)` are the real Phase 2a boundary effects
+
+Current shipped inference/checking behavior:
+
+- effect inference runs after HM type inference on the annotated Deep returned by the
+  type checker
+- a function's inferred effect set is the union of the effects of compiler-known
+  operations in its body
+- `dropout(x, rate)` is the concrete shipped `Random` source
+- `with seed(seed) { ... }` handles `Random`
+- `with device(device) { ... }` marks a resource region that is validated against the
+  chosen build target
+- declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but
+  the current checker does not yet synthesize `Resource(Device)` onto checked `fn`
+  metadata the way it does for inferred `Random`
+- unhandled top-level `Random` is a check error with repair guidance
+
+The current shipped checker does **not** yet claim the full Phase 2 design:
+
+- no full user-visible `Diff` effect checking
+- no user-visible `Accum` inference/handling
+- no general row-polymorphic higher-order effect surface promised as shipped behavior
 
 ### 7.2 Type Representation
 
-Function types with effects:
+Declared function types with effects use `eff` metadata on `t-fn`:
 
 ```scheme
-;; f : (tensor[D, f32]) -[Diff, Random]-> tensor[D, f32]
-(t-fn {eff: (Diff Random)}
+;; f : tensor[D, f32] -> tensor[D, f32] ! {Random, Resource("gpu:0")}
+(t-fn {eff: (effects {} random (resource {} "gpu:0"))}
   (t-tensor {} (d-var {} d) (t-prim {} f32))
   (t-tensor {} (d-var {} d) (t-prim {} f32)))
 ```
 
-The `eff` key is the extension point. Phase 0 ignores it; Phase 2 validates it if
-present. Effect annotations are optional in both Surf and Deep and are intended mainly
-for documentation or consistency checks, not as mandatory user syntax.
+Checked function bodies may also carry inferred effect metadata:
+
+```scheme
+(fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
+```
+
+In the shipped subset, this inferred `effects` metadata is used for effect information
+the checker actually synthesizes today, notably `Random`. Resource regions are enforced
+at the handler/build boundary, but are not yet written back onto checked `fn` metadata.
+
+Effect annotations remain optional in Surf and Deep. They are accepted as part of the
+surface syntax even where the current checker only implements a bounded subset of the
+eventual design.
 
 ### 7.3 Phase 0 Extension Point
 
-The `eff` meta key on `t-fn` nodes. Phase 0 parser accepts it, Phase 0 type checker
-ignores it.
+The `eff` meta key on `t-fn` nodes and the `effects` meta key on checked `fn` nodes are
+the active Phase 2a extension points.
 
 ---
 

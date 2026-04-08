@@ -112,8 +112,35 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+Default-gate discipline:
+
+- `cargo test --workspace` is the inner development loop and should stay under roughly 60
+  seconds on a machine without GPU/PyTorch
+- tests that exceed that budget or require heavyweight local prerequisites should be
+  `#[ignore]` by default and invoked through a documented manual gate
+- every ignored test must have a concrete manual command and expected success condition in
+  the owning phase docs
+
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
+
+## Local HIP Environment
+
+This repository is currently being worked on from a real AMD/ROCm machine, not a
+CPU-only dev box.
+
+- Host OS: Fedora 43 (`Linux fedora 6.18.16-200.fc43.x86_64`)
+- CPU marketing name from `rocminfo`: `AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`
+- GPU marketing name from `rocminfo`: `Radeon 8060S Graphics`
+- ROCm ISA from `rocminfo`: `amdgcn-amd-amdhsa--gfx1100`
+- `hipcc` on PATH: HIP `6.4.43484-9999`
+- `rocminfo` is available and should be treated as the source of truth for local GPU
+  probing
+- `rocm-smi` may be absent; do not assume it exists before using it in instructions or
+  validation scripts
+
+Implication for agent work: on this machine, ignored/manual HIP validation gates should
+be treated as runnable unless they require a separate missing prerequisite.
 
 ## Manual Gates
 
@@ -132,13 +159,26 @@ default workspace run.
   against a corpus, not only single happy-path examples.
 - For machine-facing CLI output, test both shape and semantic invariants.
 
+## Surf Style Guide
+
+When writing or rewriting Surf in this repository:
+
+- prefer `def ... -> T = ...` over `def ... : T = ...`
+- put types on function parameters, not on load-style top-level `let` bindings
+- use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
+- keep fixed architecture dimensions concrete
+- do not annotate intermediate expressions when inference already determines the type
+- keep meaningful intermediates like `h1`, `logits`, `probs`, and `loss`
+- combine short tensor operations when the composed expression is clearer than over-decomposed single-op bindings
+- treat decompiler-generated verbose load chains and checker-inserted ascriptions as debug output, not example style
+
 ## Chelis-Specific Rules
 
 ### Deep AST
 
 - Every Deep node is a 3-tuple: `(tag {} children...)`
 - Metadata map is always present at element 1
-- 56-tag closed vocabulary; see `spec/03-deep-syntax.md`
+- 59-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
 
@@ -154,6 +194,8 @@ default workspace run.
 - `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
 - `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
 - Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
+- On this workstation specifically, HIP manual gates can use the local `hipcc` + ROCm
+  stack directly; prefer `rocminfo` for environment confirmation
 
 ## Shared Local Skills
 

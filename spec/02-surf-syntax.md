@@ -18,11 +18,11 @@ Reserved. Cannot be used as identifiers.
 
 ```
 def  sig  let  in  type  dim  match  with  fn  module
-import  export  if  then  else  grad  vmap  jit  cast
+import  export  if  then  else  grad  vmap  jit  cast  macro
 realize  copy  par  true  false
 ```
 
-**Total: 24.**
+**Total: 25.**
 
 Reserved for Phase 2 (parse as keywords, emit "reserved for future use" error):
 ```
@@ -99,7 +99,7 @@ Module-level `dim` for concrete dimensions. Function-level `[...]` brackets for 
 ```
 dim batch, vocab_size
 
-def transpose[a, b](x: tensor[a, b, f32]): tensor[b, a, f32] =
+def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
   permute(x, [1, 0])
 ```
 
@@ -120,7 +120,7 @@ Both inline and standalone forms. All types are optional — inference fills the
 
 **Inline:**
 ```
-def add_vecs(x: tensor[d, f32], y: tensor[d, f32]): tensor[d, f32] = add(x, y)
+def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
 ```
 
 When a `def` has inline type annotations, the desugarer extracts a `defsig` in addition to the `def`.
@@ -141,7 +141,41 @@ def multi_head_attn(q, k, v, mask) = ...
 
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type).
 
+Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
+
+```text
+sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
+def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
+```
+
+Surf accepts the built-in names `Diff`, `Random`, `Accum`, and `Resource("device")`.
+The current shipped boundary-checking surface is narrower than the syntax:
+
+- `Random` is the active user-facing boundary effect in Phase 2a
+- `Resource("...")` is the active build-boundary placement annotation in Phase 2a
+- `Diff` is accepted as documentation / forward-compatible syntax, but `grad` remains a
+  compiler capability rather than a user-handled boundary effect
+- `Accum` is accepted as forward-compatible syntax but remains internal-only in the
+  shipped Phase 2a subset
+
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
+
+### P4a: Preferred Surf Style
+
+The parser accepts both `def f(x: T): U = ...` and `def f(x: T) -> U = ...`.
+Project-preferred source style is the arrow form:
+
+```text
+def f(x: tensor[batch, 784, f32]) -> tensor[batch, 128, f32] = ...
+```
+
+Style rules for human-facing Surf:
+
+- put types on parameters rather than top-level load bindings
+- use symbolic dimensions for runtime-varying axes such as `batch` and `seq`
+- keep fixed architecture dimensions concrete
+- omit intermediate type ascriptions when inference already determines the type
+- combine short tensor operations when that improves readability
 
 ### P5: Blocks and Sequencing
 
@@ -176,6 +210,60 @@ Blocks are expressions: `let result = { let temp = f(x); g(temp) }` is valid.
 A separator (newline or semicolon) is required between a `let` binding and the next statement. Multiple separators (blank lines) are fine. Trailing semicolon after the final expression is tolerated.
 
 No `where` clauses. Use `let...in` or blocks.
+
+### P5a: Effect Handlers
+
+Phase 2a adds two `with` block forms:
+
+```text
+with seed(42) {
+  dropout(x, 0.5)
+}
+
+with device("gpu:0") {
+  body
+}
+```
+
+`with` handlers are expressions. They take exactly one argument in parentheses and a
+brace-delimited block body.
+
+Current shipped constraints:
+
+- `with seed(...)` currently requires an explicit integer literal seed for the effect
+  checker and lowering path
+- `with device(...)` currently requires an explicit string literal device name
+- only `seed` and `device` are valid handler names in the Phase 2a Surf parser
+
+### P5b: Macros
+
+Phase 2c adds top-level macro definitions:
+
+```text
+macro linear_layer(x, w, b) = add(matmul(x, w), expand(b, 0, batch))
+macro relu_ref(x) = max_elem(x, 0.0)
+```
+
+Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
+
+Current shipped macro rules:
+
+- resolution order is lexical blockers first, then user-defined top-level macros, then
+  the standard macro prelude, then ordinary function call resolution
+- a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
+  that identifier
+- hygiene renames only binders introduced by the macro expansion (`let` names, `fn`
+  params, pattern binders); free references in the macro body remain free and resolve
+  in the caller's scope
+- macro expansion runs before type checking, effect inference, linearity checking, and
+  lowering
+
+Current shipped prelude macros:
+
+- `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
+- `residual(x, f)` -> `add(x, f(x))`
+- `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
+  composition used by the current executable corpus
 
 ### P6: Records
 
@@ -276,6 +364,7 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
+| `&x` | `(borrow {} (var {} x))` | Only valid as a direct call argument in Phase 2b |
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 
@@ -593,11 +682,11 @@ dim batch, seq                   ⟹  (defdim {} batch) (defdim {} seq)
 sig f: f32 -> f32 -> f32
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
 
-def f(x: f32, y: f32): f32 = add(x, y)
+def f(x: f32, y: f32) -> f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
     (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})
-                             (y {type: (t-prim {} f32)}))
-                (app {} (var {} add) (var {} x) (var {} y))))
+                           (y {type: (t-prim {} f32)}))
+                   (app {} (var {} add) (var {} x) (var {} y))))
 
 def f(x, y) = add(x, y)
 ⟹  (def {} f (fn {} (params {} x y) (app {} (var {} add) (var {} x) (var {} y))))
@@ -685,6 +774,7 @@ vmap(f)                           ⟹  (vmap {} f' (lit {type: (t-prim {} int32)
 cast(e, bf16)                     ⟹  (cast {} e' (t-prim {} bf16))
 realize(e)                        ⟹  (realize {} e')
 copy(e)                           ⟹  (copy {} e')
+&x                                ⟹  (borrow {} (var {} x))
 ```
 
 ### 5.4 Type Expressions
@@ -783,13 +873,20 @@ sig predict:
   -> tensor[1, f32]
   -> tensor[samples, 1, f32]
 
-def predict(x, w, b) =
-  matmul(x, w) |> fn (y) -> add(y, b)
+def predict(
+  x: tensor[samples, features, f32],
+  w: tensor[features, 1, f32],
+  b: tensor[1, f32]
+) -> tensor[samples, 1, f32] =
+  add(matmul(x, w), expand(b, 0, samples))
 
-def mse_loss(y_pred, y_true) = {
+def mse_loss(
+  y_pred: tensor[samples, 1, f32],
+  y_true: tensor[samples, 1, f32]
+) -> tensor[f32] = {
   let diff = sub(y_pred, y_true)
   let sq = mul(diff, diff)
-  mean(sq)
+  mean(mean(sq, 1), 0)
 }
 
 def train_step(w, b, x, y, lr) = {
@@ -810,7 +907,7 @@ dim batch, input_dim, hidden_dim, output_dim
 
 type Activation = | ReLU | Sigmoid
 
-def activate(act, x) =
+def activate(act: Activation, x: tensor[batch, hidden_dim, f32]) -> tensor[batch, hidden_dim, f32] =
   match act with {
     | ReLU    => relu(x)
     | Sigmoid => sigmoid(x)
@@ -856,13 +953,13 @@ def scale_lr(opt, factor) =
 ```
 module Linalg
 
-def transpose[a, b](x: tensor[a, b, f32]): tensor[b, a, f32] =
+def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
   permute(x, [1, 0])
 
-def dot[n](x: tensor[n, f32], y: tensor[n, f32]): f32 =
+def dot[n](x: tensor[n, f32], y: tensor[n, f32]) -> f32 =
   sum(mul(x, y))
 
-def normalize[d](x: tensor[d, f32]): tensor[d, f32] = {
+def normalize[d](x: tensor[d, f32]) -> tensor[d, f32] = {
   let norm = sqrt(sum(mul(x, x)))
   div(x, expand(norm, 0))
 }
