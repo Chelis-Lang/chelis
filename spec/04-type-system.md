@@ -416,15 +416,28 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ---
 
-## 7. Forward Compatibility: Effects (Phase 2 Sketch)
+## 7. Forward Compatibility: Effects (Phase 2 Design Direction)
 
-NOT implemented in Phase 0. Sketched here so the type representation doesn't preclude it.
+NOT implemented in Phase 0. This section records the active Phase 2 design direction so
+the current representation and docs stay aligned.
 
 ### 7.1 Effect Model
 
-Algebraic effects via row polymorphism. Three built-in effects: `Diff` (differentiability), `Random` (stochasticity), `Resource(Device)` (allocation).
+Algebraic effects via row polymorphism. The current Phase 2 design vocabulary has four
+built-in effects:
 
-Effects are inferred, not declared. A function's effects are the union of effects of all operations in its body. `grad` handles the `Diff` effect. `handleRandom(seed)` handles `Random`.
+- `Diff` -- differentiability
+- `Random` -- stochasticity
+- `Accum` -- associative accumulation that preserves parallelism in backward passes
+- `Resource(Device)` -- allocation / placement on a concrete device
+
+Effects are inferred rather than required annotations. A function's effects are the
+union of the effects of the operations in its body. `grad` handles `Diff`.
+`withSeed(seed, f)` handles `Random`. `withDevice(device, f)` handles
+`Resource(Device)`. Unhandled effects at the program boundary are compile errors.
+
+Effects are inferred after ordinary HM type inference on the typed Deep AST. A
+higher-order function propagates the callee effect row rather than erasing it.
 
 ### 7.2 Type Representation
 
@@ -437,19 +450,28 @@ Function types with effects:
   (t-tensor {} (d-var {} d) (t-prim {} f32)))
 ```
 
-Phase 0 ignores the `eff` key. Phase 2 checks it.
+The `eff` key is the extension point. Phase 0 ignores it; Phase 2 validates it if
+present. Effect annotations are optional in both Surf and Deep and are intended mainly
+for documentation or consistency checks, not as mandatory user syntax.
 
 ### 7.3 Phase 0 Extension Point
 
-The `eff` meta key on `t-fn` nodes. Phase 0 parser accepts it, Phase 0 type checker ignores it.
+The `eff` meta key on `t-fn` nodes. Phase 0 parser accepts it, Phase 0 type checker
+ignores it.
 
 ---
 
-## 8. Forward Compatibility: Linear Types (Phase 2 Sketch)
+## 8. Forward Compatibility: Linear Types (Phase 2 Design Direction)
 
 ### 8.1 Model
 
-All tensor types are linear by default. Used exactly once. Borrowing for read-only. Explicit `copy` for duplication.
+The current Phase 2b starting point is lightweight uniqueness, not a full Rust-style
+ownership-and-lifetimes system. Tensors are the linear values. Scalars and ordinary ADT
+payloads remain freely copyable.
+
+Operational rule of thumb: a tensor consumed by a RISC op is dead unless it is
+explicitly `copy()`'d. Borrowing provides temporary read-only access without
+consumption.
 
 ### 8.2 Type Representation
 
@@ -461,8 +483,15 @@ All tensor types are linear by default. Used exactly once. Borrowing for read-on
 (t-tensor {lin: borrow} (d-name {} batch) (t-prim {} f32))
 ```
 
-Phase 0 ignores the `lin` key. All tensors are treated as unrestricted.
+Phase 0 ignores the `lin` key. All tensors are treated as unrestricted today. The Phase
+2 design intends borrow usage to stay temporary and non-storable: borrows are for one
+call-site view, not general aliasing.
+
+Linearity is expected to compose with effects, especially `Resource(Device)`: the
+effect system tracks where a tensor lives, while linearity tracks when it is consumed.
+That gives the compiler a stronger basis for safe in-place buffer reuse.
 
 ### 8.3 Phase 0 Extension Point
 
-The `lin` meta key on `t-tensor` nodes. Phase 0 parser accepts it, Phase 0 type checker ignores it.
+The `lin` meta key on `t-tensor` nodes. Phase 0 parser accepts it, Phase 0 type checker
+ignores it.

@@ -211,18 +211,41 @@ It is not a proposal to rewrite the Surf parser.
 
 **Prerequisite:** the shipped Phase 1 fixed-workload deliverable is in place.
 **Deliverable:** language maturity features and interactive tooling.
+The detailed implementation plan lives in `spec/design/chelis_phase2_plan.md`.
 
-**Phase 2 follow-up bug:** the compiler currently emits dotted Deep module/import
-paths that `chelis validate` accepts, but the compiler-side Deep parser still does not
-fully round-trip that emitted form. Fixing emit -> reparse -> identical AST for this
-shape is a Phase 2 task because it matters for decompilation and LLM repair
-workflows, but it is not a Phase 1 correctness blocker.
+**Phase 2 deliverable statement:** the language is usable by researchers. Effects,
+linear types, macros, the agent API, and tooling make Chelis a credible alternative to
+PyTorch for specific workloads. A researcher should be able to write, type-check,
+differentiate, compile, train, and debug a model - with AI assistance - using only the
+Chelis toolchain.
+
+**Carry-forward fixes before Phase 2 proper:** symbolic dimensions in both backends,
+HIP `pad`/`shrink`, and the Deep dotted path round-trip gap. These are explicit debt
+from the shipped Phase 1 boundary, not hidden blockers.
+
+**Critical path:** 2a -> 2b -> 2c. The Tide tooling track (2e -> 2f -> 2g) can run in
+parallel with the type-system track once 2e has enough compiler API surface.
+
+### Sub-Phase Plans
+
+| Sub-phase | Doc | Summary |
+|---|---|---|
+| Phase 1 carry-forward fixes | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Symbolic dims, HIP `pad`/`shrink`, dotted Deep round-trip |
+| 2a: Algebraic Effects | [chelis_phase2_plan.md](chelis_phase2_plan.md) | `Diff`, `Random`, `Accum`, `Resource(D)` with handlers and row-polymorphic inference |
+| 2b: Linear Types | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Lightweight uniqueness, borrowing, explicit `copy`, safe buffer reuse |
+| 2c: Macro System | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Hygienic expansion before all LLM-facing operations, provenance metadata |
+| 2d: `vmap` | [chelis_phase2_plan.md](chelis_phase2_plan.md) | DAG rewrite for automatic vectorization with correct `grad` interaction |
+| 2e: Tide Agent API + MCP | [chelis_phase2_plan.md](chelis_phase2_plan.md) | HTTP/JSON compiler service, MCP tools, batch interfaces |
+| 2f: Tide LSP | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Diagnostics, hover, completion, go-to-definition, Surf/Deep visibility |
+| 2g: Tide TUI (`chelis cove`) | [chelis_phase2_plan.md](chelis_phase2_plan.md) | Terminal IDE, live checking, Surf/Deep toggle, agent mode |
+| 2s: Seed Corpus | [chelis_phase2_plan.md](chelis_phase2_plan.md) | 50-100 programs collected throughout Phase 2 |
 
 ### 2a: Algebraic Effects
 
 - `Diff`, `Random`, and `Resource(Device)`
 - inferred rather than manually declared
 - handled through explicit effect handlers
+- `Accum` is the design hook for parallelism-preserving gradient accumulation
 
 ### 2b: Linear Types
 
@@ -279,6 +302,12 @@ provenance annotation format — not whether LLMs interact with macros (they don
 - live type checking
 - Surf↔Deep toggling
 - build and run flows without leaving the terminal
+
+### 2s: Seed Corpus
+
+- 50-100 Chelis programs collected throughout Phase 2
+- serves as training data, compiler corpus, and documentation material
+- stratified by complexity rather than filtered to one difficulty band
 
 ---
 

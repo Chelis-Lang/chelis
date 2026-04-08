@@ -137,6 +137,7 @@ examples/illustrative/  Non-executable syntax/design examples
 - [Architecture Guide](ARCHITECTURE.md)
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
+- [Phase 2 Plan](spec/design/chelis_phase2_plan.md)
 - [Project Plan](spec/design/chelis_project_plan.md)
 
 ## Agent Tooling

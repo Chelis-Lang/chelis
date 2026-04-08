@@ -46,6 +46,13 @@ The node is a standard `app` node; the `source` key is ignored by all compiler p
 except error reporting.
 The provenance format will be fully specified in Phase 2c.
 
+**Macro boundary rule (Phase 2c).** LLM-facing Deep is always expanded Deep. Macro
+definition and invocation forms may exist as compiler-internal or pre-expansion syntax,
+but the AST surfaced to AI generation, repair, fitness scoring, decompilation
+workflows, or downstream transforms contains only ordinary Deep nodes plus optional
+`source` metadata. Macro syntax is a human-authoring layer that compiles away before
+those workflows begin.
+
 ### 1.2 Rationale
 
 The universal 3-tuple means every node has identical shape. An agent constructing Deep never decides where metadata goes — it's always element two. Compared to alternatives:

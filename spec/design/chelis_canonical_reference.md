@@ -166,11 +166,12 @@ This list is the intended stable surface for project-level documentation.
 
 ### Deferred to Phase 2
 
-- algebraic effects
-- linear types
-- borrowing rules
-- effect handlers
-- lightweight uniqueness / alias tracking should be considered before a full heavy linear-ownership model
+- algebraic effects: `Diff`, `Random`, `Accum`, `Resource(Device)`
+- inferred effect sets with explicit handlers at the program boundary
+- linear types for tensors with borrowing rules and explicit `copy`
+- lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
+- macro expansion before all LLM-facing operations, with provenance in metadata
+- Tide agent API, MCP, LSP, and `chelis cove`
 
 ### Deferred to Phase 3
 
@@ -208,6 +209,10 @@ left to user space rather than embedded as special language primitives.
 Programs-as-data operations (`quote`, `unquote`, `splice`) work on expanded Deep.
 Macros have already been resolved — the AST an agent inspects or transforms contains
 only base tags.
+
+`vmap` remains a core compiler transform in the same sense as `grad`: a DAG rewrite
+whose semantics compose with the rest of the lowering pipeline rather than a library
+helper.
 
 ---
 
