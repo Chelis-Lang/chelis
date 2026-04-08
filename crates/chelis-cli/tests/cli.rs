@@ -39,6 +39,41 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+fn write_symbolic_matmul_program(path: &Path) {
+    write_file(
+        path,
+        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]): tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
+    );
+}
+
+fn write_symbolic_softmax_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, seq, f32]): tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
+    );
+}
+
+fn write_symbolic_row_sum_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, seq, f32]): tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
+    );
+}
+
+fn write_symbolic_layer_norm_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]): tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
+    );
+}
+
+fn write_symbolic_hidden_layer_norm_program(path: &Path) {
+    write_file(
+        path,
+        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]): tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
+    );
+}
+
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -168,6 +203,162 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
     assert!(source.contains("int batch = inputs[0]->shape[0];"));
     assert!(source.contains("int features = inputs[0]->shape[1];"));
+}
+
+#[test]
+fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_matmul.ch");
+    let c_out = dir.path().join("c-out");
+    let hip_out = dir.path().join("hip-out");
+    write_symbolic_matmul_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            c_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Symbolic dims: batch, in_dim, out_dim",
+        ));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            hip_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Symbolic dims: batch, in_dim, out_dim",
+        ))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
+    assert!(c_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(c_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
+
+    let hip_source =
+        fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
+    assert!(hip_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(hip_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_softmax() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_softmax.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_softmax_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, seq"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("kernel_maxred_ax1"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_row_sum() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_sum.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_row_sum_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, seq"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_layer_norm.ch");
+    let out_dir = dir.path().join("hip-out");
+    write_symbolic_layer_norm_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source =
+        fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("kernel_sum_ax1"));
+}
+
+#[test]
+fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic_hidden_layer_norm.ch");
+    write_symbolic_hidden_layer_norm_program(&path);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent",
+        ));
 }
 
 #[test]

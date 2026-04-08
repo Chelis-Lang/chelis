@@ -180,6 +180,13 @@ fn validate_phase0e_expr(
 ) {
     match expr {
         deep::Expr::List(list, _) => {
+            if get_tag(list) == Some("fn") {
+                let scoped_env = extend_phase0e_env_with_fn_params(list, type_env);
+                for elem in &list.elements {
+                    validate_phase0e_expr(elem, &scoped_env, errors);
+                }
+                return;
+            }
             if let Some(tag) = get_tag(list) {
                 if matches!(
                     tag,
@@ -194,49 +201,20 @@ fn validate_phase0e_expr(
 
                 if tag == "app"
                     && let Some(func_name) = phase0e_builtin_name(list)
+                    && is_phase0e_shape_sensitive_builtin(func_name)
                 {
-                    if is_phase0e_shape_sensitive_builtin(func_name) {
-                        if !has_type_metadata(list) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::Other,
-                                format!(
-                                    "Phase 0e builtin `{func_name}` requires explicit type metadata on the app node"
-                                ),
-                                vec!["Run lowering only on checked/annotated Deep".to_string()],
-                            ));
-                        }
-                        if !app_result_type_is_concrete(list) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::Other,
-                                format!(
-                                    "Phase 0e builtin `{func_name}` requires concrete output tensor dimensions"
-                                ),
-                                vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
-                            ));
-                        }
+                    if !has_type_metadata(list) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::Other,
+                            format!(
+                                "Phase 0e builtin `{func_name}` requires explicit type metadata on the app node"
+                            ),
+                            vec!["Run lowering only on checked/annotated Deep".to_string()],
+                        ));
                     }
-
-                    let tensor_arg_count = match func_name {
-                        "matmul" => 2,
-                        "softmax" | "mean" => 1,
-                        "layer_norm" => 3,
-                        "conv2d" => 2,
-                        _ => 0,
-                    };
-                    if tensor_arg_count > 0 {
-                        for arg in list.elements.iter().skip(3).take(tensor_arg_count) {
-                            if !expr_tensor_type_is_concrete(arg, type_env) {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::Other,
-                                    format!(
-                                        "Phase 0e builtin `{func_name}` requires concrete tensor argument metadata"
-                                    ),
-                                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
-                                ));
-                                break;
-                            }
-                        }
-                    }
+                    validate_phase0e_builtin_symbolic_requirements(
+                        list, func_name, type_env, errors,
+                    );
                 }
             }
 
@@ -731,13 +709,6 @@ fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-fn app_result_type_is_concrete(list: &deep::List) -> bool {
-    get_meta(list)
-        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
-        .unwrap_or(false)
-}
-
 fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::Expr> {
     match expr {
         deep::Expr::List(list, _) => {
@@ -758,10 +729,137 @@ fn expr_type_expr(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> Option<deep::
     }
 }
 
+fn extend_phase0e_env_with_fn_params(
+    fn_list: &deep::List,
+    type_env: &Phase0eTypeEnv,
+) -> Phase0eTypeEnv {
+    let mut scoped = type_env.clone();
+    let Some(params_expr) = children(fn_list).first() else {
+        return scoped;
+    };
+    let deep::Expr::List(params_list, _) = params_expr else {
+        return scoped;
+    };
+    if get_tag(params_list) != Some("params") {
+        return scoped;
+    }
+    for param in children(params_list) {
+        let deep::Expr::List(param_list, _) = param else {
+            continue;
+        };
+        let Some(name) = param_list.elements.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(meta) = get_meta(param_list) else {
+            continue;
+        };
+        let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
+            continue;
+        };
+        scoped.insert(name.to_string(), ty.clone());
+    }
+    scoped
+}
+
 fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &Phase0eTypeEnv) -> bool {
     expr_type_expr(expr, type_env)
         .map(|ty| type_expr_is_phase0e_concrete(&ty))
         .unwrap_or(false)
+}
+
+fn validate_phase0e_builtin_symbolic_requirements(
+    list: &deep::List,
+    func_name: &str,
+    type_env: &Phase0eTypeEnv,
+    errors: &mut Vec<CheckError>,
+) {
+    match func_name {
+        "conv2d" => {
+            if !app_result_type_is_concrete(list) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `conv2d` requires concrete output tensor dimensions"
+                        .to_string(),
+                    vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                ));
+            }
+            for arg in list.elements.iter().skip(3).take(2) {
+                if !expr_tensor_type_is_concrete(arg, type_env) {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::Other,
+                        "Phase 0e builtin `conv2d` requires concrete tensor argument metadata"
+                            .to_string(),
+                        vec!["Use concrete d-lit dimensions for Phase 0e lowering".to_string()],
+                    ));
+                    break;
+                }
+            }
+        }
+        "mean" => {
+            if phase0e_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `mean` requires a concrete reduced axis extent".to_string(),
+                    vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
+                ));
+            }
+        }
+        "layer_norm" => {
+            let x_dims = list
+                .elements
+                .get(3)
+                .and_then(|expr| expr_type_expr(expr, type_env))
+                .and_then(|ty| tensor_dims_from_type_expr(&ty));
+            if matches!(
+                x_dims.as_ref().and_then(|dims| dims.last()),
+                Some(DeepDimKind::NonConcrete)
+            ) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::Other,
+                    "Phase 0e builtin `layer_norm` requires a concrete normalized axis extent"
+                        .to_string(),
+                    vec!["Use a concrete d-lit dimension for the final axis".to_string()],
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn phase0e_builtin_axis_dim(
+    list: &deep::List,
+    type_env: &Phase0eTypeEnv,
+    tensor_arg_index: usize,
+    axis_arg_index: usize,
+) -> Option<DeepDimKind> {
+    let tensor_dims = list
+        .elements
+        .get(3 + tensor_arg_index)
+        .and_then(|expr| expr_type_expr(expr, type_env))
+        .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
+    let axis = list
+        .elements
+        .get(3 + axis_arg_index)
+        .and_then(extract_axis_literal)?;
+    tensor_dims.get(axis).copied()
+}
+
+fn app_result_type_is_concrete(list: &deep::List) -> bool {
+    get_meta(list)
+        .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
+        .map(|(_, ty)| type_expr_is_phase0e_concrete(ty))
+        .unwrap_or(false)
+}
+
+fn extract_axis_literal(expr: &deep::Expr) -> Option<usize> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n as usize),
+        deep::Expr::List(list, _) => match list.elements.get(2) {
+            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => Some(*n as usize),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4003,5 +4101,25 @@ mod tests {
             "expected typed app metadata, got:\n{text}"
         );
         assert!(checked.type_env().contains_key("c"));
+    }
+
+    #[test]
+    fn phase0e_rejects_symbolic_normalized_axis_for_layer_norm() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
+             (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+        )
+        .unwrap();
+        let err =
+            check_phase0e_program(&exprs).expect_err("symbolic hidden axis should be rejected");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("concrete normalized axis extent")),
+            "expected layer_norm symbolic normalized-axis error, got: {:?}",
+            err.errors
+        );
     }
 }

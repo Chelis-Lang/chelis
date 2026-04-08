@@ -1256,6 +1256,65 @@ int main(void) {{
     }
 
     #[test]
+    fn symbolic_matmul_codegen_reuses_one_artifact_for_multiple_batch_sizes() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let a_ty = TensorType {
+            dims: vec![DimInfo::Named("batch".to_string(), None), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let b_ty = TensorType {
+            dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load {
+                name: "a".to_string(),
+            },
+            vec![],
+            a_ty.clone(),
+        );
+        let b = dag.add_node(
+            RiscOp::Load {
+                name: "b".to_string(),
+            },
+            vec![],
+            b_ty.clone(),
+        );
+        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+        dag.add_root(out);
+
+        let result = codegen(&dag, "test_symbolic_matmul");
+        assert_eq!(result.symbolic_dims, vec!["batch"]);
+        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+
+        let lines = compile_and_run_input_cases(
+            &dag,
+            "test_symbolic_matmul",
+            CodegenOptions::default(),
+            &[
+                vec![
+                    TestInput::new("a", &[1, 3], &[1.0, 2.0, 3.0]),
+                    TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ],
+                vec![
+                    TestInput::new("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                    TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ],
+            ],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "22.000000 28.000000",
+                "22.000000 28.000000 49.000000 64.000000"
+            ]
+        );
+    }
+
+    #[test]
     fn symbolic_preamble_checks_every_non_canonical_occurrence() {
         let mut dag = Dag::new();
         let symbolic = TensorType {

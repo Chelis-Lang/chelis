@@ -513,6 +513,86 @@ fn g4_max_reduce_gpu_matches_cpu() {
     );
 }
 
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_row_sum_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("seq".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let out_ty = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty);
+    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_sum",
+        &[TestInput::new(
+            "x",
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_softmax_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let x_ty = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Named("seq".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+    let out = chelis_ir::tier2::lower_softmax(&mut dag, x, 1, &x_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_softmax",
+        &[TestInput::new(
+            "x",
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 0.0, -1.0, 4.0],
+        )],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_matmul_gpu_matches_cpu() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty.clone());
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty.clone());
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+    dag.add_root(out);
+    assert_gpu_matches_eval(
+        &dag,
+        "g4_symbolic_matmul",
+        &[
+            TestInput::new("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        ],
+    );
+}
+
 // ===========================================================================
 // G5: expand then add — stride-0 correct on GPU
 // ===========================================================================
