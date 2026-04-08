@@ -118,7 +118,9 @@ fn bench_phase1e_hidden_hip_device_emits_structured_skip_report() {
     assert_eq!(hip["status"].as_str(), Some("skipped"));
     let reason = hip["reason"].as_str().unwrap_or("");
     assert!(
-        reason.contains("HIP runtime unavailable") || reason.contains("no HIP devices visible"),
+        reason.contains("HIP runtime unavailable")
+            || reason.contains("no HIP devices visible")
+            || reason.contains("hipcc not available"),
         "unexpected HIP skip reason: {reason}"
     );
 }
