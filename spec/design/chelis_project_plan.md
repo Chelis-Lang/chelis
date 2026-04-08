@@ -33,7 +33,9 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
+| **3** | Ecosystem foundations: package system (Reef), Python FFI, research type extensions, Lean formalization, pipe-first style pass |  |
+| **4** | ML & AI coding: seed corpus, ICL measurement, trajectory collection, local model training, SKILL.md v2, model integration |  |
+| **5** | Advanced backends: StableHLO, FX Graph, Triton, multi-GPU |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
 A red team round means adversarial review of design decisions, test coverage, spec
@@ -322,7 +324,9 @@ provenance annotation format — not whether LLMs interact with macros (they don
 ## Phase 3
 
 **Prerequisite:** Phase 2 complete.
-**Deliverable:** ecosystem, interoperability, and research extensions.
+**Deliverable:** ecosystem foundations that make Chelis usable by external users.
+This phase is about packaging, interop, polished examples, and research-facing
+extensions after the Phase 2 language surface is stable.
 
 ### 3a: Package System (Shells + Reef)
 
@@ -330,167 +334,152 @@ provenance annotation format — not whether LLMs interact with macros (they don
 - Shell publishing and dependency resolution
 - Reef registry
 
-### 3b: StableHLO Backend
-
-- direct DAG to StableHLO emission
-- TPU and XLA-family interop
-
-### 3c: FX Backend
-
-- DAG to PyTorch FX graph export
-- interoperability with TorchInductor and export flows
-
-### 3d: Research Notes
-
-- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit `expand`
-  operations during inference while preserving Chelis's no-implicit-broadcasting rule
-- keep this as a research direction, not a committed language feature
-
-### 3d: Python FFI
+### 3b: Python FFI
 
 - DLPack tensor exchange
 - PyO3 compiler bindings
 - GIL release during Chelis execution
+- zero-copy tensor handoff as the default interop goal where the runtime permits it
 
-### 3e: Research Type Features
+### 3c: Research Type Extensions
 
-- distribution types
-- equivariance constraints
-- optimization-property annotations
+- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit `expand`
+  operations during inference while preserving Chelis's no-implicit-broadcasting rule
+- evaluate size-dependent types and refinement-style constraints as research extensions,
+  not baseline language commitments
+- treat these as publication-grade extensions layered onto the stable Phase 2 language,
+  not prerequisites for the core toolchain
 
-### 3f: Mechanized Type System (Lean 4)
+### 3d: Lean Integration
 
 - mechanize the core type system only
 - prove soundness for the stable Phase 0 core
 
-### 3g: Chelis Coding Assistance
+### 3e: Pipe-First Style Pass
 
-Chelis has two explicit first-party tracks for AI code generation.
-Track 1 is the Phase 2 frontier-model workflow.
-Track 2 is the Phase 3 shipped local-model deliverable.
+This is not a cosmetic formatting tweak.
+It is a decompiler behavior change plus a full corpus rewrite for idiomatic Surf.
 
-**Key product framing:** a language for AIs that does not include an AI is an
-incomplete product.
+Target outcome:
 
-#### Track 1: SKILL.md + Frontier Models (Phase 2)
+- the decompiler defaults to pipe-first Surf for linear tensor/dataflow chains
+- executable examples are rewritten out of assembly-like `let` ladders and into the
+  stable idiomatic Phase 2 style
+- `SKILL.md` and related teaching material point at the same idiom the docs and
+  examples use
 
-Ship a first-party `SKILL.md` alongside the Tide MCP server.
-This is the compiler-in-the-loop workflow for frontier models such as Claude and GPT-5.
+Decompiler rule:
 
-What ships:
+- emit a pipe chain when a binding is used exactly once as the first argument to the
+  next call, and that result is again used exactly once as the first argument to the
+  next call
+- keep explicit named bindings for semantically meaningful intermediates such as `h1`,
+  `logits`, and `loss`
+- keep explicit named bindings for values used more than once or for steps where naming
+  materially improves readability
 
-- the 59-tag Deep grammar and arity rules
-- the Surf→Deep desugaring table
-- canonical form rules
-- built-in scope and core type signatures
-- worked examples over the current compiler surface
-- common error patterns and fixes
+Examples of the intended direction:
 
-Validation status:
+- prefer `matmul(x, w1) |> add(expand(b1, 0, batch)) |> relu`
+- avoid decompiled output that expands the same linear flow into `mm1`, `b1_exp`,
+  `pre_h1`, `h1` unless those names carry semantic weight
 
-- current skill validation result: **9/10** tasks passed against the compiler on a local
-  Qwen 35B MoE setup
-- the remaining failure is a Deep repair execution issue in the local model, not a spec
-  or skill-content gap
+Sequencing rationale:
 
-Critical dependency:
+- do this after Phase 2 language stability so the corpus is not rewritten repeatedly
+- do this before Phase 4 corpus collection and model training so the training data uses
+  the final idiomatic Surf style
 
-- the Tide MCP server from Phase 2e
+Acceptance criteria:
 
-Non-negotiable prerequisite:
-
-- 50-100 hand-written or supervised-interaction seed programs covering core Chelis
-  patterns
-- these serve as few-shot examples, trajectory seeds, and evaluation anchors
-- stratified by problem complexity as controls for ICL measurement:
-  - ~20 single-operation programs
-  - ~40 single-layer programs (5-15 ops)
-  - ~30 multi-layer programs (15-40 ops)
-  - ~10 full models (40+ ops)
-- all bands are included; do not filter out simple or complex programs
-
-Phase 2 success condition:
-
-- frontier models can write useful Chelis through `SKILL.md` + MCP
-- the workflow is documented, tested, and repeatable
-
-#### Track 2: Local Model Ships With Toolchain (Phase 3)
-
-Phase 3 requires a local Chelis coding model that ships with the toolchain.
-This is not a fallback and not optional.
-
-Target deliverable:
-
-- a 4B-8B-class local model distributed with the Chelis toolchain
-- quantized GGUF artifacts for consumer hardware
-- integrated into `chelis cove --assist` and related local workflows
-- no API key or internet requirement for baseline coding assistance
-
-Training pipeline:
-
-1. **SSD for distributional shaping**
-   Use the base model's own outputs to cheaply bias it toward Chelis structure before
-   any expensive supervised fine-tuning.
-   This is the bridge between "model has never seen Deep" and "model can produce
-   something the compiler can score."
-   If macros exist by the time the local model is trained, all training data uses
-   expanded forms.
-   Macro invocations are expanded before inclusion in any training dataset.
-   The model never learns to generate macro calls — it generates the expanded pattern
-   directly.
-2. **Trajectory collection with compiler feedback**
-   Collect full attempt traces, including failures, from compiler-in-the-loop runs.
-   For each generated program, compute `nesting_depth × operation_count` as a
-   complexity proxy and log it alongside the trace.
-   After collection, analyze the complexity distribution and stratify by band.
-   Do not pre-commit to a specific complexity band — the ICL prerequisite experiment
-   (step below) should measure across complexity levels and let the data determine
-   where the sweet spot is for Deep specifically.
-3. **Fine-tune, method chosen empirically**
-   Start with LoRA on trajectories, seed programs, spec tests, and curated examples.
-   If forgetting is measured, switch to SDFT instead.
-   RLVR is available as an optional final polish step if the quality bar still is not
-   met.
-4. **Quantize and ship as GGUF**
-   Package the local model as a standard toolchain artifact.
-
-Why SSD is explicit:
-
-- it is cheap relative to API-driven data generation
-- it uses the model's own outputs
-- it directly addresses the structural validity gap seen in SKILL validation, where
-  small and local models may reason correctly about Deep but fail to execute the
-  canonical syntax in their emitted output
-
-Prerequisite measurement:
-
-- before any training, measure the ICL effect by running the SKILL evaluation with and
-  without the spec in context
-- stratify this measurement by seed-corpus complexity band to determine whether the
-  intermediate-complexity peak from the literature holds for Deep or whether the
-  zero-data regime has a different curve
-- if the spec meaningfully improves output quality, distillation-style methods are
-  viable
-- if it does not, stick with the simplest supervised path first
-
-Hard constraint:
-
-- anti-forgetting is mandatory; the trained model must preserve PyTorch/JAX semantic
-  knowledge through Chelis training
-
-Decision protocol:
-
-1. Try LoRA first and measure both Chelis fitness and forgetting on a PyTorch/JAX
-   comprehension benchmark.
-2. If fitness is good and forgetting is minimal, ship it.
-3. If forgetting is measured, replace LoRA with SDFT.
-4. If quality still plateaus after the chosen fine-tuning method, use RLVR as final
-   polish.
+- decompiler output prefers pipe chains for eligible linear flows
+- examples in `examples/` and supporting teaching docs use the same pipe-first style
+- `SKILL.md` guidance is updated to match the final idiomatic Surf corpus
+- docs state clearly when a named intermediate should remain a `let` instead of a pipe
 
 Phase 3 success condition:
 
-- Chelis ships with a local coding model as part of the product, not as an optional
-  research extra
+- Chelis has a coherent external-user surface: package story, Python interop,
+  research-extension direction, formalization target, and polished pipe-first examples
+
+---
+
+## Phase 4
+
+**Prerequisite:** Phase 3 complete, including the pipe-first corpus/style pass.
+**Deliverable:** first-party ML and coding-assistance stack built on the finalized
+Phase 2 language and finalized example idioms.
+
+### 4a: Seed Corpus Collection and Curation
+
+- collect and curate 50-100 Chelis programs
+- stratify by complexity rather than filtering to one difficulty band
+- treat the corpus as shared infrastructure for evaluation, examples, and later training
+
+### 4b: ICL Effect Measurement
+
+- measure SKILL-assisted generation with and without the relevant context in prompt
+- stratify results by corpus complexity band
+- use this as the prerequisite experiment before choosing a heavier training path
+
+### 4c: Trajectory Collection via Compiler Loop
+
+- collect 2K-4K compiler-in-the-loop trajectories
+- include failures, repairs, and complexity metadata
+- use the compiler as the scoring/teaching surface rather than free-form human labels
+
+### 4d: Local Coding Model Training
+
+- start with SSD for distributional shaping
+- fine-tune with the simplest method that meets the quality bar
+- quantize and ship GGUF artifacts for local use
+- preserve PyTorch/JAX semantic knowledge as a hard anti-forgetting constraint
+
+### 4e: SKILL.md v2
+
+- update `SKILL.md` for the full stable Phase 2 language surface
+- cover effects, linearity, macros, `vmap`, tuples, and the finalized pipe-first Surf
+  idiom
+- keep teaching examples aligned with the curated corpus, not decompiler-debug style
+
+### 4f: Coding Model Integration
+
+- integrate the local model into `chelis cove --assist`
+- expose the same capability through the MCP tool surface with local-model fallback
+- baseline coding assistance should work without an API key or internet requirement
+
+Phase 4 success condition:
+
+- Chelis ships a first-party local coding model as part of the product, not as an
+  optional research extra
+
+---
+
+## Phase 5
+
+**Prerequisite:** Phase 4 complete or explicit product demand that justifies backend
+expansion.
+**Deliverable:** specialized backend expansion beyond the primary C and HIP paths.
+
+### 5a: StableHLO Backend
+
+- direct DAG to StableHLO emission
+- TPU and XLA-family interop
+
+### 5b: FX Graph Backend
+
+- DAG to PyTorch FX graph export
+- interoperability with TorchInductor, Triton kernels, and export flows
+
+### 5c: Triton Backend
+
+- emit Triton IR directly where it is a better fit than FX export
+- reuse Triton's optimization passes when they materially help Chelis workloads
+
+### 5d: Multi-GPU Data Parallelism Infrastructure
+
+- add explicit multi-GPU support only if Phase 4 or downstream product needs justify it
+- treat this as conditional infrastructure, not a default near-term commitment
 
 ---
 

@@ -201,7 +201,7 @@ Project-facing Surf should read like human-written model code, not typed Deep de
 - macro expansion before all LLM-facing operations, with provenance in metadata
 - algebraic-effect, linearity, macro, and `vmap` tooling that remains planned in Phase 2
 
-### Deferred to Phase 3
+### Deferred to Phase 3+
 
 - distribution types
 - equivariance constraints
@@ -450,7 +450,7 @@ This means the skill file is real project infrastructure, not aspirational promp
 
 ### Track 2: Local Model Ships With Toolchain
 
-Chelis also requires a local coding model as a Phase 3 deliverable.
+Chelis also requires a local coding model as a Phase 4 deliverable.
 This is not optional and not a speculative fallback.
 
 Target shape:

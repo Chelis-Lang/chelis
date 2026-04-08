@@ -14,9 +14,9 @@ compile, train, and debug a model - with AI assistance - using only the Chelis
 toolchain.
 
 **Phase 2 does NOT deliver:** A package manager (Phase 3a), alternative backends like
-StableHLO/FX (Phase 3b/3c), Python FFI (Phase 3d), or the local coding model (Phase
-3g). Phase 2 is about making the language complete; Phase 3 is about making the
-ecosystem complete.
+StableHLO/FX/Triton (Phase 5), Python FFI (Phase 3b), or the local coding model
+(Phase 4). Phase 2 is about making the language complete; Phase 3 is about making the
+ecosystem polished and externally usable.
 
 ---
 
@@ -565,7 +565,7 @@ models rather than serializing compiler AST/DAG structs directly.
 - `chelis_validate`
 
 **Batch mode:** `POST /batch` accepts an array of requests, returns results for all.
-Essential for evolutionary loops and trajectory collection (Phase 3g training
+Essential for evolutionary loops and trajectory collection (Phase 4c training
 pipeline).
 
 **Implementation:** Rust HTTP server (`axum`) wrapping the existing compiler crates.
@@ -720,7 +720,8 @@ update live, save, and trigger compile/eval output without leaving the TUI.
 ## 2s: Seed Corpus (Continuous Throughout Phase 2)
 
 **Goal:** Build a corpus of 50-100 Chelis programs that serve as training data for the
-local model (Phase 3g), test cases for the compiler, and documentation for users.
+later local model work (Phase 4), test cases for the compiler, and documentation for
+users.
 
 **Strategy:** Every time a new compiler feature is implemented, write 2-3 programs that
 exercise it. By the end of Phase 2, the corpus grows organically to 50-100 programs

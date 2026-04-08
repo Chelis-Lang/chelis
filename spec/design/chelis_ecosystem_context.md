@@ -52,7 +52,7 @@ the current compiler surface.
 ### Track 2
 
 Ship a local model with the toolchain.
-This is the Phase 3 story: SSD for distributional shaping, complexity-aware trajectory
+This is the Phase 4 story: SSD for distributional shaping, complexity-aware trajectory
 collection with compiler feedback, empirically chosen fine-tuning, then quantize and
 ship as GGUF.
 LoRA is the default starting point, SDFT is the anti-forgetting fallback if forgetting
@@ -112,6 +112,7 @@ including offline/local use.
 - "First-party coding capability" is the right umbrella phrase.
 - "Compiler-as-teacher" is more accurate than "compiler-as-evaluator only."
 - "SKILL.md + MCP" is the Phase 2 story.
-- "Local model ships with toolchain" is the Phase 3 story.
+- "Pipe-first examples and polished public teaching material" is a key Phase 3 story.
+- "Local model ships with toolchain" is the Phase 4 story.
 - "A language for AIs that doesn't include an AI is an incomplete product" is now part
   of the core framing.
