@@ -506,7 +506,8 @@ tests.
 ### Design
 
 HTTP/JSON API that wraps every compiler pass as an endpoint. An AI agent connects via
-MCP and uses the compiler as a tool.
+MCP and uses the compiler as a tool. The shipped contract uses explicit stable wire
+models rather than serializing compiler AST/DAG structs directly.
 
 **Endpoints:**
 
@@ -514,11 +515,11 @@ MCP and uses the compiler as a tool.
 |---|---|---|
 | `POST /parse` | Surf or Deep source | AST (success) or parse errors |
 | `POST /desugar` | Surf source | Canonical Deep |
-| `POST /check` | Surf or Deep source | Fitness score + typed AST + errors |
+| `POST /check` | Surf or Deep source | Fitness report + structured diagnostics |
 | `POST /lower` | Surf or Deep source | RISC DAG (JSON-serialized) |
-| `POST /compile` | Surf or Deep source + target | Generated C/HIP code |
-| `POST /eval` | Deep expression + bindings | Evaluation result |
-| `POST /grad` | Surf or Deep source | Differentiated program |
+| `POST /compile` | Surf or Deep source + target | Generated C/HIP files + flags |
+| `POST /eval` | Surf or Deep source + named bindings | Evaluated roots |
+| `POST /grad` | Surf or Deep source + output/wrt names | Differentiated DAG JSON |
 | `POST /validate` | Surf or Deep source + mode | Conformance result |
 | `POST /decompile` | Deep source | Surf source |
 
@@ -535,18 +536,18 @@ MCP and uses the compiler as a tool.
 Essential for evolutionary loops and trajectory collection (Phase 3g training
 pipeline).
 
-**Implementation:** Rust HTTP server (`axum` or `warp`) wrapping the existing compiler
-crates. The MCP server is a thin adapter that translates MCP tool calls to HTTP
-requests. The server runs as `chelis tide serve` (HTTP) or is embedded in the MCP
-protocol.
+**Implementation:** Rust HTTP server (`axum`) wrapping the existing compiler crates.
+The MCP server is a thin stdio adapter over the same compiler adapter layer. The
+server runs as `chelis tide serve` (HTTP) or `chelis tide mcp` (stdio MCP).
 
 ### Implementation Plan
 
 **Crate: `chelis-tide` (new)**
-- `server.rs`: HTTP server with endpoints
+- `schema.rs`: stable wire models and request/response types
+- `compiler.rs`: shared compiler adapter and name-based eval binding bridge
+- `http.rs`: HTTP server with endpoints
 - `mcp.rs`: MCP protocol adapter
-- `batch.rs`: batch request handling
-- `lib.rs`: shared compiler invocation logic
+- `lib.rs`: shared service exports
 
 **CLI:**
 - `chelis tide serve --port 8080` starts the HTTP server
@@ -559,6 +560,8 @@ protocol.
 - Batch endpoint handles mixed success/failure
 - MCP tool calls map correctly to HTTP endpoints
 - Server handles concurrent requests without data races
+- `/eval` resolves request bindings by input name rather than position
+- `/grad` returns DAG JSON and rejects unsupported non-scalar outputs cleanly
 
 ### Acceptance Gate
 
@@ -566,6 +569,8 @@ protocol.
 
 Manual: connect Claude (or another MCP-capable agent) to `chelis tide mcp`, have it
 write a program, check fitness, fix errors based on feedback, compile, and run.
+For a reproducible external-process validation harness, run
+`python scripts/redteam_tide_phase2e.py`.
 
 ---
 

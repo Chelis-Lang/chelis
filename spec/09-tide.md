@@ -1,6 +1,6 @@
-# Tide: Interactive Mode
+# Tide: Interactive And Agent Mode
 
-**Status:** Implemented in Phase 0i.
+**Status:** Phase 0i REPL shipped; Phase 2e agent API + MCP shipped.
 This document records the intended architecture so the rest of the docs stay aligned
 while implementation catches up.
 
@@ -14,8 +14,7 @@ Phase 0i covers the first interactive developer workflow:
 - `chelis fmt` for Surf formatting
 - `chelis eval expr` for one-shot evaluation
 
-Later phases extend Tide into machine-facing services such as the agent API, MCP,
-language server support, and the Cove TUI.
+Later phases extend Tide into language-server support and the Cove TUI.
 
 ## 2. Interactive Execution Strategy
 
@@ -49,6 +48,27 @@ This is a policy decision, not an open exploration track.
 Launch an interactive REPL.
 It should accept Deep expressions directly and may accept Surf input when the front-end
 path is available.
+
+### `chelis tide serve`
+
+Launch the HTTP/JSON compiler service.
+The shipped surface includes `/parse`, `/desugar`, `/check`, `/lower`, `/compile`,
+`/eval`, `/grad`, `/validate`, `/decompile`, and `/batch`.
+The public contract uses explicit wire-model types rather than serialized compiler
+internals.
+
+### `chelis tide mcp`
+
+Launch the MCP server on stdio.
+The shipped MCP tool surface is:
+
+- `chelis_check`
+- `chelis_compile`
+- `chelis_desugar`
+- `chelis_decompile`
+- `chelis_eval`
+- `chelis_grad`
+- `chelis_validate`
 
 ### `chelis eval expr`
 
@@ -96,3 +116,13 @@ Phase 2 extends Tide beyond the REPL:
   visibility
 - 2g: `chelis cove` terminal UI with live checking and Surf/Deep toggling
 - batch interfaces for agent loops and corpus collection
+
+## 8. Phase 2e Contract Notes
+
+- `/eval` takes named input bindings and resolves them by `Load.name`; the evaluator
+  itself remains unchanged.
+- `/grad` is DAG-level in the shipped Phase 2e surface and returns differentiated DAG
+  JSON plus node mappings, not a source-level differentiated Surf or Deep program.
+- The 2e automated acceptance oracle is `cargo test -p chelis-tide --test api`.
+- MCP-agent end-to-end validation remains a documented manual gate rather than part of
+  the default workspace run.

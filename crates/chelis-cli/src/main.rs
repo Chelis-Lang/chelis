@@ -4,6 +4,7 @@ use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -76,8 +77,24 @@ enum Command {
         #[arg(long, default_value = "c")]
         target: String,
     },
-    /// Interactive REPL
-    Tide,
+    /// Interactive REPL, HTTP API, and MCP server
+    Tide {
+        #[command(subcommand)]
+        command: Option<TideCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TideCommand {
+    /// Start the Tide HTTP/JSON API server
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+    /// Start the Tide MCP server over stdio
+    Mcp,
 }
 
 fn main() {
@@ -99,7 +116,7 @@ fn main() {
             output,
             target,
         }) => cmd_build(&file, output.as_deref(), &target),
-        Some(Command::Tide) => run_tide(),
+        Some(Command::Tide { command }) => run_tide(command),
         None => {
             println!("chelis 0.1.0 -- use --help for commands");
             Ok(())
@@ -472,7 +489,22 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
-fn run_tide() -> Result<(), Box<dyn std::error::Error>> {
+fn run_tide(command: Option<TideCommand>) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        None => run_tide_repl(),
+        Some(TideCommand::Serve { host, port }) => {
+            let addr = SocketAddr::new(host, port);
+            chelis_tide::http::serve_blocking(addr)?;
+            Ok(())
+        }
+        Some(TideCommand::Mcp) => {
+            chelis_tide::mcp::run_stdio_blocking()?;
+            Ok(())
+        }
+    }
+}
+
+fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
     println!("Chelis Tide v0.1 -- type expressions or definitions. Ctrl-D to exit.");
     let stdin = io::stdin();
     let mut accumulated_source = String::new();

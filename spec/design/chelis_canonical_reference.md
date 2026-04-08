@@ -142,6 +142,8 @@ chelis deep app.ch
 chelis surf program.dp
 chelis eval expr
 chelis tide
+chelis tide serve --port 8080
+chelis tide mcp
 chelis cove
 chelis fmt app.ch
 chelis validate --surf app.ch
@@ -171,7 +173,7 @@ This list is the intended stable surface for project-level documentation.
 - linear types for tensors with borrowing rules and explicit `copy`
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
-- Tide agent API, MCP, LSP, and `chelis cove`
+- Tide LSP and `chelis cove`
 
 ### Deferred to Phase 3
 

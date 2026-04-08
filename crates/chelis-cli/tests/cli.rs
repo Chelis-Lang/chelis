@@ -278,6 +278,27 @@ fn tide_quit_exits_cleanly() {
 }
 
 #[test]
+fn tide_serve_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--port"))
+        .stdout(predicate::str::contains("--host"));
+}
+
+#[test]
+fn tide_mcp_help_is_available() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["tide", "mcp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the Tide MCP server"));
+}
+
+#[test]
 fn validate_requires_exactly_one_mode() {
     Command::cargo_bin("chelis")
         .expect("binary")

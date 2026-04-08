@@ -68,9 +68,12 @@ Phase 0i shipped:
 - `chelis check`
 - `chelis build`
 - `chelis tide`
+- `chelis tide serve`
+- `chelis tide mcp`
 
 The current shipped surface includes the Phase 1 HIP backend work plus
-`chelis validate` for executable grammar conformance.
+`chelis validate` for executable grammar conformance and the Phase 2e Tide
+machine-facing API surface.
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
@@ -83,7 +86,7 @@ Known carried-forward limitations are:
 These limitations are real debt, but they do not block the Phase 2 language work.
 AI assistance planning is split cleanly:
 
-- Phase 2: `SKILL.md` + Tide MCP for frontier models
+- Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
 - Phase 3: a local coding model that ships with the toolchain
 
 ## Phase 0h Validation
@@ -110,6 +113,7 @@ crates/
   chelis-types/      Type checker, dimensions, precision, fitness
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
   chelis-backend-c/  C backend and runtime
+  chelis-tide/       Tide HTTP/JSON API and MCP server
   chelis-cli/        CLI binary
 spec/                Numbered language specs and design docs
 examples/            Executable Phase 0 example programs
@@ -154,6 +158,12 @@ Tool-specific skill entry points should resolve to the same local skill library:
 
 - `.claude/skills` -> `agent-skills/`
 - `.codex/skills` -> `agent-skills/`
+
+External Phase 2e validation can be run with:
+
+```sh
+python scripts/redteam_tide_phase2e.py
+```
 
 ## License
 
