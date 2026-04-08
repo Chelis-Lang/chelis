@@ -14,7 +14,7 @@ const VALID_TAGS: &[&str] = &[
     "variant",
     "field",
     "defdim",
-    // Expressions (15)
+    // Expressions (16)
     "fn",
     "app",
     "let",
@@ -59,14 +59,17 @@ const VALID_TAGS: &[&str] = &[
     "realize",
     "cast",
     "copy",
+    "handle-effect",
     // Meta (3)
     "quote",
     "unquote",
     "splice",
-    // Helpers (3)
+    // Helpers (5)
     "params",
     "bind",
     "kv",
+    "effects",
+    "resource",
 ];
 
 #[derive(Debug, Clone)]
@@ -119,7 +122,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
                                 message: format!(
-                                    "unknown tag '{tag}' — not in the 56-tag vocabulary"
+                                    "unknown tag '{tag}' — not in the 59-tag vocabulary"
                                 ),
                             });
                         } else {
@@ -179,6 +182,11 @@ fn validate_tag_shape(
         "if" | "arm" => {
             if child_count != 3 {
                 warn_arity(warnings, "exactly 3 children");
+            }
+        }
+        "handle-effect" => {
+            if child_count != 2 {
+                warn_arity(warnings, "exactly 2 children");
             }
         }
         "fn" => {
@@ -250,6 +258,31 @@ fn validate_tag_shape(
                     offset,
                     message: "`bind` must contain name/expression pairs".to_string(),
                 });
+            }
+        }
+        "effects" => {
+            if !list.elements.iter().skip(2).all(|child| {
+                matches!(child, Expr::Atom(crate::ast::Atom::Symbol(_), _))
+                    || matches!(
+                        child,
+                        Expr::List(inner, _)
+                            if matches!(
+                                inner.elements.first(),
+                                Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) if tag == "resource"
+                            )
+                    )
+            }) {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset,
+                    message: "`effects` must contain symbols or `(resource {} ...)` entries"
+                        .to_string(),
+                });
+            }
+        }
+        "resource" => {
+            if child_count != 1 {
+                warn_arity(warnings, "exactly 1 child");
             }
         }
         _ => {}

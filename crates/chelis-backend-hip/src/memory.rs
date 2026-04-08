@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chelis_ir::dag::{Dag, NodeId, RiscOp};
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp};
 use chelis_types::types::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub enum NodeMemoryKind {
 pub struct SlotPlan {
     pub id: usize,
     pub dtype: Prim,
-    pub capacity_elems: usize,
+    pub capacity_elems: DimExpr,
     pub first_owner: NodeId,
     pub last_use_index: usize,
 }
@@ -35,7 +35,6 @@ pub struct SlotPlan {
 pub struct MemoryPlan {
     node_kinds: Vec<NodeMemoryKind>,
     slots: Vec<SlotPlan>,
-    peak_device_bytes_estimate: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +42,7 @@ struct OwnerRequirement {
     owner: NodeId,
     birth_index: usize,
     last_use_index: usize,
-    capacity_elems: usize,
+    capacity_elems: DimExpr,
     dtype: Prim,
 }
 
@@ -53,15 +52,7 @@ impl MemoryPlan {
         let owner_of = compute_owner_map(dag, &node_kinds);
         let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
         let slots = assign_slots(&requirements, &mut node_kinds);
-        let peak_device_bytes_estimate = slots
-            .iter()
-            .map(|slot| slot.capacity_elems * bytes_per_element(slot.dtype))
-            .sum();
-        Self {
-            node_kinds,
-            slots,
-            peak_device_bytes_estimate,
-        }
+        Self { node_kinds, slots }
     }
 
     pub fn node_kind(&self, id: NodeId) -> &NodeMemoryKind {
@@ -76,8 +67,20 @@ impl MemoryPlan {
         &self.slots
     }
 
-    pub fn peak_device_bytes_estimate(&self) -> usize {
-        self.peak_device_bytes_estimate
+    pub fn peak_device_bytes_estimate(&self) -> Option<usize> {
+        self.peak_device_bytes_terms()
+            .into_iter()
+            .try_fold(0usize, |acc, term| Some(acc + term.as_concrete()?))
+    }
+
+    pub fn peak_device_bytes_formula(&self) -> String {
+        render_dim_expr_sum(&self.peak_device_bytes_terms())
+    }
+
+    pub fn peak_device_bytes_at(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+        self.peak_device_bytes_terms()
+            .into_iter()
+            .try_fold(0usize, |acc, term| Ok(acc + term.evaluate(bindings)?))
     }
 
     pub fn emit_cleanup(&self) -> Vec<String> {
@@ -134,6 +137,7 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Log
                 | RiscOp::Sin
                 | RiscOp::Sqrt
+                | RiscOp::Dropout { .. }
                 | RiscOp::Sum { .. }
                 | RiscOp::MaxReduce { .. }
                 | RiscOp::Realize
@@ -248,8 +252,14 @@ fn assign_slots(
     for req in requirements {
         let reused = slots.iter().enumerate().find_map(|(slot_id, slot)| {
             let reusable = slot.dtype == req.dtype
-                && slot.capacity_elems >= req.capacity_elems
-                && availability[slot_id] < req.birth_index;
+                && availability[slot_id] < req.birth_index
+                && match (
+                    slot.capacity_elems.as_concrete(),
+                    req.capacity_elems.as_concrete(),
+                ) {
+                    (Some(slot_elems), Some(req_elems)) => slot_elems >= req_elems,
+                    _ => slot.capacity_elems == req.capacity_elems,
+                };
             reusable.then_some(slot_id)
         });
 
@@ -258,7 +268,7 @@ fn assign_slots(
             slots.push(SlotPlan {
                 id: slot_id,
                 dtype: req.dtype,
-                capacity_elems: req.capacity_elems,
+                capacity_elems: req.capacity_elems.clone(),
                 first_owner: req.owner,
                 last_use_index: req.last_use_index,
             });
@@ -285,21 +295,53 @@ fn assign_slots(
     slots
 }
 
-fn logical_elements(ty: &chelis_ir::dag::TensorType) -> usize {
+fn logical_elements(ty: &chelis_ir::dag::TensorType) -> DimExpr {
     if ty.dims.is_empty() {
-        1
+        DimExpr::Concrete(1)
     } else {
-        ty.dims.iter().map(dim_size).product()
+        ty.dims
+            .iter()
+            .map(dim_size)
+            .reduce(|lhs, rhs| DimExpr::Mul(Box::new(lhs), Box::new(rhs)))
+            .unwrap_or(DimExpr::Concrete(1))
     }
 }
 
-fn dim_size(dim: &chelis_ir::dag::DimInfo) -> usize {
+fn dim_size(dim: &DimInfo) -> DimExpr {
     match dim {
-        chelis_ir::dag::DimInfo::Lit(n) => *n,
-        chelis_ir::dag::DimInfo::Named(_, Some(n)) => *n,
-        chelis_ir::dag::DimInfo::Named(name, None) => {
-            panic!("unsized named dimension '{name}' in HIP memory planner")
-        }
+        DimInfo::Lit(n) => DimExpr::Concrete(*n),
+        DimInfo::Named(_, Some(n)) => DimExpr::Concrete(*n),
+        DimInfo::Named(name, None) => DimExpr::Sym(name.clone()),
+    }
+}
+
+fn bytes_expr(expr: &DimExpr, dtype: Prim) -> DimExpr {
+    let bytes = bytes_per_element(dtype);
+    if bytes == 1 {
+        expr.clone()
+    } else {
+        DimExpr::Mul(Box::new(expr.clone()), Box::new(DimExpr::Concrete(bytes)))
+    }
+}
+
+fn render_dim_expr_sum(terms: &[DimExpr]) -> String {
+    if terms.is_empty() {
+        "0".to_string()
+    } else {
+        terms
+            .iter()
+            .map(|expr| expr.to_string())
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+}
+
+impl MemoryPlan {
+    pub(crate) fn peak_device_bytes_terms(&self) -> Vec<DimExpr> {
+        self.slots
+            .iter()
+            .map(|slot| bytes_expr(&slot.capacity_elems, slot.dtype))
+            .collect()
     }
 }
 
@@ -418,5 +460,53 @@ mod tests {
 
         assert_eq!(lines[0], "    chelis_gpu_free_view(d_t0);");
         assert_eq!(lines[1], "    chelis_gpu_free(chelis_slot0);");
+    }
+
+    #[test]
+    fn planner_reuses_identical_symbolic_slots() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], symbolic.clone());
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], symbolic.clone());
+        let add = dag.add_node(RiscOp::Add, vec![a, b], symbolic.clone());
+        let two = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], symbolic.clone());
+        let neg = dag.add_node(RiscOp::Neg, vec![two], symbolic.clone());
+        dag.add_root(neg);
+
+        let plan = build_plan(&dag, &[neg]);
+        assert_eq!(
+            plan.slots().len(),
+            3,
+            "identical symbolic capacities should reuse dead slots instead of allocating one slot per owner"
+        );
+        assert!(matches!(
+            plan.node_kind(add),
+            NodeMemoryKind::SlotBacked { .. }
+        ));
+        assert!(matches!(
+            plan.node_kind(neg),
+            NodeMemoryKind::SlotBacked { .. }
+        ));
+    }
+
+    #[test]
+    fn symbolic_peak_device_memory_reports_formula_and_eval() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("batch".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
+        dag.add_root(x);
+
+        let plan = build_plan(&dag, &[x]);
+        assert_eq!(plan.peak_device_bytes_estimate(), None);
+        assert_eq!(plan.peak_device_bytes_formula(), "(batch * 4)");
+
+        let bindings = HashMap::from([(String::from("batch"), 32usize)]);
+        assert_eq!(plan.peak_device_bytes_at(&bindings).unwrap(), 128);
     }
 }

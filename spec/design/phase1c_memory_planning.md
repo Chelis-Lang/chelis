@@ -10,8 +10,8 @@ Phase 1c is a codegen/runtime-planning change inside the HIP backend. The shippe
 - planner-driven HIP emission that reuses backing allocations across non-overlapping lifetimes
 - unique input copies transferred once, with repeated `Load(name)` nodes aliasing that copy
 - metadata-only wrappers for movement ops and `store`
-- a structured `peak_device_bytes_estimate` on `HipCodegenResult`
-- a human-readable estimate line in `chelis build --target hip`
+- a structured peak-memory formula on `HipCodegenResult`, plus an optional concrete estimate when all slot sizes are static
+- a human-readable formula line in `chelis build --target hip`
 
 Phase 1c does **not** add a persistent GPU execution API, automatic checkpoint insertion, or
 runtime budget comparison flags. The estimate is surfaced to the user; policy decisions based on
@@ -30,7 +30,7 @@ Walk the DAG and compute, for each tensor:
 
 When a buffer's lifetime ends, its GPU memory can be reused for a later tensor of the same size (or smaller, with internal fragmentation). This is a graph coloring problem on the interference graph of buffer lifetimes.
 
-For Phase 1c, use a simple greedy algorithm: process buffers in birth order, reuse the first available dead buffer of sufficient size. This is not optimal but is correct and simple. Optimal allocation (minimum total memory) is NP-hard in general but tractable for the DAG sizes Chelis produces.
+For Phase 1c, use a simple greedy algorithm: process buffers in birth order, reuse the first available dead buffer of sufficient size. For symbolic sizes, reuse conservatively only when the size expressions are identical. This is not optimal but is correct and simple. Optimal allocation (minimum total memory) is NP-hard in general but tractable for the DAG sizes Chelis produces.
 
 **Host↔device transfer minimization:**
 
@@ -49,10 +49,11 @@ The transfer plan is a list of `(tensor, direction, timing)` triples emitted alo
 
 Given a VRAM budget, estimate peak memory usage from the buffer plan. If it exceeds the budget, insert recomputation points — trade compute for memory by recomputing an intermediate result instead of keeping it in VRAM. This is activation checkpointing. For Phase 1c, implement the estimation and warning ("this model needs N MB VRAM, you have M MB") but not automatic checkpointing insertion.
 
-The shipped Phase 1c surface stops at the estimate itself. It reports estimated peak bytes through
-`HipCodegenResult` and `chelis build --target hip`, but does not compare against live free memory.
-Phase 1d extends that estimate to include inline staged-reduction scratch chains; it still does
-not compare the estimate against live device memory.
+The shipped Phase 1c surface stops at the reporting itself. It reports peak-memory formulas
+through `HipCodegenResult` and `chelis build --target hip`, plus concrete byte estimates when
+all slot sizes are static, but does not compare against live free memory. Phase 1d extends that
+reporting to include inline staged-reduction scratch chains; it still does not compare the result
+against live device memory.
 
 **Deferred optimization note:** LMAD-style algebraic memory-layout analysis may later help
 reason about coalescing, transposes, and layout-sensitive kernel selection. That is not a

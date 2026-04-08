@@ -20,15 +20,15 @@ record_fields = { "{" ~ field_decl ~ ("," ~ field_decl)* ~ ","? ~ "}" }
 tuple_fields = { "(" ~ type_expr ~ ("," ~ type_expr)* ~ ","? ~ ")" }
 field_decl = { ident ~ ":" ~ type_expr }
 
-sig_decl = { SIG ~ ident ~ ":" ~ type_expr }
-fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ "=" ~ expr }
+sig_decl = { SIG ~ ident ~ ":" ~ type_expr ~ effect_suffix? }
+fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ effect_suffix? ~ "=" ~ expr }
 dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
 params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
 param = { ident ~ (":" ~ type_expr)? }
 return_type = { ":" ~ type_expr }
 let_decl = { LET ~ ident ~ (":" ~ type_expr)? ~ "=" ~ expr }
 
-expr = _{ let_expr | match_expr | if_expr | fn_expr | pipe_expr }
+expr = _{ let_expr | match_expr | if_expr | fn_expr | with_expr | pipe_expr }
 
 let_expr = { LET ~ let_binding ~ (LET ~ let_binding)* ~ IN ~ expr }
 let_binding = { let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
@@ -40,6 +40,8 @@ guard = { IF ~ expr }
 
 if_expr = { IF ~ expr ~ THEN ~ expr ~ ELSE ~ expr }
 fn_expr = { FN ~ params ~ ARROW ~ expr }
+with_expr = { WITH ~ with_handler ~ "(" ~ expr ~ ")" ~ block_expr }
+with_handler = { "seed" | "device" }
 
 pipe_expr = { or_expr ~ (PIPE ~ pipe_stage)* }
 pipe_stage = { let_expr | match_expr | if_expr | fn_expr | or_expr }
@@ -119,6 +121,10 @@ constructor_pat = { type_ident ~ pat_arg* }
 pat_arg = _{ tuple_pat | paren_pat | record_pat | literal | "_" | ident | type_ident }
 
 type_expr = { type_atom ~ (ARROW ~ type_atom)* }
+effect_suffix = { BANG ~ "{" ~ effect_expr ~ ("," ~ effect_expr)* ~ ","? ~ "}" }
+effect_expr = { effect_resource | effect_name }
+effect_name = { "Diff" | "Random" | "Accum" | "diff" | "random" | "accum" }
+effect_resource = { "Resource" ~ "(" ~ string_lit ~ ")" }
 type_atom = _{
     tensor_type
   | precision_type

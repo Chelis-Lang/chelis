@@ -167,6 +167,19 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn tensor_with_rate(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(input), Type::Prim(Prim::F32)],
+                Box::new(Type::Var(input)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let kernel = vg.fresh_tvar();
@@ -246,6 +259,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("pad", &mut env, &mut vg);
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);
+    tensor_with_rate("dropout", &mut env, &mut vg);
 
     (env, vg)
 }

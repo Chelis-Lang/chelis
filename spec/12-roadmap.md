@@ -23,7 +23,8 @@ For detailed execution planning, see `spec/design/chelis_project_plan.md`.
 | **1d** | Optimized reductions, staged scalar scratch, hipBLAS matmul specialization | Implemented; carried-forward backend limits documented |
 | **1e** | Benchmarks, reference comparison, checked-in results | Shipped for fixed benchmark models |
 | **1f** | Executable grammar | Implemented |
-| **2** | Effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | Planned; detailed design in `spec/design/chelis_phase2_plan.md` |
+| **2a** | Algebraic effects | Initial subset shipped: effect syntax, annotated checked Deep, `Random` via `dropout` + `with seed(...)`, and `Resource(Device)` build-boundary validation |
+| **2** | Remaining Phase 2 work: broader effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`), seed corpus | In progress; detailed design in `spec/design/chelis_phase2_plan.md` |
 | **3** | Package ecosystem (Reef), StableHLO/FX backends, Python FFI, research type features, mechanized type system (Lean 4), local coding model (ships with toolchain) |  |
 
 ## Red Team Checkpoints
@@ -40,5 +41,5 @@ For Phase 0h specifically, the authoritative milestone validation is the release
 MNIST runner in `crates/chelis-e2e`, not `cargo test --workspace` alone.
 
 Phase 2 begins with the documented carry-forward fixes from the shipped Phase 1
-boundary: symbolic dimensions in both backends, HIP `pad`/`shrink`, and the Deep
-dotted-path round-trip gap.
+boundary: the remaining HIP `pad`/`shrink` work, symbolic normalized-axis support for
+`layer_norm`/`mean` when needed, and the Deep dotted-path round-trip gap.

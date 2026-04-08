@@ -7,16 +7,12 @@ without changing Chelis's regular tensor execution model.
 
 Phase 1d ships inside the HIP backend code generator and runtime header:
 
-- segmented reductions use three strategies keyed by static segment size
-  - tiny: `axis_size <= 8`
-  - small: `9..=64`
-  - large: `>= 65`
-- small and large strategies use shared-memory block cooperation
-- fused elementwise→reduction kernels reuse the same tiny/small/large split
+- segmented reductions use a single runtime-sized axis-specific kernel on the generic path
+- fused elementwise→reduction kernels reuse that same runtime-sized reduction kernel
 - scalar contiguous reductions use a staged scratch-chain reduction
 - staged partial buffers are allocated/freed inline in generated host code and are **not**
   routed through the Phase 1c slot planner
-- `peak_device_bytes_estimate` includes the worst single staged scratch chain
+- the HIP peak-memory reporting includes the worst single staged scratch chain
 - contiguous rank-2 `f32` matmul subgraphs (`expand + mul + sum(axis=1)`) specialize to
   hipBLAS via `chelis_hipblas_sgemm_row_major(...)`
 - non-contiguous matmul-shaped DAGs fall back to the generic reduction path
@@ -31,9 +27,9 @@ Chelis tensors are regular. The shipped Phase 1d path keeps the existing tensor-
 and focuses on better reduction kernels rather than flattening transformations.
 
 **Segmented reductions are the primary optimization target.**
-Softmax-style workloads reduce rows or row-like segments repeatedly, so the backend now picks
-between tiny/small/large segmented kernels instead of using the Phase 1a naive loop for all
-cases.
+Softmax-style workloads reduce rows or row-like segments repeatedly, so the backend keeps a
+dedicated runtime-sized segmented reduction kernel instead of using the Phase 1a naive loop for
+all cases.
 
 **Scalar staged reductions are intentionally narrow.**
 The staged scratch-chain path is used only for safe scalar contiguous reductions. Row-wise and

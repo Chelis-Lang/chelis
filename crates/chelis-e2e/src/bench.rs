@@ -107,6 +107,7 @@ pub struct BackendReport {
     pub reason: Option<String>,
     pub compile_ms: Option<f64>,
     pub run_ms: Option<f64>,
+    pub peak_device_bytes_formula: Option<String>,
     pub peak_device_bytes_estimate: Option<usize>,
     pub loss_history: Option<Vec<f32>>,
     pub final_loss: Option<f32>,
@@ -463,7 +464,7 @@ fn run_training_backend(
         &train.compile_flags,
         &train.link_flags,
     ) {
-        Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+        Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
         Err(err) => failed(err),
     }
 }
@@ -492,9 +493,12 @@ fn run_training_backend_hip(
         &train.compile_flags,
         &train.link_flags,
     ) {
-        Ok((compile_ms, stdout)) => {
-            parse_run_output(stdout, compile_ms, Some(train.peak_device_bytes_estimate))
-        }
+        Ok((compile_ms, stdout)) => parse_run_output(
+            stdout,
+            compile_ms,
+            Some(train.peak_device_bytes_formula.clone()),
+            train.peak_device_bytes_estimate,
+        ),
         Err(err) => failed(err),
     }
 }
@@ -520,7 +524,7 @@ fn run_forward_backend(
                 &programs.cpu.compile_flags,
                 &programs.cpu.link_flags,
             ) {
-                Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None),
+                Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
                 Err(err) => failed(err),
             }
         }
@@ -544,7 +548,8 @@ fn run_forward_backend(
                 Ok((compile_ms, stdout)) => parse_run_output(
                     stdout,
                     compile_ms,
-                    Some(programs.hip.peak_device_bytes_estimate),
+                    Some(programs.hip.peak_device_bytes_formula.clone()),
+                    programs.hip.peak_device_bytes_estimate,
                 ),
                 Err(err) => failed(err),
             }
@@ -608,6 +613,7 @@ fn run_pytorch_with_python(
         String::from_utf8_lossy(&output.stdout).into_owned(),
         compile_ms,
         None,
+        None,
     )
 }
 
@@ -637,6 +643,7 @@ fn apply_pytorch_env(cmd: &mut Command) {
 fn parse_run_output(
     stdout: String,
     compile_ms: f64,
+    peak_device_bytes_formula: Option<String>,
     peak_device_bytes_estimate: Option<usize>,
 ) -> RunArtifacts {
     #[derive(serde::Deserialize)]
@@ -661,6 +668,7 @@ fn parse_run_output(
                     reason: None,
                     compile_ms: Some(compile_ms),
                     run_ms: Some(raw.run_ms),
+                    peak_device_bytes_formula,
                     peak_device_bytes_estimate,
                     loss_history: if raw.loss_history.is_empty() {
                         None
@@ -730,6 +738,7 @@ fn skipped(reason: String) -> RunArtifacts {
             reason: Some(reason),
             compile_ms: None,
             run_ms: None,
+            peak_device_bytes_formula: None,
             peak_device_bytes_estimate: None,
             loss_history: None,
             final_loss: None,
@@ -749,6 +758,7 @@ fn failed(reason: String) -> RunArtifacts {
             reason: Some(reason),
             compile_ms: None,
             run_ms: None,
+            peak_device_bytes_formula: None,
             peak_device_bytes_estimate: None,
             loss_history: None,
             final_loss: None,
@@ -902,6 +912,7 @@ fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
         link_flags: hip.link_flags.clone(),
         input_labels: hip.input_labels.clone(),
         output_labels: hip.output_labels.clone(),
+        symbolic_dims: hip.symbolic_dims.clone(),
     }
 }
 
@@ -1915,6 +1926,7 @@ mod tests {
                 reason: None,
                 compile_ms: None,
                 run_ms: None,
+                peak_device_bytes_formula: None,
                 peak_device_bytes_estimate: None,
                 loss_history: Some(losses),
                 final_loss: None,

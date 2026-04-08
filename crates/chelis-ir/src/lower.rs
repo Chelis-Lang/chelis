@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::{CheckedProgram, types::Prim};
 
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::tier2;
 
 /// Lower a checked Phase 0e Deep program into a RISC DAG.
@@ -135,6 +135,7 @@ struct LowerCtx {
     dag: Dag,
     bindings: HashMap<String, NodeId>,
     program_types: HashMap<String, TensorType>,
+    random_seed: Option<u64>,
 }
 
 impl LowerCtx {
@@ -143,6 +144,7 @@ impl LowerCtx {
             dag: Dag::new(),
             bindings: HashMap::new(),
             program_types,
+            random_seed: None,
         }
     }
 
@@ -369,6 +371,7 @@ impl LowerCtx {
             "tuple-get" => self.lower_tuple_get(elems),
             "match" => self.lower_match(elems),
             "grad" => self.lower_grad(elems),
+            "handle-effect" => self.lower_handle_effect(elems),
             "vmap" | "jit" => self.lower_unsupported(tag, elems),
             "defsig" | "deftype" | "typealias" => {
                 self.dag
@@ -566,6 +569,13 @@ impl LowerCtx {
             "sqrt" if args.len() == 1 => {
                 let x = self.lower_expr(&args[0]);
                 self.lower_transcendental(RiscOp::Sqrt, x, ty)
+            }
+            "dropout" if args.len() == 2 => {
+                let x = self.lower_expr(&args[0]);
+                let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
+                let seed = self.random_seed.unwrap_or(0);
+                self.dag
+                    .add_node(RiscOp::Dropout { rate, seed }, vec![x], ty.clone())
             }
 
             // Tier 2 decompositions
@@ -776,9 +786,9 @@ impl LowerCtx {
                 let x = self.lower_expr(&args[0]);
                 let axis = self.extract_usize_value(&args[1]).unwrap_or(0);
                 let size = if args.len() >= 3 {
-                    self.extract_usize_value(&args[2]).unwrap_or(1)
+                    DimExpr::Concrete(self.extract_usize_value(&args[2]).unwrap_or(1))
                 } else {
-                    1
+                    DimExpr::Concrete(1)
                 };
                 self.dag
                     .add_node(RiscOp::Expand { axis, size }, vec![x], ty.clone())
@@ -864,6 +874,38 @@ impl LowerCtx {
             }
             _ => None,
         }
+    }
+
+    fn lower_handle_effect(&mut self, elems: &[Expr]) -> NodeId {
+        let effect = match elems.get(1) {
+            Some(Expr::Map(meta, _)) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "effect")
+                .and_then(|(_, value)| match value {
+                    Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+                    _ => None,
+                }),
+            _ => None,
+        };
+        match effect {
+            Some("random") if elems.len() >= 4 => {
+                let saved_seed = self.random_seed;
+                self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                let result = self.lower_expr(&elems[3]);
+                self.random_seed = saved_seed;
+                result
+            }
+            Some("resource") if elems.len() >= 4 => self.lower_expr(&elems[3]),
+            _ if elems.len() >= 4 => self.lower_expr(&elems[3]),
+            _ => self
+                .dag
+                .add_node(RiscOp::Const { value: 0.0 }, vec![], Self::default_type()),
+        }
+    }
+
+    fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
+        self.extract_usize_value(expr).map(|value| value as u64)
     }
 
     /// Extract an f64 value from an expression.

@@ -168,7 +168,7 @@ validated automatically.
 | `kv` | 2 | key, value | `(kv {} lr (var {} lr))` |
 
 This vocabulary is complete and closed. User-defined macros do not add new tags — macros
-expand to combinations of these 56 tags before any LLM interaction.
+expand to combinations of these 59 tags before any LLM interaction.
 
 ### 2c. Built-in Scope
 

@@ -207,6 +207,7 @@ dependencies = [
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",
+ "chelis-effects",
  "chelis-ir",
  "chelis-surf",
  "chelis-types",
@@ -234,6 +235,7 @@ dependencies = [
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",
+ "chelis-effects",
  "chelis-ir",
  "chelis-surf",
  "chelis-types",
@@ -244,10 +246,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-effects"
+version = "0.1.0"
+dependencies = [
+ "chelis-deep",
+ "chelis-types",
+]
+
+[[package]]
 name = "chelis-ir"
 version = "0.1.0"
 dependencies = [
  "chelis-deep",
+ "chelis-effects",
  "chelis-types",
  "thiserror",
 ]

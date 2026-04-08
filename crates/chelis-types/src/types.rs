@@ -3,6 +3,7 @@
 //! These are the checker's working types — NOT the Deep AST nodes.
 //! They mirror the Deep t-* tags but are Rust-native for efficient unification.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// A unique identifier for a type variable.
@@ -107,6 +108,75 @@ pub enum Type {
     Error,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Effect {
+    Random,
+    Accum,
+    Resource(String),
+}
+
+impl fmt::Display for Effect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Random => f.write_str("Random"),
+            Self::Accum => f.write_str("Accum"),
+            Self::Resource(device) => write!(f, "Resource(\"{device}\")"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectSet {
+    effects: BTreeSet<Effect>,
+}
+
+impl EffectSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, effect: Effect) {
+        self.effects.insert(effect);
+    }
+
+    pub fn remove(&mut self, effect: &Effect) {
+        self.effects.remove(effect);
+    }
+
+    pub fn contains(&self, effect: &Effect) -> bool {
+        self.effects.contains(effect)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+    }
+
+    pub fn extend(&mut self, other: &EffectSet) {
+        self.effects.extend(other.effects.iter().cloned());
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Effect> {
+        self.effects.iter()
+    }
+}
+
+impl FromIterator<Effect> for EffectSet {
+    fn from_iter<T: IntoIterator<Item = Effect>>(iter: T) -> Self {
+        let mut set = Self::new();
+        for effect in iter {
+            set.insert(effect);
+        }
+        set
+    }
+}
+
+impl fmt::Display for EffectSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rendered: Vec<String> = self.effects.iter().map(ToString::to_string).collect();
+        write!(f, "{{{}}}", rendered.join(", "))
+    }
+}
+
 /// A polymorphic type scheme: ∀ tvars, dvars. body
 #[derive(Debug, Clone)]
 pub struct Scheme {
@@ -155,7 +225,7 @@ impl fmt::Display for Type {
 }
 
 /// Counter for generating fresh type and dimension variables.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VarGen {
     next_tvar: u32,
     next_dvar: u32,

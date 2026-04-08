@@ -273,7 +273,14 @@ fn s5_permute_no_kernel_launch() {
 fn s5_expand_no_kernel_launch() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3));
-    let e = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], mat_f32(4, 3));
+    let e = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
+        vec![x],
+        mat_f32(4, 3),
+    );
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_expand");
     assert!(
@@ -522,8 +529,62 @@ fn s12_peak_estimate_reported() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_peak_estimate");
     assert!(
-        result.peak_device_bytes_estimate > 0,
+        result
+            .peak_device_bytes_estimate
+            .expect("concrete DAG should report bytes")
+            > 0,
         "HIP codegen should report a nonzero peak device-memory estimate"
+    );
+    assert!(!result.peak_device_bytes_formula.is_empty());
+}
+
+#[test]
+fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
+    let mut dag = Dag::new();
+    let symbolic = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
+    dag.add_root(x);
+
+    let result = codegen_hip(&dag, "test_symbolic_peak");
+    assert_eq!(result.peak_device_bytes_estimate, None);
+    assert_eq!(result.peak_device_bytes_formula, "(batch * 4)");
+    assert_eq!(
+        result
+            .peak_device_bytes_at(&std::collections::HashMap::from([(
+                String::from("batch"),
+                64usize,
+            )]))
+            .unwrap(),
+        256
+    );
+}
+
+#[test]
+fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
+    let mut dag = Dag::new();
+    let symbolic = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], symbolic.clone());
+    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], symbolic.clone());
+    let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone());
+    let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic);
+    dag.add_root(xyz);
+
+    let result = codegen_hip(&dag, "test_symbolic_repeats");
+    assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(
+        result.c_source.contains("inputs[1]->shape[0] != batch"),
+        "second occurrence must be checked against the canonical binding"
+    );
+    assert!(
+        result.c_source.contains("inputs[2]->shape[0] != batch"),
+        "third occurrence must also be checked against the canonical binding"
     );
 }
 
@@ -708,8 +769,8 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     tiny.add_root(sum_tiny);
     let tiny_result = codegen_hip(&tiny, "test_tiny_reduce");
     assert!(
-        tiny_result.c_source.contains("kernel_sum_ax1_sz8_tiny"),
-        "axis_size=8 should use the tiny segmented reduction kernel"
+        tiny_result.c_source.contains("kernel_sum_ax1"),
+        "generic symbolic-capable reductions should emit the axis-specific kernel"
     );
 
     let mut small = Dag::new();
@@ -718,14 +779,8 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     small.add_root(sum_small);
     let small_result = codegen_hip(&small, "test_small_reduce");
     assert!(
-        small_result.c_source.contains("kernel_sum_ax1_sz16_small"),
-        "axis_size=16 should use the small segmented reduction kernel"
-    );
-    assert!(
-        small_result
-            .c_source
-            .contains("__shared__ float shared[256];"),
-        "small segmented reductions should use shared-memory batching"
+        small_result.c_source.contains("kernel_sum_ax1"),
+        "axis_size=16 should use the same runtime-sized reduction kernel"
     );
 
     let mut large = Dag::new();
@@ -734,14 +789,14 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     large.add_root(sum_large);
     let large_result = codegen_hip(&large, "test_large_reduce");
     assert!(
-        large_result.c_source.contains("kernel_sum_ax1_sz128_large"),
-        "axis_size=128 should use the large segmented reduction kernel"
+        large_result.c_source.contains("kernel_sum_ax1"),
+        "axis_size=128 should use the same runtime-sized reduction kernel"
     );
     assert!(
         large_result
             .c_source
-            .contains("chelis_launch_kernel(mod_kernel_sum_ax1_sz128_large"),
-        "large segmented reductions should launch their dedicated kernel"
+            .contains("chelis_launch_kernel(mod_kernel_sum_ax1"),
+        "reductions should launch the generic runtime-sized kernel"
     );
 }
 
@@ -754,20 +809,13 @@ fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
     let result = codegen_hip(&dag, "test_scalar_stage");
 
     assert!(
-        result.c_source.contains("kernel_sum_scalar_stage1_bs256"),
-        "scalar reductions should emit the staged stage-1 kernel"
-    );
-    assert!(
-        result.c_source.contains("kernel_sum_scalar_stage_n_bs256"),
-        "multi-stage scalar reductions should emit the stage-n kernel"
-    );
-    assert!(
-        result.c_source.contains("hipMalloc(&t1_partials0"),
-        "staged scalar reductions should allocate inline scratch buffers"
+        result.c_source.contains("kernel_sum_ax0"),
+        "scalar reductions should use the generic runtime-sized reduction kernel"
     );
     assert_eq!(
-        result.peak_device_bytes_estimate, 4116,
-        "peak estimate should include slot-plan bytes plus staged scratch"
+        result.peak_device_bytes_estimate,
+        Some(4100),
+        "generic scalar reductions should report only slot-plan bytes without staged scratch"
     );
 }
 
@@ -777,12 +825,18 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
     let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );
@@ -812,12 +866,18 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     );
     let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );
@@ -831,7 +891,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         "non-contiguous matmul operands must fall back to the generic reduction path"
     );
     assert!(
-        result.c_source.contains("kernel_sum_ax1_sz3_tiny"),
+        result.c_source.contains("kernel_sum_ax1"),
         "fallback matmul should still emit the generic reduction kernel"
     );
 }

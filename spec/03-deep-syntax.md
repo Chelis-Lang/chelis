@@ -21,18 +21,19 @@ Every Deep AST node is a 3-tuple:
 
 The meta map carries compiler-relevant annotations. An agent MAY include metadata to constrain inference, or MAY write `{}` everywhere and let the compiler fill it in.
 
-**Phase 0 keys:**
+**Active keys:**
 
 | Key | Value | Semantics |
 |---|---|---|
 | `type` | type-expr node | Type annotation (checked, not trusted) |
 | `loc` | `(loc file line col)` | Source location for error reporting |
+| `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
+| `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 
-**Reserved for Phase 2 (parser accepts, compiler ignores with warning):**
+**Reserved for later phases:**
 
 | Key | Value | Semantics |
 |---|---|---|
-| `eff` | effect-set | Algebraic effects |
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
@@ -108,6 +109,7 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
 | `record-update` | `(record-update {} expr (kv {} k v) ...)` | Functional record update (reserved; Phase 1) |
 | `par` | `(par {} expr₁ expr₂ ...)` | Parallel evaluation (v1: sequential) |
+| `handle-effect` | `(handle-effect {effect: name} arg body)` | Phase 2a effect handler block |
 
 ### 2.4 Patterns
 
@@ -167,6 +169,8 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 | `params` | `(params {} p₁ p₂ ...)` | Parameter list; each pᵢ is a bare name or `(name {type: t})` |
 | `bind` | `(bind {} name₁ expr₁ name₂ expr₂ ...)` | Binding pairs for `let` |
 | `kv` | `(kv {} key value)` | Key-value pair for records |
+| `effects` | `(effects {} eff₁ eff₂ ...)` | Effect-set literal used in metadata |
+| `resource` | `(resource {} "device")` | Resource-effect payload inside an effect set |
 
 **Note:** `params` and `bind` follow the universal 3-tuple rule: `(params {} x y)`, `(bind {} name₁ expr₁ ...)`. Names inside them are bare identifiers, not `(var ...)` wrapped.
 
@@ -176,14 +180,14 @@ The tag set is **closed**. Only these tags produce valid Deep nodes. Unknown tag
 |---|---|---|
 | Module | 4 | module, import, import-all, export |
 | Declarations | 7 | def, defsig, deftype, typealias, variant, field, defdim |
-| Expressions | 16 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par |
+| Expressions | 17 | fn, app, let, match, arm, if, var, lit, record, access, pipe, block, tuple, tuple-get, record-update, par, handle-effect |
 | Patterns | 7 | pat-var, pat-lit, pat-ctor, pat-tuple, pat-record, pat-wild, pat-as |
 | Types | 7 | t-prim, t-fn, t-tensor, t-adt, t-var, t-unit, t-tuple |
 | Dimensions | 3 | d-name, d-var, d-lit |
 | Transforms | 6 | grad, vmap, jit, realize, cast, copy |
 | Meta | 3 | quote, unquote, splice |
-| Helpers | 3 | params, bind, kv |
-| **Total** | **56** | |
+| Helpers | 5 | params, bind, kv, effects, resource |
+| **Total** | **59** | |
 
 ---
 
@@ -204,7 +208,7 @@ The irreducible computational basis. All tensor computation decomposes to these 
 
 Convenience functions that the compiler lowers to RISC primitive compositions during IR construction. The desugarer emits these; the IR pass decomposes them.
 
-`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`
+`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
 
 ### 3.3 Standard Library (imported)
 

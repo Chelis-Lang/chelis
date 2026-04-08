@@ -4,7 +4,7 @@
 
 use chelis_types::types::Prim;
 
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 
 /// `sub(a, b)` = `add(a, neg(b))`
 pub fn lower_sub(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId {
@@ -159,6 +159,11 @@ pub fn dim_size(ty: &TensorType, axis: usize) -> Option<usize> {
     })
 }
 
+/// Extract a runtime-capable dimension expression from a tensor type at the given axis.
+pub fn dim_expr(ty: &TensorType, axis: usize) -> Option<DimExpr> {
+    ty.dims.get(axis).map(DimExpr::from)
+}
+
 /// A scalar type with no dimensions and the given precision.
 pub fn scalar_type(precision: Prim) -> TensorType {
     TensorType {
@@ -202,7 +207,7 @@ fn expand_to_match(
         let missing = target_dims.len() - ty.dims.len();
         let insert_at = 0;
         let source_dim = target_dims[missing - 1].clone();
-        let size = require_dim_extent(&source_dim, "expand_to_match");
+        let size = DimExpr::from(&source_dim);
         let mut next_dims = ty.dims.clone();
         next_dims.insert(insert_at, source_dim);
         let next_ty = TensorType {
@@ -248,8 +253,8 @@ pub fn lower_matmul(
         "matmul shared axis",
     );
     let k_dim = require_dim(b_ty.dims.get(1), "matmul rhs axis 1");
-    let i_size = require_dim_extent(&i_dim, "matmul lhs axis 0");
-    let k_size = require_dim_extent(&k_dim, "matmul rhs axis 1");
+    let i_size = DimExpr::from(&i_dim);
+    let k_size = DimExpr::from(&k_dim);
 
     // The intermediate expanded type is [i, j, k].
     let expanded_ty = TensorType {
@@ -295,13 +300,20 @@ pub fn lower_matmul(
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
 pub fn lower_softmax(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> NodeId {
     let red_ty = reduced_type(ty, axis);
-    let size = require_axis_size(ty, axis, "softmax");
+    let size = DimExpr::from(&require_dim(ty.dims.get(axis), "softmax axis"));
 
     // 1. max_reduce(x, axis)
     let max_val = dag.add_node(RiscOp::MaxReduce { axis }, vec![x], red_ty.clone());
 
     // 2. expand max back to original shape
-    let max_expanded = dag.add_node(RiscOp::Expand { axis, size }, vec![max_val], ty.clone());
+    let max_expanded = dag.add_node(
+        RiscOp::Expand {
+            axis,
+            size: size.clone(),
+        },
+        vec![max_val],
+        ty.clone(),
+    );
 
     // 3. shifted = x - max (numerical stability)
     let shifted = lower_sub(dag, x, max_expanded, ty);
@@ -355,12 +367,12 @@ pub fn lower_layer_norm(
     eps: f64,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
-    let axis_size = require_axis_size(x_ty, axis, "layer_norm");
+    let axis_size = DimExpr::Concrete(require_axis_size(x_ty, axis, "layer_norm"));
     let mean = lower_mean(dag, x, axis, x_ty);
     let mean_expanded = dag.add_node(
         RiscOp::Expand {
             axis,
-            size: axis_size,
+            size: axis_size.clone(),
         },
         vec![mean],
         x_ty.clone(),
@@ -1145,15 +1157,61 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "softmax requires a concrete extent")]
-    fn softmax_rejects_symbolic_axis_extent() {
+    fn softmax_accepts_symbolic_axis_extent() {
         let mut dag = Dag::new();
         let ty = TensorType {
             dims: vec![DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
-        let _ = lower_softmax(&mut dag, x, 0, &ty);
+        let out = lower_softmax(&mut dag, x, 0, &ty);
+        let expand_sizes: Vec<_> = dag
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Expand { size, .. } => Some(size.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            expand_sizes
+                .iter()
+                .all(|size| matches!(size, DimExpr::Sym(name) if name == "batch")),
+            "softmax should preserve a symbolic axis extent through expand nodes"
+        );
+        assert_eq!(dag.get(out).unwrap().output_type, ty);
+        assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "layer_norm requires a concrete extent")]
+    fn layer_norm_rejects_symbolic_normalized_axis_extent() {
+        let mut dag = Dag::new();
+        let x_ty = TensorType {
+            dims: vec![DimInfo::Named("hidden".into(), None)],
+            precision: Prim::F32,
+        };
+        let scale_ty = TensorType {
+            dims: vec![DimInfo::Named("hidden".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let gamma = dag.add_node(
+            RiscOp::Load {
+                name: "gamma".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let beta = dag.add_node(
+            RiscOp::Load {
+                name: "beta".into(),
+            },
+            vec![],
+            scale_ty.clone(),
+        );
+        let _ = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
     }
 
     #[test]

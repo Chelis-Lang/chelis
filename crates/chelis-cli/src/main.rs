@@ -181,9 +181,18 @@ fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-    let report = chelis_types::check_phase0e_fitness(&deep_exprs);
+    let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
+    let effect_errors = match chelis_types::check_phase0e_program(&deep_exprs) {
+        Ok(checked) => chelis_effects::check_program(&checked)
+            .err()
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    if !effect_errors.is_empty() {
+        report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
+    }
     // Format as JSON manually
-    let errors_json: Vec<String> = report
+    let mut errors_json: Vec<String> = report
         .errors
         .iter()
         .map(|e| {
@@ -206,6 +215,13 @@ fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             )
         })
         .collect();
+    errors_json.extend(effect_errors.iter().map(|e| {
+        format!(
+            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":0.8}}",
+            e.kind,
+            serde_json::to_string(&e.message).unwrap_or_default(),
+        )
+    }));
 
     let json = format!(
         concat!(
@@ -247,8 +263,11 @@ fn cmd_build(
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-    let checked = chelis_types::check_phase0e_program(&deep_exprs)
-        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
+    let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
+    let checked =
+        checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
+    chelis_effects::validate_build_target(&checked, target)
+        .map_err(|errors| format_effect_errors(&errors))?;
     let dag = chelis_ir::lower::lower_program(&checked);
     let func_name = file
         .file_stem()
@@ -257,39 +276,21 @@ fn cmd_build(
 
     match target {
         "c" => {
-            reject_unsized_named_dims(&dag, "c")?;
+            reject_unsupported_effect_ops(&dag, "c")?;
             let fused = chelis_ir::fuse::fuse(&dag);
-            cmd_build_c(&fused, func_name, file, output)
+            cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
         }
         "hip" => {
-            reject_unsized_named_dims(&dag, "hip")?;
+            reject_unsupported_effect_ops(&dag, "hip")?;
             reject_unsupported_hip_ops(&dag)?;
             // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
             // When grad participates in a GPU compilation pipeline, the intended ordering is:
             // lower -> optimize -> grad -> optimize -> fuse -> codegen.
             let fused = chelis_ir::fuse::fuse(&dag);
-            cmd_build_hip(&fused, func_name, file, output)
+            cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
         }
         other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
     }
-}
-
-fn reject_unsized_named_dims(
-    dag: &chelis_ir::dag::Dag,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for node in dag.nodes() {
-        for dim in &node.output_type.dims {
-            if let chelis_ir::dag::DimInfo::Named(name, None) = dim {
-                return Err(format!(
-                    "`chelis build --target {target}` does not yet support unresolved named dimensions; node {} uses symbolic dimension `{name}`",
-                    node.id.0
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
@@ -310,6 +311,21 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 .into());
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn reject_unsupported_effect_ops(
+    dag: &chelis_ir::dag::Dag,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for node in dag.nodes() {
+        if let chelis_ir::dag::RiscOp::Dropout { .. } = &node.op {
+            return Err(format!(
+                "`chelis build --target {target}` does not yet codegen `dropout`; evaluate it under `with seed(...)` instead"
+            )
+            .into());
         }
     }
     Ok(())
@@ -353,6 +369,7 @@ fn cmd_build_c(
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
+    symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = chelis_backend_c::codegen(dag, func_name);
 
@@ -382,6 +399,10 @@ fn cmd_build_c(
         runtime_dir.join("chelis_runtime.h").display(),
         runtime_dir.join("chelis_runtime.c").display()
     );
+    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    if !symbolic_dims.is_empty() {
+        println!("Symbolic dims: {}", symbolic_dims.join(", "));
+    }
     let mut flags: Vec<&str> = result
         .compile_flags
         .iter()
@@ -404,6 +425,7 @@ fn cmd_build_hip(
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
+    symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = chelis_backend_hip::codegen_hip(dag, func_name);
 
@@ -437,10 +459,17 @@ fn cmd_build_hip(
         "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
         runtime_dir.display()
     );
+    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    if !symbolic_dims.is_empty() {
+        println!("Symbolic dims: {}", symbolic_dims.join(", "));
+    }
     println!(
-        "Estimated peak device memory: {}",
-        human_bytes(result.peak_device_bytes_estimate)
+        "Peak device memory formula: {}",
+        result.peak_device_bytes_formula
     );
+    if let Some(bytes) = result.peak_device_bytes_estimate {
+        println!("Estimated peak device memory: {}", human_bytes(bytes));
+    }
     let mut flags: Vec<&str> = result
         .compile_flags
         .iter()
@@ -514,8 +543,7 @@ fn run_tide() -> Result<(), Box<dyn std::error::Error>> {
 fn try_eval(source: &str) -> Result<String, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("{e}"))?;
     let deep = chelis_surf::desugar::desugar_program(&decls);
-    let checked = chelis_types::check_phase0e_program(&deep)
-        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
+    let checked = checked_program_with_effects(&deep)?;
     let dag = chelis_ir::lower::lower_program(&checked);
 
     if dag.is_empty() {
@@ -546,5 +574,79 @@ fn try_eval(source: &str) -> Result<String, String> {
             }
         }
         None => Err("no result".into()),
+    }
+}
+
+fn checked_program_with_effects(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<chelis_types::CheckedProgram, String> {
+    let checked = chelis_types::check_phase0e_program(deep_exprs)
+        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
+    chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))
+}
+
+fn format_effect_errors(errors: &[chelis_effects::EffectError]) -> String {
+    errors
+        .iter()
+        .map(|error| error.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn fallback_symbolic_dims(
+    dag: &chelis_ir::dag::Dag,
+    preferred: &[String],
+    hint: &[String],
+) -> Vec<String> {
+    if !preferred.is_empty() {
+        preferred.to_vec()
+    } else if !hint.is_empty() {
+        hint.to_vec()
+    } else {
+        chelis_ir::dag::symbolic_bindings(dag)
+            .into_iter()
+            .map(|binding| binding.name)
+            .collect()
+    }
+}
+
+fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {
+    let mut dims = Vec::<String>::new();
+    for expr in exprs {
+        collect_symbolic_dims_expr(expr, &mut dims);
+    }
+    dims.sort();
+    dims.dedup();
+    dims
+}
+
+fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<String>) {
+    match expr {
+        chelis_deep::ast::Expr::List(list, _) => {
+            if let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) =
+                list.elements.first()
+                && tag == "d-name"
+                && let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) =
+                    list.elements.get(2)
+                && name != "*"
+            {
+                dims.push(name.clone());
+            }
+            for child in &list.elements {
+                collect_symbolic_dims_expr(child, dims);
+            }
+        }
+        chelis_deep::ast::Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_symbolic_dims_expr(value, dims);
+            }
+        }
+        chelis_deep::ast::Expr::MetaExpr(meta, _) => {
+            collect_symbolic_dims_expr(&meta.expr, dims);
+            for (_, value) in &meta.entries {
+                collect_symbolic_dims_expr(value, dims);
+            }
+        }
+        chelis_deep::ast::Expr::Atom(_, _) => {}
     }
 }

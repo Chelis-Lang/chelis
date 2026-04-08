@@ -50,11 +50,11 @@ pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let expand_b = dag.get(mul_node.inputs[1])?;
 
     let (axis_a, _size_a) = match &expand_a.op {
-        RiscOp::Expand { axis, size } => (*axis, *size),
+        RiscOp::Expand { axis, size } => (*axis, size.clone()),
         _ => return None,
     };
     let (axis_b, _size_b) = match &expand_b.op {
-        RiscOp::Expand { axis, size } => (*axis, *size),
+        RiscOp::Expand { axis, size } => (*axis, size.clone()),
         _ => return None,
     };
 
@@ -151,12 +151,18 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             tensor3_f32(2, 3, 4),
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             tensor3_f32(2, 3, 4),
         );
@@ -200,12 +206,18 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(5, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             tensor3_f32(2, 3, 4),
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             tensor3_f32(2, 5, 4),
         );

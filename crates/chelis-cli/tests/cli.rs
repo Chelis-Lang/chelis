@@ -141,9 +141,10 @@ fn build_creates_missing_output_directory() {
 }
 
 #[test]
-fn build_hip_rejects_symbolic_dims_without_panic() {
+fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("symbolic.ch");
+    let out_dir = dir.path().join("hip-out");
     write_file(
         &path,
         "def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
@@ -151,13 +152,22 @@ fn build_hip_rejects_symbolic_dims_without_panic() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["build", path.to_str().unwrap(), "--target", "hip"])
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "does not yet support unresolved named dimensions",
-        ))
-        .stderr(predicate::str::contains("symbolic dimension `batch`"));
+        .success()
+        .stdout(predicate::str::contains("Symbolic dims: batch, features"))
+        .stdout(predicate::str::contains("Peak device memory formula:"));
+
+    let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int features = inputs[0]->shape[1];"));
 }
 
 #[test]
@@ -200,6 +210,7 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .stdout(predicate::str::contains(
             out_dir.join("chelis_runtime.c").display().to_string(),
         ))
+        .stdout(predicate::str::contains("Peak device memory formula:"))
         .stdout(predicate::str::contains("Estimated peak device memory:"));
 
     assert!(out_dir.join("mnist_hip.cpp").exists());
@@ -264,6 +275,40 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
         hip_src.contains("chelis_hipblas_sgemm_row_major"),
         "HIP build should surface hipBLAS specialization for a simple matmul program"
     );
+}
+
+#[test]
+fn check_reports_unhandled_random_effect() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("dropout.ch");
+    write_file(
+        &path,
+        "let x: tensor[32, f32] = x\nlet y: tensor[32, f32] = dropout(x, 0.5)\n",
+    );
+
+    let json = run_json_check(&path);
+    let errors = json["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"].as_str() == Some("UnhandledEffect")
+            && error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Random"))
+    }));
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+}
+
+#[test]
+fn build_rejects_gpu_device_region_for_c_target() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("device.ch");
+    write_file(&path, "let x: int32 = with device(\"gpu:0\") { 1 }\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "c"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot satisfy resource region"));
 }
 
 #[test]

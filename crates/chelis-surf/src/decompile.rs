@@ -118,7 +118,8 @@ fn decompile_defsig(list: &List) -> String {
     }
     let name = sym_str(&kids[0]).unwrap_or("_");
     let ty = decompile_type_expr(&kids[1]);
-    format!("sig {name} : {ty}")
+    let effects = decompile_effect_suffix_from_type_expr(&kids[1]);
+    format!("sig {name} : {ty}{effects}")
 }
 
 fn decompile_deftype(list: &List) -> String {
@@ -437,6 +438,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "copy()".to_string()
             }
         }
+        Some("handle-effect") => decompile_handle_effect(list),
         Some("par") => {
             let kids = children(list);
             let parts: Vec<String> = kids.iter().map(decompile_expr).collect();
@@ -706,6 +708,119 @@ fn decompile_dim_or_prim(expr: &Expr) -> String {
     decompile_type_expr(expr)
 }
 
+fn decompile_handle_effect(list: &List) -> String {
+    let effect = meta(list).and_then(|meta| {
+        meta.entries
+            .iter()
+            .find(|(key, _)| key == "effect")
+            .and_then(|(_, value)| sym_str(value))
+    });
+    let kids = children(list);
+    if kids.len() < 2 {
+        return "()".to_string();
+    }
+    let arg = decompile_expr_without_annotation(&kids[0]);
+    let body = decompile_block_contents(&kids[1]);
+    match effect {
+        Some("random") => format!("with seed({arg}) {{\n{body}\n}}"),
+        Some("resource") => format!("with device({arg}) {{\n{body}\n}}"),
+        _ => format!("handle-effect({}, {})", arg, decompile_expr(&kids[1])),
+    }
+}
+
+fn decompile_expr_without_annotation(expr: &Expr) -> String {
+    match expr {
+        Expr::List(list, _) => decompile_list_expr(list),
+        Expr::MetaExpr(meta, _) => decompile_expr_without_annotation(&meta.expr),
+        _ => decompile_expr(expr),
+    }
+}
+
+fn decompile_block_contents(expr: &Expr) -> String {
+    let mut bindings = Vec::new();
+    let final_expr = collect_block_bindings(expr, &mut bindings);
+    if bindings.is_empty() {
+        return format!("  {}", decompile_expr(final_expr));
+    }
+
+    let mut lines: Vec<String> = bindings
+        .into_iter()
+        .map(|binding| format!("  {binding}"))
+        .collect();
+    lines.push(format!("  {}", decompile_expr(final_expr)));
+    lines.join("\n")
+}
+
+fn collect_block_bindings<'a>(expr: &'a Expr, bindings: &mut Vec<String>) -> &'a Expr {
+    if let Expr::List(list, _) = expr
+        && tag(list) == Some("let")
+    {
+        let kids = children(list);
+        if kids.len() >= 2 {
+            bindings.push(format!("let {}", decompile_bind(&kids[0])));
+            return collect_block_bindings(&kids[1], bindings);
+        }
+    }
+    expr
+}
+
+fn decompile_effect_suffix_from_type_expr(expr: &Expr) -> String {
+    let Expr::List(list, _) = expr else {
+        return String::new();
+    };
+    if tag(list) != Some("t-fn") {
+        return String::new();
+    }
+    let Some(effect_expr) = meta(list).and_then(|meta| {
+        meta.entries
+            .iter()
+            .find(|(key, _)| key == "eff")
+            .map(|(_, value)| value)
+    }) else {
+        return String::new();
+    };
+
+    let rendered = decompile_effect_set_expr(effect_expr);
+    if rendered.is_empty() {
+        String::new()
+    } else {
+        format!(" ! {{ {rendered} }}")
+    }
+}
+
+fn decompile_effect_set_expr(expr: &Expr) -> String {
+    let Expr::List(list, _) = expr else {
+        return String::new();
+    };
+    if tag(list) != Some("effects") {
+        return String::new();
+    }
+    let rendered: Vec<String> = children(list)
+        .iter()
+        .filter_map(decompile_effect_expr)
+        .collect();
+    rendered.join(", ")
+}
+
+fn decompile_effect_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => Some(match name.as_str() {
+            "diff" => "Diff".to_string(),
+            "random" => "Random".to_string(),
+            "accum" => "Accum".to_string(),
+            _ => return None,
+        }),
+        Expr::List(list, _) if tag(list) == Some("resource") => {
+            let device = children(list).first().and_then(|child| match child {
+                Expr::Atom(Atom::Str(device), _) => Some(device.as_str()),
+                _ => None,
+            })?;
+            Some(format!("Resource(\"{device}\")"))
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -752,5 +867,38 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decompile_program;
+    use crate::desugar::desugar_program;
+    use crate::parser::parse_str;
+
+    fn surf_to_surf(source: &str) -> String {
+        let decls = parse_str(source).expect("surf parse");
+        let deep = desugar_program(&decls);
+        decompile_program(&deep)
+    }
+
+    #[test]
+    fn decompile_defsig_effects() {
+        let rendered = surf_to_surf("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}");
+        assert!(rendered.contains("sig f : f32 -> f32 ! { Diff, Random, Resource(\"gpu:0\") }"));
+    }
+
+    #[test]
+    fn decompile_with_seed_handler() {
+        let rendered = surf_to_surf("def f() = with seed(42) { dropout(x, 0.5) }");
+        assert!(rendered.contains("with seed(42) {"));
+        assert!(rendered.contains("dropout(x,"));
+    }
+
+    #[test]
+    fn decompile_with_device_handler() {
+        let rendered = surf_to_surf("def f() = with device(\"gpu:0\") { x }");
+        assert!(rendered.contains("with device(\"gpu:0\") {"));
+        assert!(rendered.contains("\n  x\n}"));
     }
 }

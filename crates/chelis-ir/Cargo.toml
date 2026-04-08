@@ -10,3 +10,6 @@ repository.workspace = true
 chelis-deep.workspace = true
 chelis-types = { path = "../chelis-types" }
 thiserror.workspace = true
+
+[dev-dependencies]
+chelis-effects.workspace = true

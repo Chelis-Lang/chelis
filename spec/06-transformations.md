@@ -217,6 +217,22 @@ For memory efficiency, `grad(f, checkpoint=true)` opts into gradient checkpointi
 
 This is not implemented in Phase 0 but is specified here so the DAG representation can accommodate it from the start.
 
+### 2.10 Interaction With Phase 2a Effects
+
+`grad` remains a compiler transform, not a user-visible effect handler.
+
+- `Diff` is treated as a capability of the AD pipeline rather than a boundary effect
+- `Accum` remains an internal design hook for backward-pass accumulation and is not yet
+  a user-facing checked effect
+- `with seed(...)` is handled before or during lowering so seeded `dropout` enters the
+  DAG as a deterministic `Dropout { rate, seed }` node
+- in the shipped evaluator/AD path, the backward pass reuses the same seeded dropout
+  mask rather than differentiating with respect to the seed
+
+`with device(...)` is not a DAG-to-DAG transform. In the shipped Phase 2a subset it is
+validated on the checked Deep/build boundary: `chelis build --target c` rejects GPU
+resource regions, and `chelis build --target hip` rejects CPU-only regions.
+
 ---
 
 ## 3. vmap -- Vectorized Map

@@ -39,12 +39,11 @@ fn meta_empty() -> deep::Expr {
 }
 
 fn meta_with_type(ty: deep::Expr) -> deep::Expr {
-    deep::Expr::Map(
-        deep::MetaMap {
-            entries: vec![("type".to_string(), ty)],
-        },
-        sp(),
-    )
+    meta_with_entries(vec![("type".to_string(), ty)])
+}
+
+fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
+    deep::Expr::Map(deep::MetaMap { entries }, sp())
 }
 
 /// Build a 3-tuple Deep node: (tag {} children...)
@@ -110,6 +109,38 @@ fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     }
 }
 
+fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
+    let mut children = Vec::new();
+    for effect in effects {
+        children.push(match effect {
+            EffectExpr::Diff(_) => sym("diff"),
+            EffectExpr::Random(_) => sym("random"),
+            EffectExpr::Accum(_) => sym("accum"),
+            EffectExpr::Resource(device, _) => node(
+                "resource",
+                vec![deep::Expr::Atom(deep::Atom::Str(device.clone()), sp())],
+            ),
+        });
+    }
+    node("effects", children)
+}
+
+fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>) -> deep::Expr {
+    match (effects, ty_expr) {
+        (Some(effects), deep::Expr::List(list, span)) if !effects.is_empty() => {
+            let mut elements = list.elements;
+            if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = elements.first()
+                && tag == "t-fn"
+            {
+                elements[1] =
+                    meta_with_entries(vec![("eff".to_string(), desugar_effect_set(effects))]);
+            }
+            deep::Expr::List(deep::List { elements }, span)
+        }
+        (_, other) => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Primitive type names
 // ---------------------------------------------------------------------------
@@ -129,9 +160,10 @@ fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
             dim_params,
             params,
             ret_ty,
+            effects,
             body,
             ..
-        } => desugar_fun_def(name, dim_params, params, ret_ty, body),
+        } => desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
 
         Decl::LetDef {
             name,
@@ -171,7 +203,12 @@ fn desugar_decl(decl: &Decl) -> Vec<deep::Expr> {
             )]
         }
 
-        Decl::Sig { name, ty, .. } => vec![node("defsig", vec![sym(name), desugar_type(ty)])],
+        Decl::Sig {
+            name, ty, effects, ..
+        } => vec![node(
+            "defsig",
+            vec![sym(name), apply_effect_metadata(desugar_type(ty), effects)],
+        )],
 
         Decl::Dim { names, .. } => names
             .iter()
@@ -216,6 +253,7 @@ fn desugar_fun_def(
     dim_params: &[String],
     params: &[Param],
     ret_ty: &Option<TypeExpr>,
+    effects: &Option<Vec<EffectExpr>>,
     body: &Expr,
 ) -> Vec<deep::Expr> {
     // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
@@ -242,7 +280,13 @@ fn desugar_fun_def(
             Some(ty) => desugar_type_with_dims(ty, &dim_set),
             None => node("t-var", vec![sym("_")]),
         });
-        let sig = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
+        let sig = node(
+            "defsig",
+            vec![
+                sym(name),
+                apply_effect_metadata(node("t-fn", type_parts), effects),
+            ],
+        );
         vec![sig, def_node]
     } else {
         vec![def_node]
@@ -402,6 +446,16 @@ fn desugar_expr(expr: &Expr) -> deep::Expr {
         Expr::Jit(f, _) => node("jit", vec![desugar_expr(f)]),
         Expr::Realize(f, _) => node("realize", vec![desugar_expr(f)]),
         Expr::Copy(f, _) => node("copy", vec![desugar_expr(f)]),
+        Expr::WithSeed(seed, body, _) => node_meta(
+            "handle-effect",
+            meta_with_entries(vec![("effect".to_string(), sym("random"))]),
+            vec![desugar_expr(seed), desugar_expr(body)],
+        ),
+        Expr::WithDevice(device, body, _) => node_meta(
+            "handle-effect",
+            meta_with_entries(vec![("effect".to_string(), sym("resource"))]),
+            vec![desugar_expr(device), desugar_expr(body)],
+        ),
         Expr::Par(exprs, _) => node("par", exprs.iter().map(desugar_expr).collect()),
 
         Expr::Annotate(e, ty, _) => {
@@ -951,6 +1005,7 @@ mod tests {
             dim_params: vec![],
             params: vec![param("x", None)],
             ret_ty: None,
+            effects: None,
             body: tvar("x"),
             span: s(),
         };
@@ -969,6 +1024,7 @@ mod tests {
             dim_params: vec![],
             params: vec![param("x", Some(named_ty("f32")))],
             ret_ty: Some(named_ty("f32")),
+            effects: None,
             body: tvar("x"),
             span: s(),
         };
@@ -1006,6 +1062,7 @@ mod tests {
                 "f32".to_string(),
                 s(),
             )),
+            effects: None,
             body: tvar("x"),
             span: s(),
         };

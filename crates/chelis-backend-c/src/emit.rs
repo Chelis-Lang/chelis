@@ -1,7 +1,8 @@
 //! RISC DAG to C source code emission.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
+    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
+    symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -99,6 +100,8 @@ impl CEmitter {
             e.line("}");
         }
 
+        e.emit_input_shape_preamble(dag, &input_slots, func_name);
+
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
@@ -171,6 +174,9 @@ impl CEmitter {
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
             RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
+            RiscOp::Dropout { .. } => {
+                unreachable!("dropout should be rejected before C code generation")
+            }
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -212,7 +218,7 @@ impl CEmitter {
                 self.emit_permute(id, axes, &node.inputs, &node.output_type, dag);
             }
             RiscOp::Expand { axis, size } => {
-                self.emit_expand(id, *axis, *size, &node.inputs, &node.output_type, dag);
+                self.emit_expand(id, *axis, size, &node.inputs, &node.output_type, dag);
             }
             RiscOp::Pad { padding, fill } => {
                 self.emit_pad(id, padding, *fill, &node.inputs, &node.output_type, dag);
@@ -343,17 +349,96 @@ impl CEmitter {
         }
     }
 
+    fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
+        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op {
+                seen.entry(name.clone())
+                    .or_insert_with(|| node.output_type.clone());
+            }
+        }
+        seen
+    }
+
+    fn emit_input_shape_preamble(
+        &mut self,
+        dag: &Dag,
+        input_slots: &std::collections::HashMap<String, usize>,
+        func_name: &str,
+    ) {
+        let input_types = Self::input_types(dag);
+        for (label, ty) in &input_types {
+            let slot = input_slots[label];
+            self.line(&format!("if (inputs[{slot}] == NULL) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}: input `{label}` at slot {slot} is NULL\\n\");"
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!(
+                "if (inputs[{slot}]->ndim != {}) {{",
+                Self::ndim(ty)
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                Self::ndim(ty)
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            for (axis, dim) in ty.dims.iter().enumerate() {
+                if let Some(expected) = Self::known_dim_size(dim) {
+                    self.line(&format!(
+                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "fprintf(stderr, \"{func_name}: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                    ));
+                    self.line("abort();");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+
+        for binding in symbolic_bindings(dag) {
+            let canonical_slot = input_slots[&binding.canonical.input_label];
+            self.line(&format!(
+                "int {} = inputs[{canonical_slot}]->shape[{}];",
+                binding.name, binding.canonical.axis
+            ));
+            for occurrence in binding.others {
+                let slot = input_slots[&occurrence.input_label];
+                self.line(&format!(
+                    "if (inputs[{slot}]->shape[{}] != {}) {{",
+                    occurrence.axis, binding.name
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"{func_name}: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
+                    binding.name,
+                    occurrence.input_label,
+                    occurrence.axis,
+                    binding.name,
+                    occurrence.axis,
+                    binding.name
+                ));
+                self.line("abort();");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
+    }
+
     fn shape_literal(ty: &TensorType) -> String {
         let dims: Vec<String> = ty
             .dims
             .iter()
-            .map(|d| match d {
-                DimInfo::Lit(n) => n.to_string(),
-                DimInfo::Named(_, Some(n)) => n.to_string(),
-                DimInfo::Named(name, None) => {
-                    panic!("unsized named dimension '{name}' in C codegen")
-                }
-            })
+            .map(|dim| Self::emit_dim_expr(&DimExpr::from(dim)))
             .collect();
         if dims.is_empty() {
             "(int[]){1}".to_string()
@@ -366,12 +451,39 @@ impl CEmitter {
         if ty.dims.is_empty() { 1 } else { ty.dims.len() }
     }
 
-    fn dim_size(dim: &DimInfo) -> usize {
+    fn known_dim_size(dim: &DimInfo) -> Option<usize> {
         match dim {
-            DimInfo::Lit(n) => *n,
-            DimInfo::Named(_, Some(n)) => *n,
-            DimInfo::Named(name, None) => {
-                panic!("unsized named dimension '{name}' in C codegen")
+            DimInfo::Lit(n) => Some(*n),
+            DimInfo::Named(_, Some(n)) => Some(*n),
+            DimInfo::Named(_, None) => None,
+        }
+    }
+
+    fn emit_dim_info(dim: &DimInfo) -> String {
+        match dim {
+            DimInfo::Lit(n) => n.to_string(),
+            DimInfo::Named(_, Some(n)) => n.to_string(),
+            DimInfo::Named(name, None) => name.clone(),
+        }
+    }
+
+    fn emit_dim_expr(expr: &DimExpr) -> String {
+        match expr {
+            DimExpr::Concrete(n) => n.to_string(),
+            DimExpr::Sym(name) => name.clone(),
+            DimExpr::Mul(lhs, rhs) => {
+                format!(
+                    "({} * {})",
+                    Self::emit_dim_expr(lhs),
+                    Self::emit_dim_expr(rhs)
+                )
+            }
+            DimExpr::Div(lhs, rhs) => {
+                format!(
+                    "({} / {})",
+                    Self::emit_dim_expr(lhs),
+                    Self::emit_dim_expr(rhs)
+                )
             }
         }
     }
@@ -683,7 +795,7 @@ impl CEmitter {
         }
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
@@ -742,7 +854,7 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::dim_size(&input_node.output_type.dims[axis]);
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
@@ -804,7 +916,7 @@ impl CEmitter {
             RiscOp::FusedElem { ops } => ops,
             _ => panic!("expected FusedElem op"),
         };
-        let axis_size = Self::dim_size(&fused_input_type.dims[axis]);
+        let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);
         // ndim of the fused input (pre-reduction shape)
         let fused_ndim = fused_input_type.dims.len();
 
@@ -987,7 +1099,7 @@ impl CEmitter {
         &mut self,
         id: usize,
         axis: usize,
-        size: usize,
+        _size: &DimExpr,
         inputs: &[NodeId],
         ty: &TensorType,
         _dag: &Dag,
@@ -995,7 +1107,6 @@ impl CEmitter {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
-        let _ = size; // used in shape already
         let dtype = Self::dtype_macro(ty);
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
@@ -1341,7 +1452,14 @@ mod tests {
     fn expand_sets_stride_zero() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1));
-        dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![a], vec_f32(4));
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
+            vec![a],
+            vec_f32(4),
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("strides[0] = 0"));
     }
@@ -1599,7 +1717,10 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1607,7 +1728,10 @@ mod tests {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1637,7 +1761,10 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
         let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
         let ea = dag.add_node(
-            RiscOp::Expand { axis: 2, size: 4 },
+            RiscOp::Expand {
+                axis: 2,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
             vec![a],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
@@ -1645,7 +1772,10 @@ mod tests {
             },
         );
         let eb = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(2),
+            },
             vec![b],
             TensorType {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],

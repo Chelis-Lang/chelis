@@ -6,7 +6,7 @@ use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
 
 /// Parse Surf source, desugar to Deep, print Deep, re-parse Deep with strict
-/// tag validation. Verifies the generated Deep uses only canonical 56-tag
+/// tag validation. Verifies the generated Deep uses only canonical 59-tag
 /// vocabulary and round-trips through the Deep parser.
 fn roundtrip(surf_source: &str) {
     // 1. Parse Surf
@@ -215,5 +215,38 @@ fn no_legacy_tags() {
     assert!(
         !text.contains("(: "),
         "Legacy ':' annotation tag found in:\n{text}"
+    );
+}
+
+#[test]
+fn effect_annotations_desugar_into_t_fn_metadata() {
+    let decls = surf_parse("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}").unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("{eff: (effects {} diff random (resource {} \"gpu:0\"))}"),
+        "Expected effect metadata on t-fn, got:\n{text}"
+    );
+}
+
+#[test]
+fn with_seed_desugars_to_handle_effect() {
+    let decls = surf_parse("def f() = with seed(42) { dropout(x, 0.5) }").unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(handle-effect {effect: random}"),
+        "Expected random handler node, got:\n{text}"
+    );
+}
+
+#[test]
+fn with_device_desugars_to_handle_effect() {
+    let decls = surf_parse("def f() = with device(\"gpu:0\") { x }").unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(handle-effect {effect: resource}"),
+        "Expected resource handler node, got:\n{text}"
     );
 }

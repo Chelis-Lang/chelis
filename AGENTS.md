@@ -138,7 +138,7 @@ default workspace run.
 
 - Every Deep node is a 3-tuple: `(tag {} children...)`
 - Metadata map is always present at element 1
-- 56-tag closed vocabulary; see `spec/03-deep-syntax.md`
+- 59-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
 

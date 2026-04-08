@@ -141,6 +141,23 @@ def multi_head_attn(q, k, v, mask) = ...
 
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type).
 
+Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
+
+```text
+sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
+def train(x: tensor[n, f32]): tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
+```
+
+Surf accepts the built-in names `Diff`, `Random`, `Accum`, and `Resource("device")`.
+The current shipped boundary-checking surface is narrower than the syntax:
+
+- `Random` is the active user-facing boundary effect in Phase 2a
+- `Resource("...")` is the active build-boundary placement annotation in Phase 2a
+- `Diff` is accepted as documentation / forward-compatible syntax, but `grad` remains a
+  compiler capability rather than a user-handled boundary effect
+- `Accum` is accepted as forward-compatible syntax but remains internal-only in the
+  shipped Phase 2a subset
+
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
 ### P5: Blocks and Sequencing
@@ -176,6 +193,30 @@ Blocks are expressions: `let result = { let temp = f(x); g(temp) }` is valid.
 A separator (newline or semicolon) is required between a `let` binding and the next statement. Multiple separators (blank lines) are fine. Trailing semicolon after the final expression is tolerated.
 
 No `where` clauses. Use `let...in` or blocks.
+
+### P5a: Effect Handlers
+
+Phase 2a adds two `with` block forms:
+
+```text
+with seed(42) {
+  dropout(x, 0.5)
+}
+
+with device("gpu:0") {
+  body
+}
+```
+
+`with` handlers are expressions. They take exactly one argument in parentheses and a
+brace-delimited block body.
+
+Current shipped constraints:
+
+- `with seed(...)` currently requires an explicit integer literal seed for the effect
+  checker and lowering path
+- `with device(...)` currently requires an explicit string literal device name
+- only `seed` and `device` are valid handler names in the Phase 2a Surf parser
 
 ### P6: Records
 

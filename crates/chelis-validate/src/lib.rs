@@ -46,6 +46,7 @@ const VALID_TAGS: &[&str] = &[
     "tuple",
     "tuple-get",
     "par",
+    "handle-effect",
     "pat-var",
     "pat-lit",
     "pat-ctor",
@@ -76,6 +77,8 @@ const VALID_TAGS: &[&str] = &[
     "params",
     "bind",
     "kv",
+    "effects",
+    "resource",
 ];
 
 #[derive(Debug, Error)]
@@ -188,6 +191,7 @@ fn validate_tag_shape(
 
     match tag {
         "if" | "arm" if child_count != 3 => Err(wrong_arity("exactly 3 children")),
+        "handle-effect" if child_count != 2 => Err(wrong_arity("exactly 2 children")),
         "fn" => {
             if child_count != 2 {
                 return Err(wrong_arity("exactly 2 children"));

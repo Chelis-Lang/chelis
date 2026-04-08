@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::tier2;
 use chelis_types::types::Prim;
 
@@ -258,17 +258,30 @@ fn compute_adjoints(
             let dx = tier2::lower_div(dag, g, two_sqrt, &ty);
             Some(vec![(x, dx)])
         }
+        RiscOp::Dropout { rate, seed } => {
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let dx = dag.add_node(
+                RiscOp::Dropout {
+                    rate: *rate,
+                    seed: *seed,
+                },
+                vec![g],
+                ty,
+            );
+            Some(vec![(x, dx)])
+        }
 
         // --- Reduction ---
         RiscOp::Sum { axis } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = dim_size(&input_ty.dims[*axis]);
+            let original_size = DimExpr::from(&input_ty.dims[*axis]);
             let dx = dag.add_node(
                 RiscOp::Expand {
                     axis: *axis,
-                    size: original_size,
+                    size: original_size.clone(),
                 },
                 vec![g],
                 input_ty,
@@ -281,13 +294,13 @@ fn compute_adjoints(
             // dx = mul(expand(g, axis, size), mask)
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = dim_size(&input_ty.dims[*axis]);
+            let original_size = DimExpr::from(&input_ty.dims[*axis]);
 
             // Expand forward max_reduce node back to input shape.
             let expanded_max = dag.add_node(
                 RiscOp::Expand {
                     axis: *axis,
-                    size: original_size,
+                    size: original_size.clone(),
                 },
                 vec![node.id],
                 input_ty.clone(),
@@ -916,7 +929,10 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_ty.clone());
         let expanded = dag.add_node(
-            RiscOp::Expand { axis: 0, size: 2 },
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Concrete(2),
+            },
             vec![x],
             mat23_ty.clone(),
         );

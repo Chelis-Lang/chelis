@@ -522,7 +522,14 @@ fn g4_max_reduce_gpu_matches_cpu() {
 fn g5_expand_add_stride_zero() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3));
-    let expanded = dag.add_node(RiscOp::Expand { axis: 0, size: 4 }, vec![x], mat_f32(4, 3));
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
+        vec![x],
+        mat_f32(4, 3),
+    );
     let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(4, 3));
     let out = dag.add_node(RiscOp::Add, vec![expanded, c], mat_f32(4, 3));
     dag.add_root(out);
@@ -809,12 +816,18 @@ fn g15_hipblas_matmul_matches_eval() {
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );
@@ -854,12 +867,18 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
     );
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
     let ea = dag.add_node(
-        RiscOp::Expand { axis: 2, size: 4 },
+        RiscOp::Expand {
+            axis: 2,
+            size: chelis_ir::dag::DimExpr::Concrete(4),
+        },
         vec![a],
         tensor3_f32(2, 3, 4),
     );
     let eb = dag.add_node(
-        RiscOp::Expand { axis: 0, size: 2 },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::DimExpr::Concrete(2),
+        },
         vec![b],
         tensor3_f32(2, 3, 4),
     );

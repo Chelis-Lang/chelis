@@ -209,12 +209,12 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate kernel source for sum reduction (naive: one thread per output element).
-pub fn reduce_sum(kernel_name: &str, axis: usize, axis_size: usize) -> String {
+pub fn reduce_sum(kernel_name: &str, axis: usize) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
     const float *a, {a_strides}, int a_ndim, int a_size,
-    float *out, {out_shape}, int out_ndim, int out_size) {{
+    float *out, {out_shape}, int out_ndim, int out_size, int axis_size) {{
 {build_a_s}
 {build_out_sh}
   int outer = blockIdx.x * blockDim.x + threadIdx.x;
@@ -222,7 +222,7 @@ extern \"C\" __global__ void {kernel_name}(
   int out_indices[{MAX_DIM}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   float acc = 0.0f;
-  for (int k = 0; k < {axis_size}; k++) {{
+  for (int k = 0; k < axis_size; k++) {{
     int full_indices[{MAX_DIM}];
     int out_d = 0;
     for (int d = 0; d < a_ndim; d++) {{
@@ -247,12 +247,12 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate kernel source for max reduction (naive: one thread per output element).
-pub fn reduce_max(kernel_name: &str, axis: usize, axis_size: usize) -> String {
+pub fn reduce_max(kernel_name: &str, axis: usize) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
     const float *a, {a_strides}, int a_ndim, int a_size,
-    float *out, {out_shape}, int out_ndim, int out_size) {{
+    float *out, {out_shape}, int out_ndim, int out_size, int axis_size) {{
 {build_a_s}
 {build_out_sh}
   int outer = blockIdx.x * blockDim.x + threadIdx.x;
@@ -260,7 +260,7 @@ extern \"C\" __global__ void {kernel_name}(
   int out_indices[{MAX_DIM}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   float acc = -3.402823466e+38F;
-  for (int k = 0; k < {axis_size}; k++) {{
+  for (int k = 0; k < axis_size; k++) {{
     int full_indices[{MAX_DIM}];
     int out_d = 0;
     for (int d = 0; d < a_ndim; d++) {{
@@ -779,7 +779,6 @@ extern \"C\" __global__ void {kernel_name}(
 pub fn reduce_fused(
     kernel_name: &str,
     axis: usize,
-    axis_size: usize,
     steps: &[chelis_ir::dag::FusedStep],
     n_external: usize,
     reduce_kind: ReduceKind,
@@ -799,6 +798,7 @@ pub fn reduce_fused(
     params.push(shape_params("out"));
     params.push("int out_ndim".into());
     params.push("int out_size".into());
+    params.push("int axis_size".into());
 
     // Build local array constructions for external input strides
     let mut body_arrays = Vec::new();
@@ -892,7 +892,7 @@ extern \"C\" __global__ void {kernel_name}(
   int out_indices[{MAX_DIM}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   float acc = {init};
-  for (int k = 0; k < {axis_size}; k++) {{
+  for (int k = 0; k < axis_size; k++) {{
     int full_indices[{MAX_DIM}];
     int out_d = 0;
     for (int d = 0; d < out_ndim + 1; d++) {{
@@ -1139,15 +1139,15 @@ mod tests {
 
     #[test]
     fn reduce_sum_kernel_has_axis_loop() {
-        let src = reduce_sum("kernel_sum_ax0", 0, 32);
+        let src = reduce_sum("kernel_sum_ax0", 0);
         assert!(src.contains("float acc = 0.0f;"));
-        assert!(src.contains("for (int k = 0; k < 32; k++)"));
+        assert!(src.contains("for (int k = 0; k < axis_size; k++)"));
         assert!(src.contains("if (d == 0)"));
     }
 
     #[test]
     fn reduce_max_kernel_has_f32_min_sentinel() {
-        let src = reduce_max("kernel_max_ax1", 1, 10);
+        let src = reduce_max("kernel_max_ax1", 1);
         assert!(src.contains("-3.402823466e+38F"));
         assert!(src.contains("fmaxf(acc,"));
     }
@@ -1164,7 +1164,7 @@ mod tests {
     fn device_helpers_present_in_all_compute_kernels() {
         let add = binary_elementwise("k", "+");
         let neg = unary_prefix("k", "-");
-        let sum = reduce_sum("k", 0, 1);
+        let sum = reduce_sum("k", 0);
         let fill_src = fill("k");
         for src in [&add, &neg, &sum, &fill_src] {
             assert!(src.contains("__device__ void chelis_flat_to_indices"));

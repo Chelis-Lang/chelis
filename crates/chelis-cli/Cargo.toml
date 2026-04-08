@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive"] }
 chelis-deep.workspace = true
 chelis-surf.workspace = true
 chelis-types = { path = "../chelis-types" }
+chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }

@@ -95,7 +95,7 @@ Macro invocations are expanded before any LLM-facing operation (generation, trai
 fitness scoring, error reporting).
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
-The 56-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+The 59-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
 
@@ -164,10 +164,18 @@ This list is the intended stable surface for project-level documentation.
 - named tensor dimensions
 - graded fitness scoring with repair suggestions
 
-### Deferred to Phase 2
+### Phase 2a shipped subset
 
-- algebraic effects: `Diff`, `Random`, `Accum`, `Resource(Device)`
-- inferred effect sets with explicit handlers at the program boundary
+- effect annotations on Surf `sig` / `def` and Deep `t-fn` metadata
+- checked-program upgrade: downstream passes consume annotated Deep with type metadata
+- algebraic-effect boundary handling for `Random` and `Resource(Device)`
+- `with seed(...)` for seeded stochastic regions and `with device(...)` for resource regions
+
+### Deferred to later Phase 2 work
+
+- broader effect inference/checking beyond the shipped `Random` / `Resource(Device)` subset
+- `Diff` as a fully specified effect surface (it remains a compiler capability today)
+- `Accum` as user-visible effect surface (it remains internal-only today)
 - linear types for tensors with borrowing rules and explicit `copy`
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
@@ -286,16 +294,14 @@ differentiate, cannot fuse), it belongs in the core.
 If removing it just means the user has to write it themselves from the primitives, it
 belongs in a library.
 
-### Grey area: Phase 2 effects
+### Grey area: shipped Phase 2a effects vs later extensibility
 
-The Phase 2 effect system (`Diff`, `Random`, `Resource(Device)`) will make some
-currently library-level constructs interact with the type system.
-When `Random` is an effect, a probabilistic sampling library declares the `Random`
-effect and the compiler tracks it — but the effect mechanism is designed to be open
-(user-defined effects in Phase 3), so the compiler knows about the effect mechanism,
-not about specific libraries that use it.
-The sampling library declares `Random` effect; the compiler tracks it; neither needs to
-know the other's internals.
+The shipped Phase 2a surface is intentionally closed and compiler-known:
+`Random`, `Accum`, and `Resource(Device)` live in the type layer, but only `Random`
+and `Resource(Device)` are boundary-checked today.
+This is narrower than the longer-term design space.
+User-defined effects remain deferred; the current compiler knows both the effect
+mechanism and the concrete built-in effect vocabulary it ships.
 
 ### Phase 1–2 practical note
 
