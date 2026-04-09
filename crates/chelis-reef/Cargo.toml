@@ -1,0 +1,26 @@
+[package]
+name = "chelis-reef"
+description = "Local-first Reef package system for Chelis"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chelis-deep.workspace = true
+chelis-macros.workspace = true
+chelis-surf.workspace = true
+chelis-types.workspace = true
+chelis-effects.workspace = true
+chelis-shell.workspace = true
+serde.workspace = true
+bincode = "1"
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+toml = "0.8"
+walkdir = "2"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -99,6 +99,11 @@ enum Command {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Local-first Reef package management
+    Reef {
+        #[command(subcommand)]
+        command: ReefCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +122,22 @@ enum TideCommand {
         #[arg(long, hide = true, action = ArgAction::SetTrue)]
         stdio: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ReefCommand {
+    /// Initialize a Reef package root
+    Init {
+        name: String,
+        #[arg(long)]
+        module_prefix: String,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Build package artifacts (.chb + .tar.zst)
+    Build { path: Option<PathBuf> },
+    /// Publish a package into the local Reef registry
+    Publish { path: Option<PathBuf> },
 }
 
 fn main() {
@@ -142,6 +163,7 @@ fn main() {
             output,
             target,
         }) => cmd_build(&file, output.as_deref(), &target),
+        Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
         None => {
@@ -155,7 +177,7 @@ fn main() {
     }
 }
 
-fn cmd_deep(file: &PathBuf, flat: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deep(file: &Path, flat: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
@@ -168,7 +190,7 @@ fn cmd_deep(file: &PathBuf, flat: bool) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn cmd_surf(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let options = if verbose {
@@ -199,7 +221,7 @@ fn cmd_surf(file: &PathBuf, verbose: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn cmd_fmt(file: &PathBuf, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::error::Error>> {
     if inplace && check {
         return Err("`chelis fmt` does not allow `--inplace` and `--check` together".into());
     }
@@ -247,9 +269,8 @@ fn cmd_eval(
     }
 }
 
-fn cmd_check(file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
+fn cmd_check(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let (decls, _) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
     let (effect_errors, linearity_errors) = match chelis_types::check_typed_program(&deep_exprs) {
@@ -347,15 +368,32 @@ fn cmd_build(
     output: Option<&std::path::Path>,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file)?;
-    let decls = chelis_surf::parser::parse_str(&source)?;
+    let (decls, entry_decls) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
     let checked =
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    let dag = chelis_ir::lower::lower_program(&checked);
+    let mut dag = chelis_ir::lower::lower_program(&checked);
+    let all_root_names = lowered_root_names_from_decls(&decls, checked.type_env());
+    let entry_root_names = lowered_root_names_from_decls(&entry_decls, checked.type_env());
+    if !entry_root_names.is_empty() && entry_root_names.len() != all_root_names.len() {
+        let selected = all_root_names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                if entry_root_names.iter().any(|entry| entry == name) {
+                    dag.roots().get(index).copied()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !selected.is_empty() {
+            dag.set_roots(selected);
+        }
+    }
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -378,6 +416,57 @@ fn cmd_build(
         }
         other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
     }
+}
+
+fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ReefCommand::Init {
+            name,
+            module_prefix,
+            output,
+        } => {
+            let root = output.unwrap_or_else(|| PathBuf::from("."));
+            chelis_reef::init_package(&root, &name, &module_prefix)?;
+            println!(
+                "Initialized Reef package `{name}` at {}",
+                root.canonicalize().unwrap_or(root).display()
+            );
+        }
+        ReefCommand::Build { path } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let artifacts = chelis_reef::build_package(&root)?;
+            println!(
+                "Built {} {}",
+                artifacts.package.name, artifacts.package.version
+            );
+            println!("Shell: {}", artifacts.shell_path.display());
+            println!("Archive: {}", artifacts.archive_path.display());
+        }
+        ReefCommand::Publish { path } => {
+            let root = path.unwrap_or_else(|| PathBuf::from("."));
+            let artifacts = chelis_reef::publish_package(&root)?;
+            println!(
+                "Published {} {}",
+                artifacts.package.name, artifacts.package.version
+            );
+            println!("Shell: {}", artifacts.shell_path.display());
+            println!("Archive: {}", artifacts.archive_path.display());
+        }
+    }
+    Ok(())
+}
+
+fn load_check_build_decls(
+    file: &Path,
+) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
+    if let Some(prepared) =
+        chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?
+    {
+        return Ok((prepared.decls, prepared.entry_decls));
+    }
+    let source = fs::read_to_string(file)?;
+    let decls = chelis_surf::parser::parse_str(&source)?;
+    Ok((decls.clone(), decls))
 }
 
 fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
@@ -419,7 +508,7 @@ fn reject_unsupported_effect_ops(
 }
 
 fn cmd_validate(
-    file: &PathBuf,
+    file: &Path,
     surf: bool,
     deep: bool,
     desugar: bool,

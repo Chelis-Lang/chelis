@@ -1,0 +1,11 @@
+[package]
+name = "chelis-shell"
+description = "Shell (.chb) metadata for the Chelis package system"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+bincode = "1"

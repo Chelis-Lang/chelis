@@ -44,8 +44,8 @@ Deep source file.
 
 ### `.chb`
 
-Planned binary Chelis artifact.
-The name is settled, but the full on-disk format is not frozen in this spec yet.
+Binary Shell metadata artifact for the Reef package system.
+The name and role are settled; the full on-disk format is still implementation-owned.
 
 ### Shell
 
@@ -56,7 +56,8 @@ The term is ecosystem-facing and broader than a single file format.
 
 ### Reef
 
-The future package ecosystem and registry for Chelis.
+The Chelis package ecosystem and registry surface.
+The first shipped cut is local-first.
 
 ### Tide
 

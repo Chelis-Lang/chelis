@@ -108,9 +108,11 @@ Chelis currently has three named artifact forms:
 
 - `.ch` for Surf source
 - `.dp` for Deep source
-- `.chb` for a future binary typed artifact
+- `.chb` for Shell metadata in the Reef package system
 
-`.chb` is a planned concept, not a fully frozen on-disk format yet.
+`.chb` now exists as an implementation-owned binary package interface.
+The name and role are stable; the low-level wire format is intentionally not frozen in
+the public spec yet.
 
 ---
 
@@ -152,6 +154,9 @@ chelis tide lsp
 chelis cove
 chelis fmt app.ch
 chelis fmt app.dp --check
+chelis reef init demo --module-prefix Demo
+chelis reef build
+chelis reef publish
 chelis validate --surf app.ch
 chelis validate --deep app.dp
 chelis validate --desugar app.ch
@@ -347,16 +352,14 @@ This is narrower than the longer-term design space.
 User-defined effects remain deferred; the current compiler knows both the effect
 mechanism and the concrete built-in effect vocabulary it ships.
 
-### Phase 1–2 practical note
+### Phase 3 practical note
 
 Everything currently lives in the core repo.
-External libraries do not exist yet because there is no package manager (Reef is Phase
-3a).
-The standard library grows organically as the MNIST model and subsequent models demand
-common utilities.
-The first external library will likely be an architecture zoo (`chelis-models`) once
-someone wants to ship a pretrained transformer, which requires the package system to
-exist.
+The first shipped Reef cut is local-first: `chelis-std` is bundled in-repo and
+dogfoods the same package pipeline users rely on.
+That is enough to prove manifests, `.chb` shells, local publish/install, import
+resolution, and source-archive consumption during `check` / `build`.
+Broader external libraries and any hosted registry service remain later ecosystem work.
 
 ---
 

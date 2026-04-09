@@ -394,10 +394,14 @@ Acceptance criteria:
 ### 3a: Package System (Shells + Reef)
 
 - `reef.toml`
-- Shell publishing and dependency resolution
-- Reef registry
+- `reef.lock`
+- local-first Reef registry
+- `.chb` shell metadata plus source archives for downstream builds
+- bounded package-aware `chelis check` / `chelis build`
 - dogfood the system by shipping `chelis-std` as a Reef package through the same
   shell/import pipeline users rely on
+- keep `Std.IO.Safetensors` as a package/API stub in `3a`; land its runtime
+  implementation in `3b`
 
 ### 3b: Python FFI
 

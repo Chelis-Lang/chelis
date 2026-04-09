@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use chelis_shell::{ShellSymbol, SymbolKind, read_shell, write_shell};
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
@@ -46,6 +47,10 @@ fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
 
+fn package_std() -> PathBuf {
+    example_path("../../packages/chelis-std")
+}
+
 fn editor_file(rel: &str) -> PathBuf {
     example_path(&format!("../../editors/vscode/{rel}"))
 }
@@ -63,6 +68,20 @@ let out = (matmul(a, b) : tensor[2, 4, f32])
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("create dst dir");
+    for entry in fs::read_dir(src).expect("read dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target);
+        } else {
+            fs::copy(&path, &target).expect("copy file");
+        }
+    }
 }
 
 fn write_symbolic_matmul_program(path: &Path) {
@@ -375,6 +394,330 @@ fn phase3e_pipe_first_acceptance_oracle() {
         ))
         .stdout(predicate::str::contains("(softmax(logits, 1) :").not())
         .stdout(predicate::str::contains("(matmul(x, w1) :").not());
+}
+
+#[test]
+fn reef_init_scaffolds_valid_package() {
+    let dir = tempdir().expect("tempdir");
+    let pkg = dir.path().join("demo");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "reef",
+            "init",
+            "demo",
+            "--module-prefix",
+            "Demo",
+            "--output",
+            pkg.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(pkg.join("reef.toml").exists());
+    assert!(pkg.join("src/main.ch").exists());
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn reef_build_emits_shell_and_archive() {
+    let dir = tempdir().expect("tempdir");
+    let pkg = dir.path().join("chelis-std");
+    copy_dir_recursive(&package_std(), &pkg);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "build", pkg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built chelis-std 0.1.0"));
+
+    assert!(pkg.join("reef.lock").exists());
+    assert!(pkg.join("dist/chelis-std-0.1.0.chb").exists());
+    assert!(pkg.join("dist/chelis-std-0.1.0.tar.zst").exists());
+}
+
+#[test]
+fn phase3a_reef_std_acceptance_oracle() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("demo-app");
+    let out_dir = dir.path().join("out");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "demo-app"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Nn.Linear (forward)
+import Std.Loss.CrossEntropy (loss)
+import Std.Init.Xavier (sample)
+
+export (main)
+
+def main(
+  x: tensor[32, 784, f32],
+  w: tensor[784, 10, f32],
+  b: tensor[10, f32]
+) -> tensor[32, 10, f32] =
+  forward(x, w, b)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(app_pkg.join("reef.lock").exists());
+    assert!(out_dir.join("main.c").exists());
+    assert!(out_dir.join("main.h").exists());
+}
+
+#[test]
+fn reef_check_accepts_sig_only_shell_imports() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("sig-app");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "sig-app"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.IO.Safetensors (load_tensors)
+
+export (main)
+
+def main(path: string) -> string =
+  load_tensors(path)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+}
+
+#[test]
+fn reef_check_accepts_path_dependencies() {
+    let dir = tempdir().expect("tempdir");
+    let dep_pkg = dir.path().join("dep");
+    let app_pkg = dir.path().join("app");
+    fs::create_dir_all(dep_pkg.join("src")).expect("mkdir dep src");
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    write_file(
+        &dep_pkg.join("reef.toml"),
+        r#"[package]
+name = "dep"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Common"
+"#,
+    );
+    write_file(
+        &dep_pkg.join("src/helper.ch"),
+        r#"module Common.Helper
+
+export (shared)
+
+def shared(x: f32) -> f32 = x
+"#,
+    );
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+dep = { path = "../dep" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Common.Helper (shared)
+
+export (main)
+
+def main(x: f32) -> f32 = shared(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+}
+
+#[test]
+fn reef_check_rejects_tampered_registry_shell_exports() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let dep_pkg = dir.path().join("dep");
+    let app_pkg = dir.path().join("app");
+    fs::create_dir_all(dep_pkg.join("src")).expect("mkdir dep src");
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    write_file(
+        &dep_pkg.join("reef.toml"),
+        r#"[package]
+name = "dep"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Common"
+"#,
+    );
+    write_file(
+        &dep_pkg.join("src/api.ch"),
+        r#"module Common.Api
+
+export (public)
+
+def public(x: f32) -> f32 = hidden(x)
+def hidden(x: f32) -> f32 = x
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", dep_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let shell_path = reef_home.join("packages/dep/0.1.0/dep-0.1.0.chb");
+    let mut shell = read_shell(&shell_path).expect("read published shell");
+    let module = shell
+        .modules
+        .iter_mut()
+        .find(|module| module.module == "Common.Api")
+        .expect("Common.Api shell module");
+    let public = module
+        .exports
+        .iter()
+        .find(|symbol| symbol.name == "public")
+        .expect("public export")
+        .clone();
+    module.exports.push(ShellSymbol {
+        name: "hidden".to_string(),
+        kind: SymbolKind::Value,
+        type_repr: public.type_repr,
+        effects: public.effects,
+        has_body: true,
+    });
+    module.exports.sort_by(|a, b| a.name.cmp(&b.name));
+    write_shell(&shell_path, &shell).expect("rewrite shell");
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+dep = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Common.Api (hidden)
+
+export (main)
+
+def main(x: f32) -> f32 = hidden(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("checksum")
+                .or(predicate::str::contains("does not export `hidden`")),
+        );
 }
 
 #[test]

@@ -130,6 +130,15 @@ Phase 2g currently ships as:
 - live diagnostics and numeric fitness status
 - `Ctrl-S` save, `Ctrl-R` compile, `Ctrl-E` eval, `Ctrl-Q` quit
 
+Phase 3 now ships:
+
+- `chelis reef init`
+- `chelis reef build`
+- `chelis reef publish`
+- local-first Reef package resolution for `chelis check` and `chelis build`
+- bundled `packages/chelis-std` dogfooding the package system through `.chb` shell
+  metadata plus source archives
+
 ## Phase 0h Validation
 
 Release-mode MNIST validation is checked in as:
@@ -149,6 +158,8 @@ The ignored MNIST tests mirror it for manual test-harness use, but the normal wo
 
 ```text
 crates/
+  chelis-shell/      .chb Shell metadata
+  chelis-reef/       Reef manifests, lockfiles, local registry, package linker
   chelis-deep/       Deep parser and canonical printer
   chelis-surf/       Surf parser, desugaring, decompilation
   chelis-types/      Type checker, dimensions, precision, fitness
@@ -162,6 +173,7 @@ crates/
   spec/                Numbered language specs and design docs
 editors/vscode/      VS Code-compatible extension and TextMate grammars
 grammars/            Tree-sitter grammars for Surf and Deep
+packages/chelis-std/ Reef-packaged standard-library dogfood set
 examples/            Executable Phase 0 example programs
 examples/illustrative/  Non-executable syntax/design examples
 ```

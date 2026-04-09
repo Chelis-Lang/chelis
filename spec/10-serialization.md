@@ -11,19 +11,20 @@ Binary formats remain intentionally under-specified until there is an implemente
 
 Deep canonical printing is defined by `spec/03-deep-syntax.md`.
 
-## 2. Planned Binary Form
+## 2. Binary Shell Form
 
-`.chb` is the name reserved for a future binary Chelis artifact.
-The term is stable, but the exact wire format is not yet frozen.
+`.chb` is the binary Shell metadata artifact used by the Reef package system.
+Its role is stable, but the exact wire format is still owned by the implementation.
 
-Current expectations for a future `.chb` artifact:
+Current `.chb` expectations:
 
-- typed program representation
-- compiler metadata
-- room for backend-specific cached products
+- public package metadata
+- exported symbol metadata
+- compiler compatibility metadata
+- room for future cached products without freezing the public wire layout
 
-The project should not publish fake low-level `.chb` layout guarantees until a real
-serialization implementation exists.
+The project should not publish fake low-level `.chb` layout guarantees while the
+implementation is still expected to evolve.
 
 ## 3. Related Serialization Work
 

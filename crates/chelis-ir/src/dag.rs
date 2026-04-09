@@ -340,6 +340,10 @@ impl Dag {
         &self.roots
     }
 
+    pub fn set_roots(&mut self, roots: Vec<NodeId>) {
+        self.roots = roots;
+    }
+
     pub fn is_root(&self, id: NodeId) -> bool {
         self.roots.contains(&id)
     }

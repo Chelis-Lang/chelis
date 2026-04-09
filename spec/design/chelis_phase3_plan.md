@@ -270,9 +270,10 @@ The first real package is the standard library itself.
 
 - `reef.toml` manifest
 - `reef.lock` lockfile
-- `.chb` shell artifact containing public typed metadata
-- registry index and artifact publishing
+- `.chb` shell artifact containing public metadata owned by `chelis-shell`
+- local registry index and artifact publishing
 - dependency resolution and import loading
+- source archive consumption during downstream builds
 
 ### Dogfooding rule
 
@@ -283,23 +284,21 @@ its own shell format, it is not done.
 This makes `chelis-std` the real acceptance gate for:
 
 - shell compilation
-- `.chb` public type/effect/linearity metadata
+- `.chb` public type/effect metadata
 - import resolution
 - compiler-version compatibility handling
 - bundled standard-library resolution
+- bounded manifest discovery for package-aware `check` / `build`
 
 ### Standard Library Surface
 
 The standard library is library code, not language magic.
-Representative module areas:
+Shipped `3a` dogfood surface:
 
 - `Std.Nn`
-- `Std.Optim`
 - `Std.Init`
 - `Std.Loss`
-- `Std.Metrics`
 - `Std.IO`
-- `Std.Schedule`
 
 All Phase 3 standard-library code should already use the finalized `3e` Surf style.
 
@@ -312,6 +311,11 @@ Why safetensors: memory-mapped (fast loading, no deserialization overhead), stor
 metadata (shapes, dtypes, names) alongside data, universally supported (PyTorch, JAX,
 HuggingFace), simple spec (JSON header + flat tensor data), and safe (no arbitrary code
 execution unlike pickle).
+
+In `3a`, `Std.IO.Safetensors` ships as a package/API stub only.
+It proves that the package system can carry I/O-shaped modules and exported signatures
+through `.chb`, import resolution, and shell consumption.
+The real runtime implementation and cross-framework loading gate move to `3b`.
 
 Surface in `Std.IO`:
 
@@ -327,11 +331,10 @@ save_tensors("checkpoint.safetensors", {
 params = load_tensors("checkpoint.safetensors")
 ```
 
-Implementation: thin wrapper around the `safetensors` Rust crate, exposed to Chelis
-programs via the C backend's runtime. The `save_tensors` function writes the
-chelis_tensor data in safetensors format. The `load_tensors` function memory-maps the
-file and returns chelis_tensor views. Zero-copy when possible (memory-mapped data
-accessed via stride-aware indexing).
+Implementation split:
+
+- `3a`: package stub with exported typed signatures only
+- `3b`: runtime implementation via the host-callable boundary and safetensors library
 
 Interop with Python (Phase 3b): a model trained in Chelis and saved as safetensors can
 be loaded by PyTorch with `safetensors.torch.load_file("checkpoint.safetensors")`. A
@@ -364,22 +367,31 @@ Formats NOT supported (and why):
 - dependency-resolution success and conflict cases
 - `chelis reef` CLI scaffolding and build flows
 - bundled `chelis-std` build/import success
-- safetensors: `save_tensors` round-trips tensor data with correct shapes/dtypes/names
-- safetensors: `load_tensors` memory-maps without copying when possible
-- safetensors: file written by Chelis loads correctly in PyTorch (cross-framework gate,
-  manual)
+- bounded package-root discovery for `check` / `build`
+- `module_prefix` enforcement on both module declaration and `src/` path shape
+- safetensors shell import/type-check success from the `3a` stub
 
 ### Acceptance Oracle
 
-Manual:
+Authoritative oracle:
 
 ```sh
-chelis reef build chelis-std
-chelis check examples/using_std.ch
+cargo test -p chelis-cli phase3a_reef_std_acceptance_oracle -- --exact
 ```
 
-Expected result: the standard library is built as a Reef package and consumed through
-the package system, not through ad hoc compiler special cases.
+Expected result:
+
+- a temp `chelis-std` package builds and publishes into an isolated local Reef registry
+- a temp consumer package resolves `chelis-std` by exact version
+- `chelis check` and `chelis build` succeed on the consumer through the package system,
+  not through ad hoc compiler special cases
+
+Supporting manual probe:
+
+```sh
+chelis reef build packages/chelis-std
+chelis reef publish packages/chelis-std
+```
 
 ---
 

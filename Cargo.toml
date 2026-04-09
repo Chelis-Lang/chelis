@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/chelis-shell",
+    "crates/chelis-reef",
     "crates/chelis-deep",
     "crates/chelis-macros",
     "crates/chelis-surf",
@@ -26,6 +28,8 @@ repository = "https://github.com/jeffreyksmithjr/chelis"
 
 [workspace.dependencies]
 chelis-deep = { path = "crates/chelis-deep" }
+chelis-shell = { path = "crates/chelis-shell" }
+chelis-reef = { path = "crates/chelis-reef" }
 chelis-macros = { path = "crates/chelis-macros" }
 chelis-surf = { path = "crates/chelis-surf" }
 chelis-types = { path = "crates/chelis-types" }
@@ -40,3 +44,4 @@ chelis-cove = { path = "crates/chelis-cove" }
 
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
+serde = { version = "1", features = ["derive"] }
