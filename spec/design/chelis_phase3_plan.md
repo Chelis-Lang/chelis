@@ -154,6 +154,8 @@ Rendering rules:
 Binding rule:
 
 - keep `name = ...` on one line only if the whole flat binding fits
+- if the chain is broken and `name = first_stage` still fits for a short chain, keep the
+  first stage on that first line
 - otherwise break after `=`
 
 Target layout:
@@ -233,23 +235,26 @@ Phase 3 public examples should consistently use:
 
 ### Acceptance Oracle
 
-Manual:
+Authoritative oracle:
 
 ```sh
-chelis deep examples/mnist.ch | chelis surf
+cargo test -p chelis-cli phase3e_pipe_first_acceptance_oracle -- --exact
 ```
 
 Expected result:
 
-- short-form block bindings by default
-- pipe-first Surf
-- long chains broken at every `|>`
-- no unnecessary intermediate type ascriptions
+- the test passes
+- decompiled Surf uses short-form block bindings by default
+- the `loss` chain is rendered pipe-first and broken at every `|>`
+- no unnecessary intermediate body ascriptions are reintroduced
 
-Automated:
+Supporting manual probe:
 
 ```sh
-cargo test -p chelis-surf --test decompile_pipes
+tmp=$(mktemp)
+chelis deep examples/mnist.ch > "$tmp"
+chelis surf "$tmp"
+rm -f "$tmp"
 ```
 
 ---

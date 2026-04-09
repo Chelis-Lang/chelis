@@ -7,7 +7,11 @@ pub fn format_program(decls: &[Decl]) -> String {
     for decl in decls {
         out.push(format_decl(decl));
     }
-    out.join("\n")
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", out.join("\n"))
+    }
 }
 
 fn format_decl(decl: &Decl) -> String {
@@ -468,6 +472,7 @@ fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<Stri
         };
     }
 
+    let total_stages = 1 + stages.len();
     let flat_chain = std::iter::once(seed.clone())
         .chain(stages.iter().map(|stage| format!("|> {stage}")))
         .collect::<Vec<_>>()
@@ -477,17 +482,14 @@ fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<Stri
         None => flat_chain.clone(),
     };
 
-    if stages.len() <= 2 && flat.chars().count() <= WIDTH {
-        return flat;
-    }
-    if stages.len() <= 3 && flat.chars().count() <= WIDTH {
+    if total_stages <= 3 && flat.chars().count() <= WIDTH {
         return flat;
     }
 
     match binding_head {
         Some(head) => {
             let first_line = format!("{head} = {seed}");
-            if first_line.chars().count() <= WIDTH && stages.len() <= 2 {
+            if first_line.chars().count() <= WIDTH && total_stages <= 2 {
                 let mut lines = vec![first_line];
                 lines.extend(stages.iter().map(|stage| format!("  |> {stage}")));
                 lines.join("\n")
@@ -549,4 +551,36 @@ fn indent_lines(text: &str, spaces: usize) -> String {
         .map(|line| format!("{prefix}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_stage_pipe_chain_breaks_even_under_width() {
+        let rendered = format_pipe_layout(
+            Some("value"),
+            "add(x, y)".to_string(),
+            vec!["relu".to_string(), "log".to_string(), "neg".to_string()],
+        );
+
+        assert_eq!(
+            rendered,
+            "value =\n  add(x, y)\n  |> relu\n  |> log\n  |> neg"
+        );
+    }
+
+    #[test]
+    fn formatted_program_ends_with_trailing_newline() {
+        let span = chelis_deep::Span::new(0, 0);
+        let program = [Decl::LetDef {
+            name: "x".to_string(),
+            ty: None,
+            value: Expr::Lit(Literal::Int(1), span),
+            span,
+        }];
+
+        assert_eq!(format_program(&program), "let x = 1\n");
+    }
 }

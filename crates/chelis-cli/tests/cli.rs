@@ -243,6 +243,22 @@ fn fmt_check_succeeds_for_canonical_surf() {
 }
 
 #[test]
+fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("program.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["fmt", path.to_str().unwrap(), "--check"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn fmt_check_fails_for_noncanonical_deep() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("program.dp");
@@ -328,6 +344,37 @@ fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
             "def f(x: tensor[n, f32]) -> tensor[n, f32] =",
         ))
         .stdout(predicate::str::contains("sig f").not());
+}
+
+#[test]
+fn phase3e_pipe_first_acceptance_oracle() {
+    let dir = tempdir().expect("tempdir");
+    let surf_path = dir.path().join("mnist.ch");
+    let deep_path = dir.path().join("mnist.dp");
+    fs::copy(mnist_example(), &surf_path).expect("copy");
+
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&deep_path, deep).expect("write deep program");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", deep_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("let h1").not())
+        .stdout(predicate::str::contains("let logits").not())
+        .stdout(predicate::str::contains(
+            "softmax(logits, 1)\n  |> log\n  |> mul(labels)\n  |> sum(1)\n  |> neg\n  |> mean(0)",
+        ))
+        .stdout(predicate::str::contains("(softmax(logits, 1) :").not())
+        .stdout(predicate::str::contains("(matmul(x, w1) :").not());
 }
 
 #[test]
