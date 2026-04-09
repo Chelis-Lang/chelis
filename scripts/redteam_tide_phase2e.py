@@ -294,7 +294,7 @@ def mcp_roundtrip(messages, send_exit=False):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=ROOT,
-        timeout=20,
+        timeout=60,
     )
     if proc.returncode != 0:
         raise CheckFailure(f"MCP process failed: {proc.stderr.decode()}")

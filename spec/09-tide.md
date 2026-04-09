@@ -158,6 +158,9 @@ Phase 2 extends Tide beyond the REPL:
   ready.
 - The Deep toggle is a read-only command that shows canonical Deep; it does not attempt
   bidirectional Surf/Deep editing.
+- Automated coverage for 2f is library-level: `cargo test -p chelis-lsp` exercises the
+  analysis engine and command preparation. Full editor-host protocol behavior remains a
+  manual gate rather than a claimed automated proof.
 - The 2f manual acceptance oracle is opening a `.ch` file through the extension and
   verifying immediate syntax highlighting, diagnostics, hover, completion, definition
   lookup, Deep view, and fitness status in one session.
@@ -176,6 +179,9 @@ Phase 2 extends Tide beyond the REPL:
   `grammars/tree-sitter-chelis-deep/`; Cove uses them for Surf and Deep highlighting.
 - Agent-mode hosting inside Cove is deferred; the shipped 2g surface does not embed an
   MCP-driven assistant session.
+- Automated coverage for 2g is non-UI only: the live pipeline helpers, zero-binding
+  eval, file loading, and CLI surface are tested, but the terminal event loop and panel
+  behavior remain manual-gate territory.
 - The 2g manual acceptance oracle is:
   `cargo run -p chelis-cli -- cove --file examples/mnist.ch`
   and confirming that editing updates Deep/diagnostics live, `Ctrl-S` saves, and

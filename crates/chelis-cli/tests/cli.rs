@@ -24,6 +24,24 @@ fn vmap_example() -> PathBuf {
     example_path("../../examples/vmap_relu.ch")
 }
 
+fn linreg_example() -> PathBuf {
+    example_path("../../examples/linreg.ch")
+}
+
+fn transformer_block_example() -> PathBuf {
+    example_path("../../examples/transformer_block.ch")
+}
+
+fn executable_examples() -> [PathBuf; 5] {
+    [
+        hello_tensor_example(),
+        linreg_example(),
+        mnist_example(),
+        transformer_block_example(),
+        vmap_example(),
+    ]
+}
+
 fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
@@ -96,7 +114,7 @@ fn run_json_check(path: &Path) -> Value {
 
 #[test]
 fn check_accepts_executable_examples() {
-    for path in [mnist_example(), hello_tensor_example(), vmap_example()] {
+    for path in executable_examples() {
         let json = run_json_check(&path);
         assert_eq!(json["score"].as_f64().unwrap(), 1.0, "{path:?}");
         assert_eq!(json["errors"].as_array().unwrap().len(), 0, "{path:?}");
@@ -105,6 +123,17 @@ fn check_accepts_executable_examples() {
             0,
             "{path:?}"
         );
+    }
+}
+
+#[test]
+fn fmt_check_accepts_canonical_executable_examples() {
+    for path in executable_examples() {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["fmt", path.to_str().unwrap(), "--check"])
+            .assert()
+            .success();
     }
 }
 

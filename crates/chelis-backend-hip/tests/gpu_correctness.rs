@@ -112,22 +112,24 @@ fn c_shape(shape: &[usize]) -> (usize, Vec<usize>) {
     }
 }
 
-fn build_main_cpp(
+fn append_case_lines(
+    lines: &mut Vec<String>,
     func_name: &str,
     input_labels: &[String],
     n_out: usize,
     inputs: &[TestInput],
-) -> String {
-    let mut lines = Vec::new();
-
+    prefix: &str,
+) {
     if input_labels.is_empty() {
-        lines.push("    chelis_tensor **inputs = NULL;".to_string());
+        lines.push(format!("    chelis_tensor **{prefix}_inputs = NULL;"));
     } else {
         lines.push(format!(
-            "    chelis_tensor *input_storage[{}] = {{0}};",
-            input_labels.len()
+            "    chelis_tensor *{prefix}_input_storage[{}] = {{0}};",
+            input_labels.len(),
         ));
-        lines.push("    chelis_tensor **inputs = input_storage;".to_string());
+        lines.push(format!(
+            "    chelis_tensor **{prefix}_inputs = {prefix}_input_storage;"
+        ));
         for (slot, label) in input_labels.iter().enumerate() {
             let input = inputs
                 .iter()
@@ -139,36 +141,87 @@ fn build_main_cpp(
                 .map(|d| d.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            lines.push(format!("    int shape_{slot}[{ndim}] = {{ {dims} }};"));
             lines.push(format!(
-                "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_F32);"
+                "    int {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
+            ));
+            lines.push(format!(
+                "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, CHELIS_F32);"
             ));
             for (idx, value) in input.data.iter().enumerate() {
                 lines.push(format!(
-                    "    input_storage[{slot}]->data[{idx}] = {:.8}f;",
+                    "    {prefix}_input_storage[{slot}]->data[{idx}] = {:.8}f;",
                     value
                 ));
             }
         }
     }
 
-    lines.push(format!("    chelis_tensor *outputs[{n_out}] = {{0}};"));
     lines.push(format!(
-        "    {func_name}(inputs, {}, outputs, {n_out});",
+        "    chelis_tensor *{prefix}_outputs[{n_out}] = {{0}};"
+    ));
+    lines.push(format!(
+        "    {func_name}({prefix}_inputs, {}, {prefix}_outputs, {n_out});",
         input_labels.len()
     ));
     lines.push(format!(
-        "    for (int out_idx = 0; out_idx < {n_out}; out_idx++) {{"
+        "    for (int {prefix}_out_idx = 0; {prefix}_out_idx < {n_out}; {prefix}_out_idx++) {{"
     ));
-    lines.push("        for (int i = 0; i < outputs[out_idx]->size; i++) {".to_string());
-    lines.push("            if (i > 0) printf(\" \");".to_string());
-    lines.push("            printf(\"%.6f\", outputs[out_idx]->data[i]);".to_string());
+    lines.push(format!(
+        "        for (int {prefix}_i = 0; {prefix}_i < {prefix}_outputs[{prefix}_out_idx]->size; {prefix}_i++) {{"
+    ));
+    lines.push(format!("            if ({prefix}_i > 0) printf(\" \");"));
+    lines.push(format!(
+        "            printf(\"%.6f\", {prefix}_outputs[{prefix}_out_idx]->data[{prefix}_i]);"
+    ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
-    lines.push("        chelis_free(outputs[out_idx]);".to_string());
+    lines.push(format!(
+        "        chelis_free({prefix}_outputs[{prefix}_out_idx]);"
+    ));
     lines.push("    }".to_string());
     for slot in 0..input_labels.len() {
-        lines.push(format!("    chelis_free(input_storage[{slot}]);"));
+        lines.push(format!("    chelis_free({prefix}_input_storage[{slot}]);"));
+    }
+}
+
+fn build_main_cpp(
+    func_name: &str,
+    input_labels: &[String],
+    n_out: usize,
+    inputs: &[TestInput],
+) -> String {
+    let mut lines = Vec::new();
+    append_case_lines(&mut lines, func_name, input_labels, n_out, inputs, "case0");
+
+    format!(
+        r#"#include "chelis_runtime.h"
+void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+{body}
+    return 0;
+}}
+"#,
+        body = lines.join("\n")
+    )
+}
+
+fn build_multi_case_main_cpp(
+    func_name: &str,
+    input_labels: &[String],
+    n_out: usize,
+    input_cases: &[Vec<TestInput>],
+) -> String {
+    let mut lines = Vec::new();
+    for (idx, inputs) in input_cases.iter().enumerate() {
+        append_case_lines(
+            &mut lines,
+            func_name,
+            input_labels,
+            n_out,
+            inputs,
+            &format!("case{idx}"),
+        );
     }
 
     format!(
@@ -255,6 +308,86 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         .unwrap_or("")
         .split_whitespace()
         .map(|token| token.parse::<f32>().expect("parse output float"))
+        .collect()
+}
+
+fn compile_and_run_output_cases(
+    dag: &Dag,
+    func_name: &str,
+    input_cases: &[Vec<TestInput>],
+) -> Vec<Vec<f32>> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name);
+    assert_eq!(
+        result.output_labels.len(),
+        1,
+        "manual harness currently expects a single output"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    let cpu_rt = cpu_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    write_temp_file(
+        tmp.path(),
+        "chelis_runtime.h",
+        &fs::read_to_string(cpu_rt.join("chelis_runtime.h")).expect("cpu runtime header"),
+    );
+    write_temp_file(
+        tmp.path(),
+        "chelis_runtime.c",
+        &fs::read_to_string(cpu_rt.join("chelis_runtime.c")).expect("cpu runtime source"),
+    );
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    write_temp_file(
+        tmp.path(),
+        "main.cpp",
+        &build_multi_case_main_cpp(
+            func_name,
+            &result.input_labels,
+            result.output_labels.len(),
+            input_cases,
+        ),
+    );
+
+    let bin_path = tmp.path().join("gpu_correctness_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_runtime.c"));
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert!(
+        run.status.success(),
+        "GPU binary failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    String::from_utf8(run.stdout)
+        .expect("utf8 stdout")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| token.parse::<f32>().expect("parse output float"))
+                .collect()
+        })
         .collect()
 }
 
@@ -591,6 +724,42 @@ fn g4_symbolic_matmul_gpu_matches_cpu() {
             TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
         ],
     );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
+    let mut dag = Dag::new();
+    let a_ty = TensorType {
+        dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+        precision: Prim::F32,
+    };
+    let b_ty = TensorType {
+        dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty.clone());
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty.clone());
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+    dag.add_root(out);
+
+    let actual = compile_and_run_output_cases(
+        &dag,
+        "g4_symbolic_matmul_reuse",
+        &[
+            vec![
+                TestInput::new("a", &[1, 3], &[1.0, 2.0, 3.0]),
+                TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            ],
+            vec![
+                TestInput::new("a", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                TestInput::new("b", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            ],
+        ],
+    );
+    assert_eq!(actual.len(), 2, "expected one output row per input case");
+    assert_close_vec(&actual[0], &[22.0, 28.0]);
+    assert_close_vec(&actual[1], &[22.0, 28.0, 49.0, 64.0]);
 }
 
 // ===========================================================================
