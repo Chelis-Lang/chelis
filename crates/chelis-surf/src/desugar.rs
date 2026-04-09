@@ -180,6 +180,144 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
     }
 }
 
+fn fresh_pipe_param_name(stage: &Expr) -> String {
+    let base = "__chelis_pipe";
+    let mut index = 0;
+    loop {
+        let candidate = if index == 0 {
+            base.to_string()
+        } else {
+            format!("{base}{index}")
+        };
+        if !expr_mentions_name(stage, &candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Lit(_, _) => false,
+        Expr::Var(found, _) | Expr::Constructor(found, _) => found == name,
+        Expr::Apply(func, args, _) => {
+            expr_mentions_name(func, name) || args.iter().any(|arg| expr_mentions_name(arg, name))
+        }
+        Expr::Record(_, fields, _) => fields
+            .iter()
+            .any(|(_, value)| expr_mentions_name(value, name)),
+        Expr::Access(base, field, _) => expr_mentions_name(base, name) || field == name,
+        Expr::TupleGet(base, _, _) => expr_mentions_name(base, name),
+        Expr::Binary(_, lhs, rhs, _) => {
+            expr_mentions_name(lhs, name) || expr_mentions_name(rhs, name)
+        }
+        Expr::Unary(_, operand, _) => expr_mentions_name(operand, name),
+        Expr::Pipe(seed, stages, _) => {
+            expr_mentions_name(seed, name)
+                || stages.iter().any(|stage| expr_mentions_name(stage, name))
+        }
+        Expr::If(cond, then_e, else_e, _) => {
+            expr_mentions_name(cond, name)
+                || expr_mentions_name(then_e, name)
+                || expr_mentions_name(else_e, name)
+        }
+        Expr::Match(scrutinee, arms, _) => {
+            expr_mentions_name(scrutinee, name)
+                || arms.iter().any(|arm| {
+                    pattern_mentions_name(&arm.pattern, name)
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| expr_mentions_name(guard, name))
+                        || expr_mentions_name(&arm.body, name)
+                })
+        }
+        Expr::Let(bindings, body, _) | Expr::Block(bindings, body, _) => {
+            bindings.iter().any(|binding| {
+                let_pattern_mentions_name(&binding.pattern, name)
+                    || binding
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| type_mentions_name(ty, name))
+                    || expr_mentions_name(&binding.value, name)
+            }) || expr_mentions_name(body, name)
+        }
+        Expr::Lambda(params, body, _) => {
+            params.iter().any(|param| {
+                param.name == name
+                    || param
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| type_mentions_name(ty, name))
+            }) || expr_mentions_name(body, name)
+        }
+        Expr::Tuple(items, _) | Expr::Par(items, _) => {
+            items.iter().any(|item| expr_mentions_name(item, name))
+        }
+        Expr::Cast(expr, precision, _) => expr_mentions_name(expr, name) || precision == name,
+        Expr::Grad(expr, wrt, _) => {
+            expr_mentions_name(expr, name)
+                || wrt
+                    .as_ref()
+                    .is_some_and(|names| names.iter().any(|wrt_name| wrt_name == name))
+        }
+        Expr::Vmap(expr, _, _)
+        | Expr::Jit(expr, _)
+        | Expr::Realize(expr, _)
+        | Expr::Copy(expr, _)
+        | Expr::Borrow(expr, _)
+        | Expr::Annotate(expr, _, _) => expr_mentions_name(expr, name),
+        Expr::WithSeed(seed, body, _) | Expr::WithDevice(seed, body, _) => {
+            expr_mentions_name(seed, name) || expr_mentions_name(body, name)
+        }
+    }
+}
+
+fn let_pattern_mentions_name(pattern: &LetPattern, name: &str) -> bool {
+    match pattern {
+        LetPattern::Var(found, _) => found == name,
+        LetPattern::Wildcard(_) => false,
+        LetPattern::Tuple(items, _) => items
+            .iter()
+            .any(|item| let_pattern_mentions_name(item, name)),
+    }
+}
+
+fn pattern_mentions_name(pattern: &Pattern, name: &str) -> bool {
+    match pattern {
+        Pattern::Wildcard(_) | Pattern::Lit(_, _) => false,
+        Pattern::Var(found, _) => found == name,
+        Pattern::Constructor(found, items, _) => {
+            found == name || items.iter().any(|item| pattern_mentions_name(item, name))
+        }
+        Pattern::Tuple(items, _) => items.iter().any(|item| pattern_mentions_name(item, name)),
+        Pattern::Record(found, fields, _) => {
+            found == name
+                || fields
+                    .iter()
+                    .any(|(field, value)| field == name || pattern_mentions_name(value, name))
+        }
+        Pattern::As(found, inner, _) => found == name || pattern_mentions_name(inner, name),
+    }
+}
+
+fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
+    match ty {
+        TypeExpr::Named(found, _) => found == name,
+        TypeExpr::Tensor(items, precision, _) => {
+            precision == name || items.iter().any(|item| type_mentions_name(item, name))
+        }
+        TypeExpr::Arrow(args, ret, _) => {
+            args.iter().any(|arg| type_mentions_name(arg, name)) || type_mentions_name(ret, name)
+        }
+        TypeExpr::App(found, args, _) => {
+            found == name || args.iter().any(|arg| type_mentions_name(arg, name))
+        }
+        TypeExpr::Tuple(items, _) => items.iter().any(|item| type_mentions_name(item, name)),
+        TypeExpr::Infer(_) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Primitive type names
 // ---------------------------------------------------------------------------
@@ -210,6 +348,28 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String
 }
 
 impl DesugarCtx {
+    fn desugar_pipe_stage(&self, stage: &Expr, local_fn_params: &[String]) -> deep::Expr {
+        match stage {
+            Expr::Apply(func, args, span) if !args.is_empty() => {
+                let pipe_param = fresh_pipe_param_name(stage);
+                let mut applied_args = Vec::with_capacity(args.len() + 1);
+                applied_args.push(Expr::Var(pipe_param.clone(), *span));
+                applied_args.extend(args.iter().cloned());
+                let lambda = Expr::Lambda(
+                    vec![Param {
+                        name: pipe_param,
+                        ty: None,
+                        span: *span,
+                    }],
+                    Box::new(Expr::Apply(func.clone(), applied_args, *span)),
+                    *span,
+                );
+                self.desugar_expr_with_scope(&lambda, local_fn_params)
+            }
+            _ => self.desugar_expr_with_scope(stage, local_fn_params),
+        }
+    }
+
     fn desugar_decl(&self, decl: &Decl) -> Vec<deep::Expr> {
         match decl {
             Decl::FunDef {
@@ -566,7 +726,7 @@ impl DesugarCtx {
                 children.extend(
                     stages
                         .iter()
-                        .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params)),
+                        .map(|expr| self.desugar_pipe_stage(expr, local_fn_params)),
                 );
                 node("pipe", children)
             }
@@ -1142,6 +1302,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_pipe_stage_call_desugars_to_unary_lambda() {
+        let expr = Expr::Pipe(
+            Box::new(tvar("x")),
+            vec![Expr::Apply(Box::new(tvar("add")), vec![tvar("y")], s())],
+            s(),
+        );
+        let rendered = print_expr(&desugar_expr(&expr));
+        assert!(rendered.contains("(var {} x)"));
+        assert!(rendered.contains("(params {} __chelis_pipe)"));
+        assert!(rendered.contains("(app {} (var {} add) (var {} __chelis_pipe) (var {} y))"));
+    }
+
     // --- If ---
 
     #[test]
@@ -1197,6 +1370,7 @@ mod tests {
     fn test_let() {
         let expr = Expr::Let(
             vec![LetBinding {
+                style: BindingStyle::ExplicitLet,
                 pattern: LetPattern::Var("x".to_string(), s()),
                 ty: None,
                 value: int_lit(1),
@@ -1215,6 +1389,7 @@ mod tests {
     fn test_let_tuple_destructuring() {
         let expr = Expr::Let(
             vec![LetBinding {
+                style: BindingStyle::ExplicitLet,
                 pattern: LetPattern::Tuple(
                     vec![
                         LetPattern::Var("a".to_string(), s()),

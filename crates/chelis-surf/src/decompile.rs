@@ -5,6 +5,8 @@
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 
+const SURF_WIDTH: usize = 80;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecompileOptions {
     pub strip_redundant_types: bool,
@@ -305,8 +307,8 @@ impl<'a> IdiomaticDecompiler<'a> {
             .map(|sig| format!(" -> {}", decompile_type_expr(&sig.ret_type)))
             .unwrap_or_default();
         let effects = signature.map(|sig| sig.effects).unwrap_or_default();
-        let body = indent_lines(&self.decompile_expr(&fn_kids[1]), 2);
-        format!("def {name}({params}){ret_suffix}{effects} =\n{body}")
+        let body = self.render_function_body(&fn_kids[1]);
+        format!("def {name}({params}){ret_suffix}{effects} = {body}")
     }
 
     fn render_params(&self, expr: &Expr, signature: Option<&FnSignature>) -> String {
@@ -403,14 +405,12 @@ impl<'a> IdiomaticDecompiler<'a> {
             .unwrap_or_default();
         let synthetic_name = self.synthetic_name.unwrap_or("forward");
         let body = if bindings.is_empty() {
-            self.decompile_expr(output.body)
+            self.render_function_body(output.body)
         } else {
-            self.render_let_chain(&bindings, output.body)
+            self.render_block_from_bindings(&bindings, output.body)
         };
-
         Some(format!(
-            "def {synthetic_name}({params}){ret_suffix} =\n{}",
-            indent_lines(&body, 2)
+            "def {synthetic_name}({params}){ret_suffix} = {body}"
         ))
     }
 
@@ -421,6 +421,125 @@ impl<'a> IdiomaticDecompiler<'a> {
         }
         lines.push(format!("in {}", self.decompile_expr(final_expr)));
         lines.join("\n")
+    }
+
+    fn render_function_body(&self, expr: &Expr) -> String {
+        let mut bindings = Vec::new();
+        let final_expr = collect_let_bindings(expr, &mut bindings);
+        if bindings.is_empty() {
+            self.render_statement_expr(final_expr)
+        } else {
+            self.render_block_from_bindings(&bindings, final_expr)
+        }
+    }
+
+    fn render_block_from_bindings(
+        &self,
+        bindings: &[(String, &Expr)],
+        final_expr: &Expr,
+    ) -> String {
+        let contents = self.render_block_contents_from_bindings(bindings, final_expr);
+        format!("{{\n{}\n}}", indent_lines(&contents, 2))
+    }
+
+    fn render_block_contents_from_bindings(
+        &self,
+        bindings: &[(String, &Expr)],
+        final_expr: &Expr,
+    ) -> String {
+        let use_counts = collect_use_counts(bindings, final_expr);
+        let mut lines = Vec::new();
+        let mut index = 0;
+        let mut rendered_final = None;
+
+        while index < bindings.len() {
+            let (name, value) = &bindings[index];
+            if !is_meaningful_binding_name(name)
+                && let Some((end_index, stages, target_name)) =
+                    self.detect_pipe_chain(bindings, &use_counts, index)
+            {
+                if let Some(target_name) = target_name {
+                    lines.push(format_pipe_binding(&target_name, &stages));
+                    index = end_index + 1;
+                    continue;
+                }
+                rendered_final = Some(format_pipe_expr_lines(&stages));
+                index = end_index + 1;
+                continue;
+            }
+
+            lines.push(self.render_binding_line(name, value));
+            index += 1;
+        }
+
+        lines.push(rendered_final.unwrap_or_else(|| self.render_statement_expr(final_expr)));
+        lines.join("\n")
+    }
+
+    fn detect_pipe_chain(
+        &self,
+        bindings: &[(String, &Expr)],
+        use_counts: &std::collections::BTreeMap<String, usize>,
+        start: usize,
+    ) -> Option<(usize, Vec<String>, Option<String>)> {
+        let (start_name, start_value) = &bindings[start];
+        if !expr_starts_pipe_chain(start_value) {
+            return None;
+        }
+
+        let mut stages =
+            match collect_pipe_stages_from_expr(start_value, |expr| self.decompile_expr(expr)) {
+                Some(stages) => stages,
+                None => vec![self.decompile_expr(start_value)],
+            };
+        let mut current_name = start_name.as_str();
+        let mut current_index = start;
+        let mut advanced = false;
+
+        while current_index + 1 < bindings.len() {
+            if use_counts.get(current_name).copied().unwrap_or_default() != 1 {
+                break;
+            }
+            let (next_name, next_value) = &bindings[current_index + 1];
+            let Some(stage) = call_stage_using_first_arg(next_value, current_name, |expr| {
+                self.decompile_expr(expr)
+            }) else {
+                break;
+            };
+            stages.push(stage);
+            current_index += 1;
+            current_name = next_name.as_str();
+            advanced = true;
+
+            if is_meaningful_binding_name(current_name)
+                || use_counts.get(current_name).copied().unwrap_or_default() != 1
+            {
+                return Some((current_index, stages, Some(current_name.to_string())));
+            }
+        }
+
+        if advanced {
+            return Some((current_index, stages, Some(current_name.to_string())));
+        }
+
+        None
+    }
+
+    fn render_binding_line(&self, name: &str, value: &Expr) -> String {
+        if let Some(stages) = collect_pipe_stages_from_expr(value, |expr| self.decompile_expr(expr))
+        {
+            return format_pipe_binding(name, &stages);
+        }
+        format!("{name} = {}", self.decompile_expr(value))
+    }
+
+    fn render_statement_expr(&self, expr: &Expr) -> String {
+        if let Some(stages) =
+            collect_pipe_stages_from_expr(expr, |inner| self.decompile_expr(inner))
+        {
+            return format_pipe_expr_lines(&stages);
+        }
+        self.decompile_expr(expr)
     }
 
     fn decompile_expr(&self, expr: &Expr) -> String {
@@ -515,11 +634,12 @@ impl<'a> IdiomaticDecompiler<'a> {
                     self.decompile_expr(&kids[1])
                 )
             }
-            Some("pipe") => children(list)
-                .iter()
-                .map(|expr| self.decompile_expr(expr))
-                .collect::<Vec<_>>()
-                .join(" |> "),
+            Some("pipe") => format_pipe_expr_lines(
+                &children(list)
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>(),
+            ),
             Some("match") => {
                 let kids = children(list);
                 if kids.is_empty() {
@@ -585,7 +705,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                 .first()
                 .map(|expr| format!("&{}", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "&()".to_string()),
-            Some("handle-effect") => decompile_handle_effect(list),
+            Some("handle-effect") => self.decompile_handle_effect(list),
             Some("par") => format!(
                 "par({})",
                 children(list)
@@ -666,6 +786,35 @@ impl<'a> IdiomaticDecompiler<'a> {
             index += 2;
         }
         self.render_let_chain(&bindings, &kids[1])
+    }
+
+    fn decompile_handle_effect(&self, list: &List) -> String {
+        let effect = meta(list).and_then(|meta| {
+            meta.entries
+                .iter()
+                .find(|(key, _)| key == "effect")
+                .and_then(|(_, value)| sym_str(value))
+        });
+        let kids = children(list);
+        if kids.len() < 2 {
+            return "()".to_string();
+        }
+        let arg = decompile_expr_without_annotation(&kids[0]);
+        let mut bindings = Vec::new();
+        let final_expr = collect_let_bindings(&kids[1], &mut bindings);
+        let body = if bindings.is_empty() {
+            format!("  {}", self.render_statement_expr(final_expr))
+        } else {
+            indent_lines(
+                &self.render_block_contents_from_bindings(&bindings, final_expr),
+                2,
+            )
+        };
+        match effect {
+            Some("random") => format!("with seed({arg}) {{\n{body}\n}}"),
+            Some("resource") => format!("with device({arg}) {{\n{body}\n}}"),
+            _ => format!("handle-effect({}, {})", arg, self.decompile_expr(&kids[1])),
+        }
     }
 }
 
@@ -759,6 +908,223 @@ fn collect_var_refs(expr: &Expr, refs: &mut Vec<String>) {
             }
         }
         Expr::Atom(_, _) => {}
+    }
+}
+
+fn collect_use_counts(
+    bindings: &[(String, &Expr)],
+    final_expr: &Expr,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut refs = Vec::new();
+    for (_, value) in bindings {
+        collect_var_refs(value, &mut refs);
+    }
+    collect_var_refs(final_expr, &mut refs);
+    let mut counts = std::collections::BTreeMap::new();
+    for name in refs {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn collect_let_bindings<'a>(expr: &'a Expr, bindings: &mut Vec<(String, &'a Expr)>) -> &'a Expr {
+    if let Expr::List(list, _) = expr
+        && tag(list) == Some("let")
+    {
+        let kids = children(list);
+        if kids.len() >= 2
+            && let Some(bind_list) = as_tagged_list(&kids[0], "bind")
+        {
+            let bind_kids = children(bind_list);
+            let mut index = 0;
+            while index + 1 < bind_kids.len() {
+                bindings.push((
+                    sym_str(&bind_kids[index]).unwrap_or("_").to_string(),
+                    &bind_kids[index + 1],
+                ));
+                index += 2;
+            }
+            return collect_let_bindings(&kids[1], bindings);
+        }
+    }
+    expr
+}
+
+fn collect_pipe_stages_from_expr<F>(expr: &Expr, render: F) -> Option<Vec<String>>
+where
+    F: Fn(&Expr) -> String,
+{
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if tag(list) != Some("pipe") {
+        return None;
+    }
+    let kids = children(list);
+    let (head, stages) = kids.split_first()?;
+    let mut rendered = vec![render(head)];
+    rendered.extend(stages.iter().map(|stage| render_pipe_stage(stage, &render)));
+    Some(rendered)
+}
+
+fn expr_starts_pipe_chain(expr: &Expr) -> bool {
+    matches!(expr, Expr::List(list, _) if matches!(tag(list), Some("app" | "pipe")))
+}
+
+fn call_stage_using_first_arg<F>(expr: &Expr, name: &str, render: F) -> Option<String>
+where
+    F: Fn(&Expr) -> String,
+{
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if tag(list) != Some("app") {
+        return None;
+    }
+    let kids = children(list);
+    if kids.len() < 2 {
+        return None;
+    }
+    let Expr::List(first_arg, _) = &kids[1] else {
+        return None;
+    };
+    if tag(first_arg) != Some("var") || children(first_arg).first().and_then(sym_str) != Some(name)
+    {
+        return None;
+    }
+    let func = render(&kids[0]);
+    let rest = kids[2..].iter().map(render).collect::<Vec<_>>();
+    Some(if rest.is_empty() {
+        func
+    } else {
+        format!("{func}({})", rest.join(", "))
+    })
+}
+
+fn render_pipe_stage<F>(expr: &Expr, render: F) -> String
+where
+    F: Fn(&Expr) -> String,
+{
+    compact_pipe_stage(expr, &render).unwrap_or_else(|| render(expr))
+}
+
+fn compact_pipe_stage<F>(expr: &Expr, render: F) -> Option<String>
+where
+    F: Fn(&Expr) -> String,
+{
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if tag(list) == Some("fn") {
+        let kids = children(list);
+        let params = kids.first()?;
+        let body = kids.get(1)?;
+        let param_name = extract_single_param_name(params)?;
+        return call_stage_using_first_arg(body, param_name, render);
+    }
+    None
+}
+
+fn extract_single_param_name(expr: &Expr) -> Option<&str> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if tag(list) != Some("params") {
+        return None;
+    }
+    let [only] = children(list) else {
+        return None;
+    };
+    match only {
+        Expr::Atom(_, _) => sym_str(only),
+        Expr::List(helper, _) => helper.elements.first().and_then(sym_str),
+        _ => None,
+    }
+}
+
+fn is_meaningful_binding_name(name: &str) -> bool {
+    matches!(
+        name,
+        "logits"
+            | "loss"
+            | "probs"
+            | "predictions"
+            | "gradients"
+            | "attention"
+            | "residual"
+            | "output"
+            | "out"
+    ) || is_hidden_state_name(name)
+        || !(name.len() == 1
+            || name.starts_with('_')
+            || name.starts_with("tmp")
+            || name.starts_with("pre_")
+            || name.contains("_exp")
+            || is_mm_temp(name)
+            || is_numeric_suffix_temp(name))
+}
+
+fn is_hidden_state_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('h') else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_mm_temp(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("mm") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_numeric_suffix_temp(name: &str) -> bool {
+    let mut chars = name.chars().rev();
+    let digits = chars.by_ref().take_while(|ch| ch.is_ascii_digit()).count();
+    digits > 0 && chars.next().is_some()
+}
+
+fn format_pipe_binding(name: &str, stages: &[String]) -> String {
+    format_pipe_layout(Some(name), stages)
+}
+
+fn format_pipe_expr_lines(stages: &[String]) -> String {
+    format_pipe_layout(None, stages)
+}
+
+fn format_pipe_layout(binding: Option<&str>, stages: &[String]) -> String {
+    if stages.is_empty() {
+        return binding.unwrap_or_default().to_string();
+    }
+    let flat_chain = stages.join(" |> ");
+    let flat = match binding {
+        Some(name) => format!("{name} = {flat_chain}"),
+        None => flat_chain.clone(),
+    };
+    if stages.len() <= 3 && flat.chars().count() <= SURF_WIDTH {
+        return flat;
+    }
+
+    match binding {
+        Some(name) => {
+            let first_line = format!("{name} = {}", stages[0]);
+            if stages.len() <= 2 && first_line.chars().count() <= SURF_WIDTH {
+                std::iter::once(first_line)
+                    .chain(stages[1..].iter().map(|stage| format!("  |> {stage}")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                std::iter::once(format!("{name} ="))
+                    .chain(std::iter::once(format!("  {}", stages[0])))
+                    .chain(stages[1..].iter().map(|stage| format!("  |> {stage}")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        None => std::iter::once(stages[0].clone())
+            .chain(stages[1..].iter().map(|stage| format!("|> {stage}")))
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -1648,7 +2014,7 @@ mod tests {
     fn decompile_with_device_handler() {
         let rendered = surf_to_surf("def f() = with device(\"gpu:0\") { x }");
         assert!(rendered.contains("with device(\"gpu:0\") {"));
-        assert!(rendered.contains("\n    x\n  }"));
+        assert!(rendered.contains("\n  x\n}"));
     }
 
     #[test]
@@ -1706,5 +2072,54 @@ mod tests {
         assert!(!rendered.contains("sig logits"));
         assert!(!rendered.contains("sig loss"));
         assert!(!rendered.contains("let x: tensor["));
+    }
+
+    #[test]
+    fn decompile_block_bindings_use_short_form() {
+        let rendered = surf_to_surf(
+            "def f() = {
+                let x = relu(y)
+                let z = add(x, y)
+                z
+            }",
+        );
+        assert!(rendered.contains("{\n  z = relu(y) |> add(y)\n  z\n}"));
+        assert!(!rendered.contains("let x ="));
+    }
+
+    #[test]
+    fn decompile_long_pipe_breaks_across_lines() {
+        let rendered = surf_to_surf(
+            "def f(logits, labels) = {
+                loss = softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
+                loss
+            }",
+        );
+        assert!(rendered.contains("loss =\n    softmax(logits, 1)\n    |> log\n    |> mul(labels)\n    |> sum(1)\n    |> neg\n    |> mean(0)"));
+    }
+
+    #[test]
+    fn decompile_preserves_meaningful_binding_names() {
+        let rendered = surf_to_surf(
+            "def f(x, w1, b1, w2, b2) = {
+                h1 = matmul(x, w1) |> add(expand(b1, 0, 32)) |> relu
+                logits = matmul(h1, w2) |> add(expand(b2, 0, 32))
+                logits
+            }",
+        );
+        assert!(rendered.contains("h1 ="));
+        assert!(rendered.contains("logits ="));
+    }
+
+    #[test]
+    fn decompile_compacts_lambda_pipe_stage_back_to_call_sugar() {
+        let rendered = surf_to_surf(
+            "def f(x, y) = {
+                out = x |> add(y) |> relu
+                out
+            }",
+        );
+        assert!(rendered.contains("out = x |> add(y) |> relu"));
+        assert!(!rendered.contains("fn (__chelis_pipe) ->"));
     }
 }

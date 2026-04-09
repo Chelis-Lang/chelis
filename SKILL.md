@@ -266,6 +266,12 @@ Prefer idiomatic Surf when you are generating `.ch` source for humans:
 - put input types on parameters, not on top-level load-style `let` bindings
 - use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
 - do not annotate intermediate expressions when the checker can infer them
+- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
+  valid, but it is not the default idiom for sequential block code
+- prefer pipe-first composition for linear flows, including first-argument insertion
+  stages such as `|> add(expand(b, 0, batch))`
+- break long or many-stage pipes after `=` and before every `|>` so the data flow stays
+  visually scannable
 - keep meaningful intermediate names like `logits`, `probs`, and `loss`
 - combine short tensor operations when the composition is clearer than one-binding-per-op
 
@@ -290,13 +296,13 @@ From lowest to highest:
 |---|---|
 | `def f(x: T) -> U = body` | `defsig` + `def` with typed `params` |
 | `let x = e in body` | `(let {} (bind {} x e') body')` |
-| `{ let x = e; body }` | same `let` shape after block desugaring |
+| `{ x = e; body }` | same `let` shape after block desugaring |
 | `match x with { | P => b }` | `(match {} x' (arm {} P' () b'))` |
 | `fn (x) -> body` | `(fn {} (params {} x) body')` |
 | `type Option[a] = | Some(a) | None` | `(deftype {} Option (a) ...)` |
 | `type Weights = tensor[n, f32]` | `(typealias {} Weights () ...)` |
 | `dim batch` | `(defdim {} batch)` |
-| `x |> f |> g` | `(pipe {} x' f' g')` |
+| `x |> f |> add(y)` | `(pipe {} x' f' (fn {} (params {} v) (app {} add' v' y')))` |
 | `x : T` | metadata annotation on the desugared Deep node |
 
 ### Current-Snapshot Surf Advice
@@ -381,14 +387,16 @@ Deep:
     (app {} (var {} add) (var {} x) (var {} y))))
 ```
 
-### 5.3 Let-Binding Pipeline
+### 5.3 Block Binding Pipeline
 
 Surf:
 
 ```chelis-surf
 def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
-  let y = add(x, x)
-  in relu(y)
+  {
+    y = add(x, x)
+    relu(y)
+  }
 ```
 
 Deep:
@@ -442,8 +450,15 @@ Deep:
 Surf:
 
 ```chelis-surf
-def classify(x: tensor[n, f32]) -> tensor[n, f32] =
-  x |> relu |> fn (v) -> softmax(v, 0)
+def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
+  logits = x |> relu |> add(labels)
+  loss =
+    softmax(logits, 0)
+    |> log
+    |> mul(labels)
+    |> sum(0)
+  loss
+}
 ```
 
 Deep:
@@ -453,16 +468,29 @@ Deep:
   classify
   (t-fn {}
     (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-name {} n) (t-prim {} f32))
+    (t-tensor {} (t-prim {} f32))))
 
 (def {}
   classify
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
-    (pipe {}
-      (var {} x)
-      (var {} relu)
-      (fn {} (params {} v) (app {} (var {} softmax) (var {} v) (lit {type: (t-prim {} int32)} 0))))))
+    (params {}
+      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
+      (labels {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (let {}
+      (bind {}
+        logits
+        (pipe {}
+          (var {} x)
+          (var {} relu)
+          (fn {} (params {} __chelis_pipe) (app {} (var {} add) (var {} __chelis_pipe) (var {} labels))))
+        loss
+        (pipe {}
+          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} int32)} 0))
+          (var {} log)
+          (fn {} (params {} __chelis_pipe) (app {} (var {} mul) (var {} __chelis_pipe) (var {} labels)))
+          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} int32)} 0)))))
+      (var {} loss))))
 ```
 
 ### 5.6 Sigmoid Step

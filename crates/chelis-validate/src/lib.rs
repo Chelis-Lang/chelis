@@ -88,9 +88,14 @@ pub enum ValidationError {
 }
 
 pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
-    surf::Grammar::parse(surf::Rule::program, source)
-        .map(|_| ())
-        .map_err(|err| ValidationError::Failed(err.to_string()))
+    match surf::Grammar::parse(surf::Rule::program, source) {
+        Ok(_) => Ok(()),
+        Err(pest_err) => chelis_surf::parser::parse_str(source)
+            .map(|_| ())
+            .map_err(|parse_err| {
+                ValidationError::Failed(format!("{pest_err}\ncompiler parse failed: {parse_err}"))
+            }),
+    }
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
@@ -292,6 +297,12 @@ mod tests {
     fn surf_accepts_arrow_return_types() {
         let source = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
         validate_surf(source).expect("validator should accept arrow return types");
+    }
+
+    #[test]
+    fn surf_accepts_short_block_bindings() {
+        let source = "def f(x) = {\n  y = relu(x)\n  y\n}\n";
+        validate_surf(source).expect("validator should accept short block bindings");
     }
 
     #[test]

@@ -87,7 +87,7 @@ tuple_or_paren_expr = { "(" ~ expr ~ ("," ~ expr)+ ~ ","? ~ ")" | "(" ~ expr ~ "
 
 block_expr = { "{" ~ block_body ~ "}" }
 block_body = { (block_let ~ semicolons?)* ~ expr }
-block_let = { LET ~ let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
+block_let = { (LET ~ let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr) | (let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr) }
 
 transform_expr = _{ grad_expr | vmap_expr | jit_expr | cast_expr | realize_expr | copy_expr | par_expr }
 grad_expr = { GRAD ~ "(" ~ expr ~ ")" }

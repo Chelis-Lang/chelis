@@ -125,9 +125,16 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetBinding {
+    pub style: BindingStyle,
     pub pattern: LetPattern,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingStyle {
+    ExplicitLet,
+    Short,
 }
 
 #[derive(Debug, Clone, PartialEq)]

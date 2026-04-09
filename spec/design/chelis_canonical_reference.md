@@ -172,6 +172,16 @@ Project-facing Surf should read like human-written model code, not typed Deep de
 - avoid redundant intermediate type ascriptions when inference already determines the type
 - prefer meaningful intermediate names over mechanically naming every primitive step
 
+Planned public-style target for Phase 3:
+
+- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
+  valid
+- prefer pipe-first composition for eligible linear flows
+- use multiline pipes for long or many-stage chains, breaking after `=` and before every
+  `|>` when the flat form exceeds the width budget or the chain becomes visually dense
+- apply the same flat-first, width-threshold philosophy in Surf that Deep already uses
+  for pretty printing
+
 ---
 
 ## 7. Type System Scope
@@ -452,6 +462,9 @@ server.
 This is the Phase 2 coding-assistance story: compiler-in-the-loop generation, no local
 training requirement, and immediate usefulness for agents that already have strong
 general coding ability.
+The full-surface `SKILL.md` v2 refresh belongs to Phase 3, after the Phase 2 language
+surface and the Phase 3 public Surf idiom are stabilized: pipe-first chains,
+short-form block bindings, and width-aware multiline rendering.
 
 Current validation result:
 

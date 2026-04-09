@@ -146,6 +146,17 @@ impl Parser {
                 TokenKind::Newline | TokenKind::Semicolon
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
+                    if matches!(token.kind, TokenKind::Newline)
+                        && self
+                            .tokens
+                            .iter()
+                            .skip(pos + 1)
+                            .find(|next| !matches!(next.kind, TokenKind::Newline))
+                            .is_some_and(|next| matches!(next.kind, TokenKind::Pipe))
+                    {
+                        pos += 1;
+                        continue;
+                    }
                     break;
                 }
                 TokenKind::RBrace if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
@@ -1072,7 +1083,12 @@ impl Parser {
             };
             self.expect(&TokenKind::Eq)?;
             let value = self.parse_expr(0)?;
-            bindings.push(LetBinding { pattern, ty, value });
+            bindings.push(LetBinding {
+                style: BindingStyle::ExplicitLet,
+                pattern,
+                ty,
+                value,
+            });
         }
 
         self.expect(&TokenKind::In)?;
@@ -1276,7 +1292,9 @@ impl Parser {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
         self.consume_block_separators();
-        while *self.peek() == TokenKind::Let && !self.at_eof() {
+        while !self.at_eof()
+            && (*self.peek() == TokenKind::Let || self.is_short_block_binding_start())
+        {
             bindings.push(self.parse_block_let_binding()?);
             let sep_count = self.consume_block_separators();
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
@@ -1293,8 +1311,31 @@ impl Parser {
         Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
     }
 
+    fn is_short_block_binding_start(&self) -> bool {
+        let mut probe = Parser {
+            tokens: self.tokens.clone(),
+            pos: self.pos,
+            module_allowed: false,
+        };
+        let Ok(pattern) = probe.parse_let_pattern() else {
+            return false;
+        };
+        if matches!(pattern, LetPattern::Var(_, _)) && *probe.peek() == TokenKind::Colon {
+            probe.advance();
+            if probe.parse_type().is_err() {
+                return false;
+            }
+        }
+        *probe.peek() == TokenKind::Eq
+    }
+
     fn parse_block_let_binding(&mut self) -> Result<LetBinding, ParseError> {
-        self.expect(&TokenKind::Let)?;
+        let style = if *self.peek() == TokenKind::Let {
+            self.expect(&TokenKind::Let)?;
+            BindingStyle::ExplicitLet
+        } else {
+            BindingStyle::Short
+        };
         let pattern = self.parse_let_pattern()?;
         let ty = if matches!(pattern, LetPattern::Var(_, _)) && *self.peek() == TokenKind::Colon {
             self.advance();
@@ -1303,8 +1344,14 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
+        self.consume_block_separators();
         let value = self.parse_expr_until_block_separator()?;
-        Ok(LetBinding { pattern, ty, value })
+        Ok(LetBinding {
+            style,
+            pattern,
+            ty,
+            value,
+        })
     }
 
     fn parse_let_pattern(&mut self) -> Result<LetPattern, ParseError> {
@@ -2296,6 +2343,73 @@ mod tests {
             }
             _ => panic!("expected Block, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn block_accepts_short_bindings() {
+        let e = body(
+            "def f() = {
+                x = 1
+                y = 2
+                y
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 2);
+                assert!(matches!(bindings[0].style, BindingStyle::Short));
+                assert!(matches!(bindings[1].style, BindingStyle::Short));
+                assert!(matches!(*body, Expr::Var(ref n, _) if n == "y"));
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_accepts_typed_short_binding() {
+        let e = body(
+            "def f() = {
+                x: tensor[n, f32] = relu(y)
+                x
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(bindings[0].style, BindingStyle::Short));
+                assert!(bindings[0].ty.is_some());
+                assert!(matches!(*body, Expr::Var(ref n, _) if n == "x"));
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_accepts_binding_value_broken_after_equals() {
+        let e = body(
+            "def f(logits, labels) = {
+                loss =
+                  softmax(logits, 0)
+                  |> log
+                  |> mul(labels)
+                loss
+            }",
+        );
+        match e {
+            Expr::Block(bindings, body, _) => {
+                assert_eq!(bindings.len(), 1);
+                assert!(matches!(bindings[0].style, BindingStyle::Short));
+                assert!(matches!(bindings[0].value, Expr::Pipe(_, _, _)));
+                assert!(matches!(*body, Expr::Var(ref n, _) if n == "loss"));
+            }
+            _ => panic!("expected Block, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn block_rejects_call_like_short_binding_head() {
+        let err = p_err("def f() = { g(x) = 1 x }");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[test]

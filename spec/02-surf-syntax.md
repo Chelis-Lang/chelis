@@ -177,6 +177,14 @@ Style rules for human-facing Surf:
 - omit intermediate type ascriptions when inference already determines the type
 - combine short tensor operations when that improves readability
 
+Planned Phase 3 public-style target:
+
+- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
+  valid
+- prefer pipe-first composition for eligible linear flows
+- break long or many-stage pipes after `=` and before every `|>` using the same
+  flat-first, width-threshold approach as the Deep pretty printer
+
 ### P5: Blocks and Sequencing
 
 Braces define blocks. Inside blocks, `let` bindings are sequential — no `in` required. Newlines and semicolons are both valid separators. The final expression is the block's value.
@@ -208,6 +216,10 @@ Braces define blocks. Inside blocks, `let` bindings are sequential — no `in` r
 Blocks are expressions: `let result = { let temp = f(x); g(temp) }` is valid.
 
 A separator (newline or semicolon) is required between a `let` binding and the next statement. Multiple separators (blank lines) are fine. Trailing semicolon after the final expression is tolerated.
+
+Planned Phase 3 extension: block-level sequential bindings may also use the short form
+`name = expr` or pattern forms such as `(a, b) = pair`, while `let ... in`
+expressions continue to require `let`.
 
 No `where` clauses. Use `let...in` or blocks.
 

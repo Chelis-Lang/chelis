@@ -209,14 +209,9 @@ fn cmd_fmt(file: &PathBuf, inplace: bool, check: bool) -> Result<(), Box<dyn std
         let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
         chelis_deep::printer::print_canonical(&deep_exprs)
     } else {
-        // .ch: parse Surf -> desugar -> decompile back to Surf (idempotent)
+        // .ch: parse Surf -> pretty-print Surf while preserving surface choices
         let decls = chelis_surf::parser::parse_str(&source)?;
-        let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-        chelis_surf::decompile::decompile_program_with_context(
-            &deep_exprs,
-            &chelis_surf::decompile::DecompileOptions::idiomatic(),
-            file.file_stem().and_then(|stem| stem.to_str()),
-        )
+        chelis_surf::format::format_program(&decls)
     };
     if check {
         if output == source {

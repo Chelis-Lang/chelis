@@ -117,7 +117,9 @@ These limitations are real debt, but they do not block the Phase 2 language work
 AI assistance planning is split cleanly:
 
 - Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
-- Phase 3: ecosystem polish, including the pipe-first example/decompiler cleanup
+- Phase 3: ecosystem foundations, starting with the Surf style pass (pipe-first,
+  short-form block bindings, width-aware multiline pipes), then package/FFI work and
+  the `SKILL.md` v2 refresh
 - Phase 4: a local coding model that ships with the toolchain
 
 Phase 2g currently ships as:
