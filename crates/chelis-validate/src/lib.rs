@@ -46,6 +46,7 @@ const VALID_TAGS: &[&str] = &[
     "tuple",
     "tuple-get",
     "par",
+    "borrow",
     "handle-effect",
     "pat-var",
     "pat-lit",

@@ -16,14 +16,13 @@ research roadmap for both type-system extensions and mechanized conformance.
 **Phase 3 does NOT deliver:** The local coding model (Phase 4), alternative backends
 like StableHLO / FX / Triton (Phase 5), or multi-GPU support (Phase 5d).
 
-This phase has two explicit tracks across five numbered sub-phases:
+This phase has two explicit tracks across six numbered sub-phases:
 
-- engineering track: `3e -> 3a -> 3b`
+- engineering track: `3e -> 3f -> 3a -> 3b`
 - research track: `3c` and `3d` in parallel
 
-`SKILL.md` v2 is the public-teaching/documentation refresh that lands after the style
-foundation is settled and before the Phase 4 model-training track begins.
-It stays near `3e`, but it is not counted as a sixth numbered sub-phase.
+`3f` (SKILL.md v2) is the public-teaching/documentation refresh that lands after the
+style foundation is settled and before the Phase 4 model-training track begins.
 
 ---
 
@@ -36,11 +35,12 @@ Engineering track
   (pipes, optional block let, width-aware formatting, examples)     |
          |                                                          |
          v                                                          |
+3f: SKILL.md v2 Refresh                                             |
+  (teaching surface locked to 3e idiom, before Phase 4)             |
+         |                                                          |
+         v                                                          |
 3a: Package System (Shells + Reef) ---------------------------------+--> 3b: Python FFI
   (dogfood with chelis-std)                                              (DLPack + PyO3)
-         |
-         +---------------------------------------------> SKILL.md v2 refresh
-                                                        (after 3e, before 4a)
 
 Research track
 
@@ -51,14 +51,16 @@ Research track
 **Recommended execution order:**
 
 1. `3e` style foundation
-2. `3a` package system
-3. `3b` Python FFI
-4. `3d` Lean formalization in parallel
-5. `3c` research type extensions
-6. `SKILL.md` v2 refresh after the idiom is stable and before Phase 4 corpus/training work
+2. `3f` SKILL.md v2 refresh (locks the teaching idiom before corpus collection)
+3. `3a` package system
+4. `3b` Python FFI
+5. `3d` Lean formalization in parallel
+6. `3c` research type extensions
 
 `3e` goes first because every later deliverable publishes examples, package code, or
-teaching material that should already be in the final public idiom.
+teaching material that should already be in the final public idiom. `3f` follows
+immediately so the SKILL.md is locked to the finalized style before Phase 4 corpus
+collection and model training.
 
 ---
 
@@ -301,6 +303,58 @@ Representative module areas:
 
 All Phase 3 standard-library code should already use the finalized `3e` Surf style.
 
+**Model serialization strategy (`Std.IO.Safetensors`):**
+
+Safetensors is the explicit format choice for Chelis tensor serialization. No custom
+format, no HDF5, no pickle.
+
+Why safetensors: memory-mapped (fast loading, no deserialization overhead), stores tensor
+metadata (shapes, dtypes, names) alongside data, universally supported (PyTorch, JAX,
+HuggingFace), simple spec (JSON header + flat tensor data), and safe (no arbitrary code
+execution unlike pickle).
+
+Surface in `Std.IO`:
+
+```chelis
+import Std.IO.Safetensors
+
+-- Save trained parameters
+save_tensors("checkpoint.safetensors", {
+  "w1": w1, "b1": b1, "w2": w2, "b2": b2
+})
+
+-- Load parameters
+params = load_tensors("checkpoint.safetensors")
+```
+
+Implementation: thin wrapper around the `safetensors` Rust crate, exposed to Chelis
+programs via the C backend's runtime. The `save_tensors` function writes the
+chelis_tensor data in safetensors format. The `load_tensors` function memory-maps the
+file and returns chelis_tensor views. Zero-copy when possible (memory-mapped data
+accessed via stride-aware indexing).
+
+Interop with Python (Phase 3b): a model trained in Chelis and saved as safetensors can
+be loaded by PyTorch with `safetensors.torch.load_file("checkpoint.safetensors")`. A
+model trained in PyTorch and saved as safetensors can be loaded by Chelis. No conversion
+step — the format is the interop layer.
+
+The full serialization story for a Chelis model in production:
+
+| Artifact | Format | Purpose |
+|---|---|---|
+| Model definition | `.ch` (Surf source) | Human-readable, version-controlled |
+| Compiled artifact | `.c` / `.hip` (generated code) | Compiled by gcc/hipcc, deployed |
+| Trained weights | `.safetensors` | Parameter values, portable across frameworks |
+| Coding model | `.gguf` (Phase 4) | The AI that wrote the model, ships with toolchain |
+
+Formats NOT supported (and why):
+- HDF5: legacy, being replaced by safetensors across the ML ecosystem
+- NPZ: NumPy-specific, not framework-portable
+- Pickle: security hazard (arbitrary code execution), no new system should support it
+- ONNX/TorchScript: whole-model export formats (computation graph + weights), not
+  weight-only serialization; relevant for Phase 5 FX backend export, not for
+  Chelis-native checkpointing
+
 ### Test Plan
 
 - manifest parse/write round-trip
@@ -310,6 +364,10 @@ All Phase 3 standard-library code should already use the finalized `3e` Surf sty
 - dependency-resolution success and conflict cases
 - `chelis reef` CLI scaffolding and build flows
 - bundled `chelis-std` build/import success
+- safetensors: `save_tensors` round-trips tensor data with correct shapes/dtypes/names
+- safetensors: `load_tensors` memory-maps without copying when possible
+- safetensors: file written by Chelis loads correctly in PyTorch (cross-framework gate,
+  manual)
 
 ### Acceptance Oracle
 
@@ -385,15 +443,38 @@ Each candidate feature follows this order:
 5. submit
 6. merge into the mainline only after it proves out
 
-Priority order:
+**Tier 1 (high priority, core Phase 3 deliverables):**
 
 1. ILP/AUTOMAP-style rank polymorphism
 2. size-dependent types
+
+**Tier 2 (medium priority, start in Phase 3, may extend into Phase 4+):**
+
 3. distribution types
 4. equivariance constraints
 
-The first two are the main Phase 3 focus.
-The latter two remain more speculative.
+**Tier 3 (low priority, Phase 4+ or opportunistic):**
+
+5. optimization-property annotations
+6. **Inference as a typed effect** — LLM calls as a typed, mockable algebraic effect
+   (`Inference.complete`). Relevant if Chelis programs ever delegate to LLMs
+   (meta-learning, reward model queries, LLM-as-judge). Composes with existing effects —
+   `effects(<Random, Inference>)` means the function uses both randomness and LLM calls.
+   Inspired by Vera's `Inference` effect. Phase 3+ research direction, not a v1 feature.
+
+### Research Notes
+
+**De Bruijn references in Deep (study, don't adopt).** Vera's elimination of variable
+names in favor of typed positional indices (`@T.n`) achieves 100% LLM generation
+accuracy on its benchmark. The question for Chelis: would replacing `(var {} x)` with
+positional references `(ref {} 0)` in Deep improve LLM generation accuracy for the
+s-expression representation? The hypothesis: Deep's closed 60-tag vocabulary and 3-tuple
+structure may already provide enough structural constraint that de Bruijn indices add
+complexity without measurable benefit. Additionally, named references carry semantic
+meaning for ML code (`logits` vs `hidden`) that positional indices destroy. Study this
+as an empirical question during Phase 4b (ICL effect measurement): test generation
+accuracy with named-Deep vs positional-Deep variants of the SKILL.md and compare. Don't
+adopt unless the measurement shows a clear advantage.
 
 ### Test / Validation Plan
 
@@ -438,7 +519,7 @@ reference for conformance disputes in that subset.
 
 ---
 
-## SKILL.md v2 Refresh
+## 3f: SKILL.md v2 Refresh
 
 **Goal:** refresh `SKILL.md` for the complete stable Phase 2 language surface and the
 finalized Phase 3 Surf idiom.
@@ -483,4 +564,4 @@ Before calling Phase 3 complete:
 - `3b` covers both DLPack and PyO3
 - `3c` has at least one paper-quality, corpus-validated extension in flight
 - `3d` has a running Lean checker on the agreed core subset
-- `SKILL.md` v2 matches the final public Surf idiom
+- `3f` SKILL.md v2 matches the final public Surf idiom

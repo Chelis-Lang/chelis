@@ -96,7 +96,7 @@ fitness scoring, error reporting), and before CLI paths such as `chelis deep`,
 `check`, `build`, and `eval`.
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
-The 59-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+The 60-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
 Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
@@ -523,6 +523,18 @@ Product framing:
 - a language for AIs that does not include an AI is an incomplete product
 - Track 1 is the frontier-model path
 - Track 2 is the shipped local-model path
+
+**ChelisBench:** A 50-task ML programming benchmark comparing LLM code generation in
+Chelis vs PyTorch on equivalent tasks. Measures whether a language designed for LLMs
+produces better ML code than the standard approach. Serves double duty as a measurement
+tool and a trajectory source for model training.
+
+**Type-driven property testing:** The Tide API provides `chelis test` / `POST /test` —
+automatic test generation from function type signatures. The compiler knows tensor
+shapes, dtypes, and dimension constraints; it generates random valid inputs, runs the
+function, and verifies output shapes, determinism (for pure functions), and gradient
+correctness (for differentiable functions). No test code written by anyone — the type
+signature is the test specification.
 
 ---
 

@@ -34,7 +34,7 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
 | **3** | Ecosystem foundations: package system (Reef), Python FFI, research type extensions, Lean formalization, pipe-first style pass, SKILL.md v2 |  |
-| **4** | ML & AI coding: seed corpus, ICL measurement, trajectory collection, local model training, model integration |  |
+| **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends: StableHLO, FX Graph, Triton, multi-GPU |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
@@ -281,7 +281,7 @@ pure tape-only or pure full-recompute AD.
 **LLM representation constraint:** The macro system must produce clean expanded Deep
 with provenance metadata in the `{}` slot.
 Macro expansion is a compilation step that happens before any LLM-facing operation.
-The expanded form uses only the base 59-tag vocabulary.
+The expanded form uses only the base 60-tag vocabulary.
 LLMs never see, generate, or reason about unexpanded macro invocations.
 This is a settled design decision, not an open question for Phase 2c.
 The Phase 2c design task is: expansion rules, hygiene, phase separation, and the
@@ -331,11 +331,11 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
 **Tracks:** Phase 3 has an explicit engineering track (`3e -> 3a -> 3b`) and a
 parallel research track (`3c` and `3d`).
-`SKILL.md` v2 lands immediately after `3e` as a teaching-surface refresh, but it is
-not counted as a sixth numbered sub-phase.
+`3f` (SKILL.md v2) lands after `3e` as the teaching-surface refresh that locks the
+idioms before corpus collection and model training.
 
-**Recommended execution order:** `3e`, then `3a`, then `3b`, while `3d` runs in
-parallel and `3c` follows the paper-first validation path.
+**Recommended execution order:** `3e`, then `3f`, then `3a`, then `3b`, while `3d`
+runs in parallel and `3c` follows the paper-first validation path.
 
 ### 3e: Style Foundation
 
@@ -425,7 +425,7 @@ Acceptance criteria:
 - run this as a non-blocking parallel research track and treat Lean as the conformance
   oracle for the formalized subset when Lean and Rust disagree
 
-### SKILL.md v2 Refresh
+### 3f: SKILL.md v2 Refresh
 
 - update `SKILL.md` for the full stable Phase 2 language surface
 - cover effects, linearity, macros, `vmap`, tuples, short-form block bindings, and the
@@ -444,9 +444,11 @@ Phase 3 success condition:
 
 ## Phase 4
 
-**Prerequisite:** Phase 3 complete, including the pipe-first corpus/style pass.
+**Prerequisite:** Phase 2 complete, Phase 3e complete (idiomatic examples), Phase 3f
+complete (SKILL.md v2 covering full language surface).
 **Deliverable:** first-party ML and coding-assistance stack built on the finalized
-Phase 2 language and finalized example idioms.
+Phase 2 language and finalized example idioms, plus a reproducible benchmark proving
+the "designed for LLMs" thesis.
 
 ### 4a: Seed Corpus Collection and Curation
 
@@ -459,6 +461,12 @@ Phase 2 language and finalized example idioms.
 - measure SKILL-assisted generation with and without the relevant context in prompt
 - stratify results by corpus complexity band
 - use this as the prerequisite experiment before choosing a heavier training path
+- **additional measurement (informed by Vera's de Bruijn research):** test generation
+  accuracy with named-Deep vs a positional-reference Deep variant; if positional
+  references measurably improve generation accuracy, consider adopting them for the
+  LLM-facing representation; if not (hypothesis: Deep's closed vocabulary already
+  provides sufficient structural constraint), document the result and keep named
+  references
 
 ### 4c: Trajectory Collection via Compiler Loop
 
@@ -466,23 +474,72 @@ Phase 2 language and finalized example idioms.
 - include failures, repairs, and complexity metadata
 - use the compiler as the scoring/teaching surface rather than free-form human labels
 
-### 4d: Local Coding Model Training
+### 4d: ChelisBench
+
+A reproducible benchmark measuring whether LLMs write better ML code in Chelis than in
+PyTorch. Inspired by Vera's VeraBench methodology — same tasks, multiple languages,
+multiple models, comparable evaluation.
+
+**Structure:** 50 ML programming tasks across 5 difficulty tiers:
+
+| Tier | Examples | Count |
+|---|---|---|
+| 1: Single ops | "Implement ReLU," "Compute mean along axis 1" | 10 |
+| 2: Layer components | "Write a linear layer with bias," "Implement softmax cross-entropy loss" | 15 |
+| 3: Model blocks | "Write a transformer attention block," "Implement a residual connection with layer norm" | 12 |
+| 4: Full models | "Write a 2-layer MLP for MNIST," "Implement a single transformer encoder layer" | 8 |
+| 5: Training pipelines | "Write a training step with gradient computation and parameter update," "Implement per-example gradients with vmap" | 5 |
+
+**Evaluation:** For each task, evaluate on 3-6 models (Qwen, Llama, Claude, GPT, etc.)
+in two modes:
+- **Chelis mode:** SKILL.md in context, generate Chelis (Surf or Deep), evaluate with
+  `chelis check` fitness score + `chelis test` property tests + `chelis eval` numerical
+  correctness
+- **PyTorch mode:** Standard PyTorch documentation in context, generate Python, evaluate
+  with syntax check + execution + numerical correctness
+
+**Metrics per task:** compile/run success rate, fitness score (Chelis only), iterations
+to first correct program, final correctness, wall-clock generation time.
+
+**The thesis test:** If Chelis is well-designed for LLM authorship, models should achieve
+comparable or better success rates on Chelis tasks than PyTorch tasks, despite zero
+Chelis training data. The SKILL.md + compiler feedback loop should compensate for the
+training data gap.
+
+**Dual purpose:** ChelisBench is both a measurement tool AND a trajectory source for
+Phase 4c. Every benchmark run produces model-generated programs with compiler feedback —
+usable as training data.
+
+**Publication target:** Workshop paper or blog post. "ChelisBench: Do LLMs Write Better
+ML Code in a Language Designed for Them?"
+
+### 4e: Local Coding Model Training
 
 - start with SSD for distributional shaping
 - fine-tune with the simplest method that meets the quality bar
 - quantize and ship GGUF artifacts for local use
 - preserve PyTorch/JAX semantic knowledge as a hard anti-forgetting constraint
 
-### 4e: Coding Model Integration
+### 4f: Coding Model Integration
 
 - integrate the local model into `chelis cove --assist`
 - expose the same capability through the MCP tool surface with local-model fallback
 - baseline coding assistance should work without an API key or internet requirement
 
+**Distribution summary:**
+
+| Artifact | Track | Phase | Purpose |
+|---|---|---|---|
+| `chelis-lang/chelis-skill` (SKILL.md v2 + examples + harness) | Track 1 | Phase 3f | Frontier model in-context learning |
+| `chelis-lang/chelis-bench` (ChelisBench tasks + evaluation harness) | Measurement | Phase 4d | Benchmark: do LLMs write better ML code in Chelis? |
+| `chelis-lang/chelis-trajectories` (trajectory dataset) | Track 2 | Phase 4c | Training data for local model |
+| `chelis-lang/chelis-coder` (GGUF quantized model) | Track 2 | Phase 4e | Ships with toolchain |
+
 Phase 4 success condition:
 
 - Chelis ships a first-party local coding model as part of the product, not as an
   optional research extra
+- ChelisBench provides reproducible evidence for the "designed for LLMs" thesis
 
 ---
 
@@ -580,7 +637,7 @@ depends on it.
 |---|---|---|---|
 | **Effect system design** | effect typing rules, handler syntax, HM interaction; investigate Dex's Accum effect for parallelism-preserving gradient accumulation, and distinguish parallelism-preserving effects from sequentializing ones | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
-| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 59-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
+| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 60-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
 | **GPU memory model** | device-memory semantics and ownership model | Phase 1 / 2a | **MEDIUM** |
 | **Effect handler syntax** | Surf and Deep syntax for handling effects | Phase 2a | **MEDIUM** |

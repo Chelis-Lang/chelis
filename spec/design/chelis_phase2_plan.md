@@ -594,6 +594,7 @@ models rather than serializing compiler AST/DAG structs directly.
 | `POST /grad` | Surf or Deep source + output/wrt names | Differentiated DAG JSON |
 | `POST /validate` | Surf or Deep source + mode | Conformance result |
 | `POST /decompile` | Deep source | Surf source |
+| `POST /test` | Surf or Deep source + function name + num_cases | Property test results (shapes, determinism, gradient check) |
 
 **MCP tools (wrapping the HTTP endpoints):**
 - `chelis_check`
@@ -603,10 +604,22 @@ models rather than serializing compiler AST/DAG structs directly.
 - `chelis_eval`
 - `chelis_grad`
 - `chelis_validate`
+- `chelis_test` — type-driven property testing
 
 **Batch mode:** `POST /batch` accepts an array of requests, returns results for all.
 Essential for evolutionary loops and trajectory collection (Phase 4c training
 pipeline).
+
+**Type-driven property testing (`/test`):** Generate test inputs automatically from
+function type signatures. A function
+`def f(x: tensor[batch, 784, f32]) -> tensor[batch, 128, f32]` has enough information
+to generate random valid inputs — the compiler knows the shapes, dtypes, and dimension
+constraints. The endpoint generates `num_cases` random inputs of the correct shapes,
+calls the function via the evaluator, and verifies: output shape matches the declared
+return type, pure functions are deterministic (same inputs → same output),
+`Diff`-annotated functions have finite-difference-verified gradients. No test code
+written by anyone — the type signature IS the test specification. Also available as
+`chelis test <file> --fn <name>` on the CLI.
 
 **Implementation:** Rust HTTP server (`axum`) wrapping the existing compiler crates.
 The MCP server is a thin stdio adapter over the same compiler adapter layer. The

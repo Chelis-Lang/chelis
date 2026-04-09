@@ -22,7 +22,7 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
 
 1. Extract the PEG grammars from `spec/02-surf-syntax.md` §4 and `spec/03-deep-syntax.md` into `pest` grammar files (`.pest`)
 2. Build a `chelis-validate` crate that uses `pest` to parse against these grammars
-3. The Deep validator additionally checks: tag vocabulary (only 56 valid tags), 3-tuple structure (every node has `{}`), arity rules (correct number of children per tag)
+3. The Deep validator additionally checks: tag vocabulary (only 60 valid tags), 3-tuple structure (every node has `{}`), arity rules (correct number of children per tag)
 4. Wire into the CLI as the `validate` subcommand
 
 **This is a conformance tool, not a replacement for the parser.** The full compiler's parser is hand-written (Pratt + recursive descent). The `pest`-based validator is an independent second implementation derived from the spec grammar. If they disagree about whether a program is valid, that's a bug in one of them — and the disagreement is the valuable finding.
