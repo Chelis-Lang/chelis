@@ -26,9 +26,9 @@ Detailed Phase 3 planning lives in `spec/design/chelis_phase3_plan.md`.
 | **1f** | Executable grammar | Implemented |
 | **2a** | Algebraic effects | Initial subset shipped: effect syntax, annotated checked Deep, `Random` via `dropout` + `with seed(...)`, and `Resource(Device)` build-boundary validation |
 | **2** | Remaining Phase 2 work: broader effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`) | In progress; 2e Tide Agent API + MCP, 2f LSP, 2g Cove, and the 2gb Deep pretty-formatting side quest are shipped alongside the initial 2a subset; seed corpus work from the original 2s track was deferred to Phase 4a; detailed design in `spec/design/chelis_phase2_plan.md` |
-| **3** | Ecosystem foundations: style foundation first (`3e`), package system (Reef), Python FFI, research type extensions, Lean formalization, SKILL.md v2 | In progress; `3e`, `3f`, and the local-first `3a` Reef package-system cut are shipped |
+| **3** | Ecosystem foundations: style foundation first (`3e`), package system (Reef), Python FFI, direct Python execution, research type extensions, Lean formalization, SKILL.md v2 | In progress; `3e`, `3f`, `3a`, `3b`, and `3b-ii` are shipped; `3c` and `3d` remain |
 | **4** | ML & AI coding: seed corpus, ICL measurement, trajectory collection, local model training, model integration |  |
-| **5** | Advanced backends: StableHLO, FX Graph, Triton, multi-GPU |  |
+| **5** | Advanced backends: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU |  |
 
 ## Red Team Checkpoints
 

@@ -1,4 +1,3 @@
-pub mod compiler;
 pub mod http;
 pub mod mcp;
-pub mod schema;
+pub use chelis_compiler_api::{compiler, schema};

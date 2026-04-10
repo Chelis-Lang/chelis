@@ -65,7 +65,7 @@ pub fn runtime_dir() -> &'static str {
 pub fn codegen_hip(dag: &chelis_ir::dag::Dag, func_name: &str) -> HipCodegenResult {
     let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name);
     let h_header = format!(
-        "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+        "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
     let input_labels = emit::HipEmitter::input_labels(dag);
     let output_labels = emit::HipEmitter::output_labels(dag);

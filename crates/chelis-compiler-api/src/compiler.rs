@@ -37,6 +37,31 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionDim {
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionTensorSpec {
+    pub name: String,
+    pub dtype: String,
+    pub dims: Vec<ExecutionDim>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompiledExecutionArtifact {
+    pub compile_result: CompileResult,
+    pub host_entry_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_entry_name: Option<String>,
+    pub inputs: Vec<ExecutionTensorSpec>,
+    pub outputs: Vec<ExecutionTensorSpec>,
+    pub symbolic_dims: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompilerError {
     pub stage: String,
@@ -107,6 +132,10 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
 }
 
 pub fn compile(request: CompileRequest) -> Result<CompileResult> {
+    Ok(compile_for_execution(request)?.compile_result)
+}
+
+pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
     let func_name = request
         .entry_name
@@ -117,14 +146,30 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let fused = chelis_ir::fuse::fuse(&compiled.dag);
             let result = chelis_backend_c::codegen(&fused, &func_name);
-            Ok(compile_result_c(request.target, &func_name, result))
+            Ok(compiled_execution_artifact(
+                request.target,
+                &func_name,
+                None,
+                compile_result_c(request.target, &func_name, &result),
+                execution_input_specs(&compiled.dag, &result.input_labels),
+                execution_output_specs(&compiled.dag, &result.output_labels),
+                result.symbolic_dims,
+            ))
         }
         CompileTarget::Hip => {
             reject_unsized_named_dims(&compiled.dag, "hip")?;
             reject_unsupported_hip_ops(&compiled.dag)?;
             let fused = chelis_ir::fuse::fuse(&compiled.dag);
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
-            Ok(compile_result_hip(request.target, &func_name, result))
+            Ok(compiled_execution_artifact(
+                request.target,
+                &func_name,
+                Some(format!("{func_name}_device")),
+                compile_result_hip(request.target, &func_name, &result),
+                execution_input_specs(&compiled.dag, &result.input_labels),
+                execution_output_specs(&compiled.dag, &result.output_labels),
+                result.symbolic_dims,
+            ))
         }
     }
 }
@@ -511,10 +556,29 @@ fn symbol_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
+fn compiled_execution_artifact(
+    _target: CompileTarget,
+    host_entry_name: &str,
+    device_entry_name: Option<String>,
+    compile_result: CompileResult,
+    inputs: Vec<ExecutionTensorSpec>,
+    outputs: Vec<ExecutionTensorSpec>,
+    symbolic_dims: Vec<String>,
+) -> CompiledExecutionArtifact {
+    CompiledExecutionArtifact {
+        compile_result,
+        host_entry_name: host_entry_name.to_string(),
+        device_entry_name,
+        inputs,
+        outputs,
+        symbolic_dims,
+    }
+}
+
 fn compile_result_c(
     target: CompileTarget,
     func_name: &str,
-    result: CodegenResult,
+    result: &CodegenResult,
 ) -> CompileResult {
     CompileResult {
         target,
@@ -522,11 +586,11 @@ fn compile_result_c(
         files: vec![
             GeneratedFile {
                 path: format!("{func_name}.c"),
-                contents: result.c_source,
+                contents: result.c_source.clone(),
             },
             GeneratedFile {
                 path: format!("{func_name}.h"),
-                contents: result.h_header,
+                contents: result.h_header.clone(),
             },
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
@@ -537,8 +601,8 @@ fn compile_result_c(
                 contents: RUNTIME_C.to_string(),
             },
         ],
-        compile_flags: result.compile_flags,
-        link_flags: result.link_flags,
+        compile_flags: result.compile_flags.clone(),
+        link_flags: result.link_flags.clone(),
         peak_device_bytes_estimate: None,
     }
 }
@@ -546,7 +610,7 @@ fn compile_result_c(
 fn compile_result_hip(
     target: CompileTarget,
     func_name: &str,
-    result: HipCodegenResult,
+    result: &HipCodegenResult,
 ) -> CompileResult {
     CompileResult {
         target,
@@ -554,11 +618,11 @@ fn compile_result_hip(
         files: vec![
             GeneratedFile {
                 path: format!("{func_name}_hip.cpp"),
-                contents: result.c_source,
+                contents: result.c_source.clone(),
             },
             GeneratedFile {
                 path: format!("{func_name}_hip.h"),
-                contents: result.h_header,
+                contents: result.h_header.clone(),
             },
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
@@ -573,9 +637,99 @@ fn compile_result_hip(
                 contents: HIP_RUNTIME_H.to_string(),
             },
         ],
-        compile_flags: result.compile_flags,
-        link_flags: result.link_flags,
+        compile_flags: result.compile_flags.clone(),
+        link_flags: result.link_flags.clone(),
         peak_device_bytes_estimate: result.peak_device_bytes_estimate,
+    }
+}
+
+fn execution_input_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpec> {
+    let mut load_types = HashMap::<String, TensorType>::new();
+    for node in dag.nodes() {
+        if let RiscOp::Load { name } = &node.op {
+            load_types
+                .entry(name.clone())
+                .or_insert_with(|| node.output_type.clone());
+        }
+    }
+    labels
+        .iter()
+        .map(|label| {
+            let ty = load_types
+                .get(label)
+                .unwrap_or_else(|| panic!("missing load type for `{label}`"));
+            execution_tensor_spec(label.clone(), ty)
+        })
+        .collect()
+}
+
+fn execution_output_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpec> {
+    let nodes = execution_output_nodes(dag);
+    labels
+        .iter()
+        .zip(nodes)
+        .map(|(label, node_id)| {
+            let ty = &dag
+                .get(node_id)
+                .unwrap_or_else(|| panic!("missing output node {}", node_id.0))
+                .output_type;
+            execution_tensor_spec(label.clone(), ty)
+        })
+        .collect()
+}
+
+fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut nodes = Vec::new();
+
+    for node in dag.nodes() {
+        if let RiscOp::Store { name: _ } = &node.op
+            && seen.insert(node.id)
+        {
+            nodes.push(node.id);
+        }
+    }
+
+    let roots: Vec<NodeId> = if dag.roots().is_empty() {
+        dag.nodes()
+            .last()
+            .map(|node| vec![node.id])
+            .unwrap_or_default()
+    } else {
+        dag.roots().to_vec()
+    };
+
+    for root_id in roots {
+        if seen.insert(root_id) {
+            nodes.push(root_id);
+        }
+    }
+
+    nodes
+}
+
+fn execution_tensor_spec(name: String, ty: &TensorType) -> ExecutionTensorSpec {
+    ExecutionTensorSpec {
+        name,
+        dtype: ty.precision.name().to_string(),
+        dims: ty
+            .dims
+            .iter()
+            .map(|dim| match dim {
+                DimInfo::Lit(size) => ExecutionDim {
+                    name: None,
+                    size: Some(*size),
+                },
+                DimInfo::Named(name, Some(size)) => ExecutionDim {
+                    name: Some(name.clone()),
+                    size: Some(*size),
+                },
+                DimInfo::Named(name, None) => ExecutionDim {
+                    name: Some(name.clone()),
+                    size: None,
+                },
+            })
+            .collect(),
     }
 }
 

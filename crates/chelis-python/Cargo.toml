@@ -1,0 +1,28 @@
+[package]
+name = "chelis-python"
+description = "PyO3 bindings for the shared Chelis compiler API"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "chelis_python"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+chelis-compiler-api.workspace = true
+libc = "0.2"
+libloading = "0.8"
+pyo3 = { version = "0.24", features = ["abi3-py39", "auto-initialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
+assert_cmd = "2"

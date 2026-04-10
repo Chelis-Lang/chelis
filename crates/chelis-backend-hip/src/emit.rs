@@ -32,6 +32,9 @@ pub struct HipEmitter {
     reduction_inlined: std::collections::HashSet<usize>,
     /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
     extra_peak_device_bytes_estimate: usize,
+    /// Device entrypoints pre-allocate slot storage because borrowed input-backed views
+    /// are not the first owners in the host memory plan.
+    device_entrypoint_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +59,7 @@ impl HipEmitter {
             plan,
             reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
             extra_peak_device_bytes_estimate: 0,
+            device_entrypoint_mode: false,
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
@@ -81,7 +85,7 @@ impl HipEmitter {
         let expected_outputs = output_specs.len();
 
         e.line(&format!(
-            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
+            "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
         ));
         e.indent = 1;
 
@@ -180,6 +184,8 @@ impl HipEmitter {
 
         e.indent = 0;
         e.line("}");
+        e.line("");
+        e.emit_device_entrypoint(dag, func_name, &output_specs, &input_slots, &kernel_names);
         let mut formula = e.plan.peak_device_bytes_formula();
         if e.extra_peak_device_bytes_estimate > 0 {
             formula = if formula == "0" {
@@ -199,6 +205,99 @@ impl HipEmitter {
             extra_bytes: e.extra_peak_device_bytes_estimate,
         };
         (e.lines.join("\n"), breakdown)
+    }
+
+    fn emit_device_entrypoint(
+        &mut self,
+        dag: &Dag,
+        func_name: &str,
+        output_specs: &[OutputSpec],
+        input_slots: &std::collections::HashMap<String, usize>,
+        kernel_names: &[String],
+    ) {
+        let expected_inputs = input_slots.len();
+        let expected_outputs = output_specs.len();
+
+        self.line(&format!(
+            "extern \"C\" void {func_name}_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out) {{"
+        ));
+        self.indent = 1;
+
+        self.line(&format!("if (n_in != {expected_inputs}) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "fprintf(stderr, \"{func_name}_device: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+        ));
+        self.line("abort();");
+        self.indent -= 1;
+        self.line("}");
+
+        self.line(&format!("if (n_out != {expected_outputs}) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "fprintf(stderr, \"{func_name}_device: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+        ));
+        self.line("abort();");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        self.emit_input_shape_preamble_device(dag, input_slots, func_name);
+        self.line("");
+
+        for name in kernel_names {
+            self.line(&format!("static hipModule_t mod_{name} = NULL;"));
+            self.line(&format!(
+                "if (!mod_{name}) mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
+            ));
+        }
+        if !kernel_names.is_empty() {
+            self.line("");
+        }
+
+        self.device_entrypoint_mode = true;
+        self.emit_device_slot_allocations(dag);
+        if !self.plan.slots().is_empty() {
+            self.line("");
+        }
+
+        for node in dag.nodes() {
+            if self.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            if let RiscOp::Load { name } = &node.op {
+                let input_idx = *input_slots
+                    .get(name)
+                    .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                self.emit_load_device(node.id.0, input_idx, &node.output_type);
+            } else {
+                self.emit_node(node, dag);
+            }
+        }
+
+        self.line("");
+        for (slot, output) in output_specs.iter().enumerate() {
+            let id = output.id.0;
+            let line = match &dag.get(output.id).unwrap().op {
+                RiscOp::Load { name } => {
+                    let input_idx = input_slots
+                        .get(name)
+                        .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                    format!("outputs[{slot}] = chelis_gpu_clone(inputs[{input_idx}]);")
+                }
+                _ => format!("outputs[{slot}] = chelis_gpu_clone(d_t{id});"),
+            };
+            self.line(&line);
+        }
+
+        self.line("");
+        let cleanup = self.plan.emit_cleanup();
+        for line in cleanup {
+            self.lines.push(line);
+        }
+        self.device_entrypoint_mode = false;
+        self.indent = 0;
+        self.line("}");
     }
 
     // ------------------------------------------------------------------
@@ -305,6 +404,80 @@ impl HipEmitter {
                 self.indent += 1;
                 self.line(&format!(
                     "fprintf(stderr, \"{func_name}: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
+                    binding.name,
+                    occurrence.input_label,
+                    occurrence.axis,
+                    binding.name,
+                    occurrence.axis,
+                    binding.name
+                ));
+                self.line("abort();");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
+    }
+
+    fn emit_input_shape_preamble_device(
+        &mut self,
+        dag: &Dag,
+        input_slots: &std::collections::HashMap<String, usize>,
+        func_name: &str,
+    ) {
+        let input_types = Self::input_types(dag);
+        for (label, ty) in &input_types {
+            let slot = input_slots[label];
+            self.line(&format!("if (inputs[{slot}] == NULL) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}_device: input `{label}` at slot {slot} is NULL\\n\");"
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!(
+                "if (inputs[{slot}]->ndim != {}) {{",
+                Self::ndim(ty)
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"{func_name}_device: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                Self::ndim(ty)
+            ));
+            self.line("abort();");
+            self.indent -= 1;
+            self.line("}");
+            for (axis, dim) in ty.dims.iter().enumerate() {
+                if let Some(expected) = Self::known_dim_size(dim) {
+                    self.line(&format!(
+                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "fprintf(stderr, \"{func_name}_device: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                    ));
+                    self.line("abort();");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+
+        for binding in symbolic_bindings(dag) {
+            let canonical_slot = input_slots[&binding.canonical.input_label];
+            self.line(&format!(
+                "int {} = inputs[{canonical_slot}]->shape[{}];",
+                binding.name, binding.canonical.axis
+            ));
+            for occurrence in binding.others {
+                let slot = input_slots[&occurrence.input_label];
+                self.line(&format!(
+                    "if (inputs[{slot}]->shape[{}] != {}) {{",
+                    occurrence.axis, binding.name
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"{func_name}_device: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
                     binding.name,
                     occurrence.input_label,
                     occurrence.axis,
@@ -600,6 +773,9 @@ impl HipEmitter {
     }
 
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
+        if self.device_entrypoint_mode {
+            return;
+        }
         let slot_id = self.slot_id_for_node(id);
         let slot = self.plan.slot(slot_id);
         if slot.first_owner != NodeId(id) {
@@ -622,6 +798,30 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
         ));
+    }
+
+    fn emit_device_slot_allocations(&mut self, dag: &Dag) {
+        let declarations = self
+            .plan
+            .slots()
+            .iter()
+            .map(|slot| {
+                let ty = &dag
+                    .get(slot.first_owner)
+                    .unwrap_or_else(|| panic!("missing first owner {}", slot.first_owner.0))
+                    .output_type;
+                let ndim = Self::ndim(ty);
+                let shape = Self::shape_literal(ty);
+                let dtype = Self::dtype_macro(ty);
+                format!(
+                    "chelis_gpu_tensor *chelis_slot{} = chelis_gpu_alloc({ndim}, {shape}, {dtype});",
+                    slot.id
+                )
+            })
+            .collect::<Vec<_>>();
+        for declaration in declarations {
+            self.line(&declaration);
+        }
     }
 
     fn emit_alias_view(&mut self, id: usize, ty: &TensorType, data_expr: &str, storage_expr: &str) {
@@ -664,6 +864,28 @@ impl HipEmitter {
                 self.line(&format!(
                     "chelis_host_to_device(d_t{id}, inputs[{input_idx}]);"
                 ));
+            }
+            NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
+                self.emit_alias_view(
+                    id,
+                    ty,
+                    &format!("d_t{}->data", canonical_load.0),
+                    &format!("d_t{}->storage_size", canonical_load.0),
+                );
+            }
+            other => panic!("unexpected memory plan for load node {id}: {other:?}"),
+        }
+    }
+
+    fn emit_load_device(&mut self, id: usize, input_idx: usize, ty: &TensorType) {
+        match self.plan.node_kind(NodeId(id)) {
+            NodeMemoryKind::UniqueInput { .. } => {
+                self.emit_alias_view(
+                    id,
+                    ty,
+                    &format!("inputs[{input_idx}]->data"),
+                    &format!("inputs[{input_idx}]->storage_size"),
+                );
             }
             NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
                 self.emit_alias_view(

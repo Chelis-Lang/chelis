@@ -33,9 +33,9 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Ecosystem foundations: package system (Reef), Python FFI, research type extensions, Lean formalization, pipe-first style pass, SKILL.md v2 |  |
+| **3** | Ecosystem foundations: package system (Reef), Python FFI, direct Python execution, research type extensions, Lean formalization, pipe-first style pass, SKILL.md v2 |  |
 | **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
-| **5** | Advanced backends: StableHLO, FX Graph, Triton, multi-GPU |  |
+| **5** | Advanced backends: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
 A red team round means adversarial review of design decisions, test coverage, spec
@@ -329,13 +329,13 @@ This phase is about packaging, interop, polished examples, and research-facing
 extensions after the Phase 2 language surface is stable.
 The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
-**Tracks:** Phase 3 has an explicit engineering track (`3e -> 3a -> 3b`) and a
+**Tracks:** Phase 3 has an explicit engineering track (`3e -> 3f -> 3a -> 3b -> 3b-ii`) and a
 parallel research track (`3c` and `3d`).
 `3f` (SKILL.md v2) lands after `3e` as the teaching-surface refresh that locks the
 idioms before corpus collection and model training.
 
-**Recommended execution order:** `3e`, then `3f`, then `3a`, then `3b`, while `3d`
-runs in parallel and `3c` follows the paper-first validation path.
+**Recommended execution order:** `3e`, then `3f`, then `3a`, then `3b`, then `3b-ii`,
+while `3d` runs in parallel and `3c` follows the paper-first validation path.
 
 ### 3e: Style Foundation
 
@@ -405,11 +405,38 @@ Acceptance criteria:
 
 ### 3b: Python FFI
 
-- DLPack tensor exchange
+- DLPack tensor exchange with PyTorch as the guaranteed target in this cut
+- CPU-only DLPack guarantee in `3b`; GPU tensor ownership/allocator work is deferred to
+  `3b-ii`
 - PyO3 compiler bindings
-- GIL release during Chelis execution
+- shared `chelis-compiler-api` extraction so Tide and Python share one compiler
+  implementation
+- GIL release during compiler/evaluator work
 - zero-copy tensor handoff as the default interop goal where the runtime permits it
+- safetensors interop completing the `3a` API stub at the Python/runtime layer
+- install surface: `uv pip install ./bindings/python`
+- `chelis.eval(...)` is allowed to copy into the evaluator's internal representation in
+  this cut; zero-copy compiled execution belongs to `3b-ii`
+- `ChelisError` remains the compiler/build/runtime failure type; Python-side bad inputs
+  such as unsupported GPU tensors in `3b` are `ValueError`
+- explicit scope boundary: direct Python-callable execution and NumPy guarantee are
+  deferred to `3b-ii`; JAX DLPack guarantee is deferred to `5a`
 - serve both incremental-ML interop and Python-side compiler/tooling automation
+
+### 3b-ii: Direct Python Execution + NumPy Guarantee
+
+- `chelis.compile_and_load("model.ch")` is the primary path; `chelis.load("model.so")`
+  is the advanced path for prebuilt artifacts
+- load compiled Chelis artifacts into Python and call them directly, e.g.
+  `compiled = chelis.load("model.so")`
+- add the runtime loader, calling-convention adapter, and Python-side shape/dtype
+  validation needed for direct execution
+- emit a sidecar manifest with source path + content hash so `load()` can warn about
+  stale artifacts
+- add NumPy to the DLPack guarantee surface and document the copy vs zero-copy rules
+- release the GIL during native compile/build and compiled host/device execution
+- keep compiled execution on fully concrete `f32` tensors in this cut
+- reuse `3b`'s PyO3 and DLPack infrastructure rather than broadening `3b` itself
 
 ### 3c: Research Type Extensions
 
@@ -557,6 +584,8 @@ expansion.
 
 - direct DAG to StableHLO emission
 - TPU and XLA-family interop
+- JAX DLPack guarantee, deferred from `3b`, once Chelis and JAX share a richer
+  StableHLO/XLA integration story
 
 ### 5b: FX Graph Backend
 

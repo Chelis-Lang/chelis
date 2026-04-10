@@ -12,3 +12,5 @@ data/
 !crates/**/*.h
 !grammars/**/*.c
 !grammars/**/*.h
+bindings/python/chelis/_native.abi3.so
+bindings/python/chelis/__pycache__/

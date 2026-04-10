@@ -127,7 +127,7 @@ static inline chelis_gpu_tensor* chelis_gpu_alloc_view(
    Do NOT call this on views — use chelis_gpu_free_view instead. */
 static inline void chelis_gpu_free(chelis_gpu_tensor *t) {
     if (t) {
-        hipFree(t->data);
+        (void)hipFree(t->data);
         free(t);
     }
 }
@@ -151,6 +151,22 @@ static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_te
     CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
                                dst->size * sizeof(float),
                                hipMemcpyDeviceToHost));
+}
+
+static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) {
+    chelis_gpu_tensor *dst = chelis_gpu_alloc(src->ndim, src->shape, src->dtype);
+    for (int d = 0; d < src->ndim; d++) {
+        dst->strides[d] = src->strides[d];
+    }
+    dst->size = src->size;
+    dst->storage_size = src->size;
+    CHELIS_HIP_CHECK(hipMemcpy(
+        dst->data,
+        src->data,
+        src->size * sizeof(float),
+        hipMemcpyDeviceToDevice
+    ));
+    return dst;
 }
 
 /* ---- Host-side layout helpers ---- */

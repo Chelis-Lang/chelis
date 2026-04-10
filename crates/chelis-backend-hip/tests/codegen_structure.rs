@@ -62,6 +62,13 @@ fn cpu_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-c/runtime")
 }
 
+fn host_entry_source<'a>(source: &'a str, func_name: &str) -> &'a str {
+    source
+        .split(&format!("void {func_name}_device("))
+        .next()
+        .unwrap_or(source)
+}
+
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
@@ -728,7 +735,7 @@ fn s14_generated_hip_source_compiles_when_hipcc_available() {
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     let main_cpp = r#"
 #include "chelis_runtime.h"
-void test_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+extern "C" void test_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_compile(NULL, 0, outputs, 1);
@@ -896,6 +903,25 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     );
 }
 
+#[test]
+fn s15_device_entrypoint_is_emitted_for_direct_gpu_execution() {
+    let dag = dag_with_load();
+    let result = codegen_hip(&dag, "test_device_entry");
+
+    assert!(
+        result
+            .c_source
+            .contains("extern \"C\" void test_device_entry_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out)"),
+        "HIP codegen must emit the device-native ABI entrypoint for Python direct execution"
+    );
+    assert!(
+        result
+            .c_source
+            .contains("outputs[0] = chelis_gpu_clone(d_t"),
+        "device-native outputs must be surfaced as owned GPU tensors"
+    );
+}
+
 // ===========================================================================
 // SF1: FusedElem emits single kernel launch
 // ===========================================================================
@@ -914,9 +940,10 @@ fn sf1_fused_elem_single_kernel_launch() {
 
     let fused = fuse(&dag);
     let result = codegen_hip(&fused, "test_sf1");
+    let host_src = host_entry_source(&result.c_source, "test_sf1");
 
     // Count kernel launches: should be 2 fills + 1 fused = 3 total
-    let launch_count = result.c_source.matches("chelis_launch_kernel").count();
+    let launch_count = host_src.matches("chelis_launch_kernel").count();
     // Without fusion we'd have 2 fills + add + neg = 4 launches.
     // With fusion: 2 fills + 1 fused = 3.
     assert_eq!(
@@ -972,10 +999,11 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
 
     let fused = fuse(&dag);
     let result = codegen_hip(&fused, "test_sf3");
+    let host_src = host_entry_source(&result.c_source, "test_sf3");
 
     // Without fusion: 2 const allocs + add alloc + neg alloc = 4 allocs.
     // With fusion: 2 const allocs + 1 fused output alloc = 3 allocs.
-    let alloc_count = result.c_source.matches("chelis_gpu_alloc(").count();
+    let alloc_count = host_src.matches("chelis_gpu_alloc(").count();
     assert_eq!(
         alloc_count, 3,
         "Fused chain should have 3 GPU allocs (2 const + 1 fused output), got {alloc_count}"
@@ -1000,7 +1028,7 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
 
     let fused = fuse(&dag);
     let result = codegen_hip(&fused, "test_sfr1");
-    let src = &result.c_source;
+    let src = host_entry_source(&result.c_source, "test_sfr1");
 
     // With elem→elem fusion: add→neg becomes FusedElem.
     // With elem→reduction fusion: the FusedElem is inlined into the sum kernel.
@@ -1041,7 +1069,7 @@ fn sfr2_fused_elem_into_max_reduce() {
 
     let fused = fuse(&dag);
     let result = codegen_hip(&fused, "test_sfr2");
-    let src = &result.c_source;
+    let src = host_entry_source(&result.c_source, "test_sfr2");
 
     assert!(
         src.contains("kernel_fused_maxred_"),

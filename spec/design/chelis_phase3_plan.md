@@ -10,15 +10,16 @@ enough to support publication.
 
 **Phase 3 deliverable:** A researcher can write idiomatic pipe-first Chelis with
 short-form block bindings, consume libraries through Reef, exchange tensors with Python
-through DLPack, script the compiler from Python through PyO3, and point to a credible
-research roadmap for both type-system extensions and mechanized conformance.
+through DLPack, script the compiler from Python through PyO3, call compiled Chelis
+artifacts from Python, and point to a credible research roadmap for both type-system
+extensions and mechanized conformance.
 
 **Phase 3 does NOT deliver:** The local coding model (Phase 4), alternative backends
 like StableHLO / FX / Triton (Phase 5), or multi-GPU support (Phase 5d).
 
-This phase has two explicit tracks across six numbered sub-phases:
+This phase has two explicit tracks across seven named sub-phases:
 
-- engineering track: `3e -> 3f -> 3a -> 3b`
+- engineering track: `3e -> 3f -> 3a -> 3b -> 3b-ii`
 - research track: `3c` and `3d` in parallel
 
 `3f` (SKILL.md v2) is the public-teaching/documentation refresh that lands after the
@@ -40,7 +41,11 @@ Engineering track
          |                                                          |
          v                                                          |
 3a: Package System (Shells + Reef) ---------------------------------+--> 3b: Python FFI
-  (dogfood with chelis-std)                                              (DLPack + PyO3)
+  (dogfood with chelis-std)                                              (interop core)
+                                                                         |
+                                                                         v
+                                                                   3b-ii: Direct Python
+                                                                         Execution + NumPy
 
 Research track
 
@@ -53,14 +58,17 @@ Research track
 1. `3e` style foundation
 2. `3f` SKILL.md v2 refresh (locks the teaching idiom before corpus collection)
 3. `3a` package system
-4. `3b` Python FFI
-5. `3d` Lean formalization in parallel
-6. `3c` research type extensions
+4. `3b` Python FFI interop core
+5. `3b-ii` direct Python execution + NumPy guarantee
+6. `3d` Lean formalization in parallel
+7. `3c` research type extensions
 
 `3e` goes first because every later deliverable publishes examples, package code, or
 teaching material that should already be in the final public idiom. `3f` follows
 immediately so the SKILL.md is locked to the finalized style before Phase 4 corpus
-collection and model training.
+collection and model training. JAX DLPack guarantee is deferred to Phase `5a`, where
+StableHLO gives Chelis and JAX a richer shared compilation target than raw tensor
+exchange alone.
 
 ---
 
@@ -397,19 +405,29 @@ chelis reef publish packages/chelis-std
 
 ## 3b: Python FFI
 
-**Goal:** Chelis fits into incremental Python-based adoption paths.
+**Goal:** Chelis fits into incremental Python-based adoption paths through an interop
+core that is small enough to ship cleanly and honest enough to leave direct runtime
+embedding to a follow-on cut.
 
 This has two explicit layers, aimed at different users:
 
 ### DLPack Layer
 
 - zero-copy tensor exchange where framework/runtime constraints permit it
-- PyTorch/JAX-style tensor handoff for embedding Chelis compute inside existing ML loops
+- CPU tensors only in `3b`
+- PyTorch is the guaranteed framework target in `3b`
+- the API may remain generic over DLPack producers, but NumPy and JAX are not Phase `3b`
+  guarantees
+- GPU tensors are rejected as `ValueError` and deferred to `3b-ii`, where the runtime
+  loader and GPU memory bridge already belong
 
 ### PyO3 Layer
 
 - Python bindings for compiler access such as `chelis.check()` and related APIs
 - tool-builder story for scripting the compiler from Python
+- GIL release during heavy compiler/evaluator work
+- shared implementation extracted into `chelis-compiler-api` so Tide and Python call the
+  same compiler surface
 
 ### Product story
 
@@ -418,25 +436,152 @@ The intended adoption path is:
 - Chelis for the model/compiler surface
 - Python for the surrounding workflow, orchestration, and experimentation
 
+### Scope Boundary
+
+`3b` ships the compiler/tooling API and the basic tensor/file interop surface.
+Three features are explicitly deferred and have named homes:
+
+| Deferred Feature | Home | Reason |
+|---|---|---|
+| Direct Python-callable kernel execution | `3b-ii` | Requires runtime loader, calling-convention adapter, and error-safe call boundary |
+| NumPy DLPack guarantee | `3b-ii` | Likely works from the generic API, but needs explicit testing/documentation as its own user-facing promise |
+| JAX DLPack guarantee | `5a` | JAX placement and execution semantics are a better fit alongside StableHLO |
+
+### `Std.IO.Safetensors`
+
+The `3a` stub becomes real in `3b`, but only at the Python/runtime interop layer.
+That means:
+
+- Python helpers for safetensors read/write are in scope
+- PyTorch cross-load/save compatibility is in scope
+- direct Python-callable compiled-kernel execution is still out of scope for `3b`
+
+### Install Surface
+
+The `3b` package is installed from the repo as:
+
+```sh
+uv pip install ./bindings/python
+```
+
+Public surface in this cut:
+
+- `chelis.check(...)`, `chelis.compile(...)`, `chelis.desugar(...)`,
+  `chelis.decompile(...)`, `chelis.validate(...)`
+- `chelis.eval(...)` for evaluator-backed execution from Python inputs
+- `chelis.from_dlpack(...)` for CPU-only DLPack tensor wrapping
+- `chelis.save_safetensors(...)` / `chelis.load_safetensors(...)`
+
+`chelis.eval(...)` is explicitly allowed to copy Python tensors into the evaluator's
+internal `Vec<f64>` representation in `3b`. Zero-copy execution of compiled artifacts is
+deferred to `chelis.load(...)` in `3b-ii`.
+
+Error taxonomy in this cut:
+
+- `ChelisError` means the compiler/runtime failed
+- `ValueError` means Python-side arguments were unsupported or malformed
+
 ### Test Plan
 
-- DLPack tensor round-trip without silent copy where zero-copy is expected
-- framework interop examples
+- DLPack tensor round-trip with PyTorch without silent copy where zero-copy is expected
 - PyO3 compiler-call smoke tests
 - Python bindings that mirror key CLI/compiler operations
+- safetensors written by Chelis helpers load in PyTorch and vice versa
+- explicit negative tests for unsupported NumPy/JAX guarantees in `3b` docs and manual
+  gates
 
 ### Acceptance Oracle
 
 Manual:
 
-```python
-import chelis
+```sh
+cargo test -p chelis-python phase3b_python_manual_acceptance_oracle -- --ignored --exact
 ```
 
-and both of the following work:
+This installs `bindings/python` into the repo-local `py/.venv` and proves all of the
+following together:
 
-- exchanging tensors with a Python ML framework through DLPack
-- invoking compiler checks/build-facing APIs from Python
+- `import chelis` works from the installed package
+- Tide and Python agree on `check()` for the same input
+- PyTorch DLPack round-trip preserves zero-copy where expected on CPU tensors
+- GPU tensors fail as `ValueError`, not `ChelisError`
+- `chelis.eval(...)` works with the documented copy semantics
+- safetensors read/write round-trips with PyTorch
+
+---
+
+## 3b-ii: Direct Python Execution + NumPy Guarantee
+
+**Goal:** turn Chelis from "a compiler you call from Python" into "a compute backend
+you use from Python."
+
+**Prerequisite:** `3b` complete. This sub-phase reuses the PyO3, DLPack, and
+safetensors infrastructure from the interop-core cut.
+
+### Direct Python Execution
+
+This is the first runtime-embedding surface:
+
+```python
+compiled = chelis.compile_and_load("model.ch")
+output = compiled(x=torch_tensor)
+```
+
+`chelis.load("model.so")` remains the advanced path for a previously compiled shared
+library.
+
+Implementation requirements:
+
+- runtime loader for compiled artifacts
+- calling-convention adapter from Python keyword arguments to compiled Chelis inputs
+- shape/dtype validation at the call boundary
+- sidecar manifest recording source path + content hash
+- stale-source warning on `load()` when the source still exists but no longer matches the
+  artifact
+- GPU memory bridge layered on the HIP device ABI for Python-managed tensors
+- GIL release during native compile/build and compiled host/device execution
+- compiled execution limited to fully concrete `f32` tensors in this cut
+
+### NumPy DLPack Guarantee
+
+NumPy moves from "generic API may already work" to "tested, documented, and guaranteed."
+
+Required guarantees:
+
+- NumPy array -> Chelis tensor -> NumPy array round-trip is tested
+- zero-copy is verified where NumPy's DLPack path permits it
+- ordinary strided NumPy views are accepted on the CPU direct-execution path
+- supported dtype mapping is documented explicitly (`float32` in this cut)
+
+### Test Plan
+
+- direct Python compile/load/call smoke test for compiled artifacts
+- training-loop style call path with Python-managed tensors
+- NumPy DLPack round-trip coverage
+- clear negative tests for shape mismatch and dtype mismatch
+- structural HIP regression proving the device ABI entrypoint is emitted
+
+### Acceptance Oracle
+
+Manual:
+
+```sh
+cargo test -p chelis-python phase3bii_python_manual_acceptance_oracle -- --ignored --exact
+```
+
+This installs `bindings/python` into the repo-local `py/.venv` and proves all of the
+following together on the CPU path:
+
+- `chelis.compile_and_load(...)` produces a callable compiled model
+- `chelis.load(...)` reloads the shared library and warns on stale source
+- compiled execution works with PyTorch CPU tensors in a training-loop style call path
+- NumPy arrays round-trip through DLPack with the documented copy/zero-copy behavior
+- shape/dtype mismatches fail as `ValueError`
+
+When the local Python environment exposes a working PyTorch HIP stack
+(`torch.version.hip` plus `torch.cuda.is_available()`), this same manual oracle also runs
+an end-to-end Python HIP smoke path through `chelis.compile_and_load(..., target="hip")`.
+The always-on default-gate protection remains the emitted `_device` ABI structural test.
 
 ---
 
@@ -567,13 +712,74 @@ examples and guidance.
 
 ---
 
+## Phase 3 Red-Team Checkpoint
+
+Before calling the phase healthy enough to continue, red-team against these concrete
+surfaces:
+
+**Style foundation (`3e`):**
+
+- decompiler output prefers pipe-first Surf where the rules say it should
+- formatter does not invent or delete pipes semantically
+- examples and teaching material all use the finalized idiom
+
+**Package system (`3a`):**
+
+- `chelis reef init` / `build` / `publish` flows work
+- a program imports from `chelis-std` successfully
+- shell metadata includes the intended public type/effect surface
+
+**Python FFI interop core (`3b`):**
+
+- `import chelis` works in a clean environment
+- PyTorch DLPack interop is the tested guarantee
+- `chelis.check()` from Python returns structured results
+- Tide and Python agree on `check()` for the same input
+- GPU tensors fail as `ValueError`, not `ChelisError`
+- safetensors written by Chelis interoperate with PyTorch and vice versa
+
+**Direct execution + NumPy (`3b-ii`):**
+
+- `compiled = chelis.load("model.so")` works from Python
+- NumPy DLPack round-trip is tested and documented
+- shape mismatch and runtime failures surface as Python exceptions
+
+**Lean formalization (`3d`):**
+
+- Lean checker runs on the agreed core subset
+- Lean/Rust disagreement cases are captured as bugs or spec mismatches
+
+**Research types (`3c`):**
+
+- at least one feature has a paper-quality validation artifact, not only a prototype
+
+---
+
+## Phase 3 Estimated Timeline
+
+| Sub-phase | Effort | Dependencies | Nature |
+|---|---|---|---|
+| `3e`: Pipe-first style pass | ~2 weeks | none | Engineering |
+| `3f`: SKILL.md v2 refresh | ~1 week | `3e` | Engineering / teaching surface |
+| `3a`: Package system | ~6-8 weeks | `3e`, `3f` | Engineering |
+| `3b`: Python FFI interop core | ~4-6 weeks | `3a` | Engineering |
+| `3b-ii`: Direct execution + NumPy | ~3-4 weeks | `3b` | Engineering |
+| `3d`: Lean formalization | ~6 months | none (parallel track) | Research |
+| `3c`: Research type extensions | ~6 months | `3a` helpful, paper-first | Research |
+
+Engineering work (`3e`, `3f`, `3a`, `3b`, `3b-ii`) is sequentially manageable, with
+the two research tracks overlapping rather than blocking it.
+
+---
+
 ## Phase 3 Completion Check
 
 Before calling Phase 3 complete:
 
 - `3e` style rules are documented and reflected across examples/teaching material
 - `3a` package system dogfoods `chelis-std`
-- `3b` covers both DLPack and PyO3
+- `3b` covers PyO3, PyTorch DLPack, and safetensors interop
+- `3b-ii` covers direct Python-callable execution and NumPy DLPack guarantee
 - `3c` has at least one paper-quality, corpus-validated extension in flight
 - `3d` has a running Lean checker on the agreed core subset
 - `3f` SKILL.md v2 matches the final public Surf idiom

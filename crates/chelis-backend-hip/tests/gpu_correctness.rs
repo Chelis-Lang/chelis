@@ -195,7 +195,7 @@ fn build_main_cpp(
 
     format!(
         r#"#include "chelis_runtime.h"
-void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 
 int main(void) {{
 {body}
@@ -226,7 +226,7 @@ fn build_multi_case_main_cpp(
 
     format!(
         r#"#include "chelis_runtime.h"
-void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 
 int main(void) {{
 {body}

@@ -380,7 +380,10 @@ HIP is the single GPU code generation path.
 ### Later
 
 StableHLO and FX are additive integration layers for TPU and PyTorch ecosystem access.
-They do not replace the C/HIP story.
+They do not replace the C/HIP story. The Python interop stack now includes CPU-only
+PyTorch DLPack plus PyO3 compiler bindings from `bindings/python`, and `3b-ii` adds
+direct execution via `compile_and_load` / `load` plus the NumPy DLPack guarantee. The
+JAX DLPack guarantee remains deferred to the StableHLO phase.
 
 ### Rejected
 
