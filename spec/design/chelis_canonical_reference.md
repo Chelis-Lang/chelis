@@ -216,12 +216,25 @@ Planned public-style target for Phase 3:
 - macro expansion before all LLM-facing operations, with provenance in metadata
 - algebraic-effect, linearity, macro, and `vmap` tooling that remains planned in Phase 2
 
-### Deferred to Phase 3+
+### Planned remaining Phase 3 work
+
+Phase 3 is now the language-completeness phase rather than the research-extension
+phase. The remaining practical language work is:
+
+- first-class scalar `Int` / `Float` / `Bool` values outside tensors
+- first-class immutable `String` values with practical non-tensor operations
+- collection types such as `List[T]` and `Dict[K, V]`
+- functional iteration over variable-length host-side data
+- data-loading and tokenization support that removes the mandatory Python
+  preprocessing step
+
+### Deferred to Phase 5+
 
 - distribution types
 - equivariance constraints
 - optimization-property annotations
-- ILP/AUTOMAP-style rank-polymorphism remains a research idea, not a committed feature
+- ILP/AUTOMAP-style rank-polymorphism and related research type features
+- Lean mechanized formalization of the core type system
 
 ---
 
@@ -355,11 +368,20 @@ mechanism and the concrete built-in effect vocabulary it ships.
 ### Phase 3 practical note
 
 Everything currently lives in the core repo.
-The first shipped Reef cut is local-first: `chelis-std` is bundled in-repo and
-dogfoods the same package pipeline users rely on.
-That is enough to prove manifests, `.chb` shells, local publish/install, import
-resolution, and source-archive consumption during `check` / `build`.
-Broader external libraries and any hosted registry service remain later ecosystem work.
+The shipped Phase 3 foundations already cover public Surf style, Reef packaging, and
+Python interop. The remaining Phase 3 work is not more ecosystem polish or research
+prestige work; it is the language-completeness gap between "tensor programs compile"
+and "a full AI workflow can run in pure Chelis."
+
+That means the next practical surfaces are:
+
+- scalar/string programming
+- collections and iteration
+- file/config/data loading
+- tokenization and batching
+
+Broader hosted registry work, research type features, and Lean formalization remain
+later work.
 
 ---
 
@@ -468,9 +490,10 @@ server.
 This is the Phase 2 coding-assistance story: compiler-in-the-loop generation, no local
 training requirement, and immediate usefulness for agents that already have strong
 general coding ability.
-The full-surface `SKILL.md` v2 refresh belongs to Phase 3, after the Phase 2 language
-surface and the Phase 3 public Surf idiom are stabilized: pipe-first chains,
-short-form block bindings, and width-aware multiline rendering.
+The full-surface `SKILL.md` v2 refresh belongs to late Phase 3, after the shipped
+public Surf idiom and the remaining language-completeness surfaces are stabilized:
+pipe-first chains, short-form block bindings, scalar/string code, collections,
+iteration, and tokenization/data-loading workflows.
 
 Current validation result:
 

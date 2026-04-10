@@ -33,9 +33,9 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Ecosystem foundations: package system (Reef), Python FFI, direct Python execution, research type extensions, Lean formalization, pipe-first style pass, SKILL.md v2 |  |
+| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, data loading/tokenization, SKILL.md v2 |  |
 | **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
-| **5** | Advanced backends: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU |  |
+| **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, research type features, Lean formalization |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
 A red team round means adversarial review of design decisions, test coverage, spec
@@ -324,74 +324,31 @@ provenance annotation format — not whether LLMs interact with macros (they don
 ## Phase 3
 
 **Prerequisite:** Phase 2 complete.
-**Deliverable:** ecosystem foundations that make Chelis usable by external users.
-This phase is about packaging, interop, polished examples, and research-facing
-extensions after the Phase 2 language surface is stable.
+**Deliverable:** language completeness that makes Chelis self-sufficient for real AI
+programs rather than only tensor compute kernels.
+This phase is about closing the non-tensor gaps after the Phase 2 language surface is
+stable: first-class scalar/string values, collections, iteration, data loading,
+tokenization, and the teaching material refresh that matches that fuller language.
 The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
-**Tracks:** Phase 3 has an explicit engineering track (`3e -> 3f -> 3a -> 3b -> 3b-ii`) and a
-parallel research track (`3c` and `3d`).
-`3f` (SKILL.md v2) lands after `3e` as the teaching-surface refresh that locks the
-idioms before corpus collection and model training.
+**Shipped Phase 3 foundations:** `3a` package system, `3b` Python FFI interop,
+`3b-ii` direct Python execution + NumPy guarantee, and `3e` pipe-first style pass.
 
-**Recommended execution order:** `3e`, then `3f`, then `3a`, then `3b`, then `3b-ii`,
-while `3d` runs in parallel and `3c` follows the paper-first validation path.
+**Recommended execution order for remaining work:** `3c`, then `3d`, then `3g`, then
+`3f`.
+`3f` (SKILL.md v2) is intentionally last in Phase 3 now: it needs a real rewrite after
+the scalar/string, collection, and tokenization surfaces stabilize.
 
 ### 3e: Style Foundation
 
-This is not a cosmetic formatting tweak.
-It is the style foundation for the whole phase: decompiler behavior, optional block
-`let`, width-aware pipe layout, and a full corpus rewrite for idiomatic Surf.
-
-Target outcome:
-
-- the decompiler defaults to pipe-first Surf for linear tensor/dataflow chains
-- block bindings default to the short form `name = expr`, while `let name = expr`
-  remains valid
-- long or many-stage pipes break using the same flat-first, width-threshold philosophy
-  as the Deep pretty printer
-- executable examples are rewritten out of assembly-like `let` ladders and into the
-  stable idiomatic Phase 2 style
-- `SKILL.md` and related teaching material point at the same idiom the docs and
-  examples use
-
-Decompiler rule:
-
-- emit a pipe chain when a binding is used exactly once as the first argument to the
-  next call, and that result is again used exactly once as the first argument to the
-  next call
-- keep explicit named bindings for semantically meaningful intermediates such as `h1`,
-  `logits`, and `loss`
-- keep explicit named bindings for values used more than once or for steps where naming
-  materially improves readability
-
-Examples of the intended direction:
-
-- prefer `h1 = matmul(x, w1) |> add(expand(b1, 0, batch)) |> relu`
-- avoid decompiled output that expands the same linear flow into `mm1`, `b1_exp`,
-  `pre_h1`, `h1` unless those names carry semantic weight
-- break long chains after `=` and before every `|>`:
-  `loss =` followed by indented one-stage-per-line continuations
-
-Sequencing rationale:
-
-- do this first in Phase 3 so package code, Python examples, and `SKILL.md` v2 all
-  start in the final public idiom
-- do this before Phase 4 corpus collection and model training so the training data uses
-  the final idiomatic Surf style
-
-Acceptance criteria:
-
-- decompiler output prefers pipe chains for eligible linear flows
-- decompiler default output prefers short-form block bindings, while verbose output can
-  restore explicit `let`
-- `chelis fmt` reflows existing pipe chains using the same width-threshold philosophy
-  without inventing or removing pipes semantically
-- examples in `examples/` and supporting teaching docs use the same pipe-first style
-- `SKILL.md` guidance is updated to match the final idiomatic Surf corpus
-- docs state clearly when a named intermediate should remain a binding instead of a pipe
+Shipped. This remains the stylistic foundation for the remaining Phase 3 work:
+pipe-first Surf, short-form block bindings, width-aware multiline layout, and
+human-readable examples. All new Phase 3 language-completeness examples should continue
+to follow this idiom.
 
 ### 3a: Package System (Shells + Reef)
+
+Shipped.
 
 - `reef.toml`
 - `reef.lock`
@@ -404,6 +361,8 @@ Acceptance criteria:
   implementation in `3b`
 
 ### 3b: Python FFI
+
+Shipped.
 
 - DLPack tensor exchange with PyTorch as the guaranteed target in this cut
 - CPU-only DLPack guarantee in `3b`; GPU tensor ownership/allocator work is deferred to
@@ -425,6 +384,8 @@ Acceptance criteria:
 
 ### 3b-ii: Direct Python Execution + NumPy Guarantee
 
+Shipped.
+
 - `chelis.compile_and_load("model.ch")` is the primary path; `chelis.load("model.so")`
   is the advanced path for prebuilt artifacts
 - load compiled Chelis artifacts into Python and call them directly, e.g.
@@ -438,48 +399,68 @@ Acceptance criteria:
 - keep compiled execution on fully concrete `f32` tensors in this cut
 - reuse `3b`'s PyO3 and DLPack infrastructure rather than broadening `3b` itself
 
-### 3c: Research Type Extensions
+### 3c: Scalar and String Foundation
 
-- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit `expand`
-  operations during inference while preserving Chelis's no-implicit-broadcasting rule
-- evaluate size-dependent types and refinement-style constraints as research extensions,
-  not baseline language commitments
-- follow a paper-first workflow: draft, prototype, corpus validation, revise, submit,
-  then merge
-- treat these as publication-grade extensions layered onto the stable Phase 2 language,
-  not prerequisites for the core toolchain
+- add first-class unrestricted `Int`, `Float`, and `Bool` values outside tensors
+- add first-class immutable `String` values for file paths, tokens, labels, config
+  keys, and logging
+- add scalar `if/else` as the natural control surface for boolean decisions
+- add practical built-ins around these values: arithmetic, comparison, bitwise integer
+  ops, formatting, parsing, and tensor shape queries
+- make `Option[T]` part of the practical language surface for failure-returning APIs
+- add `print` / `debug` as the minimum IO-based debugging surface
+- keep tensor scalars distinct from host-language scalar values; conversions stay
+  explicit
 
-### 3d: Lean Integration
+### 3d: Collections and Iteration
 
-- mechanize the core type system only
-- prove soundness for the stable Phase 0 core
-- run this as a non-blocking parallel research track and treat Lean as the conformance
-  oracle for the formalized subset when Lean and Rust disagree
+- add immutable `List[T]` and `Dict[K, V]` as first-class collection types
+- add iteration primitives such as `map`, `filter`, `fold`, `zip`, `enumerate`, and
+  `range`
+- define effect propagation through iteration so list-processing code composes with
+  `Random`, IO, and later effects
+- add the boundary between variable-length collections and fixed-shape tensors:
+  list/tensor conversion, stacking, and `pad_sequences`
+- make preprocessing and dataset plumbing expressible in pure Chelis rather than Python
+
+### 3g: Data Loading and Tokenization
+
+- add text file I/O as the minimum host-data ingress surface
+- add CSV and JSON loading for tabular data, configs, and lightweight corpora
+- add a BPE tokenizer that can load existing vocabulary/merge artifacts and
+  encode/decode text
+- add batch encode + padding flows that bridge `List[List[Int]]` into tensor model
+  inputs
+- make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
+  sidecar
 
 ### 3f: SKILL.md v2 Refresh
 
-- update `SKILL.md` for the full stable Phase 2 language surface
-- cover effects, linearity, macros, `vmap`, tuples, short-form block bindings, and the
-  finalized pipe-first Surf idiom
-- keep teaching examples aligned with the curated corpus, not decompiler-debug style
-- treat this as the public teaching/documentation refresh that locks the idioms before
-  corpus collection and local-model work
+- rewrite `SKILL.md` after `3c`, `3d`, and `3g`, not before them
+- cover effects, linearity, macros, `vmap`, tuples, scalar/string code, collections,
+  iteration, tokenization, and the finalized pipe-first Surf idiom
+- keep teaching examples aligned with the real executable language surface, not the
+  earlier tensor-only subset
+- treat this as a genuine redo of the teaching surface, not a minor patch-up pass
 
 Phase 3 success condition:
 
-- Chelis has a coherent external-user surface: package story, Python interop,
-  research-extension direction, formalization target, polished pipe-first examples, and
-  teaching material that matches the finalized language style
+- a pure Chelis program can read text, tokenize it, batch and pad it, run a model,
+  compute loss and gradients, and print results without dropping to Python
+- the package, Python, and style foundations already shipped in `3a`, `3b`, `3b-ii`,
+  and `3e` remain valid while the language grows beyond tensor-kernel scope
+- `SKILL.md` and examples match the fuller language rather than the earlier
+  tensor-compute-only subset
 
 ---
 
 ## Phase 4
 
-**Prerequisite:** Phase 2 complete, Phase 3e complete (idiomatic examples), Phase 3f
-complete (SKILL.md v2 covering full language surface).
+**Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
+through `3g` and `3f` complete.
 **Deliverable:** first-party ML and coding-assistance stack built on the finalized
-Phase 2 language and finalized example idioms, plus a reproducible benchmark proving
-the "designed for LLMs" thesis.
+language-complete Chelis surface and finalized example idioms, plus a reproducible
+benchmark proving the "designed for LLMs" thesis.
 
 ### 4a: Seed Corpus Collection and Curation
 
@@ -578,7 +559,8 @@ Phase 4 success condition:
 
 **Prerequisite:** Phase 4 complete or explicit product demand that justifies backend
 expansion.
-**Deliverable:** specialized backend expansion beyond the primary C and HIP paths.
+**Deliverable:** specialized backend expansion plus deferred research work that becomes
+valuable only after Chelis is already usable as a full AI programming language.
 
 ### 5a: StableHLO Backend
 
@@ -601,6 +583,27 @@ expansion.
 
 - add explicit multi-GPU support only if Phase 4 or downstream product needs justify it
 - treat this as conditional infrastructure, not a default near-term commitment
+
+### 5e: Research Type Features
+
+- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit
+  `expand` operations during inference while preserving Chelis's
+  no-implicit-broadcasting rule
+- evaluate size-dependent types and refinement-style constraints as research
+  extensions, not baseline language commitments
+- keep distribution types, equivariance constraints, optimization-property annotations,
+  and related type research in this advanced/research phase rather than the pragmatic
+  language-completeness phase
+- follow a paper-first workflow: draft, prototype, corpus validation, revise, submit,
+  then merge
+
+### 5f: Lean Formalization
+
+- mechanize the core type system only
+- prove soundness for the stable formalized subset
+- treat Lean as the conformance oracle for that subset when Lean and Rust disagree
+- keep this as publication-grade research work rather than a blocker for practical
+  language completeness
 
 ---
 

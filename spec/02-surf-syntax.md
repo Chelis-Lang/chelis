@@ -10,6 +10,22 @@ PEG notation. `/` is ordered choice. `*` is zero-or-more. `+` is one-or-more. `?
 
 Deep desugaring shown as **⟹** with the target Deep s-expression.
 
+### 0.1 Executable Surface Note
+
+This syntax document records the intended Surf language shape, not only the currently
+implemented evaluator/backend subset.
+
+Important Phase 3 honesty rule:
+
+- parser support or desugaring shape does not, by itself, mean a feature is already part
+  of the practical executable language
+- the remaining Phase 3 language-completeness work specifically targets the gap around
+  first-class scalar/string workflows, collections, iteration, file/data loading, and
+  tokenization
+
+Until those Phase `3c` / `3d` / `3g` items land, the parser may describe surface forms
+that are not yet the full self-sufficient AI-programming story.
+
 ---
 
 ## 1. Keywords
@@ -184,6 +200,13 @@ Planned Phase 3 public-style target:
 - prefer pipe-first composition for eligible linear flows
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
+
+Planned remaining Phase 3 language-completeness additions:
+
+- practical scalar/string programming beyond tensor-only code
+- collection literals and iteration idioms
+- data-loading and tokenization helpers that remove the mandatory Python preprocessing
+  step
 
 ### P5: Blocks and Sequencing
 

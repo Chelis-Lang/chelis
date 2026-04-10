@@ -48,9 +48,9 @@ The current strategy has two explicit tracks:
 Use a first-party `SKILL.md` plus the Tide MCP server with frontier models.
 This is the Phase 2 story: compiler-in-the-loop, in-context learning, validated against
 the current compiler surface.
-Then Phase 3 refreshes that skill file for the complete stable Phase 2 language and the
-final public Surf style: pipe-first composition, short-form block bindings, and
-width-aware multiline pipes for long chains.
+Then late Phase 3 rewrites that skill file for the fuller language-complete surface:
+pipe-first Surf, scalar/string code, collections, iteration, and tokenization/data-
+loading workflows.
 
 ### Track 2
 
@@ -115,9 +115,10 @@ including offline/local use.
 - "First-party coding capability" is the right umbrella phrase.
 - "Compiler-as-teacher" is more accurate than "compiler-as-evaluator only."
 - "SKILL.md + MCP" is the Phase 2 story.
-- "Style foundation first, then packages and FFI" is the key Phase 3 sequencing story.
-- "Pipe-first examples, short-form block bindings, and `SKILL.md` v2" are a key Phase 3
-  public-surface story.
+- "Package system and Python interop are shipped foundations; remaining Phase 3 work is
+  language completeness" is the key sequencing story.
+- "Pipe-first examples first, then scalar/string/collection/tokenization support, then
+  `SKILL.md` v2 redo" is the Phase 3 public-surface story.
 - "Local model ships with toolchain" is the Phase 4 story.
 - "A language for AIs that doesn't include an AI is an incomplete product" is now part
   of the core framing.

@@ -6,6 +6,11 @@ Hindley-Milner inference, numeric precision types, named tensor dimensions, fitn
 scoring, annotated checked Deep, and bounded `Random` / `Resource(Device)` effect
 checking.
 
+**Executable completeness note:** this document includes type-level shapes that are
+larger than the currently practical tensor-only execution story. In particular, the
+remaining Phase `3c` / `3d` / `3g` work is what turns scalar/string/collection ideas
+into a real end-to-end AI-programming surface rather than only syntax or type examples.
+
 ---
 
 ## 0. Checked Deep Contract
@@ -40,7 +45,7 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 (t-prim {} int32)     ;; 32-bit integer
 (t-prim {} int64)     ;; 64-bit integer
 (t-prim {} bool)      ;; boolean
-(t-prim {} string)    ;; string (for IO only, not tensor computation)
+(t-prim {} string)    ;; string type exists in the grammar/type layer; practical first-class runtime support is a remaining Phase 3 item
 ```
 
 ### 1.2 Function Types
@@ -89,7 +94,7 @@ Last child is the precision type (must be a numeric `t-prim`). All preceding chi
 ;; Option f32
 (t-adt {} Option (t-prim {} f32))
 
-;; List (tensor[batch, f32])
+;; List (tensor[batch, f32]) -- illustrative future/planned collection typing surface
 (t-adt {} List (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 
 ;; No type arguments
@@ -144,6 +149,10 @@ Recursive references are by name. No explicit `mu` type needed:
   (variant {} Nil))
 ```
 
+The recursive `List` example shows the intended type-level shape of collection support.
+It should not be read as a claim that the full practical collection runtime and
+iteration surface are already shipped today.
+
 ### 2.4 Exhaustive Pattern Matching
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
@@ -151,6 +160,21 @@ The type checker verifies that `match` expressions cover all variants. Missing v
 ---
 
 ## 3. Hindley-Milner Inference
+
+### 2.5 Planned Remaining Phase 3 Type-Surface Extensions
+
+The remaining language-completeness work is expected to make the following type-level
+surfaces practical and executable:
+
+- first-class non-tensor `Int`, `Float`, and `Bool` values
+- first-class `string` values with ordinary operations
+- `Option[T]` as the ergonomic failure-returning surface for parse/lookups
+- `List[T]` and `Dict[K, V]` as practical collection types
+- explicit bridges between collection values and tensor values
+
+Those items should be treated as Phase 3 implementation targets, not as a claim that the
+current evaluator/backends already provide the full runtime behavior implied by the type
+examples above.
 
 ### 3.1 Algorithm
 

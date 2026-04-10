@@ -1,757 +1,336 @@
-# Phase 3: Ecosystem Foundations - Expanded Implementation Plan
+# Phase 3: Language Completeness - Expanded Implementation Plan
 
 ## Context
 
-Phase 2 makes the language usable by researchers.
-Phase 3 makes Chelis usable by people other than its creator.
-That means: the public Surf style is stabilized, packages can be shared, Python can
-interoperate with the compiler/runtime, and the research-facing extensions are strong
-enough to support publication.
+Phase 2 shipped a feature-rich tensor computation language: effects, linearity, macros,
+`vmap`, tuples, Tide APIs, LSP, and Cove. Phase `3a` shipped the package system.
+Phases `3b` and `3b-ii` shipped Python interop, safetensors, and direct execution.
+Phase `3e` shipped the pipe-first public Surf idiom.
 
-**Phase 3 deliverable:** A researcher can write idiomatic pipe-first Chelis with
-short-form block bindings, consume libraries through Reef, exchange tensors with Python
-through DLPack, script the compiler from Python through PyO3, call compiled Chelis
-artifacts from Python, and point to a credible research roadmap for both type-system
-extensions and mechanized conformance.
+But Chelis still depends on Python for every non-tensor part of a real AI program. It
+can define a transformer forward pass and compute gradients, but it still cannot:
 
-**Phase 3 does NOT deliver:** The local coding model (Phase 4), alternative backends
-like StableHLO / FX / Triton (Phase 5), or multi-GPU support (Phase 5d).
+- represent first-class scalar integers/floats/bools outside tensors
+- process strings as ordinary language values
+- store variable-length sequences and maps
+- iterate over non-tensor data
+- read text/config/data files directly
+- tokenize text and batch it into model inputs
 
-This phase has two explicit tracks across seven named sub-phases:
+That means Chelis is still a sophisticated tensor-compute DSL rather than a
+self-sufficient AI programming language.
 
-- engineering track: `3e -> 3f -> 3a -> 3b -> 3b-ii`
-- research track: `3c` and `3d` in parallel
+**Phase 3 deliverable:** a researcher can write, in pure Chelis, a program that reads
+text, tokenizes it, batches and pads it, runs a model, computes loss and gradients, and
+prints results, without dropping to Python for preprocessing or orchestration.
 
-`3f` (SKILL.md v2) is the public-teaching/documentation refresh that lands after the
-style foundation is settled and before the Phase 4 model-training track begins.
+**Phase 3 does NOT deliver:** research type extensions or Lean formalization. Those move
+to Phase `5e` and `5f`. Phase 3 is the pragmatic language-completeness phase.
 
 ---
 
 ## Dependency Graph
 
 ```text
-Engineering track
+Shipped foundations
 
-3e: Style Foundation -----------------------------------------------+
-  (pipes, optional block let, width-aware formatting, examples)     |
-         |                                                          |
-         v                                                          |
-3f: SKILL.md v2 Refresh                                             |
-  (teaching surface locked to 3e idiom, before Phase 4)             |
-         |                                                          |
-         v                                                          |
-3a: Package System (Shells + Reef) ---------------------------------+--> 3b: Python FFI
-  (dogfood with chelis-std)                                              (interop core)
-                                                                         |
-                                                                         v
-                                                                   3b-ii: Direct Python
-                                                                         Execution + NumPy
+3e: Pipe-First Style Pass
+3a: Package System
+3b: Python FFI
+3b-ii: Direct Python Execution + NumPy
 
-Research track
+Remaining work
 
-3c: Research Type Extensions (paper-first, corpus-validated)
-3d: Lean Formalization (independent conformance-oracle track)
+3c: Scalar & String Foundation -> 3d: Collections & Iteration -> 3g: Data Loading & Tokenization -> 3f: SKILL.md v2 Redo
 ```
 
 **Recommended execution order:**
 
-1. `3e` style foundation
-2. `3f` SKILL.md v2 refresh (locks the teaching idiom before corpus collection)
-3. `3a` package system
-4. `3b` Python FFI interop core
-5. `3b-ii` direct Python execution + NumPy guarantee
-6. `3d` Lean formalization in parallel
-7. `3c` research type extensions
+1. `3c`: Scalar and string foundation
+2. `3d`: Collections and iteration
+3. `3g`: Data loading and tokenization
+4. `3f`: SKILL.md v2 redo
 
-`3e` goes first because every later deliverable publishes examples, package code, or
-teaching material that should already be in the final public idiom. `3f` follows
-immediately so the SKILL.md is locked to the finalized style before Phase 4 corpus
-collection and model training. JAX DLPack guarantee is deferred to Phase `5a`, where
-StableHLO gives Chelis and JAX a richer shared compilation target than raw tensor
-exchange alone.
+Shipped Phase 3 foundations stay in place and continue to constrain the remaining work:
+
+- `3e` defines the public Surf idiom new examples must follow
+- `3a` defines the package/distribution story new libraries should use
+- `3b` / `3b-ii` define the Python interop boundary the fuller language must still fit
+
+`3c` must precede `3d` because collections need scalar and string element types.
+`3d` must precede `3g` because tokenization and file/config processing produce lists,
+dicts, and variable-length sequences. `3f` goes last because the teaching surface
+should describe the real full Phase 3 language, not a partially complete midpoint.
 
 ---
 
-## 3e: Style Foundation
+## Shipped Foundations
 
-**Goal:** Pipe-first, short-binding Surf becomes the default public Chelis style across
-decompiler output, formatting, examples, docs, and teaching material.
+### 3e: Pipe-First Style Pass
 
-This is not only a formatter tweak.
-It is a coordinated rendering and corpus cleanup covering:
+**Status:** shipped.
 
-- pipe-chain detection in decompilation
-- short-form block bindings (`name = expr`)
-- width-aware multiline rendering for pipe chains
-- example/spec/tutorial refresh
+This remains the public style foundation for all remaining Phase 3 work:
 
-### Decompiler Behavior
-
-Given a sequence of sequential bindings in a block, scan for linear chains:
-
-```text
-a = f(x)      -- used once, as first arg to g
-b = g(a, y)   -- used once, as first arg to h
-c = h(b)      -- end of chain
-```
-
-Collapse to:
-
-```text
-c = f(x) |> g(y) |> h
-```
-
-Pipe-eligibility rule:
-
-1. the binding RHS is a function call
-2. the bound value is used exactly once in the block
-3. that single use is as the first positional argument to another function call
-4. the use appears in the immediately following binding
-
-When a chain is detected, emit a single pipe expression.
-The first stage is the full initial call; later stages are rendered as the function plus
-its non-piped arguments.
-
-### Named Binding Preservation
-
-Do not pipe through semantically meaningful names.
-Keep explicit bindings for names such as `h1`, `logits`, `probs`, `loss`,
-`predictions`, and `gradients`.
-Also keep explicit bindings for values used more than once.
-
-The intended result is a small number of meaningful bindings connected by pipes rather
-than a flat sequence of mechanically named temporary values.
-
-### Optional `let` in Block Bindings
-
-Accept both forms in block statement position:
-
-```chelis
-x = expr
-let x = expr
-(a, b) = pair
-let (a, b) = pair
-```
-
-Both forms desugar to the same Deep `(let {} (bind {} ...) ...)` structure.
-
-Rules:
-
-- short form is preferred for block-level sequential bindings
-- explicit `let` remains accepted for backward compatibility and user preference
-- `let ... in` expressions remain unchanged and still require `let`
-- function-call left sides such as `f(x) = expr` are not valid binding patterns
-
-### Width-Aware Pipe Formatting
-
-Both `chelis surf` and `chelis fmt` should follow the same flat-first, break-if-over-
-budget philosophy as the Deep pretty printer.
-
-Width budget:
-
-- 80 characters at the current indentation level
-
-Rendering rules:
-
-- keep a pipe chain on one line if the full binding/expression fits within 80 chars
-- 2-3 short stages may stay flat
-- break before every `|>` when the chain exceeds 80 chars
-- break before every `|>` for chains with 4+ stages even if they technically fit
-- once a chain is broken, break all stages consistently; do not keep multiple stages on
-  the same continuation line
-- continuation lines are indented 2 spaces from the binding
-
-Binding rule:
-
-- keep `name = ...` on one line only if the whole flat binding fits
-- if the chain is broken and `name = first_stage` still fits for a short chain, keep the
-  first stage on that first line
-- otherwise break after `=`
-
-Target layout:
-
-```chelis
-loss =
-  softmax(logits, 1)
-  |> log
-  |> mul(labels)
-  |> sum(1)
-  |> neg
-  |> mean(0)
-```
-
-Short layout:
-
-```chelis
-h1 = matmul(x, w1) |> relu
-pred = matmul(x, w) |> add(expand(b, 0, batch))
-```
-
-`chelis fmt` responsibilities:
-
-- reflow existing pipe chains according to width and indentation rules
-- preserve whether the user wrote long-form or short-form block bindings
-
-`chelis fmt` must not:
-
-- invent pipes from let-chains
-- remove pipes back into let-chains
-- rewrite `let x = expr` into `x = expr`, or vice versa
-
-### CLI Surface
-
-`chelis surf` default vs verbose:
-
-- default: pipe-first output, short-form block bindings, width-aware multiline layout
-- `--verbose`: explicit `let`, no pipe-chain compression, and the more expanded debug
-  rendering choices already associated with verbose mode
-
-### Example / Doc Refresh
-
-Rewrite the public Surf corpus to the finalized style:
-
-- examples in `examples/`
-- README hero/sample programs
-- user-facing spec/tutorial examples where the sample is intended as idiomatic Surf
-- supporting teaching material used by agents and users
-
-Phase 3 public examples should consistently use:
-
+- pipe-first decompiler output
 - short-form block bindings
-- pipe-first composition
-- multiline pipes for long or many-stage chains
-- symbolic runtime-varying dimensions such as `batch` and `seq`
-- `->` return syntax
+- width-aware multiline pipe layout
+- examples and docs that read like human-written Surf rather than typed Deep debug text
 
-### Test Plan
+All new examples introduced in `3c`, `3d`, `3g`, and `3f` should continue to follow
+this style.
 
-- parser tests: `x = 5` and `let x = 5` parse identically in block position
-- parser tests: tuple/destructuring short form works
-- parser tests: `f(x) = 5` is not accepted as a binding pattern
-- parser tests: `let ... in` still requires `let`
-- decompiler tests: linear chains emit pipes
-- decompiler tests: multi-use values do not pipe
-- decompiler tests: meaningful names stay as bindings
-- decompiler tests: default output uses short-form block bindings
-- decompiler tests: verbose output restores explicit `let`
-- formatter tests: flat chains stay flat under budget
-- formatter tests: 4+ stage chains break at every `|>`
-- formatter tests: over-budget chains break at every `|>`
-- formatter tests: long names break after `=`
-- formatter tests: once broken, each continuation line holds one stage
-- validator tests: both binding forms are accepted
-- round-trip tests: parse -> decompile -> parse preserves AST shape
-- example corpus tests: rewritten examples still parse, check, and compile
+### 3a: Package System (Shells + Reef)
 
-### Acceptance Oracle
+**Status:** shipped.
 
-Authoritative oracle:
+The package system remains in scope as infrastructure, not as remaining work. New
+Phase 3 library surfaces such as tokenizer helpers or text/data modules should be
+documented as package-friendly APIs that fit the existing Reef / `.chb` model.
 
-```sh
-cargo test -p chelis-cli phase3e_pipe_first_acceptance_oracle -- --exact
-```
+### 3b: Python FFI
 
-Expected result:
+**Status:** shipped.
 
-- the test passes
-- decompiled Surf uses short-form block bindings by default
-- the `loss` chain is rendered pipe-first and broken at every `|>`
-- no unnecessary intermediate body ascriptions are reintroduced
+Python interop remains a supporting boundary, not the solution to Chelis's remaining
+language gaps. Phase 3 is successful only when preprocessing and tokenization no
+longer require Python for ordinary use.
 
-Supporting manual probe:
+### 3b-ii: Direct Python Execution + NumPy Guarantee
 
-```sh
-tmp=$(mktemp)
-chelis deep examples/mnist.ch > "$tmp"
-chelis surf "$tmp"
-rm -f "$tmp"
-```
+**Status:** shipped.
+
+Direct execution remains the bridge for embedding Chelis in Python workflows, but the
+remaining Phase 3 work is about making that embedding optional for end-to-end AI
+program authoring.
 
 ---
 
-## 3a: Package System (Shells + Reef)
+## 3c: Scalar and String Foundation
 
-**Goal:** Chelis libraries can be published, discovered, and consumed.
-The first real package is the standard library itself.
+**Goal:** make Chelis a real programming language for AI workflows by adding first-class
+scalar values and strings outside the tensor-only world.
 
-### Core pieces
+### Why This Matters
 
-- `reef.toml` manifest
-- `reef.lock` lockfile
-- `.chb` shell artifact containing public metadata owned by `chelis-shell`
-- local registry index and artifact publishing
-- dependency resolution and import loading
-- source archive consumption during downstream builds
+Without first-class scalars and strings, Chelis cannot naturally express:
 
-### Dogfooding rule
+- loop counters and vocabulary indices
+- loss-threshold checks and training decisions
+- file paths and config keys
+- labels, tokens, and log messages
+- tokenizer state and text-derived metadata
 
-`chelis-std` must ship as a Reef package using the package system itself.
-If the package system cannot build, export, and re-import the standard library through
-its own shell format, it is not done.
+### Required Surface
 
-This makes `chelis-std` the real acceptance gate for:
+**Scalar types as ordinary values:**
 
-- shell compilation
-- `.chb` public type/effect metadata
-- import resolution
-- compiler-version compatibility handling
-- bundled standard-library resolution
-- bounded manifest discovery for package-aware `check` / `build`
+- unrestricted `Int`, `Float`, and `Bool`
+- arithmetic, comparison, and basic integer bitwise operations
+- scalar values are distinct from rank-0 tensors
+- explicit scalar/tensor conversions where needed
 
-### Standard Library Surface
+**String values as ordinary values:**
 
-The standard library is library code, not language magic.
-Shipped `3a` dogfood surface:
+- immutable UTF-8 `String`
+- length, concat, slice, contains, starts/ends-with, trim
+- parse/format helpers such as `to_int`, `to_float`, and `to_string`
+- string-producing/logging use cases must work without Python
 
-- `Std.Nn`
-- `Std.Init`
-- `Std.Loss`
-- `Std.IO`
+**Control and observability:**
 
-All Phase 3 standard-library code should already use the finalized `3e` Surf style.
+- scalar `if cond then a else b`
+- `print(x)` and `debug(x)` as minimal IO-backed debugging tools
+- tensor shape queries such as `shape`, `rank`, and `numel`
+- `Option[T]` promoted as the practical failure-returning surface for parse/lookups
 
-**Model serialization strategy (`Std.IO.Safetensors`):**
+### Implementation Shape
 
-Safetensors is the explicit format choice for Chelis tensor serialization. No custom
-format, no HDF5, no pickle.
-
-Why safetensors: memory-mapped (fast loading, no deserialization overhead), stores tensor
-metadata (shapes, dtypes, names) alongside data, universally supported (PyTorch, JAX,
-HuggingFace), simple spec (JSON header + flat tensor data), and safe (no arbitrary code
-execution unlike pickle).
-
-In `3a`, `Std.IO.Safetensors` ships as a package/API stub only.
-It proves that the package system can carry I/O-shaped modules and exported signatures
-through `.chb`, import resolution, and shell consumption.
-The real runtime implementation and cross-framework loading gate move to `3b`.
-
-Surface in `Std.IO`:
-
-```chelis
-import Std.IO.Safetensors
-
--- Save trained parameters
-save_tensors("checkpoint.safetensors", {
-  "w1": w1, "b1": b1, "w2": w2, "b2": b2
-})
-
--- Load parameters
-params = load_tensors("checkpoint.safetensors")
-```
-
-Implementation split:
-
-- `3a`: package stub with exported typed signatures only
-- `3b`: runtime implementation via the host-callable boundary and safetensors library
-
-Interop with Python (Phase 3b): a model trained in Chelis and saved as safetensors can
-be loaded by PyTorch with `safetensors.torch.load_file("checkpoint.safetensors")`. A
-model trained in PyTorch and saved as safetensors can be loaded by Chelis. No conversion
-step — the format is the interop layer.
-
-The full serialization story for a Chelis model in production:
-
-| Artifact | Format | Purpose |
-|---|---|---|
-| Model definition | `.ch` (Surf source) | Human-readable, version-controlled |
-| Compiled artifact | `.c` / `.hip` (generated code) | Compiled by gcc/hipcc, deployed |
-| Trained weights | `.safetensors` | Parameter values, portable across frameworks |
-| Coding model | `.gguf` (Phase 4) | The AI that wrote the model, ships with toolchain |
-
-Formats NOT supported (and why):
-- HDF5: legacy, being replaced by safetensors across the ML ecosystem
-- NPZ: NumPy-specific, not framework-portable
-- Pickle: security hazard (arbitrary code execution), no new system should support it
-- ONNX/TorchScript: whole-model export formats (computation graph + weights), not
-  weight-only serialization; relevant for Phase 5 FX backend export, not for
-  Chelis-native checkpointing
-
-### Test Plan
-
-- manifest parse/write round-trip
-- deterministic lockfile generation
-- shell `.chb` round-trip for public metadata
-- shell import/type-check consumption
-- dependency-resolution success and conflict cases
-- `chelis reef` CLI scaffolding and build flows
-- bundled `chelis-std` build/import success
-- bounded package-root discovery for `check` / `build`
-- `module_prefix` enforcement on both module declaration and `src/` path shape
-- safetensors shell import/type-check success from the `3a` stub
+- extend Surf/Deep/type docs and implementation for scalar/string literals and scalar
+  conditionals
+- extend type inference/checking for non-tensor scalar and string operations
+- extend the evaluator for scalar/string execution
+- extend C/HIP codegen only where these values must survive through executable programs;
+  host-side runtime support is acceptable where GPU execution is not the point
+- keep tensor computation semantics unchanged: no implicit scalar/tensor blending
 
 ### Acceptance Oracle
 
-Authoritative oracle:
+A pure Chelis training-step-style program can:
 
-```sh
-cargo test -p chelis-cli phase3a_reef_std_acceptance_oracle -- --exact
-```
-
-Expected result:
-
-- a temp `chelis-std` package builds and publishes into an isolated local Reef registry
-- a temp consumer package resolves `chelis-std` by exact version
-- `chelis check` and `chelis build` succeed on the consumer through the package system,
-  not through ad hoc compiler special cases
-
-Supporting manual probe:
-
-```sh
-chelis reef build packages/chelis-std
-chelis reef publish packages/chelis-std
-```
+- compute scalar stopping criteria
+- build or format a checkpoint/log path as a string
+- print progress without Python
 
 ---
 
-## 3b: Python FFI
+## 3d: Collections and Iteration
 
-**Goal:** Chelis fits into incremental Python-based adoption paths through an interop
-core that is small enough to ship cleanly and honest enough to leave direct runtime
-embedding to a follow-on cut.
+**Goal:** add the variable-length data structures and functional iteration primitives
+required for preprocessing and dataset plumbing.
 
-This has two explicit layers, aimed at different users:
+### Why This Matters
 
-### DLPack Layer
+Real AI programs need to represent:
 
-- zero-copy tensor exchange where framework/runtime constraints permit it
-- CPU tensors only in `3b`
-- PyTorch is the guaranteed framework target in `3b`
-- the API may remain generic over DLPack producers, but NumPy and JAX are not Phase `3b`
-  guarantees
-- GPU tensors are rejected as `ValueError` and deferred to `3b-ii`, where the runtime
-  loader and GPU memory bridge already belong
+- lists of token ids
+- lists of sentences with different lengths
+- dictionaries for vocabularies and configs
+- dataset rows and intermediate preprocessing results
 
-### PyO3 Layer
+Tensors alone cannot express that variable-length host-side structure.
 
-- Python bindings for compiler access such as `chelis.check()` and related APIs
-- tool-builder story for scripting the compiler from Python
-- GIL release during heavy compiler/evaluator work
-- shared implementation extracted into `chelis-compiler-api` so Tide and Python call the
-  same compiler surface
+### Required Surface
 
-### Product story
+**Collections:**
 
-The intended adoption path is:
+- immutable `List[T]`
+- immutable `Dict[K, V]` with practical key types such as `String` and `Int`
 
-- Chelis for the model/compiler surface
-- Python for the surrounding workflow, orchestration, and experimentation
+**Iteration primitives:**
 
-### Scope Boundary
+- `map`, `filter`, `fold`, `zip`, `enumerate`, `range`
+- collection length, indexing, append/concat, key lookup, key/value/entry enumeration
+- effect propagation through iteration
 
-`3b` ships the compiler/tooling API and the basic tensor/file interop surface.
-Three features are explicitly deferred and have named homes:
+**Collection/tensor bridge:**
 
-| Deferred Feature | Home | Reason |
-|---|---|---|
-| Direct Python-callable kernel execution | `3b-ii` | Requires runtime loader, calling-convention adapter, and error-safe call boundary |
-| NumPy DLPack guarantee | `3b-ii` | Likely works from the generic API, but needs explicit testing/documentation as its own user-facing promise |
-| JAX DLPack guarantee | `5a` | JAX placement and execution semantics are a better fit alongside StableHLO |
+- list-to-tensor conversion for numeric lists
+- tensor-to-list conversion where practical
+- stacking and padding helpers
+- `pad_sequences` as the critical bridge from variable-length token lists to batched
+  tensor inputs
 
-### `Std.IO.Safetensors`
+### Implementation Shape
 
-The `3a` stub becomes real in `3b`, but only at the Python/runtime interop layer.
-That means:
-
-- Python helpers for safetensors read/write are in scope
-- PyTorch cross-load/save compatibility is in scope
-- direct Python-callable compiled-kernel execution is still out of scope for `3b`
-
-### Install Surface
-
-The `3b` package is installed from the repo as:
-
-```sh
-uv pip install ./bindings/python
-```
-
-Public surface in this cut:
-
-- `chelis.check(...)`, `chelis.compile(...)`, `chelis.desugar(...)`,
-  `chelis.decompile(...)`, `chelis.validate(...)`
-- `chelis.eval(...)` for evaluator-backed execution from Python inputs
-- `chelis.from_dlpack(...)` for CPU-only DLPack tensor wrapping
-- `chelis.save_safetensors(...)` / `chelis.load_safetensors(...)`
-
-`chelis.eval(...)` is explicitly allowed to copy Python tensors into the evaluator's
-internal `Vec<f64>` representation in `3b`. Zero-copy execution of compiled artifacts is
-deferred to `chelis.load(...)` in `3b-ii`.
-
-Error taxonomy in this cut:
-
-- `ChelisError` means the compiler/runtime failed
-- `ValueError` means Python-side arguments were unsupported or malformed
-
-### Test Plan
-
-- DLPack tensor round-trip with PyTorch without silent copy where zero-copy is expected
-- PyO3 compiler-call smoke tests
-- Python bindings that mirror key CLI/compiler operations
-- safetensors written by Chelis helpers load in PyTorch and vice versa
-- explicit negative tests for unsupported NumPy/JAX guarantees in `3b` docs and manual
-  gates
+- add collection types and type inference rules
+- add collection literals and built-in iteration APIs
+- add evaluator/runtime support for immutable collections
+- document linearly typed tensor elements inside collections without making collections
+  themselves linear by default
+- keep collection data host-side; tensors remain the compiled compute substrate
 
 ### Acceptance Oracle
 
-Manual:
+A pure Chelis preprocessing program can:
 
-```sh
-cargo test -p chelis-python phase3b_python_manual_acceptance_oracle -- --ignored --exact
-```
-
-This installs `bindings/python` into the repo-local `py/.venv` and proves all of the
-following together:
-
-- `import chelis` works from the installed package
-- Tide and Python agree on `check()` for the same input
-- PyTorch DLPack round-trip preserves zero-copy where expected on CPU tensors
-- GPU tensors fail as `ValueError`, not `ChelisError`
-- `chelis.eval(...)` works with the documented copy semantics
-- safetensors read/write round-trips with PyTorch
+- build a vocabulary/config map
+- transform a list of examples with functional iteration
+- pad variable-length integer sequences into a batched tensor input
 
 ---
 
-## 3b-ii: Direct Python Execution + NumPy Guarantee
+## 3g: Data Loading and Tokenization
 
-**Goal:** turn Chelis from "a compiler you call from Python" into "a compute backend
-you use from Python."
+**Goal:** make Chelis self-sufficient for the preprocessing path every serious AI
+program needs.
 
-**Prerequisite:** `3b` complete. This sub-phase reuses the PyO3, DLPack, and
-safetensors infrastructure from the interop-core cut.
+### Why This Matters
 
-### Direct Python Execution
+Without file I/O and tokenization, Chelis can only consume already-prepared tensors.
+That leaves the most basic LLM/data workflow steps in Python:
 
-This is the first runtime-embedding surface:
+- read text
+- parse configs/data
+- tokenize text
+- batch and pad tokens
 
-```python
-compiled = chelis.compile_and_load("model.ch")
-output = compiled(x=torch_tensor)
-```
+Phase 3 is not complete until those steps are expressible in pure Chelis.
 
-`chelis.load("model.so")` remains the advanced path for a previously compiled shared
-library.
+### Required Surface
 
-Implementation requirements:
+**Data loading:**
 
-- runtime loader for compiled artifacts
-- calling-convention adapter from Python keyword arguments to compiled Chelis inputs
-- shape/dtype validation at the call boundary
-- sidecar manifest recording source path + content hash
-- stale-source warning on `load()` when the source still exists but no longer matches the
-  artifact
-- GPU memory bridge layered on the HIP device ABI for Python-managed tensors
-- GIL release during native compile/build and compiled host/device execution
-- compiled execution limited to fully concrete `f32` tensors in this cut
+- text file I/O: read/write text files
+- CSV loading for small/medium structured datasets
+- JSON loading for configs, vocabularies, and metadata
 
-### NumPy DLPack Guarantee
+**Tokenization:**
 
-NumPy moves from "generic API may already work" to "tested, documented, and guaranteed."
+- a BPE tokenizer as the minimum practical tokenizer surface
+- ability to load an external vocabulary/merge artifact format used in real workflows
+- encode/decode text to and from integer token sequences
 
-Required guarantees:
+**Batching bridge:**
 
-- NumPy array -> Chelis tensor -> NumPy array round-trip is tested
-- zero-copy is verified where NumPy's DLPack path permits it
-- ordinary strided NumPy views are accepted on the CPU direct-execution path
-- supported dtype mapping is documented explicitly (`float32` in this cut)
+- batch encode helpers
+- padding to fixed sequence length
+- clean handoff from `List[List[Int]]` to model-ready tensors
 
-### Test Plan
+### Implementation Shape
 
-- direct Python compile/load/call smoke test for compiled artifacts
-- training-loop style call path with Python-managed tensors
-- NumPy DLPack round-trip coverage
-- clear negative tests for shape mismatch and dtype mismatch
-- structural HIP regression proving the device ABI entrypoint is emitted
+- model file I/O as explicit IO-effect operations
+- document tokenizer/state formats and library placement without inventing unnecessary
+  registry or remote-service machinery
+- keep the first tokenizer target pragmatic: enough to ingest ordinary HuggingFace-style
+  BPE assets rather than inventing a novel Chelis-native tokenizer format
 
 ### Acceptance Oracle
 
-Manual:
+A pure Chelis program can:
 
-```sh
-cargo test -p chelis-python phase3bii_python_manual_acceptance_oracle -- --ignored --exact
-```
-
-This installs `bindings/python` into the repo-local `py/.venv` and proves all of the
-following together on the CPU path:
-
-- `chelis.compile_and_load(...)` produces a callable compiled model
-- `chelis.load(...)` reloads the shared library and warns on stale source
-- compiled execution works with PyTorch CPU tensors in a training-loop style call path
-- NumPy arrays round-trip through DLPack with the documented copy/zero-copy behavior
-- shape/dtype mismatches fail as `ValueError`
-
-When the local Python environment exposes a working PyTorch HIP stack
-(`torch.version.hip` plus `torch.cuda.is_available()`), this same manual oracle also runs
-an end-to-end Python HIP smoke path through `chelis.compile_and_load(..., target="hip")`.
-The always-on default-gate protection remains the emitted `_device` ABI structural test.
+- read a text file
+- tokenize its contents into integer sequences
+- batch and pad those sequences into tensors
+- feed them into a model without Python preprocessing
 
 ---
 
-## 3c: Research Type Extensions
+## 3f: SKILL.md v2 Redo
 
-**Goal:** pursue research-grade extensions that are paper-worthy, practical, and
-validated against real Chelis programs.
+**Goal:** rewrite the teaching surface after the language-completeness work lands so
+that frontier-model prompting and future training both target the real usable language.
 
-This track is paper-first, not code-first.
-Each candidate feature follows this order:
+### Why This Must Move Last
 
-1. write the paper draft
-2. implement a prototype
-3. validate it on the Chelis corpus
-4. revise based on results
-5. submit
-6. merge into the mainline only after it proves out
+The earlier SKILL refresh is no longer enough. If `SKILL.md` is refreshed before
+scalar/string/collection/tokenization support lands, it will encode the tensor-only
+subset and then need another rewrite.
 
-**Tier 1 (high priority, core Phase 3 deliverables):**
+### Required Surface
 
-1. ILP/AUTOMAP-style rank polymorphism
-2. size-dependent types
+The refreshed skill should teach:
 
-**Tier 2 (medium priority, start in Phase 3, may extend into Phase 4+):**
-
-3. distribution types
-4. equivariance constraints
-
-**Tier 3 (low priority, Phase 4+ or opportunistic):**
-
-5. optimization-property annotations
-6. **Inference as a typed effect** — LLM calls as a typed, mockable algebraic effect
-   (`Inference.complete`). Relevant if Chelis programs ever delegate to LLMs
-   (meta-learning, reward model queries, LLM-as-judge). Composes with existing effects —
-   `effects(<Random, Inference>)` means the function uses both randomness and LLM calls.
-   Inspired by Vera's `Inference` effect. Phase 3+ research direction, not a v1 feature.
-
-### Research Notes
-
-**De Bruijn references in Deep (study, don't adopt).** Vera's elimination of variable
-names in favor of typed positional indices (`@T.n`) achieves 100% LLM generation
-accuracy on its benchmark. The question for Chelis: would replacing `(var {} x)` with
-positional references `(ref {} 0)` in Deep improve LLM generation accuracy for the
-s-expression representation? The hypothesis: Deep's closed 60-tag vocabulary and 3-tuple
-structure may already provide enough structural constraint that de Bruijn indices add
-complexity without measurable benefit. Additionally, named references carry semantic
-meaning for ML code (`logits` vs `hidden`) that positional indices destroy. Study this
-as an empirical question during Phase 4b (ICL effect measurement): test generation
-accuracy with named-Deep vs positional-Deep variants of the SKILL.md and compare. Don't
-adopt unless the measurement shows a clear advantage.
-
-### Test / Validation Plan
-
-- corpus validation against real examples rather than toy-only proofs
-- negative cases showing explicit failure modes
-- paper-quality writeup of tradeoffs and limitations
+- the shipped pipe-first Surf idiom from `3e`
+- effects, linearity, macros, `vmap`, and tuples
+- scalar/string programming
+- collections and iteration
+- tokenization and data-loading idioms
+- the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
 ### Acceptance Oracle
 
-A feature is not complete because a prototype exists.
-It is complete when the prototype is validated on the corpus and the paper submission
-artifact exists.
-
----
-
-## 3d: Lean Formalization
-
-**Goal:** create a mechanized reference for the core Chelis type system and use it as
-the ultimate conformance oracle.
-
-This is an explicit parallel research track.
-It does not block package work, Python interop, or public-style cleanup.
-
-Target outcomes:
-
-- a POPL/ICFP-style paper
-- an executable reference type checker
-- a conformance-oracle rule: if Lean and Rust disagree on whether a program type-checks,
-  Lean is right
-
-### Test / Validation Plan
-
-- shared corpus checked by both Rust and Lean implementations
-- disagreement cases captured as bugs against the Rust checker unless Lean is shown wrong
-- explicit documentation of the supported formalized core versus out-of-scope language
-  features
-
-### Acceptance Oracle
-
-The Lean checker runs on the agreed core corpus and serves as the authoritative
-reference for conformance disputes in that subset.
-
----
-
-## 3f: SKILL.md v2 Refresh
-
-**Goal:** refresh `SKILL.md` for the complete stable Phase 2 language surface and the
-finalized Phase 3 Surf idiom.
-
-This stays in Phase 3 because the skill file is part of the public face of the
-language, not merely a Phase 4 training input.
-
-The updated skill should cover:
-
-- effects
-- linearity
-- macros
-- `vmap`
-- tuples
-- short-form block bindings
-- pipe-first Surf
-- multiline pipe formatting for long chains
-
-All Surf examples in `SKILL.md` should align with the `3e` style foundation.
-Deep examples remain canonical Deep.
-
-### Test Plan
-
-- update worked examples to the finalized idiom
-- ensure guidance mentions short-form block bindings while keeping `let` documented as
-  valid
-- re-run the skill validation suite against the current compiler
-
-### Acceptance Oracle
-
-The checked-in skill validation suite passes against the compiler with the refreshed
-examples and guidance.
+The checked-in skill validation suite passes with examples and guidance that reflect the
+post-`3g` language surface.
 
 ---
 
 ## Phase 3 Red-Team Checkpoint
 
-Before calling the phase healthy enough to continue, red-team against these concrete
-surfaces:
+Before calling Phase 3 healthy enough to continue, red-team these concrete surfaces:
 
-**Style foundation (`3e`):**
+**Scalar/string foundation (`3c`):**
 
-- decompiler output prefers pipe-first Surf where the rules say it should
-- formatter does not invent or delete pipes semantically
-- examples and teaching material all use the finalized idiom
+- scalar arithmetic and conditionals work without silently becoming tensor operations
+- strings are usable for paths, labels, and logs
+- `print` / `debug` are honest about their IO/effect behavior
 
-**Package system (`3a`):**
+**Collections/iteration (`3d`):**
 
-- `chelis reef init` / `build` / `publish` flows work
-- a program imports from `chelis-std` successfully
-- shell metadata includes the intended public type/effect surface
+- collection APIs handle variable-length data without hidden mutation
+- effect propagation through `map` / `fold` is correct
+- list/tensor bridging rejects malformed shape cases clearly
 
-**Python FFI interop core (`3b`):**
+**Data loading/tokenization (`3g`):**
 
-- `import chelis` works in a clean environment
-- PyTorch DLPack interop is the tested guarantee
-- `chelis.check()` from Python returns structured results
-- Tide and Python agree on `check()` for the same input
-- GPU tensors fail as `ValueError`, not `ChelisError`
-- safetensors written by Chelis interoperate with PyTorch and vice versa
+- text/CSV/JSON loading returns the documented structures
+- tokenizer encode/decode is deterministic against the documented assets
+- batching/padding produces the expected tensor shapes and values
 
-**Direct execution + NumPy (`3b-ii`):**
+**Teaching surface (`3f`):**
 
-- `compiled = chelis.load("model.so")` works from Python
-- NumPy DLPack round-trip is tested and documented
-- shape mismatch and runtime failures surface as Python exceptions
-
-**Lean formalization (`3d`):**
-
-- Lean checker runs on the agreed core subset
-- Lean/Rust disagreement cases are captured as bugs or spec mismatches
-
-**Research types (`3c`):**
-
-- at least one feature has a paper-quality validation artifact, not only a prototype
+- `SKILL.md` teaches the real executable language, not a stale tensor-only subset
+- examples align with the package/style/python foundations already shipped
 
 ---
 
@@ -759,16 +338,17 @@ surfaces:
 
 | Sub-phase | Effort | Dependencies | Nature |
 |---|---|---|---|
-| `3e`: Pipe-first style pass | ~2 weeks | none | Engineering |
-| `3f`: SKILL.md v2 refresh | ~1 week | `3e` | Engineering / teaching surface |
-| `3a`: Package system | ~6-8 weeks | `3e`, `3f` | Engineering |
-| `3b`: Python FFI interop core | ~4-6 weeks | `3a` | Engineering |
-| `3b-ii`: Direct execution + NumPy | ~3-4 weeks | `3b` | Engineering |
-| `3d`: Lean formalization | ~6 months | none (parallel track) | Research |
-| `3c`: Research type extensions | ~6 months | `3a` helpful, paper-first | Research |
+| `3e`: Pipe-first style pass | shipped | none | Engineering |
+| `3a`: Package system | shipped | `3e` | Engineering |
+| `3b`: Python FFI interop core | shipped | `3a` | Engineering |
+| `3b-ii`: Direct execution + NumPy | shipped | `3b` | Engineering |
+| `3c`: Scalar and string foundation | ~4-6 weeks | `3e` shipped | Engineering |
+| `3d`: Collections and iteration | ~4-6 weeks | `3c` | Engineering |
+| `3g`: Data loading and tokenization | ~4-6 weeks | `3d` | Engineering |
+| `3f`: SKILL.md v2 redo | ~2-3 weeks | `3c`, `3d`, `3g` | Engineering / teaching surface |
 
-Engineering work (`3e`, `3f`, `3a`, `3b`, `3b-ii`) is sequentially manageable, with
-the two research tracks overlapping rather than blocking it.
+This phase is now intentionally sequential and pragmatic. The remaining work is about
+making Chelis usable, not publishable.
 
 ---
 
@@ -776,10 +356,10 @@ the two research tracks overlapping rather than blocking it.
 
 Before calling Phase 3 complete:
 
-- `3e` style rules are documented and reflected across examples/teaching material
-- `3a` package system dogfoods `chelis-std`
-- `3b` covers PyO3, PyTorch DLPack, and safetensors interop
-- `3b-ii` covers direct Python-callable execution and NumPy DLPack guarantee
-- `3c` has at least one paper-quality, corpus-validated extension in flight
-- `3d` has a running Lean checker on the agreed core subset
-- `3f` SKILL.md v2 matches the final public Surf idiom
+- `3a`, `3b`, `3b-ii`, and `3e` remain honest shipped foundations
+- `3c` provides practical scalar/string programming without Python fallback
+- `3d` provides collections and iteration for variable-length host-side data
+- `3g` provides text/config/data loading plus tokenizer and batching support
+- `3f` reflects the real post-`3g` language in `SKILL.md` and examples
+- a pure Chelis program can read text, tokenize it, batch/pad it, run a model, compute
+  loss and gradients, and print results without Python
