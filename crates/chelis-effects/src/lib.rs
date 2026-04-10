@@ -173,6 +173,9 @@ fn infer_app_effects(
     if builtin_name == Some("dropout") {
         effects.insert(Effect::Random);
     }
+    if matches!(builtin_name, Some("print" | "debug")) {
+        effects.insert(Effect::Io);
+    }
 
     effects
 }
@@ -517,6 +520,7 @@ fn effect_set_expr(effects: &EffectSet) -> Expr {
         elements.push(match effect {
             Effect::Random => symbol("random"),
             Effect::Accum => symbol("accum"),
+            Effect::Io => symbol("io"),
             Effect::Resource(device) => Expr::List(
                 chelis_deep::ast::List {
                     elements: vec![

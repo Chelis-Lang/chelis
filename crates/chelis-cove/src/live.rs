@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use chelis_tide::compiler;
 use chelis_tide::schema::{
     CheckRequest, CompileRequest, CompileTarget, DesugarRequest, Diagnostic, EvalRequest,
-    LowerRequest, SourceKind, TensorValue, WireDimInfo, WireRiscOp,
+    ExecutionValue, LowerRequest, SourceKind, TensorValue, WireDimInfo, WireRiscOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,11 +123,7 @@ pub fn eval_output(source: &str) -> String {
                 let name = root
                     .name
                     .unwrap_or_else(|| format!("node_{}", root.node_id));
-                let _ = writeln!(
-                    &mut out,
-                    "{name}: shape={:?} data={:?}",
-                    root.value.shape, root.value.data
-                );
+                let _ = writeln!(&mut out, "{name}: {}", render_execution_value(&root.value));
             }
             if out.is_empty() {
                 "eval: no roots".to_string()
@@ -168,6 +164,35 @@ pub fn diagnostics_text(analysis: &LiveAnalysis) -> String {
         }
     }
     out
+}
+
+fn render_execution_value(value: &ExecutionValue) -> String {
+    match value {
+        ExecutionValue::Tensor(value) => format!("shape={:?} data={:?}", value.shape, value.data),
+        ExecutionValue::Int(value) => value.to_string(),
+        ExecutionValue::Float(value) => value.to_string(),
+        ExecutionValue::Bool(value) => value.to_string(),
+        ExecutionValue::String(value) => value.clone(),
+        ExecutionValue::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(render_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Adt { ctor, fields } if fields.is_empty() => ctor.clone(),
+        ExecutionValue::Adt { ctor, fields } => format!(
+            "{}({})",
+            ctor,
+            fields
+                .iter()
+                .map(render_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Unit { .. } => "()".to_string(),
+    }
 }
 
 fn format_failure(stage: &str, diagnostics: &[Diagnostic]) -> String {

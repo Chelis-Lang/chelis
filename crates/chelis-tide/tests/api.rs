@@ -228,6 +228,29 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
 }
 
 #[tokio::test]
+async fn eval_endpoint_returns_host_values_and_transcript() {
+    let (_, ok) = post_json(
+        router(),
+        "/eval",
+        json!({
+            "source_kind":"surf",
+            "source":"let value = debug(string_concat(\"ok-\", to_string(string_len(\"hé\"))))\n",
+            "bindings":{}
+        }),
+    )
+    .await;
+    assert!(ok["ok"].as_bool().unwrap());
+    assert_eq!(ok["result"]["transcript"][0], "ok-2");
+    let value_root = ok["result"]["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|root| root["name"] == "value")
+        .expect("value root");
+    assert_eq!(value_root["value"], "ok-2");
+}
+
+#[tokio::test]
 async fn grad_endpoint_returns_gradient_dag_and_rejects_bad_outputs() {
     let (_, ok) = post_json(
         router(),

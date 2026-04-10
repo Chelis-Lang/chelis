@@ -69,6 +69,7 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
+    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut errors = Vec::new();
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
@@ -214,7 +215,7 @@ fn validate_phase0e_expr(
                 return;
             }
             if let Some(tag) = get_tag(list) {
-                if matches!(tag, "if" | "match" | "par" | "jit") {
+                if matches!(tag, "par" | "jit") {
                     errors.push(CheckError::new(
                         CheckErrorKind::Other,
                         format!("`{tag}` is not supported by Phase 0e lowering"),
@@ -862,14 +863,7 @@ fn app_result_type_is_concrete(list: &deep::List) -> bool {
 }
 
 fn extract_axis_literal(expr: &deep::Expr) -> Option<usize> {
-    match expr {
-        deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n as usize),
-        deep::Expr::List(list, _) => match list.elements.get(2) {
-            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => Some(*n as usize),
-            _ => None,
-        },
-        _ => None,
-    }
+    extract_int_literal(expr).and_then(|axis| (axis >= 0).then_some(axis as usize))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1628,30 +1622,60 @@ fn infer_app(
     ];
 
     const LOGICAL_OPS: &[&str] = &["and", "or", "not"];
+    const INT_BINOPS: &[&str] = &["mod", "bitand", "bitor", "bitxor"];
+    const INT_SHIFT_OPS: &[&str] = &["shl", "shr"];
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
             let mut result_ty = subst.apply(&ret_tv);
 
-            // Post-check: tensor ops require tensor arguments
+            // Post-check: shared builtins can operate on either tensors or host scalars.
             if let Some(ref fname) = func_name
                 && TENSOR_OPS.contains(&fname.as_str())
             {
                 for arg_ty in &arg_tys {
                     let resolved = subst.apply(arg_ty);
-                    match &resolved {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {} // OK
-                        _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects tensor arguments, got {}", fname, resolved),
-                                ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                    let ok = match fname.as_str() {
+                        "matmul" | "layer_norm" | "normalize" => {
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                         }
+                        "add" | "mul" | "sub" | "div" | "max_elem" | "min_elem" | "neg" => {
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+                        }
+                        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" => {
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                                || matches!(resolved, Type::Prim(prec) if prec.is_float())
+                        }
+                        "cmplt" | "gt" | "lte" | "gte" => {
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+                        }
+                        "eq" | "neq" => {
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                                || matches!(resolved, Type::Prim(_))
+                        }
+                        "and" | "or" | "not" => {
+                            matches!(
+                                resolved,
+                                Type::Tensor(_, Prim::Bool) | Type::Var(_) | Type::Error
+                            ) || matches!(resolved, Type::Prim(Prim::Bool))
+                        }
+                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error),
+                    };
+                    if !ok {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "{} does not accept argument type {} in this context",
+                                    fname, resolved
+                                ),
+                            ),
+                            vec![],
+                        ));
+                        return Type::Error;
                     }
                 }
             }
@@ -1781,6 +1805,83 @@ fn infer_app(
                 }
             }
 
+            if let Some(ref fname) = func_name
+                && INT_BINOPS.contains(&fname.as_str())
+            {
+                let lhs = arg_tys
+                    .first()
+                    .map(|ty| subst.apply(ty))
+                    .unwrap_or(Type::Error);
+                let rhs = arg_tys
+                    .get(1)
+                    .map(|ty| subst.apply(ty))
+                    .unwrap_or(Type::Error);
+                match (&lhs, &rhs) {
+                    (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
+                        if lhs_prec.is_integer()
+                            && rhs_prec.is_integer()
+                            && lhs_prec == rhs_prec =>
+                    {
+                        return Type::Prim(*lhs_prec);
+                    }
+                    (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
+                        return lhs;
+                    }
+                    (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
+                        return lhs;
+                    }
+                    (Type::Var(_), Type::Var(_)) | (Type::Error, _) | (_, Type::Error) => {
+                        return lhs;
+                    }
+                    _ => {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "{} requires matching integer arguments, got {} and {}",
+                                    fname, lhs, rhs
+                                ),
+                            ),
+                            vec![],
+                        ));
+                        return Type::Error;
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name
+                && INT_SHIFT_OPS.contains(&fname.as_str())
+            {
+                let lhs = arg_tys
+                    .first()
+                    .map(|ty| subst.apply(ty))
+                    .unwrap_or(Type::Error);
+                let rhs = arg_tys
+                    .get(1)
+                    .map(|ty| subst.apply(ty))
+                    .unwrap_or(Type::Error);
+                let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
+                    || matches!(&lhs, Type::Var(_) | Type::Error);
+                let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
+                    || matches!(&rhs, Type::Var(_) | Type::Error);
+                if lhs_ok && rhs_ok {
+                    return lhs;
+                }
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "{} requires integer lhs and shift amount, got {} and {}",
+                            fname, lhs, rhs
+                        ),
+                    ),
+                    vec![],
+                ));
+                return Type::Error;
+            }
+
             if let Some(ref fname) = func_name {
                 match fname.as_str() {
                     "matmul" => {
@@ -1818,7 +1919,10 @@ fn infer_app(
                 for arg_ty in &arg_tys {
                     let resolved = subst.apply(arg_ty);
                     match &resolved {
-                        Type::Tensor(_, Prim::Bool) | Type::Var(_) | Type::Error => {} // OK
+                        Type::Tensor(_, Prim::Bool)
+                        | Type::Prim(Prim::Bool)
+                        | Type::Var(_)
+                        | Type::Error => {} // OK
                         Type::Tensor(_, prec) => {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
@@ -1834,7 +1938,17 @@ fn infer_app(
                             ));
                             return Type::Error;
                         }
-                        _ => {} // Already caught by tensor-op check above
+                        other => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{} requires bool arguments, got {}", fname, other),
+                                ),
+                                vec!["Logical ops only work on bool values".to_string()],
+                            ));
+                            return Type::Error;
+                        }
                     }
                 }
             }
@@ -1849,6 +1963,367 @@ fn infer_app(
                     if let Type::Tensor(dims, _) = resolved_arg {
                         return Type::Tensor(dims, Prim::Bool);
                     }
+                    if matches!(resolved_arg, Type::Prim(_)) {
+                        return Type::Prim(Prim::Bool);
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name {
+                match fname.as_str() {
+                    "print" => {
+                        return Type::Unit;
+                    }
+                    "debug" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            return subst.apply(first_arg);
+                        }
+                    }
+                    "string_len" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                    return Type::Prim(Prim::Int64);
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("string_len expects string input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "string_concat" => {
+                        for arg_ty in &arg_tys {
+                            match subst.apply(arg_ty) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "string_concat expects string arguments, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        return Type::Prim(Prim::String);
+                    }
+                    "string_slice" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "string_slice expects string input, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
+                            match subst.apply(arg_ty) {
+                                Type::Prim(precision) if precision.is_integer() => {}
+                                Type::Var(_) | Type::Error => {}
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "string_slice expects integer index arguments; arg {} was {other}",
+                                                index + 1
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        return Type::Prim(Prim::String);
+                    }
+                    "string_contains" | "string_starts_with" | "string_ends_with" => {
+                        for arg_ty in &arg_tys {
+                            match subst.apply(arg_ty) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "{} expects string arguments, got {other}",
+                                                fname
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        return Type::Prim(Prim::Bool);
+                    }
+                    "string_trim" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                    return Type::Prim(Prim::String);
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "string_trim expects string input, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "to_string" => {
+                        return Type::Prim(Prim::String);
+                    }
+                    "to_int" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                    return Type::Adt(
+                                        "Option".to_string(),
+                                        vec![Type::Prim(Prim::Int64)],
+                                    );
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("to_int expects string input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "to_float" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                    return Type::Adt(
+                                        "Option".to_string(),
+                                        vec![Type::Prim(Prim::F64)],
+                                    );
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("to_float expects string input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "rank" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                    return Type::Prim(Prim::Int32);
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("rank expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "shape" => {
+                        let input_dims = if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Tensor(dims, _) => Some(dims),
+                                Type::Var(_) | Type::Error => None,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("shape expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(axis_expr) = kids.get(2)
+                            && let Some(axis) = extract_int_literal(axis_expr)
+                        {
+                            if axis < 0 {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::DimensionMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("shape requires non-negative axis, got {axis}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                            if let Some(dims) = input_dims.as_ref() {
+                                let axis = axis as usize;
+                                if axis >= dims.len() {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::DimensionMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "shape axis {axis} is out of bounds for rank {} tensor",
+                                                dims.len()
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        if let Some(axis_arg) = arg_tys.get(1) {
+                            match subst.apply(axis_arg) {
+                                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {
+                                    return Type::Prim(Prim::Int32);
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("shape expects int32 axis, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "numel" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                    return Type::Prim(Prim::Int64);
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("numel expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "tensor_to_scalar" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Tensor(dims, precision) => {
+                                    if !dims.is_empty() {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                "tensor_to_scalar expects a rank-0 tensor"
+                                                    .to_string(),
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                    return Type::Prim(precision);
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "tensor_to_scalar expects tensor input, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "scalar_to_tensor" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(precision) if !matches!(precision, Prim::String) => {
+                                    return Type::Tensor(vec![], precision);
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "scalar_to_tensor expects scalar numeric/bool input, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -2528,8 +3003,24 @@ fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
                 _ => None,
             })
         }
+        deep::Expr::List(list, _) if get_tag(list) == Some("app") => {
+            let app_children = children(list);
+            match (app_children.first(), app_children.get(1)) {
+                (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
+                    extract_int_literal(arg).map(|value| -value)
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
+}
+
+fn is_builtin_var(expr: &deep::Expr, expected: &str) -> bool {
+    let deep::Expr::List(list, _) = expr else {
+        return false;
+    };
+    get_tag(list) == Some("var") && children(list).first().and_then(symbol_name) == Some(expected)
 }
 
 fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
@@ -3787,6 +4278,182 @@ mod tests {
     }
 
     #[test]
+    fn scalar_add_is_allowed() {
+        check_ok(
+            "(def {} x
+                (app {} (var {} add)
+                    (lit {type: (t-prim {} int64)} 2)
+                    (lit {type: (t-prim {} int64)} 3)))",
+        );
+    }
+
+    #[test]
+    fn integer_mod_and_bitwise_builtins_are_allowed() {
+        check_ok(
+            "(def {} bits
+                (app {} (var {} bitxor)
+                    (app {} (var {} bitand)
+                        (lit {type: (t-prim {} int64)} 7)
+                        (lit {type: (t-prim {} int64)} 3))
+                    (app {} (var {} shl)
+                        (lit {type: (t-prim {} int64)} 1)
+                        (lit {type: (t-prim {} int64)} 2))))
+             (def {} rem
+                (app {} (var {} mod)
+                    (lit {type: (t-prim {} int64)} 17)
+                    (lit {type: (t-prim {} int64)} 5)))
+             (def {} shrunk
+                (app {} (var {} shr)
+                    (lit {type: (t-prim {} int64)} 8)
+                    (lit {type: (t-prim {} int64)} 1)))",
+        );
+    }
+
+    #[test]
+    fn string_len_builtin_is_allowed() {
+        check_ok(
+            r#"(def {} x
+                (app {} (var {} string_len)
+                    (lit {type: (t-prim {} string)} "hé")))"#,
+        );
+    }
+
+    #[test]
+    fn string_predicates_and_transforms_are_allowed() {
+        check_ok(
+            r#"(def {} ok
+                (if {}
+                    (app {} (var {} and)
+                        (app {} (var {} string_contains)
+                            (lit {type: (t-prim {} string)} "ckpt-7.safetensors")
+                            (lit {type: (t-prim {} string)} "ckpt"))
+                        (app {} (var {} string_ends_with)
+                            (app {} (var {} string_slice)
+                                (app {} (var {} string_trim)
+                                    (lit {type: (t-prim {} string)} "  ckpt-7.safetensors  "))
+                                (lit {type: (t-prim {} int64)} 7)
+                                (lit {type: (t-prim {} int64)} 12))
+                            (lit {type: (t-prim {} string)} ".safetensors")))
+                    (lit {type: (t-prim {} bool)} true)
+                    (lit {type: (t-prim {} bool)} false)))"#,
+        );
+    }
+
+    #[test]
+    fn to_int_builtin_uses_prelude_option_without_local_deftype() {
+        check_ok(
+            r#"(def {} parsed
+                (match {}
+                    (app {} (var {} to_int)
+                        (lit {type: (t-prim {} string)} "42"))
+                    (arm {} (pat-ctor {} Some (pat-var {} n)) () (var {} n))
+                    (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} int64)} 0))))"#,
+        );
+    }
+
+    #[test]
+    fn to_float_builtin_uses_prelude_option_without_local_deftype() {
+        check_ok(
+            r#"(def {} parsed
+                (match {}
+                    (app {} (var {} to_float)
+                        (lit {type: (t-prim {} string)} "0.125"))
+                    (arm {} (pat-ctor {} Some (pat-var {} x)) () (var {} x))
+                    (arm {} (pat-ctor {} None) () (lit {type: (t-prim {} f64)} 1.0))))"#,
+        );
+    }
+
+    #[test]
+    fn to_int_builtin_rejects_non_string_input() {
+        check_err(
+            r#"(def {} parsed
+                (app {} (var {} to_int)
+                    (lit {type: (t-prim {} int32)} 7)))"#,
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn mod_rejects_float_input() {
+        check_err(
+            r#"(def {} bad
+                (app {} (var {} mod)
+                    (lit {type: (t-prim {} f64)} 7.0)
+                    (lit {type: (t-prim {} f64)} 3.0)))"#,
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn bitand_rejects_mismatched_integer_widths() {
+        check_err(
+            r#"(def {} bad
+                (app {} (var {} bitand)
+                    (lit {type: (t-prim {} int32)} 7)
+                    (lit {type: (t-prim {} int64)} 3)))"#,
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn shl_rejects_non_integer_shift_amount() {
+        check_err(
+            r#"(def {} bad
+                (app {} (var {} shl)
+                    (lit {type: (t-prim {} int64)} 1)
+                    (lit {type: (t-prim {} f64)} 2.0)))"#,
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn string_slice_rejects_non_string_input() {
+        check_err(
+            r#"(def {} bad
+                (app {} (var {} string_slice)
+                    (lit {type: (t-prim {} int32)} 7)
+                    (lit {type: (t-prim {} int64)} 0)
+                    (lit {type: (t-prim {} int64)} 1)))"#,
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn rank_builtin_requires_tensor_input() {
+        check_err(
+            "(def {} x
+                (app {} (var {} rank)
+                    (lit {type: (t-prim {} int64)} 2)))",
+            CheckErrorKind::TypeMismatch,
+        );
+    }
+
+    #[test]
+    fn shape_builtin_accepts_tensor_input() {
+        check_ok(
+            r#"(def {} x
+                (lit {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} 0))
+               (def {} dim
+                (app {} (var {} shape)
+                    (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
+                    (lit {type: (t-prim {} int32)} 1)))"#,
+        );
+    }
+
+    #[test]
+    fn shape_builtin_rejects_negative_axis_when_rank_is_known() {
+        check_err(
+            r#"(def {} x
+                (lit {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} 0))
+               (def {} dim
+                (app {} (var {} shape)
+                    (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
+                    (lit {type: (t-prim {} int32)} -1)))"#,
+            CheckErrorKind::DimensionMismatch,
+        );
+    }
+
+    #[test]
     fn lit_default_int() {
         check_ok("(def {} x (lit {} 42))");
     }
@@ -4554,12 +5221,12 @@ mod tests {
 
     // ── Regression tests for bug fixes ──────────────────────────────
 
-    // Fix 1: add(int32, int32) should fail — tensor ops require tensor args
+    // Fix 1: scalar arithmetic accepts matching numeric scalars but still rejects bad mixes
     #[test]
     fn fix1_tensor_op_rejects_non_tensor_args() {
         check_err(
-            "(def {} r (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 2)))",
-            CheckErrorKind::TypeMismatch,
+            "(def {} r (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            CheckErrorKind::PrecisionMismatch,
         );
     }
 
@@ -4683,11 +5350,11 @@ mod tests {
     // Fix 8b: typed param enforces type
     #[test]
     fn fix8b_typed_param_enforced() {
-        // Param x is f32, but we try to add it (tensor op) — should fail
+        // Param x is f32, so mixing it with a bool in arithmetic must fail.
         check_err(
             "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) \
-               (app {} (var {} add) (var {} x) (var {} x))))",
-            CheckErrorKind::TypeMismatch,
+               (app {} (var {} add) (var {} x) (lit {type: (t-prim {} bool)} true))))",
+            CheckErrorKind::PrecisionMismatch,
         );
     }
 

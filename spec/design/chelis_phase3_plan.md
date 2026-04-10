@@ -126,7 +126,8 @@ Without first-class scalars and strings, Chelis cannot naturally express:
 **Scalar types as ordinary values:**
 
 - unrestricted `Int`, `Float`, and `Bool`
-- arithmetic, comparison, and basic integer bitwise operations
+- arithmetic, comparison, `%` / `mod`, and basic integer bitwise helpers such as
+  `bitand`, `bitor`, `bitxor`, `shl`, and `shr`
 - scalar values are distinct from rank-0 tensors
 - explicit scalar/tensor conversions where needed
 
@@ -134,13 +135,15 @@ Without first-class scalars and strings, Chelis cannot naturally express:
 
 - immutable UTF-8 `String`
 - length, concat, slice, contains, starts/ends-with, trim
+- string length is defined in characters, not bytes
 - parse/format helpers such as `to_int`, `to_float`, and `to_string`
 - string-producing/logging use cases must work without Python
 
 **Control and observability:**
 
 - scalar `if cond then a else b`
-- `print(x)` and `debug(x)` as minimal IO-backed debugging tools
+- `print(x)` and `debug(x)` as minimal IO-backed debugging tools with explicit `IO`
+  effect tracking
 - tensor shape queries such as `shape`, `rank`, and `numel`
 - `Option[T]` promoted as the practical failure-returning surface for parse/lookups
 

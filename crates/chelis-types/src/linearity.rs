@@ -162,12 +162,18 @@ impl Checker {
 
     fn check_app(&mut self, expr: &Expr, list: &List, scope: &mut LinearScope) {
         let kids = children(list);
+        let builtin = kids.first().and_then(var_name);
         if let Some(func) = kids.first() {
             self.check_expr(func, scope);
         }
-        for arg in kids.iter().skip(1) {
+        for (index, arg) in kids.iter().enumerate().skip(1) {
             if let Some(borrowed) = borrow_inner(arg) {
                 self.check_borrow_arg(arg, borrowed, scope);
+            } else if builtin_arg_is_observational(builtin, index - 1)
+                && is_var_expr(arg)
+                && expr_is_linear(arg)
+            {
+                self.read_var_expr(arg, scope);
             } else if is_var_expr(arg) && expr_is_linear(arg) {
                 self.consume_var_expr(arg, scope, app_site(expr, list));
             } else {
@@ -650,6 +656,16 @@ fn collect_free_vars(
 
 fn expr_is_linear(expr: &Expr) -> bool {
     type_metadata(expr).is_some_and(type_expr_contains_tensor)
+}
+
+fn builtin_arg_is_observational(name: Option<&str>, arg_index: usize) -> bool {
+    matches!(
+        (name, arg_index),
+        (
+            Some("print" | "debug" | "to_string" | "rank" | "shape" | "numel"),
+            0
+        )
+    )
 }
 
 fn type_metadata(expr: &Expr) -> Option<&Expr> {

@@ -155,6 +155,7 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
             EffectExpr::Diff(_) => sym("diff"),
             EffectExpr::Random(_) => sym("random"),
             EffectExpr::Accum(_) => sym("accum"),
+            EffectExpr::Io(_) => sym("io"),
             EffectExpr::Resource(device, _) => node(
                 "resource",
                 vec![deep::Expr::Atom(deep::Atom::Str(device.clone()), sp())],

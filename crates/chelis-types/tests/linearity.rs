@@ -109,3 +109,17 @@ def bad(pair: (tensor[4, f32], int32)): int32 =
             .any(|error| matches!(error.kind, CheckErrorKind::UseAfterConsume))
     );
 }
+
+#[test]
+fn tensor_shape_queries_do_not_consume_tensor_inputs() {
+    check_surf(
+        r#"
+def ok(x: tensor[2, 3, f32]): int32 =
+  let r: int32 = rank(x)
+  let c: int32 = shape(x, 1)
+  let n: int64 = numel(x)
+  in c
+"#,
+    )
+    .expect("shape queries should be observational, not consuming");
+}

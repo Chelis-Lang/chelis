@@ -72,6 +72,10 @@ impl Prim {
     pub fn is_numeric(&self) -> bool {
         !matches!(self, Prim::Bool | Prim::String)
     }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Prim::Int8 | Prim::Int32 | Prim::Int64)
+    }
 }
 
 /// A tensor dimension.
@@ -112,6 +116,7 @@ pub enum Type {
 pub enum Effect {
     Random,
     Accum,
+    Io,
     Resource(String),
 }
 
@@ -120,6 +125,7 @@ impl fmt::Display for Effect {
         match self {
             Self::Random => f.write_str("Random"),
             Self::Accum => f.write_str("Accum"),
+            Self::Io => f.write_str("IO"),
             Self::Resource(device) => write!(f, "Resource(\"{device}\")"),
         }
     }

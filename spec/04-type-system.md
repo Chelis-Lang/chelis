@@ -481,6 +481,7 @@ Built-in effect vocabulary in the type layer:
 
 - `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
+- `IO` -- host-side debugging/logging effects such as `print` and `debug`
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
 Settled Phase 2a design decisions:
@@ -488,6 +489,7 @@ Settled Phase 2a design decisions:
 - `Diff` is a compiler capability, not a user-visible boundary effect
 - `Accum` is internal-only in v1; users do not handle it directly
 - `Random` and `Resource(Device)` are the real Phase 2a boundary effects
+- `IO` is a shipped Phase 3 host-side effect rather than a Phase 2a handler boundary
 
 Current shipped inference/checking behavior:
 
@@ -496,6 +498,7 @@ Current shipped inference/checking behavior:
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
 - `dropout(x, rate)` is the concrete shipped `Random` source
+- `print(x)` and `debug(x)` are the concrete shipped `IO` sources
 - `with seed(seed) { ... }` handles `Random`
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
@@ -503,6 +506,7 @@ Current shipped inference/checking behavior:
   the current checker does not yet synthesize `Resource(Device)` onto checked `fn`
   metadata the way it does for inferred `Random`
 - unhandled top-level `Random` is a check error with repair guidance
+- top-level `IO` is currently permitted for debugging/logging programs
 
 The current shipped checker does **not** yet claim the full Phase 2 design:
 

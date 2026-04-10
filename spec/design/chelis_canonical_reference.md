@@ -359,8 +359,9 @@ belongs in a library.
 ### Grey area: shipped Phase 2a effects vs later extensibility
 
 The shipped Phase 2a surface is intentionally closed and compiler-known:
-`Random`, `Accum`, and `Resource(Device)` live in the type layer, but only `Random`
-and `Resource(Device)` are boundary-checked today.
+`Random`, `Accum`, `IO`, and `Resource(Device)` live in the type layer. `Random` and
+`Resource(Device)` are the Phase 2a boundary-checked effects; `IO` is the shipped Phase
+3 host-side debugging/logging effect.
 This is narrower than the longer-term design space.
 User-defined effects remain deferred; the current compiler knows both the effect
 mechanism and the concrete built-in effect vocabulary it ships.

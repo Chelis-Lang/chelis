@@ -1,9 +1,10 @@
 //! Chelis compiler CLI.
 
+use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -742,62 +743,64 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn try_eval(source: &str) -> Result<String, String> {
-    let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("{e}"))?;
-    let deep = expanded_desugared_program(&decls)?;
-    let checked = checked_program_with_effects(&deep)?;
-    let dag = chelis_ir::lower::lower_program(&checked);
-
-    if dag.is_empty() {
-        return Err("empty program".into());
-    }
-
-    let roots = dag.roots().to_vec();
-    let inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
-    let vals = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-        inputs.get(name).cloned()
+    let result = chelis_compiler_api::compiler::eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        bindings: BTreeMap::new(),
     })
-    .map_err(|e| e.to_string())?;
-    let root_names = lowered_root_names_from_decls(&decls, checked.type_env());
+    .map_err(|err| {
+        err.errors
+            .iter()
+            .map(|diag| diag.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
 
-    if roots.len() == 1 {
-        return vals
-            .get(&roots[0])
-            .map(format_tensor_value)
-            .ok_or_else(|| "no result".to_string());
+    let mut lines = result.transcript;
+    if result.roots.len() == 1 {
+        if let Some(root) = result.roots.first() {
+            lines.push(format_execution_value(&root.value));
+        }
+        return Ok(lines.join("\n"));
     }
 
-    if root_names.len() == roots.len() {
-        Ok(root_names
-            .into_iter()
-            .zip(roots)
-            .map(|(name, id)| {
-                let value = vals.get(&id).expect("root value missing");
-                format!("{name} = {}", format_tensor_value(value))
-            })
-            .collect::<Vec<_>>()
-            .join("\n"))
-    } else {
-        Ok(roots
-            .into_iter()
-            .enumerate()
-            .map(|(index, id)| {
-                let value = vals.get(&id).expect("root value missing");
-                format!("_{index} = {}", format_tensor_value(value))
-            })
-            .collect::<Vec<_>>()
-            .join("\n"))
-    }
+    lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
+        let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
+        format!("{name} = {}", format_execution_value(&root.value))
+    }));
+    Ok(lines.join("\n"))
 }
 
-fn format_tensor_value(value: &chelis_ir::eval::TensorValue) -> String {
-    if value.shape.is_empty() || value.data.len() == 1 {
-        format!("{}", value.data[0])
-    } else {
-        format!(
+fn format_execution_value(value: &ExecutionValue) -> String {
+    match value {
+        ExecutionValue::Tensor(value) => format!(
             "tensor(shape={:?}, data={:?})",
             value.shape,
             &value.data[..value.data.len().min(10)]
-        )
+        ),
+        ExecutionValue::Int(value) => value.to_string(),
+        ExecutionValue::Float(value) => value.to_string(),
+        ExecutionValue::Bool(value) => value.to_string(),
+        ExecutionValue::String(value) => value.clone(),
+        ExecutionValue::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(format_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Adt { ctor, fields } if fields.is_empty() => ctor.clone(),
+        ExecutionValue::Adt { ctor, fields } => format!(
+            "{}({})",
+            ctor,
+            fields
+                .iter()
+                .map(format_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Unit { .. } => "()".to_string(),
     }
 }
 

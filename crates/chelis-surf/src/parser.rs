@@ -1775,6 +1775,7 @@ impl Parser {
                     "Diff" | "diff" => Ok(EffectExpr::Diff(tok.span)),
                     "Random" | "random" => Ok(EffectExpr::Random(tok.span)),
                     "Accum" | "accum" => Ok(EffectExpr::Accum(tok.span)),
+                    "IO" | "io" => Ok(EffectExpr::Io(tok.span)),
                     _ => Err(ParseError::Expected {
                         expected: "effect name".into(),
                         found: name,
@@ -1788,6 +1789,7 @@ impl Parser {
                     "Diff" => Ok(EffectExpr::Diff(tok.span)),
                     "Random" => Ok(EffectExpr::Random(tok.span)),
                     "Accum" => Ok(EffectExpr::Accum(tok.span)),
+                    "IO" => Ok(EffectExpr::Io(tok.span)),
                     "Resource" => {
                         self.expect(&TokenKind::LParen)?;
                         let device = match self.peek().clone() {
@@ -1991,6 +1993,19 @@ mod tests {
                 assert!(
                     matches!(effects[2], EffectExpr::Resource(ref device, _) if device == "gpu:0")
                 );
+            }
+            _ => panic!("expected Sig"),
+        }
+    }
+
+    #[test]
+    fn sig_io_effect_annotation() {
+        let decls = p("sig f: string -> unit ! {IO}");
+        match &decls[0] {
+            Decl::Sig { effects, .. } => {
+                let effects = effects.as_ref().expect("effects");
+                assert_eq!(effects.len(), 1);
+                assert!(matches!(effects[0], EffectExpr::Io(_)));
             }
             _ => panic!("expected Sig"),
         }

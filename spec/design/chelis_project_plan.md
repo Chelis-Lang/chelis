@@ -405,8 +405,8 @@ Shipped.
 - add first-class immutable `String` values for file paths, tokens, labels, config
   keys, and logging
 - add scalar `if/else` as the natural control surface for boolean decisions
-- add practical built-ins around these values: arithmetic, comparison, bitwise integer
-  ops, formatting, parsing, and tensor shape queries
+- add practical built-ins around these values: arithmetic, comparison, `%` / `mod`,
+  named integer bitwise helpers, formatting, parsing, and tensor shape queries
 - make `Option[T]` part of the practical language surface for failure-returning APIs
 - add `print` / `debug` as the minimum IO-based debugging surface
 - keep tensor scalars distinct from host-language scalar values; conversions stay

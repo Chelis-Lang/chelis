@@ -25,6 +25,10 @@ fn vmap_example() -> PathBuf {
     example_path("../../examples/vmap_relu.ch")
 }
 
+fn scalar_string_foundation_example() -> PathBuf {
+    example_path("../../examples/scalar_string_foundation.ch")
+}
+
 fn linreg_example() -> PathBuf {
     example_path("../../examples/linreg.ch")
 }
@@ -33,11 +37,12 @@ fn transformer_block_example() -> PathBuf {
     example_path("../../examples/transformer_block.ch")
 }
 
-fn executable_examples() -> [PathBuf; 5] {
+fn executable_examples() -> [PathBuf; 6] {
     [
         hello_tensor_example(),
         linreg_example(),
         mnist_example(),
+        scalar_string_foundation_example(),
         transformer_block_example(),
         vmap_example(),
     ]
@@ -181,8 +186,59 @@ fn eval_prints_labeled_tuple_components() {
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("grads.0 = 1"))
-        .stdout(predicate::str::contains("grads.1 = 2.5"));
+        .stdout(predicate::str::contains("grads.0 = tensor(shape=[], data=[1.0])"))
+        .stdout(predicate::str::contains("grads.1 = tensor(shape=[], data=[2.5])"));
+}
+
+#[test]
+fn eval_supports_host_scalars_and_strings() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            r#"if 3 > 2 then string_concat("ok-", to_string(string_len("hé"))) else "bad""#,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok-2"));
+}
+
+#[test]
+fn eval_supports_integer_mod_and_bitwise_helpers() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            r#"bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))"#,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("7"));
+}
+
+#[test]
+fn eval_surfaces_debug_transcript() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", r#"debug("trace")"#])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trace\ntrace"));
+}
+
+#[test]
+fn phase3c_scalar_string_acceptance_oracle() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            scalar_string_foundation_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("progress: ckpt-7.safetensors"))
+        .stdout(predicate::str::contains("stop"));
 }
 
 #[test]
@@ -722,7 +778,10 @@ def main(x: f32) -> f32 = hidden(x)
 
 #[test]
 fn check_does_not_report_perfect_score_with_errors() {
-    let json = run_json_check(&illustrative_example("pattern_matching.ch"));
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad_check.ch");
+    write_file(&path, "let x = add(1, true)\n");
+    let json = run_json_check(&path);
     assert!(json["score"].as_f64().unwrap() < 1.0);
     assert!(!json["errors"].as_array().unwrap().is_empty());
 }
@@ -1126,7 +1185,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
 }
 
 #[test]
-fn check_reports_match_linearity_even_when_phase0e_rejects_match() {
+fn check_reports_match_linearity_without_old_phase0e_rejection() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("match_linearity.ch");
     write_file(
@@ -1143,15 +1202,15 @@ fn check_reports_match_linearity_even_when_phase0e_rejects_match() {
     let json = run_json_check(&path);
     let errors = json["errors"].as_array().unwrap();
     assert!(errors.iter().any(|error| {
-        error["message"].as_str().is_some_and(|message| {
-            message.contains("`match` is not supported by Phase 0e lowering")
-        })
-    }));
-    assert!(errors.iter().any(|error| {
         error["kind"].as_str() == Some("UseAfterConsume")
             && error["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("pair"))
+    }));
+    assert!(!errors.iter().any(|error| {
+        error["message"].as_str().is_some_and(|message| {
+            message.contains("`match` is not supported by Phase 0e lowering")
+        })
     }));
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }

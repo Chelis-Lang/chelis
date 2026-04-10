@@ -5,23 +5,28 @@ use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{self, TensorValue as IrTensorValue};
+use chelis_ir::lower::top_level_lowering_map;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
     TypeExpr, UnaryOp, Variant, VariantFields,
 };
-use chelis_types::errors::CheckError;
+use chelis_types::{CheckedProgram, errors::CheckError};
 
+use crate::runtime::{
+    RuntimeTensorValue, evaluate_host_program, lookup_runtime_value_for_root,
+    runtime_value_to_schema,
+};
 use crate::schema::{
     BatchRequest, BatchResult, BatchResultEnvelope, CheckResult, CompileRequest, CompileResult,
     CompileTarget, DecompileRequest, DecompileResult, DesugarRequest, DesugarResult, Diagnostic,
     EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents, GeneratedFile, GradRequest,
     GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult, SourceKind, Span,
-    TensorValue, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimInfo, WireFusedInput, WireFusedStep,
-    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
-    WireMetaEntry, WireParam, WirePattern, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
-    WireUnaryOp, WireVariant, WireVariantFields,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode, WireDeepAtom,
+    WireDeepExpr, WireDeepExprKind, WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
+    WireParam, WirePattern, WireRecordExprField, WireRecordPatternField, WireRecordTypeField,
+    WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireUnaryOp,
+    WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -176,7 +181,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    if compiled.dag.roots().is_empty() {
+    if compiled.dag.roots().is_empty() && compiled.all_root_names.is_empty() {
         return Err(stage_error(
             "eval",
             "program produced no evaluable roots",
@@ -199,20 +204,67 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
         .collect::<HashMap<_, _>>();
 
     let roots = compiled.dag.roots().to_vec();
-    let values = eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
-        bindings.get(name).cloned()
-    })
-    .map_err(|message| stage_error("eval", message, "eval_error"))?;
+    let tensor_values = if roots.is_empty() {
+        HashMap::new()
+    } else {
+        eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
+            bindings.get(name).cloned()
+        })
+        .map_err(|message| stage_error("eval", message, "eval_error"))?
+    };
+
+    let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
+    for (name, node_id) in &compiled.named_roots {
+        let value = tensor_values.get(node_id).ok_or_else(|| {
+            stage_error(
+                "eval",
+                format!("missing tensor root `{name}`"),
+                "eval_error",
+            )
+        })?;
+        let precision = compiled
+            .dag
+            .get(*node_id)
+            .map(|node| node.output_type.precision)
+            .ok_or_else(|| {
+                stage_error("eval", format!("missing node {}", node_id.0), "eval_error")
+            })?;
+        tensor_values_by_name.insert(
+            name.clone(),
+            RuntimeTensorValue {
+                value: value.clone(),
+                precision,
+            },
+        );
+    }
+
+    let host_outcome = evaluate_host_program(&compiled.checked, &tensor_values_by_name)
+        .map_err(|message| stage_error("eval", message, "eval_error"))?;
 
     Ok(EvalResult {
-        roots: roots
-            .into_iter()
-            .map(|root| EvaluatedRoot {
-                node_id: root.0,
-                name: compiled.root_name_by_id.get(&root).cloned(),
-                value: tensor_value(values.get(&root).expect("root value missing")),
+        roots: compiled
+            .all_root_names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                let value = lookup_runtime_value_for_root(
+                    name,
+                    &host_outcome.host_bindings,
+                    &tensor_values_by_name,
+                )?;
+                let node_id = compiled
+                    .named_roots
+                    .get(name)
+                    .map(|id| id.0)
+                    .unwrap_or(index);
+                Some(EvaluatedRoot {
+                    node_id,
+                    name: Some(name.clone()),
+                    value: runtime_value_to_schema(&value),
+                })
             })
             .collect(),
+        transcript: host_outcome.transcript,
     })
 }
 
@@ -327,36 +379,25 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 }
 
 struct CompiledSource {
+    checked: CheckedProgram,
     dag: Dag,
+    all_root_names: Vec<String>,
     named_roots: BTreeMap<String, NodeId>,
-    root_name_by_id: HashMap<NodeId, String>,
     forward_nodes_by_name: BTreeMap<String, NodeId>,
 }
 
-type RootNameBuilder = Box<dyn FnOnce(&HashMap<String, DeepExpr>) -> Vec<String>>;
-
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
-    let (deep_exprs, root_name_builder): (Vec<DeepExpr>, RootNameBuilder) = match source_kind {
+    let deep_exprs: Vec<DeepExpr> = match source_kind {
         SourceKind::Surf => {
             let decls = parse_surf(source)?;
-            let deep_exprs = chelis_macros::expand_program(
+            chelis_macros::expand_program(
                 &chelis_surf::desugar::desugar_program(&decls),
                 &chelis_macros::ExpansionOptions::default(),
             )
             .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
-            .into_exprs();
-            (
-                deep_exprs,
-                Box::new(move |type_env| lowered_root_names_from_surf(&decls, type_env)),
-            )
+            .into_exprs()
         }
-        SourceKind::Deep => {
-            let deep_exprs = parse_deep(source)?;
-            (
-                deep_exprs.clone(),
-                Box::new(move |type_env| lowered_root_names_from_deep(&deep_exprs, type_env)),
-            )
-        }
+        SourceKind::Deep => parse_deep(source)?,
     };
 
     let checked =
@@ -364,7 +405,6 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
             stage: "check".to_string(),
             errors: report.errors.iter().map(check_error_diagnostic).collect(),
         })?;
-    let root_names = root_name_builder(checked.type_env());
     let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
         stage: "effects".to_string(),
         errors: errors
@@ -384,30 +424,29 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
         stage: "linearity".to_string(),
         errors: errors.iter().map(check_error_diagnostic).collect(),
     })?;
+    let all_root_names = root_names_from_checked_exprs(checked.exprs(), checked.type_env(), false);
+    let tensor_root_names =
+        root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
 
     let dag = chelis_ir::lower::lower_program(&checked);
 
-    if !root_names.is_empty() && dag.roots().len() != root_names.len() {
+    if !tensor_root_names.is_empty() && dag.roots().len() != tensor_root_names.len() {
         return Err(stage_error(
             "lower",
             format!(
                 "lowered root count mismatch: expected {} named roots, got {}",
-                root_names.len(),
+                tensor_root_names.len(),
                 dag.roots().len()
             ),
             "lower_error",
         ));
     }
 
-    let named_roots = root_names
-        .into_iter()
+    let named_roots = tensor_root_names
+        .iter()
+        .cloned()
         .zip(dag.roots().iter().copied())
         .collect::<BTreeMap<_, _>>();
-
-    let root_name_by_id = named_roots
-        .iter()
-        .map(|(name, id)| (*id, name.clone()))
-        .collect::<HashMap<_, _>>();
 
     let mut forward_nodes_by_name = named_roots.clone();
     for node in dag.nodes() {
@@ -417,9 +456,10 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
     }
 
     Ok(CompiledSource {
+        checked,
         dag,
+        all_root_names,
         named_roots,
-        root_name_by_id,
         forward_nodes_by_name,
     })
 }
@@ -461,49 +501,23 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
     })
 }
 
-fn lowered_root_names_from_surf(
-    decls: &[Decl],
-    type_env: &HashMap<String, DeepExpr>,
-) -> Vec<String> {
-    let mut names = Vec::new();
-    for decl in decls {
-        collect_surf_decl_names(decl, type_env, &mut names);
-    }
-    names
-}
-
-fn collect_surf_decl_names(
-    decl: &Decl,
-    type_env: &HashMap<String, DeepExpr>,
-    out: &mut Vec<String>,
-) {
-    match decl {
-        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => {
-            extend_root_names(name, type_env.get(name), out)
-        }
-        Decl::Module { decls, .. } => {
-            for decl in decls {
-                collect_surf_decl_names(decl, type_env, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lowered_root_names_from_deep(
+fn root_names_from_checked_exprs(
     exprs: &[DeepExpr],
     type_env: &HashMap<String, DeepExpr>,
+    lowered_only: bool,
 ) -> Vec<String> {
+    let lowered_names = lowered_only.then(|| top_level_lowering_map(exprs, type_env));
     let mut names = Vec::new();
     for expr in exprs {
-        collect_deep_decl_names(expr, type_env, &mut names);
+        collect_checked_decl_names(expr, type_env, lowered_names.as_ref(), &mut names);
     }
     names
 }
 
-fn collect_deep_decl_names(
+fn collect_checked_decl_names(
     expr: &DeepExpr,
     type_env: &HashMap<String, DeepExpr>,
+    lowered_names: Option<&HashMap<String, bool>>,
     out: &mut Vec<String>,
 ) {
     let DeepExpr::List(list, _) = expr else {
@@ -515,11 +529,14 @@ fn collect_deep_decl_names(
     match tag {
         "module" => {
             for child in list.elements.iter().skip(3) {
-                collect_deep_decl_names(child, type_env, out);
+                collect_checked_decl_names(child, type_env, lowered_names, out);
             }
         }
         "def" => {
             if let Some(name) = list.elements.get(2).and_then(symbol_name) {
+                if lowered_names.is_some_and(|map| !map.get(name).copied().unwrap_or(false)) {
+                    return;
+                }
                 extend_root_names(name, type_env.get(name), out);
             }
         }
@@ -841,13 +858,6 @@ fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
         got: error.got.clone(),
         suggestions: error.suggestions.clone(),
         span: None,
-    }
-}
-
-fn tensor_value(value: &IrTensorValue) -> TensorValue {
-    TensorValue {
-        shape: value.shape.clone(),
-        data: value.data.clone(),
     }
 }
 
@@ -1431,5 +1441,212 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 })
                 .collect(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::ExecutionValue;
+
+    #[test]
+    fn compile_source_keeps_all_lowered_tensor_roots() {
+        let source = r#"
+def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
+  matmul(x, w)
+
+def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
+  matmul(x, w) |> sum(1) |> mean(0)
+"#;
+
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+
+        assert_eq!(
+            compiled.all_root_names,
+            vec!["logits".to_string(), "loss".to_string()]
+        );
+        assert_eq!(
+            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
+            vec!["logits".to_string(), "loss".to_string()]
+        );
+        assert_eq!(compiled.dag.roots().len(), 2);
+    }
+
+    #[test]
+    fn compile_source_excludes_host_only_roots_from_lowered_root_map() {
+        let source = r#"
+let label = "mnist"
+
+def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
+  matmul(x, w)
+"#;
+
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+
+        assert_eq!(
+            compiled.all_root_names,
+            vec!["label".to_string(), "logits".to_string()]
+        );
+        assert_eq!(
+            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
+            vec!["logits".to_string()]
+        );
+        assert_eq!(compiled.dag.roots().len(), 1);
+    }
+
+    #[test]
+    fn compile_source_keeps_scalar_string_foundation_host_only() {
+        let source = include_str!("../../../examples/scalar_string_foundation.ch");
+
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+
+        assert_eq!(
+            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
+            Vec::<String>::new()
+        );
+        assert_eq!(compiled.dag.roots().len(), 0);
+        assert!(compiled.all_root_names.iter().any(|name| name == "status"));
+        assert!(compiled.all_root_names.iter().any(|name| name == "loss"));
+        assert!(
+            compiled
+                .all_root_names
+                .iter()
+                .any(|name| name == "should_stop")
+        );
+    }
+
+    #[test]
+    fn eval_supports_shape_queries_with_tensor_bindings() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+let x: tensor[2, 3, f32] = x
+let dims = (rank(x), shape(x, 1), numel(x))
+"#
+            .to_string(),
+            bindings: BTreeMap::from([(
+                "x".to_string(),
+                crate::schema::TensorValue {
+                    shape: vec![2, 3],
+                    data: vec![0.0; 6],
+                },
+            )]),
+        })
+        .expect("eval");
+
+        assert_eq!(result.roots.len(), 4);
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("dims.0")
+                    && matches!(root.value, ExecutionValue::Int(2)))
+        );
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("dims.1")
+                    && matches!(root.value, ExecutionValue::Int(3)))
+        );
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("dims.2")
+                    && matches!(root.value, ExecutionValue::Int(6)))
+        );
+    }
+
+    #[test]
+    fn eval_supports_string_parse_helpers_and_option_matching() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+let parsed = match to_int(" 42 ") with {
+  | Some n => n
+  | None => cast(0, int64)
+}
+
+let cleaned = string_trim("  ckpt-42.safetensors  ")
+let progress = print(cleaned)
+let matches_path = and(
+  string_starts_with(cleaned, "ckpt-"),
+  string_contains(cleaned, "42")
+)
+let result = if matches_path then parsed else cast(0, int64)
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("result")
+                    && matches!(root.value, ExecutionValue::Int(42)))
+        );
+        assert_eq!(result.transcript, vec!["ckpt-42.safetensors".to_string()]);
+    }
+
+    #[test]
+    fn eval_supports_integer_mod_and_bitwise_helpers() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+let bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
+let rem = mod(cast(17, int64), cast(5, int64))
+let shifted = shr(cast(8, int64), cast(1, int64))
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("bits")
+                    && matches!(root.value, ExecutionValue::Int(7)))
+        );
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("rem")
+                    && matches!(root.value, ExecutionValue::Int(2)))
+        );
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("shifted")
+                    && matches!(root.value, ExecutionValue::Int(4)))
+        );
+    }
+
+    #[test]
+    fn eval_rejects_negative_shape_axis_with_signed_diagnostic() {
+        let error = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+let axis = tensor_to_scalar(scalar_to_tensor(cast(-1, int32)))
+let bad = shape(scalar_to_tensor(cast(3, int64)), axis)
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect_err("negative axis should fail");
+
+        assert_eq!(error.stage, "eval");
+        assert!(
+            error
+                .errors
+                .iter()
+                .any(|diag| diag.message == "shape requires non-negative axis, got -1")
+        );
     }
 }

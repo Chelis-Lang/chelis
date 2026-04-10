@@ -337,6 +337,7 @@ dependencies = [
  "cargo-husky",
  "chelis-backend-c",
  "chelis-backend-hip",
+ "chelis-compiler-api",
  "chelis-cove",
  "chelis-deep",
  "chelis-effects",

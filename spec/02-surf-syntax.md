@@ -66,7 +66,9 @@ Final. Binding power from lowest to highest:
 
 Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b == c` is rejected.
 
-No operator overloading. No bitwise operators. No exponentiation operator — use `pow(x, n)` from `Std.Math`.
+No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
+named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
+operator — use `pow(x, n)` from `Std.Math`.
 
 ---
 
@@ -164,11 +166,14 @@ sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
 def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
 ```
 
-Surf accepts the built-in names `Diff`, `Random`, `Accum`, and `Resource("device")`.
+Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, and
+`Resource("device")`.
 The current shipped boundary-checking surface is narrower than the syntax:
 
 - `Random` is the active user-facing boundary effect in Phase 2a
 - `Resource("...")` is the active build-boundary placement annotation in Phase 2a
+- `IO` is the shipped Phase 3 debugging/logging effect inferred from `print` and
+  `debug`; it is allowed at the program boundary
 - `Diff` is accepted as documentation / forward-compatible syntax, but `grad` remains a
   compiler capability rather than a user-handled boundary effect
 - `Accum` is accepted as forward-compatible syntax but remains internal-only in the

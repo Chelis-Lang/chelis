@@ -211,15 +211,18 @@ pub enum EffectExpr {
     Diff(Span),
     Random(Span),
     Accum(Span),
+    Io(Span),
     Resource(String, Span),
 }
 
 impl EffectExpr {
     pub fn span(&self) -> Span {
         match self {
-            Self::Diff(span) | Self::Random(span) | Self::Accum(span) | Self::Resource(_, span) => {
-                *span
-            }
+            Self::Diff(span)
+            | Self::Random(span)
+            | Self::Accum(span)
+            | Self::Io(span)
+            | Self::Resource(_, span) => *span,
         }
     }
 }

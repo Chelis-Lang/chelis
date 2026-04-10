@@ -7,6 +7,7 @@
 //! - logical_binop: ∀D. (tensor[D,bool], tensor[D,bool]) → tensor[D,bool]
 //! - logical_unop:  ∀D. tensor[D,bool] → tensor[D,bool]
 
+use crate::adt::{AdtDef, AdtRegistry, VariantInfo};
 use crate::env::Env;
 use crate::types::*;
 
@@ -22,11 +23,17 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "cmplt",
     "sub",
     "div",
+    "mod",
     "eq",
     "neq",
     "gt",
     "lte",
     "gte",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "shl",
+    "shr",
     "and",
     "or",
     "not",
@@ -47,6 +54,23 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "pad",
     "shrink",
     "stride",
+    "print",
+    "debug",
+    "string_len",
+    "string_concat",
+    "string_slice",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "string_trim",
+    "to_string",
+    "to_int",
+    "to_float",
+    "rank",
+    "shape",
+    "numel",
+    "tensor_to_scalar",
+    "scalar_to_tensor",
 ];
 
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
@@ -252,6 +276,58 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn generic_unop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input, output],
+            dvars: vec![],
+            body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_binop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let lhs = vg.fresh_tvar();
+        let rhs = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![lhs, rhs, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(lhs), Type::Var(rhs)],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_triop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(a), Type::Var(b), Type::Var(c)],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_unop_same(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let tv = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![tv],
+            dvars: vec![],
+            body: Type::Fn(vec![Type::Var(tv)], Box::new(Type::Var(tv))),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     // --- Register all built-ins ---
 
     // Tier 1: RISC Primitives
@@ -270,11 +346,17 @@ pub fn builtin_env() -> (Env, VarGen) {
     // Tier 2: Derived built-ins
     tensor_binop("sub", &mut env, &mut vg);
     tensor_binop("div", &mut env, &mut vg);
+    generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
     cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
+    generic_binop("bitand", &mut env, &mut vg);
+    generic_binop("bitor", &mut env, &mut vg);
+    generic_binop("bitxor", &mut env, &mut vg);
+    generic_binop("shl", &mut env, &mut vg);
+    generic_binop("shr", &mut env, &mut vg);
 
     logical_binop("and", &mut env, &mut vg);
     logical_binop("or", &mut env, &mut vg);
@@ -299,8 +381,95 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);
     tensor_with_rate("dropout", &mut env, &mut vg);
+    generic_unop("print", &mut env, &mut vg);
+    generic_unop_same("debug", &mut env, &mut vg);
+    generic_unop("string_len", &mut env, &mut vg);
+    generic_binop("string_concat", &mut env, &mut vg);
+    generic_unop("string_trim", &mut env, &mut vg);
+    generic_triop("string_slice", &mut env, &mut vg);
+    env.bind(
+        "string_contains".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
+                Box::new(Type::Prim(Prim::Bool)),
+            ),
+        },
+    );
+    env.bind(
+        "string_starts_with".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
+                Box::new(Type::Prim(Prim::Bool)),
+            ),
+        },
+    );
+    env.bind(
+        "string_ends_with".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::String), Type::Prim(Prim::String)],
+                Box::new(Type::Prim(Prim::Bool)),
+            ),
+        },
+    );
+    generic_unop("to_string", &mut env, &mut vg);
+    generic_unop("to_int", &mut env, &mut vg);
+    generic_unop("to_float", &mut env, &mut vg);
+    generic_unop("rank", &mut env, &mut vg);
+    generic_binop("shape", &mut env, &mut vg);
+    generic_unop("numel", &mut env, &mut vg);
+    generic_unop("tensor_to_scalar", &mut env, &mut vg);
+    generic_unop("scalar_to_tensor", &mut env, &mut vg);
 
     (env, vg)
+}
+
+pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRegistry) {
+    let option_tvar = vg.fresh_tvar();
+    let option_type = Type::Adt("Option".to_string(), vec![Type::Var(option_tvar)]);
+
+    env.bind(
+        "Some".to_string(),
+        Scheme {
+            tvars: vec![option_tvar],
+            dvars: vec![],
+            body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
+        },
+    );
+    env.bind(
+        "None".to_string(),
+        Scheme {
+            tvars: vec![option_tvar],
+            dvars: vec![],
+            body: option_type.clone(),
+        },
+    );
+
+    adt_reg
+        .defs
+        .entry("Option".to_string())
+        .or_insert_with(|| AdtDef {
+            name: "Option".to_string(),
+            type_params: vec!["a".to_string()],
+            variants: vec![
+                VariantInfo {
+                    name: "Some".to_string(),
+                    fields: vec![(None, Type::Var(option_tvar))],
+                },
+                VariantInfo {
+                    name: "None".to_string(),
+                    fields: Vec::new(),
+                },
+            ],
+        });
 }
 
 /// Names that the inference engine should special-case for return type.
@@ -343,6 +512,44 @@ mod tests {
         assert!(env.lookup("and").is_some());
         assert!(env.lookup("or").is_some());
         assert!(env.lookup("not").is_some());
+    }
+
+    #[test]
+    fn builtin_env_has_phase3c_string_helpers() {
+        let (env, _) = builtin_env();
+        assert!(env.lookup("string_slice").is_some());
+        assert!(env.lookup("string_contains").is_some());
+        assert!(env.lookup("string_starts_with").is_some());
+        assert!(env.lookup("string_ends_with").is_some());
+        assert!(env.lookup("string_trim").is_some());
+        assert!(env.lookup("to_int").is_some());
+        assert!(env.lookup("to_float").is_some());
+    }
+
+    #[test]
+    fn builtin_env_has_phase3c_integer_helpers() {
+        let (env, _) = builtin_env();
+        assert!(env.lookup("mod").is_some());
+        assert!(env.lookup("bitand").is_some());
+        assert!(env.lookup("bitor").is_some());
+        assert!(env.lookup("bitxor").is_some());
+        assert!(env.lookup("shl").is_some());
+        assert!(env.lookup("shr").is_some());
+    }
+
+    #[test]
+    fn register_prelude_adts_adds_option_constructors() {
+        let (mut env, mut vg) = builtin_env();
+        let mut adt_reg = AdtRegistry::new();
+        register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
+
+        assert!(env.lookup("Some").is_some());
+        assert!(env.lookup("None").is_some());
+        assert!(adt_reg.lookup("Option").is_some());
+        assert_eq!(
+            adt_reg.variant_names("Option").expect("option variants"),
+            vec!["Some".to_string(), "None".to_string()]
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
+chelis-compiler-api = { path = "../chelis-compiler-api" }
 chelis-cove.workspace = true
 chelis-lsp.workspace = true
 chelis-tide.workspace = true

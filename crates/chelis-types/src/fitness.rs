@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn phase0e_check_never_reports_perfect_score_with_errors() {
         let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (match {} (lit {type: (t-prim {} int32)} 1) (arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 1))))",
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
         let r = check_phase0e_program(&exprs);

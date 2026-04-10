@@ -1923,6 +1923,7 @@ fn decompile_effect_expr(expr: &Expr) -> Option<String> {
             "diff" => "Diff".to_string(),
             "random" => "Random".to_string(),
             "accum" => "Accum".to_string(),
+            "io" => "IO".to_string(),
             _ => return None,
         }),
         Expr::List(list, _) if tag(list) == Some("resource") => {

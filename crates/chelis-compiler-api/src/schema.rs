@@ -87,6 +87,24 @@ pub struct TensorValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ExecutionValue {
+    Tensor(TensorValue),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Tuple(Vec<ExecutionValue>),
+    Adt {
+        ctor: String,
+        fields: Vec<ExecutionValue>,
+    },
+    Unit {
+        kind: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ParseRequest {
     pub source_kind: SourceKind,
     pub source: String,
@@ -186,12 +204,14 @@ pub struct EvaluatedRoot {
     pub node_id: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub value: TensorValue,
+    pub value: ExecutionValue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
     pub roots: Vec<EvaluatedRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
