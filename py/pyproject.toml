@@ -2,11 +2,16 @@
 name = "chelis-tools"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["pymupdf"]
+dependencies = ["pymupdf", "pygount"]
 
 [project.scripts]
 summarize-pdf = "chelis_tools.summarize_pdf:main"
 batch-summarize = "chelis_tools.batch_summarize:main"
+loc-report = "chelis_tools.loc_report:main"
+skill-eval = "chelis_tools.skill_eval:main"
+
+[project.optional-dependencies]
+test = ["pytest"]
 
 [build-system]
 requires = ["hatchling"]

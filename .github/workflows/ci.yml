@@ -38,13 +38,13 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Install tokei
+      - name: Install uv
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo install tokei --locked
+        uses: astral-sh/setup-uv@v4
 
       - name: Generate LOC report
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: python3 scripts/loc_report.py
+        run: cd py && uv run loc-report
 
       - name: Commit LOC report
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
