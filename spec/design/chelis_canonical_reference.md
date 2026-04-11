@@ -131,7 +131,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Project manifest | `reef.toml` | A project's place in the reef |
 | Stats/optimization shell | **School** | A school of fish — numerical methods swim together |
 | Dataframe shell | **Coral** | Structured colonies built from the reef |
-| Finance shell | **Treasure** | Treasure from the deep |
+| Finance shell | **Shoal** | Where the currents of capital run shallow |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
@@ -145,9 +145,9 @@ Four tiers of packages, each built on the one below:
 | `chelis-std` | (core) | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss`, `Std.Init`, `Std.Schedule` (cosine warmup, linear warmup, step decay), `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
 | `school` | `chelis-std` | Statistics, distributions, optimization solvers (+ differentiable optimization), interpolation, SVD/PCA, hypothesis testing, ODE/SDE solvers, numerical integration, root finding, signal processing (blocked by complex numbers until Phase 5f) |
 | `coral` | `chelis-std` | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, DataFrame-aware CSV/JSON I/O. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
-| `treasure` | `chelis-std` + `school` + `coral` | Options pricing, risk measures, yield curves, stochastic processes, order books |
+| `shoal` | `chelis-std` + `school` + `coral` | Options pricing, risk measures, yield curves, stochastic processes, order books |
 
-Design rule: if a non-domain-specialist would use it, it goes in `chelis-std`, `school`, or `coral`. If only a finance practitioner needs it, it goes in `treasure`. Time and decimal are `chelis-std` because every domain needs dates and exact arithmetic. Distributions and optimization are `school` because they're general numerical methods. Dataframes are `coral` because any data scientist uses them. Black-Scholes and VaR are `treasure` because they're finance-specific.
+Design rule: if a non-domain-specialist would use it, it goes in `chelis-std`, `school`, or `coral`. If only a finance practitioner needs it, it goes in `shoal`. Time and decimal are `chelis-std` because every domain needs dates and exact arithmetic. Distributions and optimization are `school` because they're general numerical methods. Dataframes are `coral` because any data scientist uses them. Black-Scholes and VaR are `shoal` because they're finance-specific.
 
 ---
 

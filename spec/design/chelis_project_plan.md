@@ -557,7 +557,7 @@ planning or Spark distributed processing.
 | `Coral.Reshape` | Pivot, melt, stack/unstack |
 | `Coral.IO` | DataFrame-aware CSV/JSON loading, typed column auto-detection |
 
-### 3l: Treasure — Finance
+### 3l: Shoal — Finance
 
 A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `school` + `coral`.
 Contains only finance-specific logic — nothing a non-finance programmer would need.
@@ -566,18 +566,18 @@ data via named tensor dimensions.
 
 | Module | Contents |
 |---|---|
-| `Treasure.Pricing` | Black-Scholes, Heston, SABR, Monte Carlo engines. Greeks via `grad`. |
-| `Treasure.Risk` | VaR, CVaR, expected shortfall, stress testing |
-| `Treasure.Curves` | Yield curve construction, bootstrapping, day count conventions |
-| `Treasure.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
-| `Treasure.Orderbook` | Limit order book representation, matching logic (host-side collections) |
+| `Shoal.Pricing` | Black-Scholes, Heston, SABR, Monte Carlo engines. Greeks via `grad`. |
+| `Shoal.Risk` | VaR, CVaR, expected shortfall, stress testing |
+| `Shoal.Curves` | Yield curve construction, bootstrapping, day count conventions |
+| `Shoal.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
+| `Shoal.Orderbook` | Limit order book representation, matching logic (host-side collections) |
 
 ### 3f: SKILL.md v2
 
 Full-surface teaching refresh covering Phase 2 + Phase 3 including domain shells:
 effects, linearity, macros, vmap, tuples, pipes, scalars, strings, collections,
 iteration, I/O, tokenization, core numeric primitives, package imports, dataframes
-(`coral`), numerical methods (`school`), finance (`treasure` overview). Goes truly last.
+(`coral`), numerical methods (`school`), finance (`shoal` overview). Goes truly last.
 Validated via `skill_suite.rs`.
 
 Phase 3 success condition:
@@ -586,7 +586,7 @@ Phase 3 success condition:
   compute loss and gradients, and print results without dropping to Python
 - the package, Python, and style foundations already shipped in `3a`, `3b`, `3b-ii`,
   and `3e` remain valid while the language grows beyond tensor-kernel scope
-- domain shells (`school`, `coral`, `treasure`) build and import through the Reef
+- domain shells (`school`, `coral`, `shoal`) build and import through the Reef
   pipeline, composing correctly on top of `chelis-std`
 - `SKILL.md` and examples match the fuller language including domain shells rather than
   the earlier tensor-compute-only subset

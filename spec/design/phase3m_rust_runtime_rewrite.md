@@ -18,7 +18,7 @@ It is now the wrong substrate for the next Phase 3 work:
 
 - `3g` adds file I/O, CSV/JSON, tokenizer loading, and batching
 - `3i` adds time/date and exact-decimal runtime support
-- later shell work (`school`, `coral`, `treasure`) depends on a stable host runtime
+- later shell work (`school`, `coral`, `shoal`) depends on a stable host runtime
 
 If those features are added to `chelis_runtime.c`, Chelis accumulates more manual memory
 management, more ad hoc container code, and more C-side ownership bugs exactly where the
