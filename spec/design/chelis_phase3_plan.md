@@ -891,7 +891,7 @@ can ship with minimal implementations and grow.
 
 ---
 
-## 3l: Shoal — Finance
+## 3l: Shoals — Finance
 
 **Goal:** A reef package for quantitative finance. Pricing models, risk measures, yield
 curves, stochastic processes, order books. Built entirely on `chelis-std` + `school` +
@@ -905,11 +905,11 @@ amounts).
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Shoal.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `School.Distributions`, `School.SDE`, `Random` effect, cumsum |
-| `Shoal.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `School.Stats`, sort/quantile, `Random` effect |
-| `Shoal.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `School.Interpolation`, `School.Roots`, `Std.Time` |
-| `Shoal.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `School.SDE`. Variance reduction (antithetic, control variates). | `School.SDE`, `Random`, cumsum, einsum |
-| `Shoal.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
+| `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `School.Distributions`, `School.SDE`, `Random` effect, cumsum |
+| `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `School.Stats`, sort/quantile, `Random` effect |
+| `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `School.Interpolation`, `School.Roots`, `Std.Time` |
+| `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `School.SDE`. Variance reduction (antithetic, control variates). | `School.SDE`, `Random`, cumsum, einsum |
+| `Shoals.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
 
 ### What Makes This Work in Chelis
 
@@ -928,24 +928,24 @@ amounts).
 
 ### Test Plan
 
-- `Shoal.Pricing`: Black-Scholes price matches analytical formula (< 1e-10 error)
-- `Shoal.Pricing`: Monte Carlo price converges to Black-Scholes analytical for
+- `Shoals.Pricing`: Black-Scholes price matches analytical formula (< 1e-10 error)
+- `Shoals.Pricing`: Monte Carlo price converges to Black-Scholes analytical for
   vanilla European call (< 1% error with 100K paths)
-- `Shoal.Pricing`: Greeks via `grad` match analytical Black-Scholes Greeks
+- `Shoals.Pricing`: Greeks via `grad` match analytical Black-Scholes Greeks
   (< 1e-6 error)
-- `Shoal.Risk`: Parametric VaR matches `School.Distributions.Normal.ppf` at standard
+- `Shoals.Risk`: Parametric VaR matches `School.Distributions.Normal.ppf` at standard
   confidence levels
-- `Shoal.Curves`: Bootstrap reproduces known market instrument prices (< 1bp error)
-- `Shoal.Stochastic`: GBM paths satisfy known statistical properties
+- `Shoals.Curves`: Bootstrap reproduces known market instrument prices (< 1bp error)
+- `Shoals.Stochastic`: GBM paths satisfy known statistical properties
   (mean = spot * exp(mu*T), variance matches theory)
-- `Shoal.Orderbook`: matching logic satisfies price-time priority invariant
+- `Shoals.Orderbook`: matching logic satisfies price-time priority invariant
 - Effect tracking: MC pricing propagates `Random`, curve construction propagates `IO`
   for market data
 - Reproducibility: same seed produces identical prices across runs
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli phase3l_shoal_oracle -- --exact` — prices a European call
+`cargo test -p chelis-cli phase3l_shoals_oracle -- --exact` — prices a European call
 option via Black-Scholes and Monte Carlo, verifies convergence, computes Greeks via
 `grad`, loads market data via `coral`, and produces a risk report.
 
@@ -979,10 +979,10 @@ The refreshed skill should teach:
 - CSV/JSON parsing
 - tokenizer usage
 - `Std.Time` and `Std.Decimal` host-program idioms
-- package imports (`Std.*`, `School.*`, `Coral.*`, `Shoal.*`)
+- package imports (`Std.*`, `School.*`, `Coral.*`, `Shoals.*`)
 - dataframe operations (`coral`)
 - numerical methods (`school`)
-- financial models (`shoal` overview, not exhaustive)
+- financial models (`shoals` overview, not exhaustive)
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
 ### Acceptance Oracle
@@ -1000,7 +1000,7 @@ specifications above, not deferred post-phase work. The tier structure is:
 - `chelis-std` (core) — standard library shipped as the first Reef package
 - `school` (3j) — general numerical methods on top of `chelis-std`
 - `coral` (3k) — typed dataframes on top of `chelis-std`
-- `shoal` (3l) — finance on top of `chelis-std` + `school` + `coral`
+- `shoals` (3l) — finance on top of `chelis-std` + `school` + `coral`
 
 ---
 
@@ -1071,7 +1071,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 - GPU compilation of numeric column operations works (manual gate)
 - wrong column names and type mismatches produce clear errors
 
-**Finance (`3l` Shoal):**
+**Finance (`3l` Shoals):**
 
 - Black-Scholes price matches analytical formula
 - Greeks via `grad` match analytical Greeks
@@ -1082,7 +1082,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 
 - `SKILL.md` teaches the real executable language, not a stale tensor-only subset
 - examples align with the package/style/python foundations already shipped
-- coverage includes domain shells (School, Coral, Shoal)
+- coverage includes domain shells (School, Coral, Shoals)
 
 ---
 
@@ -1102,7 +1102,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3i`: Std library expansion | medium | `3h`, `3g` | Pure Chelis library (Time, Decimal, Generate, AdamW, Schedule) |
 | `3j`: School | large | `3h`, `3i` | Pure Chelis library (stats + optim + ODE/SDE) |
 | `3k`: Coral | medium | `3h`, `3d`, `3g` | Pure Chelis library (dataframes) |
-| `3l`: Shoal | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
+| `3l`: Shoals | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
 | `3f`: SKILL.md v2 | small | all above | Documentation |
 
 This phase is intentionally sequential and pragmatic. The remaining work is about making
@@ -1131,8 +1131,8 @@ Before calling Phase 3 complete:
 - `3l` provides finance-specific pricing, risk, and stochastic process tools as a Reef
   package
 - `3f` reflects the full post-shell language in `SKILL.md` and examples, including
-  `School.*`, `Coral.*`, and `Shoal.*` package imports
+  `School.*`, `Coral.*`, and `Shoals.*` package imports
 - a pure Chelis program can read text, tokenize it, batch/pad it, run a model, compute
   loss and gradients, and print results without Python
-- domain shells compose correctly: `shoal` depends on `school` + `coral`, all build
+- domain shells compose correctly: `shoals` depends on `school` + `coral`, all build
   and import through the Reef pipeline
