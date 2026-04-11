@@ -337,10 +337,11 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 `3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
 `3d` collections/iteration, and `3e` pipe-first style pass.
 
-**Recommended execution order for remaining work:** `3h` → `3g` → `3i` → `3j` ∥ `3k` →
-`3l` → `3f`. `3j` and `3k` can overlap (no mutual dependency). `3l` depends on both.
-`3f` (SKILL.md v2) is intentionally last in Phase 3: it needs a real rewrite after the
-numeric, tokenization, standard-library, and domain-shell surfaces stabilize.
+**Recommended execution order for remaining work:** `3h` → `3m` → `3g` → `3i` → `3j` ∥
+`3k` → `3l` → `3f`. `3j` and `3k` can overlap (no mutual dependency). `3l` depends on
+both. `3f` (SKILL.md v2) is intentionally last in Phase 3: it needs a real rewrite
+after the runtime, numeric, tokenization, standard-library, and domain-shell surfaces
+stabilize.
 
 ### 3e: Style Foundation
 
@@ -468,6 +469,25 @@ Shipped.
   which covers both the compiled tensor-structural example and the Reef
   `Std.Nn.Embedding` package-import build path
 
+### 3m: Rust Runtime Rewrite
+
+- replace the growing `chelis_runtime.c` implementation with a Rust static library in
+  `crates/chelis-runtime`
+- take the ABI-cleanup-now path: `chelis_tensor` remains layout-visible, while
+  `chelis_string`, `chelis_list`, `chelis_tuple`, and `chelis_dict` become opaque
+  handles with explicit retain/release and accessor APIs
+- update generated host C to stop peeking into host-value fields directly; use runtime
+  accessors plus explicit ownership operations instead
+- keep tensor kernels and evaluator semantics unchanged; this is a compiled-runtime
+  contract cleanup, not a language-semantics phase
+- make `chelis build` emit and reference `libchelis_runtime.a` plus `chelis_runtime.h`
+  instead of copying `chelis_runtime.c`
+- runtime discovery order for `chelis build`: `CHELIS_RUNTIME_DIR`, then path relative
+  to `current_exe()`, then a hard actionable error
+- block all remaining runtime-heavy Phase 3 work on this rewrite so `3g`/`3i`/shells
+  land on Rust infrastructure rather than the old C runtime
+- acceptance oracle: `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture`
+
 ### 3g: Data Loading and Tokenization
 
 - add text file I/O as the minimum host-data ingress surface
@@ -567,7 +587,7 @@ Phase 3 success condition:
 ## Phase 4
 
 **Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
-through `3h`, `3g`, `3i`, `3j`, `3k`, `3l`, and `3f` complete.
+through `3h`, `3m`, `3g`, `3i`, `3j`, `3k`, `3l`, and `3f` complete.
 **Deliverable:** Chelis ships with a local coding model as standard tooling and a
 reproducible benchmark proving the "designed for LLMs" thesis. The turtle carries its
 home.

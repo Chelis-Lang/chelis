@@ -631,7 +631,7 @@ impl HostEmitter {
                 _ => format!("chelis_scalar_tensor_from_f64({})", arg_vars[0].0),
             },
             "len" => match arg_vars[0].1 {
-                HostType::Dict(_, _) => format!("({} ? {}->len : 0)", arg_vars[0].0, arg_vars[0].0),
+                HostType::Dict(_, _) => format!("chelis_dict_len({})", arg_vars[0].0),
                 _ => format!("chelis_list_len({})", arg_vars[0].0),
             },
             "range" => format!("chelis_range_i64({}, {})", arg_vars[0].0, arg_vars[1].0),
@@ -1173,7 +1173,7 @@ impl HostEmitter {
                 self.indent, binding.name, binding.name
             )),
             HostType::String => self.lines.push(format!(
-                "{}printf(\"{} = %s\\n\", {}.data);",
+                "{}printf(\"{} = %s\\n\", chelis_string_data({}));",
                 self.indent, binding.name, binding.name
             )),
             HostType::Tensor(_) => self.lines.push(format!(
@@ -1205,9 +1205,10 @@ impl HostEmitter {
 
     fn emit_print_value(&mut self, value: &str, ty: &HostType) {
         match ty {
-            HostType::String => self
-                .lines
-                .push(format!("{}printf(\"%s\\n\", {}.data);", self.indent, value)),
+            HostType::String => self.lines.push(format!(
+                "{}printf(\"%s\\n\", chelis_string_data({}));",
+                self.indent, value
+            )),
             HostType::Int64 => self.lines.push(format!(
                 "{}printf(\"%lld\\n\", (long long){});",
                 self.indent, value

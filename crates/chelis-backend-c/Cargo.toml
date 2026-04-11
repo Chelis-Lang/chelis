@@ -11,4 +11,5 @@ chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
 
 [dev-dependencies]
+chelis-runtime.workspace = true
 tempfile = "3"

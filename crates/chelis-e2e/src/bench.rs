@@ -1000,7 +1000,30 @@ fn tool_available(tool: &str, args: &[&str]) -> bool {
 }
 
 fn cpu_runtime_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-c/runtime")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
+}
+
+fn cpu_runtime_library() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for dir in [
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+    ] {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+                {
+                    return path;
+                }
+            }
+        }
+    }
+    panic!("could not locate libchelis_runtime.a for e2e benchmarks");
 }
 
 fn hip_runtime_dir() -> PathBuf {
@@ -1031,7 +1054,10 @@ fn compile_and_run_c(
     for (name, _) in model_sources {
         cmd.arg(temp.path().join(name));
     }
-    cmd.arg(temp.path().join("chelis_runtime.c"));
+    cmd.arg("-L").arg(temp.path());
+    cmd.arg("-lchelis_runtime");
+    cmd.arg("-lpthread");
+    cmd.arg("-ldl");
     cmd.args(link_flags);
     cmd.arg("-o").arg(&bin);
 
@@ -1086,7 +1112,10 @@ fn compile_and_run_hip(
     for (name, _) in model_sources {
         cmd.arg(temp.path().join(name));
     }
-    cmd.arg(temp.path().join("chelis_runtime.c"));
+    cmd.arg("-L").arg(temp.path());
+    cmd.arg("-lchelis_runtime");
+    cmd.arg("-lpthread");
+    cmd.arg("-ldl");
     cmd.args(link_flags);
     cmd.arg("-o").arg(&bin);
 
@@ -1205,12 +1234,8 @@ fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
             .map_err(|e| format!("read chelis_runtime.h failed: {e}"))?,
     )
     .map_err(|e| format!("write chelis_runtime.h failed: {e}"))?;
-    fs::write(
-        dir.join("chelis_runtime.c"),
-        fs::read_to_string(cpu_runtime.join("chelis_runtime.c"))
-            .map_err(|e| format!("read chelis_runtime.c failed: {e}"))?,
-    )
-    .map_err(|e| format!("write chelis_runtime.c failed: {e}"))?;
+    fs::copy(cpu_runtime_library(), dir.join("libchelis_runtime.a"))
+        .map_err(|e| format!("copy libchelis_runtime.a failed: {e}"))?;
     if hip {
         let hip_runtime = hip_runtime_dir();
         fs::write(

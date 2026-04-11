@@ -49,6 +49,9 @@ Generated C headers and runtime support should make it possible to call compiled
 artifacts from C or C++.
 That interoperability follows naturally from the reference backend and does not require a
 separate host-language embedding model first.
+After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
+plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
+implementation file.
 
 ## 3. Embedding the Compiler
 

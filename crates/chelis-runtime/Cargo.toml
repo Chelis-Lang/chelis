@@ -1,0 +1,12 @@
+[package]
+name = "chelis-runtime"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+libc.workspace = true

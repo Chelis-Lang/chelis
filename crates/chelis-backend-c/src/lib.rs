@@ -118,6 +118,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::{env, fs};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -137,8 +138,55 @@ mod tests {
         }
     }
 
-    fn runtime_src_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime")
+    fn runtime_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
+    }
+
+    fn runtime_library_path() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let candidates = [
+            manifest_dir.join("../../target/debug/deps"),
+            manifest_dir.join("../../target/release/deps"),
+        ];
+        if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
+            let candidate_dir = PathBuf::from(dir);
+            if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                        .unwrap_or(false)
+                })
+            }) {
+                return path;
+            }
+        }
+        for dir in candidates {
+            if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                        .unwrap_or(false)
+                })
+            }) {
+                return path;
+            }
+        }
+        panic!("could not locate libchelis_runtime.a for backend-c tests");
+    }
+
+    fn copy_runtime_artifacts(dst: &std::path::Path) {
+        let h_src = std::fs::read_to_string(runtime_header_path()).unwrap();
+        write_temp_file(dst, "chelis_runtime.h", &h_src);
+        std::fs::copy(runtime_library_path(), dst.join("libchelis_runtime.a")).unwrap();
+    }
+
+    fn add_runtime_link(cmd: &mut Command, dir: &std::path::Path) {
+        cmd.arg(format!("-L{}", dir.display()));
+        cmd.arg("-lchelis_runtime");
+        cmd.arg("-lpthread");
+        cmd.arg("-ldl");
     }
 
     // ---- Codegen API tests ----
@@ -382,20 +430,20 @@ int main(void) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        // Copy runtime files
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        let c_path = write_temp_file(tmp.path(), "chelis_runtime.c", &c_src);
-        let o_path = tmp.path().join("chelis_runtime.o");
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(
+            tmp.path(),
+            "main.c",
+            "#include \"chelis_runtime.h\"\nint main(void) { return 0; }\n",
+        );
+        let o_path = tmp.path().join("runtime_smoke");
 
         let mut cmd = Command::new("gcc");
         apply_c_test_flags(&mut cmd);
-        cmd.args(["-c", "-O2", "-lm"])
-            .arg(c_path.to_str().unwrap())
-            .arg("-o")
-            .arg(o_path.to_str().unwrap());
+        cmd.args(["-O2"])
+            .arg(tmp.path().join("main.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.arg("-lm").arg("-o").arg(o_path.to_str().unwrap());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -412,11 +460,7 @@ int main(void) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_src);
+        copy_runtime_artifacts(tmp.path());
         let main_c = r#"
 #include "chelis_runtime.h"
 int main(void) {
@@ -437,10 +481,9 @@ int main(void) {
         let mut cmd = Command::new("gcc");
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
-            .arg(tmp.path().join("main.c").to_str().unwrap())
-            .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
-            .arg("-o")
-            .arg(bin_path.to_str().unwrap());
+            .arg(tmp.path().join("main.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -468,11 +511,7 @@ int main(void) {
         let result = codegen(&dag, "test_add");
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = r#"
@@ -493,10 +532,9 @@ int main() {
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
-            .arg(tmp.path().join("model.c").to_str().unwrap())
-            .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
-            .arg("-o")
-            .arg(bin_path.to_str().unwrap());
+            .arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -529,11 +567,7 @@ int main() {
         let result = codegen_with_options(dag, func_name, options);
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = format!(
@@ -563,7 +597,7 @@ int main() {{
         compile_cmd.args(extra_args);
         compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         compile_cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-        compile_cmd.arg(tmp.path().join("chelis_runtime.c").to_str().unwrap());
+        add_runtime_link(&mut compile_cmd, tmp.path());
         compile_cmd.args(&result.link_flags);
         compile_cmd.arg("-o");
         compile_cmd.arg(bin_path.to_str().unwrap());
@@ -695,11 +729,7 @@ int main() {{
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
 
         let main_c = format!(
@@ -723,7 +753,7 @@ int main(void) {{
         compile_cmd.args(&result.compile_flags);
         compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         compile_cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-        compile_cmd.arg(tmp.path().join("chelis_runtime.c").to_str().unwrap());
+        add_runtime_link(&mut compile_cmd, tmp.path());
         compile_cmd.args(&result.link_flags);
         compile_cmd.arg("-o");
         compile_cmd.arg(bin_path.to_str().unwrap());
@@ -1383,11 +1413,7 @@ int main(void) {{
         let result = codegen(&dag, "test_multi");
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -1407,10 +1433,9 @@ int main(void) {
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
-            .arg(tmp.path().join("model.c").to_str().unwrap())
-            .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
-            .arg("-o")
-            .arg(bin_path.to_str().unwrap());
+            .arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -1438,11 +1463,7 @@ int main(void) {
         let result = codegen(&dag, "test_load_copy");
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -1471,10 +1492,9 @@ int main(void) {
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
-            .arg(tmp.path().join("model.c").to_str().unwrap())
-            .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
-            .arg("-o")
-            .arg(bin_path.to_str().unwrap());
+            .arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -1544,11 +1564,7 @@ int main(void) {
         assert!(result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
-        let rt_dir = runtime_src_dir();
-        let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-        let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
-        write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-        write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+        copy_runtime_artifacts(tmp.path());
         write_temp_file(tmp.path(), "model.c", &result.c_source);
         let main_c = r#"
 #include "chelis_runtime.h"
@@ -1566,9 +1582,9 @@ int main(void) {
         cmd.args(["-O2"])
             .args(&result.compile_flags)
             .arg(tmp.path().join("main.c").to_str().unwrap())
-            .arg(tmp.path().join("model.c").to_str().unwrap())
-            .arg(tmp.path().join("chelis_runtime.c").to_str().unwrap())
-            .args(&result.link_flags)
+            .arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.args(&result.link_flags)
             .arg("-o")
             .arg(tmp.path().join("test_blas").to_str().unwrap());
         let out = cmd.output().unwrap();

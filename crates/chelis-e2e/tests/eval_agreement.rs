@@ -13,11 +13,41 @@ fn scalar_f32() -> TensorType {
 }
 
 fn runtime_src_dir() -> PathBuf {
-    // chelis-backend-c crate contains the runtime
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("chelis-backend-c")
-        .join("runtime")
+        .join("chelis-runtime")
+        .join("include")
+}
+
+fn runtime_library_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        manifest_dir.join("../../target/debug/libchelis_runtime.a"),
+        manifest_dir.join("../../target/release/libchelis_runtime.a"),
+    ] {
+        if path.exists() {
+            return path;
+        }
+    }
+    for dir in [
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+                {
+                    return path;
+                }
+            }
+        }
+    }
+    panic!("runtime lib not found");
 }
 
 fn gcc_available() -> bool {
@@ -54,9 +84,12 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-    let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
     write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
-    write_temp_file(tmp.path(), "chelis_runtime.c", &c_rt);
+    std::fs::copy(
+        runtime_library_path(),
+        tmp.path().join("libchelis_runtime.a"),
+    )
+    .unwrap();
     write_temp_file(tmp.path(), "model.c", &result.c_source);
 
     let main_c = format!(
@@ -88,7 +121,10 @@ int main() {{
     cmd.args(&result.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-    cmd.arg(tmp.path().join("chelis_runtime.c").to_str().unwrap());
+    cmd.arg(format!("-L{}", tmp.path().display()));
+    cmd.arg("-lchelis_runtime");
+    cmd.arg("-lpthread");
+    cmd.arg("-ldl");
     cmd.args(&result.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());

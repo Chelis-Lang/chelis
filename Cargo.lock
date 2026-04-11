@@ -316,6 +316,7 @@ name = "chelis-backend-c"
 version = "0.1.0"
 dependencies = [
  "chelis-ir",
+ "chelis-runtime",
  "chelis-types",
  "tempfile",
 ]
@@ -325,6 +326,7 @@ name = "chelis-backend-hip"
 version = "0.1.0"
 dependencies = [
  "chelis-ir",
+ "chelis-runtime",
  "chelis-types",
  "tempfile",
 ]
@@ -345,6 +347,7 @@ dependencies = [
  "chelis-lsp",
  "chelis-macros",
  "chelis-reef",
+ "chelis-runtime",
  "chelis-shell",
  "chelis-surf",
  "chelis-tide",
@@ -407,6 +410,7 @@ dependencies = [
  "chelis-effects",
  "chelis-ir",
  "chelis-macros",
+ "chelis-runtime",
  "chelis-surf",
  "chelis-types",
  "predicates",
@@ -495,6 +499,13 @@ dependencies = [
  "toml",
  "walkdir",
  "zstd",
+]
+
+[[package]]
+name = "chelis-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

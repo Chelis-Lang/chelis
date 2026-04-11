@@ -5,6 +5,7 @@ use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap};
+use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -12,16 +13,112 @@ use std::path::{Path, PathBuf};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-backend-c/runtime/chelis_runtime.h"
-));
-const RUNTIME_C: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-backend-c/runtime/chelis_runtime.c"
+    "/../chelis-runtime/include/chelis_runtime.h"
 ));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
+
+fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    const LIB_NAME: &str = "libchelis_runtime.a";
+    const LIB_PREFIX: &str = "libchelis_runtime";
+
+    fn find_in_dir(dir: &Path) -> Option<PathBuf> {
+        let exact = dir.join(LIB_NAME);
+        if exact.exists() {
+            return Some(exact);
+        }
+        let entries = fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
+        if let Some(candidate) = find_in_dir(&PathBuf::from(&dir)) {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "cannot find {LIB_NAME} in CHELIS_RUNTIME_DIR; set CHELIS_RUNTIME_DIR to the directory containing the chelis runtime static library"
+        )
+        .into());
+    }
+
+    let exe = env::current_exe()?;
+    let exe_dir = exe
+        .parent()
+        .ok_or("cannot determine chelis executable directory")?;
+    let candidates = [
+        exe_dir.join(LIB_NAME),
+        exe_dir.join("deps").join(LIB_NAME),
+        exe_dir.join("lib").join(LIB_NAME),
+        exe_dir
+            .parent()
+            .map(|p| p.join(LIB_NAME))
+            .unwrap_or_default(),
+        exe_dir
+            .parent()
+            .map(|p| p.join("deps").join(LIB_NAME))
+            .unwrap_or_default(),
+        exe_dir
+            .parent()
+            .map(|p| p.join("lib").join(LIB_NAME))
+            .unwrap_or_default(),
+    ];
+    for candidate in candidates {
+        if !candidate.as_os_str().is_empty() {
+            if candidate.is_dir() {
+                if let Some(found) = find_in_dir(&candidate) {
+                    return Ok(found);
+                }
+            } else if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    for candidate_dir in [
+        exe_dir.to_path_buf(),
+        exe_dir.join("deps"),
+        exe_dir.join("lib"),
+        exe_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+        exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
+        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
+    ] {
+        if !candidate_dir.as_os_str().is_empty()
+            && let Some(found) = find_in_dir(&candidate_dir)
+        {
+            return Ok(found);
+        }
+    }
+
+    Err(format!(
+        "cannot find {LIB_NAME}; set CHELIS_RUNTIME_DIR or install chelis so {LIB_NAME} is available relative to the chelis executable"
+    )
+    .into())
+}
+
+fn copy_runtime_artifacts(
+    runtime_dir: &Path,
+    include_hip_runtime: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    if include_hip_runtime {
+        fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+    }
+    let source = find_runtime_library()?;
+    let dest = runtime_dir.join("libchelis_runtime.a");
+    fs::copy(&source, &dest)?;
+    Ok(dest)
+}
 
 #[derive(Parser)]
 #[command(
@@ -587,27 +684,16 @@ fn cmd_build_c_result(
     }
 
     fs::write(&c_path, &result.c_source)?;
-    if result.h_header.is_empty() {
-        if h_path.exists() {
-            fs::remove_file(&h_path)?;
-        }
-    } else {
-        fs::write(&h_path, &result.h_header)?;
-    }
+    fs::write(&h_path, &result.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
-    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
+    copy_runtime_artifacts(runtime_dir, false)?;
 
-    if result.h_header.is_empty() {
-        println!("Wrote {}", c_path.display());
-    } else {
-        println!("Wrote {} and {}", c_path.display(), h_path.display());
-    }
+    println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
         "Wrote {} and {}",
         runtime_dir.join("chelis_runtime.h").display(),
-        runtime_dir.join("chelis_runtime.c").display()
+        runtime_dir.join("libchelis_runtime.a").display()
     );
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
@@ -622,9 +708,10 @@ fn cmd_build_c_result(
     flags.dedup();
     if result.c_source.contains("int main(") {
         println!(
-            "Compile: gcc -O2 {} {} chelis_runtime.c -o {}",
+            "Compile: gcc -O2 {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
             flags.join(" "),
             c_path.display(),
+            runtime_dir.display(),
             c_path.with_extension("").display()
         );
     } else {
@@ -659,27 +746,17 @@ fn cmd_build_hip_host(
     }
 
     fs::write(&c_path, &result.c_source)?;
-    if result.h_header.is_empty() {
-        if h_path.exists() {
-            fs::remove_file(&h_path)?;
-        }
-    } else {
-        fs::write(&h_path, &result.h_header)?;
-    }
+    fs::write(&h_path, &result.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
-    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
-    fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+    copy_runtime_artifacts(runtime_dir, true)?;
 
-    if result.h_header.is_empty() {
-        println!("Wrote {}", c_path.display());
-    } else {
-        println!("Wrote {} and {}", c_path.display(), h_path.display());
-    }
+    println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
-        "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
-        runtime_dir.display()
+        "Wrote runtime: {}, {}, {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("libchelis_runtime.a").display(),
+        runtime_dir.join("chelis_hip_runtime.h").display()
     );
 
     let mut flags: Vec<&str> = result
@@ -693,10 +770,10 @@ fn cmd_build_hip_host(
     flags.retain(|flag| *flag != "-fopenmp");
     if result.c_source.contains("int main(") {
         println!(
-            "Compile: hipcc {} {} {} -o {}",
+            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
             flags.join(" "),
             c_path.display(),
-            runtime_dir.join("chelis_runtime.c").display(),
+            runtime_dir.display(),
             c_path.with_extension("").display()
         );
     } else {
@@ -739,14 +816,14 @@ fn cmd_build_hip(
 
     // HIP runtime includes the CPU runtime (for chelis_tensor host struct)
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
-    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
-    fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+    copy_runtime_artifacts(runtime_dir, true)?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
-        "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
-        runtime_dir.display()
+        "Wrote runtime: {}, {}, {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("libchelis_runtime.a").display(),
+        runtime_dir.join("chelis_hip_runtime.h").display()
     );
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     if !symbolic_dims.is_empty() {
@@ -768,10 +845,10 @@ fn cmd_build_hip(
     flags.sort();
     flags.dedup();
     println!(
-        "Compile: hipcc {} {} {} -o {}",
+        "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
         flags.join(" "),
         c_path.display(),
-        runtime_dir.join("chelis_runtime.c").display(),
+        runtime_dir.display(),
         c_path.with_extension("").display()
     );
     Ok(())

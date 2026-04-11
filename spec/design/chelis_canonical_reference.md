@@ -243,6 +243,8 @@ phase. The remaining practical language work is:
 - functional iteration over variable-length host-side data
 - core numeric primitives such as `einsum`, `concat` / `split`, `gather` / `scatter`,
   `where`, `cumsum`, `sort`, `diagonal` / `trace`, and `clamp`
+- a Rust runtime rewrite that replaces the old C runtime implementation and cleans up
+  the compiled host-value ABI before more host/library work lands
 - data-loading and tokenization support that removes the mandatory Python
   preprocessing step
 - standard-library host modules such as `Std.Time` and `Std.Decimal`
@@ -404,11 +406,18 @@ Python interop. The remaining Phase 3 work is not more ecosystem polish or resea
 prestige work; it is the language-completeness gap between "tensor programs compile"
 and "a full AI workflow can run in pure Chelis."
 
+As part of that practical gap, Phase `3m` rewrites the runtime in Rust and cleans up
+the host-value ABI: `chelis_tensor` stays layout-visible for generated numeric code,
+while strings, collections, and other host values move to opaque runtime-managed
+handles with accessors and explicit ownership.
+
 That means the next practical surfaces are:
 
 - scalar/string programming
 - collections and iteration
 - core numeric primitives beyond the original minimal tensor surface
+- the Rust runtime rewrite that moves host-value runtime work out of
+  `chelis_runtime.c`
 - file/config/data loading
 - tokenization and batching
 - standard-library time and exact-decimal support
@@ -424,6 +433,9 @@ later work.
 
 Portable C code generation with BLAS and OpenMP.
 This is the reference backend and numerical oracle for future backends.
+Generated programs include `chelis_runtime.h`; the runtime implementation behind that
+header is now expected to ship as a Rust static library rather than a hand-maintained C
+implementation file.
 
 ### Phase 1
 

@@ -202,6 +202,9 @@ When writing or rewriting Surf in this repository:
 Project-local skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory so both tool
 surfaces load the same skill library.
+Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
+should point at the same underlying skill files so slash-command access does not drift
+between tool surfaces. Keep a `red-team` alias wired to `redteam-exec`.
 
 Current shared skill set:
 

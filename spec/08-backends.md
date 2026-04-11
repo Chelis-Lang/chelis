@@ -30,7 +30,7 @@ Current design points:
 - use OpenMP for elementwise and reduction parallelism
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
-- ship a small C runtime alongside generated code
+- ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
 
 This backend is the correctness oracle for future GPU and interoperability backends.
 

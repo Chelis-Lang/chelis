@@ -12,6 +12,7 @@ use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -89,8 +90,52 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_src_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-c/runtime")
+fn cpu_runtime_header_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
+}
+
+fn cpu_runtime_library_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+    ];
+    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
+        let candidate_dir = PathBuf::from(dir);
+        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
+            entries.flatten().map(|entry| entry.path()).find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+            })
+        }) {
+            return path;
+        }
+    }
+    for dir in candidates {
+        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
+            entries.flatten().map(|entry| entry.path()).find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+            })
+        }) {
+            return path;
+        }
+    }
+    panic!("could not locate libchelis_runtime.a for backend-hip manual tests");
+}
+
+fn copy_runtime_artifacts(dst: &Path) {
+    write_temp_file(
+        dst,
+        "chelis_runtime.h",
+        &fs::read_to_string(cpu_runtime_header_path()).expect("cpu runtime header"),
+    );
+    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
+        .expect("copy rust runtime library");
 }
 
 fn require_hipcc() {
@@ -248,22 +293,12 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let hip_rt = hip_runtime_src_dir();
-    let cpu_rt = cpu_runtime_src_dir();
     write_temp_file(
         tmp.path(),
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    write_temp_file(
-        tmp.path(),
-        "chelis_runtime.h",
-        &fs::read_to_string(cpu_rt.join("chelis_runtime.h")).expect("cpu runtime header"),
-    );
-    write_temp_file(
-        tmp.path(),
-        "chelis_runtime.c",
-        &fs::read_to_string(cpu_rt.join("chelis_runtime.c")).expect("cpu runtime source"),
-    );
+    copy_runtime_artifacts(tmp.path());
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -282,7 +317,10 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
-    compile_cmd.arg(tmp.path().join("chelis_runtime.c"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
     compile_cmd.arg("-o");
     compile_cmd.arg(&bin_path);
@@ -326,22 +364,12 @@ fn compile_and_run_output_cases(
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let hip_rt = hip_runtime_src_dir();
-    let cpu_rt = cpu_runtime_src_dir();
     write_temp_file(
         tmp.path(),
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    write_temp_file(
-        tmp.path(),
-        "chelis_runtime.h",
-        &fs::read_to_string(cpu_rt.join("chelis_runtime.h")).expect("cpu runtime header"),
-    );
-    write_temp_file(
-        tmp.path(),
-        "chelis_runtime.c",
-        &fs::read_to_string(cpu_rt.join("chelis_runtime.c")).expect("cpu runtime source"),
-    );
+    copy_runtime_artifacts(tmp.path());
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -360,7 +388,10 @@ fn compile_and_run_output_cases(
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
-    compile_cmd.arg(tmp.path().join("chelis_runtime.c"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
     compile_cmd.arg("-o");
     compile_cmd.arg(&bin_path);

@@ -31,11 +31,7 @@ use crate::schema::{
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-backend-c/runtime/chelis_runtime.h"
-));
-const RUNTIME_C: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-backend-c/runtime/chelis_runtime.c"
+    "/../chelis-runtime/include/chelis_runtime.h"
 ));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -642,10 +638,6 @@ fn compile_result_c(
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
             },
-            GeneratedFile {
-                path: "chelis_runtime.c".to_string(),
-                contents: RUNTIME_C.to_string(),
-            },
         ],
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
@@ -673,10 +665,6 @@ fn compile_result_hip(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime.c".to_string(),
-                contents: RUNTIME_C.to_string(),
             },
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),
@@ -709,10 +697,6 @@ fn compile_result_hip_host(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime.c".to_string(),
-                contents: RUNTIME_C.to_string(),
             },
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),

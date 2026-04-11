@@ -13,6 +13,7 @@ chelis-surf.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
+chelis-runtime.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
 serde = { version = "1", features = ["derive"] }

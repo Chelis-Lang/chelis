@@ -360,9 +360,40 @@ fn gcc_available() -> bool {
 
 fn runtime_src_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../chelis-backend-c/runtime")
+        .join("../chelis-runtime/include")
         .canonicalize()
         .expect("runtime dir not found")
+}
+
+fn runtime_library_path() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        manifest_dir.join("../../target/debug/libchelis_runtime.a"),
+        manifest_dir.join("../../target/release/libchelis_runtime.a"),
+    ] {
+        if path.exists() {
+            return path;
+        }
+    }
+    for dir in [
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+                {
+                    return path;
+                }
+            }
+        }
+    }
+    panic!("runtime lib not found");
 }
 
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
@@ -371,7 +402,6 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-    let c_rt = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
 
     let write = |name: &str, content: &str| {
         let path = tmp.path().join(name);
@@ -380,7 +410,11 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
         path
     };
     write("chelis_runtime.h", &h_src);
-    write("chelis_runtime.c", &c_rt);
+    std::fs::copy(
+        runtime_library_path(),
+        tmp.path().join("libchelis_runtime.a"),
+    )
+    .unwrap();
     write("model.c", &result.c_source);
 
     let main_c = format!(
@@ -408,7 +442,10 @@ int main() {{
     cmd.args(&result.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-    cmd.arg(tmp.path().join("chelis_runtime.c").to_str().unwrap());
+    cmd.arg(format!("-L{}", tmp.path().display()));
+    cmd.arg("-lchelis_runtime");
+    cmd.arg("-lpthread");
+    cmd.arg("-ldl");
     cmd.args(&result.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());

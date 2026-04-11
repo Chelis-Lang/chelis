@@ -44,15 +44,16 @@ Shipped foundations
 
 Remaining work
 
-3h: Core Numeric Primitives -> 3g: Data Loading & Tokenization -> 3i: Std.Time & Std.Decimal -> 3f: SKILL.md v2 Redo
+3h: Core Numeric Primitives -> 3m: Rust Runtime Rewrite -> 3g: Data Loading & Tokenization -> 3i: Std.Time & Std.Decimal -> 3f: SKILL.md v2 Redo
 ```
 
 **Recommended execution order:**
 
 1. `3h`: Core numeric primitives
-2. `3g`: Data loading and tokenization
-3. `3i`: `Std.Time` and `Std.Decimal`
-4. `3f`: SKILL.md v2 redo
+2. `3m`: Rust runtime rewrite
+3. `3g`: Data loading and tokenization
+4. `3i`: `Std.Time` and `Std.Decimal`
+5. `3f`: SKILL.md v2 redo
 
 Shipped Phase 3 foundations stay in place and continue to constrain the remaining work:
 
@@ -62,12 +63,15 @@ Shipped Phase 3 foundations stay in place and continue to constrain the remainin
 
 `3h` follows the shipped `3c`/`3d` foundations because real AI model code still needs
 practical tensor-language primitives such as `einsum`, `concat`, `gather`, and
-`clamp`. `3g` depends on that fuller host-and-tensor surface because tokenization,
-batching, and model ingress should not force awkward library workarounds. `3i` comes
-after `3g` because time/exact-decimal support rounds out the standard library rather
-than blocking the pure-AI workflow milestone. `3f` goes last because the teaching
-surface should describe the real full Phase 3 language, not a partially complete
-midpoint.
+`clamp`. `3m` comes immediately after `3h` because the host-value/runtime layer is now
+the next architectural choke point: `3g`, `3i`, and the shell ecosystem should land on
+Rust runtime infrastructure rather than expanding `chelis_runtime.c`. `3g` then depends
+on that fuller host-and-tensor surface plus the cleaned-up runtime contract because
+tokenization, batching, and model ingress should not force awkward library or runtime
+workarounds. `3i` comes after `3g` because time/exact-decimal support rounds out the
+standard library rather than blocking the pure-AI workflow milestone. `3f` goes last
+because the teaching surface should describe the real full Phase 3 language, not a
+partially complete midpoint.
 
 ---
 
@@ -345,6 +349,80 @@ Current shipped oracle for the executable `3h` slice:
   which proves both the compiled tensor-structural example path
   (`examples/tensor_structural_ops.ch`, including `einsum`) and the Reef package path
   (`Std.Nn.Embedding` imported from `chelis-std`) build to valid C artifacts
+
+---
+
+## 3m: Rust Runtime Rewrite
+
+**Goal:** replace the growing C runtime implementation with a Rust static library and
+clean up the host-value ABI before more runtime-heavy language/library work lands.
+
+### Why This Matters
+
+Phases `3c` and `3d` made the compiled host-value lane real: mixed programs now compile
+scalars, strings, lists, dicts, tuples, `Option`, and print/debug through the generated
+host program path. The old `chelis_runtime.c` implementation is now the wrong substrate
+for what comes next:
+
+- `3g` adds file I/O, CSV/JSON, tokenizer loading, and batching helpers
+- `3i` adds time/date and exact-decimal runtime support
+- later shells depend on a stable host runtime rather than ad hoc C helpers
+
+If Chelis keeps expanding the C runtime, it takes on more manual memory management and
+more C-side ownership risk exactly where the language is getting broader.
+
+### Required Surface
+
+**Runtime packaging and ABI:**
+
+- new crate: `crates/chelis-runtime`
+- `libchelis_runtime.a` becomes the shipped runtime artifact
+- `chelis_runtime.h` remains the C ABI contract but is now owned by the runtime crate
+
+**ABI cleanup decision:**
+
+- `chelis_tensor` stays layout-visible and stable because generated tensor code
+  dereferences tensor fields directly
+- `chelis_string`, `chelis_list`, `chelis_tuple`, and `chelis_dict` become opaque
+  handles
+- generated host code must use runtime accessors and retain/release APIs rather than
+  peeking into `.data`, `->len`, `->items`, or `->entries`
+
+**Build surface:**
+
+- `chelis build` emits generated source/header plus `chelis_runtime.h` and
+  `libchelis_runtime.a`
+- `chelis_runtime.c` stops being an emitted build artifact
+- runtime library discovery order is explicit: `CHELIS_RUNTIME_DIR`, then path
+  relative to `current_exe()`, then a clear hard failure
+
+### Implementation Shape
+
+- implement the runtime in Rust modules (`tensor`, `blas`, `string`, `list`, `tuple`,
+  `dict`, `value`, `print`, `io`) behind a C ABI
+- preserve current language-level behavior: same string character-count semantics, same
+  insertion-order dict behavior, same compiled-vs-eval outputs
+- update host C emission to use accessors and explicit ownership operations for host
+  temporaries, branches, loops, container operations, and returns
+- keep tensor kernels and evaluator semantics unchanged; this is a runtime contract
+  rewrite, not a language-semantics phase
+
+### Acceptance Oracle
+
+A mixed tensor + host-value Chelis program can:
+
+- build through `chelis build --target c`
+- emit `chelis_runtime.h` and `libchelis_runtime.a` but not `chelis_runtime.c`
+- compile and link with `-lchelis_runtime`
+- run as a native binary and match `chelis eval`
+
+Authoritative oracle:
+
+- `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture`
+
+Manual HIP mirror gate:
+
+- `CHELIS_RUNTIME_DIR=<runtime-dir> cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture`
 
 ---
 
@@ -724,6 +802,14 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
   evaluator and compiled paths
 - `Std.Nn.Embedding` exercises the real `gather` path rather than a fake host-side stub
 
+**Rust runtime rewrite (`3m`):**
+
+- no active docs or build/test paths still rely on `chelis_runtime.c`
+- generated host C no longer peeks into non-tensor runtime struct fields
+- runtime discovery failures clearly mention `libchelis_runtime.a` and
+  `CHELIS_RUNTIME_DIR`
+- mixed-program compiled execution matches `chelis eval` on both C and HIP paths
+
 **Data loading/tokenization (`3g`):**
 
 - text/CSV/JSON loading returns the documented structures
@@ -777,7 +863,8 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3c`: Scalar and string foundation | shipped | `3e` | Engineering |
 | `3d`: Collections and iteration | shipped | `3c` | Engineering |
 | `3h`: Core numeric primitives | medium | `3d` | Engineering (RISC ops + AD + backends) |
-| `3g`: Data loading and tokenization | medium | `3h` | Engineering (I/O + pure Chelis libraries) |
+| `3m`: Rust runtime rewrite | large | `3h`, `3d` | Engineering (runtime ABI + codegen + CLI/build) |
+| `3g`: Data loading and tokenization | medium | `3h`, `3m` | Engineering (I/O + pure Chelis libraries) |
 | `3i`: `Std.Time` and `Std.Decimal` | small | `3c`, `3a` | Engineering (pure Chelis std modules) |
 | `3j`: School | large | `3h`, `3i` | Pure Chelis library (stats + optim + ODE/SDE) |
 | `3k`: Coral | medium | `3h`, `3d`, `3g` | Pure Chelis library (dataframes) |
@@ -785,8 +872,9 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3f`: SKILL.md v2 | small | all above | Documentation |
 
 This phase is intentionally sequential and pragmatic. The remaining work is about making
-Chelis usable, not publishable. `3j` and `3k` can overlap (no mutual dependency). `3l`
-depends on both. `3f` goes truly last because it must cover the complete ecosystem
+Chelis usable, not publishable. `3m` is the runtime/ABI choke point that must land
+before the next host-data phase. `3j` and `3k` can overlap (no mutual dependency).
+`3l` depends on both. `3f` goes truly last because it must cover the complete ecosystem
 including the domain shells.
 
 ---
@@ -799,6 +887,8 @@ Before calling Phase 3 complete:
 - `3c` provides practical scalar/string programming without Python fallback
 - `3d` provides collections and iteration for variable-length host-side data
 - `3h` provides the expanded tensor-language surface needed for real model code
+- `3m` provides a Rust-owned compiled runtime so later host-language/library work does
+  not keep expanding the old C runtime
 - `3g` provides text/config/data loading plus tokenizer and batching support
 - `3i` provides `Std.Time` and `Std.Decimal` as practical standard-library host types
 - `3j` provides numerical methods (stats, optimization, ODE/SDE) as a Reef package

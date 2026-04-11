@@ -16,6 +16,19 @@ find issues in an implementation.
 4. Probe examples, fixtures, and docs for false-green situations.
 5. Add and run adversarial tests when existing coverage is not enough to prove the claim.
 
+## Fresh-Context Agent Rule
+
+When the user asks to "spawn a red team agent" for this repository, interpret that as a
+fresh local subagent in the shared workspace, not a remote deployment.
+
+- prefer a newly spawned local subagent with fresh context when that surface is available
+- if stale agents block spawning, close them first rather than silently skipping the
+  request
+- if the available subagent path routes to a remote deployment, is unavailable, or errors
+  before work begins, do not keep retrying remote infrastructure; run the red-team pass
+  locally in the main thread and say that you did so
+- do not present a remote-agent failure as if the requested validation itself failed
+
 ## Chelis-Specific Checks
 
 - Treat `cargo test --workspace` as necessary but not sufficient.

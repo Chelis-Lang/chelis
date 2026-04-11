@@ -40,12 +40,10 @@ fn c_fused_codegen_compiles() {
     std::fs::write(dir.join("test_fused.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test_fused.h"), &result.h_header).unwrap();
 
-    // Copy runtime files
-    let rt_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime");
-    let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-    let c_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
+    let rt_header = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../chelis-runtime/include/chelis_runtime.h");
+    let h_src = std::fs::read_to_string(rt_header).unwrap();
     std::fs::write(dir.join("chelis_runtime.h"), &h_src).unwrap();
-    std::fs::write(dir.join("chelis_runtime.c"), &c_src).unwrap();
 
     // Verify the source contains a fused loop (float v0, float v1, etc.)
     assert!(
@@ -185,11 +183,10 @@ fn c_fused_reduce_compiles() {
     std::fs::write(dir.join("test.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test.h"), &result.h_header).unwrap();
 
-    let rt_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime");
-    let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-    let c_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.c")).unwrap();
+    let rt_header = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../chelis-runtime/include/chelis_runtime.h");
+    let h_src = std::fs::read_to_string(rt_header).unwrap();
     std::fs::write(dir.join("chelis_runtime.h"), &h_src).unwrap();
-    std::fs::write(dir.join("chelis_runtime.c"), &c_src).unwrap();
 
     let output = std::process::Command::new("gcc")
         .args([

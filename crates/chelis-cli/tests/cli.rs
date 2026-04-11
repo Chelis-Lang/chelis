@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use chelis_shell::{ShellSymbol, SymbolKind, read_shell, write_shell};
 use predicates::prelude::*;
 use serde_json::Value;
+use std::env;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -98,6 +99,59 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
+    StdCommand::new("gcc")
+        .current_dir(out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            source,
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            binary,
+        ])
+        .status()
+        .expect("gcc should run")
+}
+
+fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::process::ExitStatus {
+    let mut cmd = StdCommand::new("gcc");
+    cmd.current_dir(out_dir);
+    cmd.args(["-O2", "-fopenmp"]);
+    cmd.args(sources);
+    cmd.args([
+        "-L.",
+        "-lchelis_runtime",
+        "-lm",
+        "-lpthread",
+        "-ldl",
+        "-o",
+        binary,
+    ]);
+    cmd.status().expect("gcc should run")
+}
+
+fn hipcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
+    StdCommand::new("hipcc")
+        .current_dir(out_dir)
+        .args([
+            source,
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            binary,
+        ])
+        .status()
+        .expect("hipcc should run")
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst dir");
     for entry in fs::read_dir(src).expect("read dir") {
@@ -157,6 +211,36 @@ fn run_json_check(path: &Path) -> Value {
         .stdout
         .clone();
     serde_json::from_slice(&output).expect("check output should be json")
+}
+
+fn runtime_library_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for dir in [
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+    ] {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
+                    .unwrap_or(false)
+                {
+                    return path;
+                }
+            }
+        }
+    }
+    panic!("could not locate libchelis_runtime.a for cli tests");
+}
+
+fn runtime_library_dir() -> PathBuf {
+    runtime_library_path()
+        .parent()
+        .expect("runtime library should have a parent directory")
+        .to_path_buf()
 }
 
 #[test]
@@ -455,19 +539,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let status = StdCommand::new("gcc")
-        .current_dir(&out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            "list_foundation.c",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "list_foundation",
-        ])
-        .status()
-        .expect("gcc should run");
+    let status = gcc_link_generated(&out_dir, "list_foundation.c", "list_foundation");
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("list_foundation"))
@@ -509,13 +581,7 @@ fn build_c_runs_dict_foundation_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let runtime_sources = ["dict_foundation.c", "chelis_runtime.c"];
-    let mut compile = StdCommand::new("gcc");
-    compile.current_dir(&out_dir);
-    compile.args(["-O2", "-fopenmp"]);
-    compile.args(runtime_sources);
-    compile.args(["-lm", "-o", "dict_foundation"]);
-    let status = compile.status().expect("gcc status");
+    let status = gcc_link_generated(&out_dir, "dict_foundation.c", "dict_foundation");
     assert!(status.success(), "generated C should compile");
 
     let run_output = StdCommand::new(out_dir.join("dict_foundation"))
@@ -554,19 +620,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let status = StdCommand::new("gcc")
-        .current_dir(&out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            "iter_foundation.c",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "iter_foundation",
-        ])
-        .status()
-        .expect("gcc should run");
+    let status = gcc_link_generated(&out_dir, "iter_foundation.c", "iter_foundation");
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("iter_foundation"))
@@ -608,19 +662,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let status = StdCommand::new("gcc")
-        .current_dir(&out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            "tensor_structural_ops.c",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "tensor_structural_ops",
-        ])
-        .status()
-        .expect("gcc should run");
+    let status = gcc_link_generated(&out_dir, "tensor_structural_ops.c", "tensor_structural_ops");
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("tensor_structural_ops"))
@@ -840,20 +882,11 @@ int main(void) {
 "#,
     );
 
-    let status = StdCommand::new("gcc")
-        .current_dir(&out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            "runner.c",
-            "scatter_runtime_bad.c",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "scatter_runtime_bad",
-        ])
-        .status()
-        .expect("gcc should run");
+    let status = gcc_link_sources(
+        &out_dir,
+        &["runner.c", "scatter_runtime_bad.c"],
+        "scatter_runtime_bad",
+    );
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("scatter_runtime_bad"))
@@ -965,19 +998,73 @@ fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let status = StdCommand::new("gcc")
-        .current_dir(&out_dir)
+    let status = gcc_link_generated(
+        &out_dir,
+        "scalar_string_foundation.c",
+        "scalar_string_foundation",
+    );
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_string_foundation"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn phase3m_rust_runtime_acceptance_oracle() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("phase3m-out");
+    let source = scalar_string_foundation_example();
+
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
         .args([
-            "-O2",
-            "-fopenmp",
-            "scalar_string_foundation.c",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "scalar_string_foundation",
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
         ])
-        .status()
-        .expect("gcc should run");
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-lchelis_runtime"))
+        .stdout(predicate::str::contains("libchelis_runtime.a"))
+        .get_output()
+        .stdout
+        .clone();
+
+    let build_stdout = String::from_utf8(build).expect("build stdout utf8");
+    assert!(out_dir.join("scalar_string_foundation.c").exists());
+    assert!(out_dir.join("scalar_string_foundation.h").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("libchelis_runtime.a").exists());
+    assert!(!out_dir.join("chelis_runtime.c").exists());
+    assert!(
+        !build_stdout.contains("chelis_runtime.c"),
+        "Phase 3m oracle must not surface the deleted C runtime"
+    );
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = gcc_link_generated(
+        &out_dir,
+        "scalar_string_foundation.c",
+        "scalar_string_foundation",
+    );
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("scalar_string_foundation"))
@@ -1050,17 +1137,114 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
         .stdout
         .clone();
 
-    let status = StdCommand::new("hipcc")
-        .current_dir(&out_dir)
+    let status = hipcc_link_generated(
+        &out_dir,
+        "scalar_string_foundation_hip.cpp",
+        "scalar_string_foundation_hip",
+    );
+    assert!(status.success(), "hipcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_string_foundation_hip"))
+        .output()
+        .expect("compiled hip binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled hip binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
+    let dir = tempdir().expect("tempdir");
+    let bad_runtime_dir = dir.path().join("missing-runtime");
+    fs::create_dir_all(&bad_runtime_dir).expect("create bad runtime dir");
+    let out_dir = dir.path().join("bad-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_RUNTIME_DIR", &bad_runtime_dir)
         .args([
-            "scalar_string_foundation_hip.cpp",
-            "chelis_runtime.c",
-            "-lm",
-            "-o",
-            "scalar_string_foundation_hip",
+            "build",
+            mnist_example().to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
         ])
-        .status()
-        .expect("hipcc should run");
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("CHELIS_RUNTIME_DIR"))
+        .stderr(predicate::str::contains("libchelis_runtime.a"));
+}
+
+#[test]
+fn build_honors_chelis_runtime_dir_override() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("env-runtime-build");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            mnist_example().to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("libchelis_runtime.a"));
+
+    assert!(out_dir.join("libchelis_runtime.a").exists());
+    assert!(!out_dir.join("chelis_runtime.c").exists());
+}
+
+#[test]
+#[ignore = "manual gate: hipcc is environment-dependent"]
+fn phase3m_rust_runtime_hip_manual_gate() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("phase3m-hip-out");
+    let source = scalar_string_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-lchelis_runtime"))
+        .stdout(predicate::str::contains("libchelis_runtime.a"));
+
+    assert!(out_dir.join("scalar_string_foundation_hip.cpp").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("libchelis_runtime.a").exists());
+    assert!(out_dir.join("chelis_hip_runtime.h").exists());
+    assert!(!out_dir.join("chelis_runtime.c").exists());
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = hipcc_link_generated(
+        &out_dir,
+        "scalar_string_foundation_hip.cpp",
+        "scalar_string_foundation_hip",
+    );
     assert!(status.success(), "hipcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("scalar_string_foundation_hip"))
@@ -1642,8 +1826,8 @@ fn build_creates_missing_output_directory() {
 
     assert!(out_dir.join("mnist.c").exists());
     assert!(out_dir.join("mnist.h").exists());
-    assert!(out_dir.join("chelis_runtime.c").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("libchelis_runtime.a").exists());
 }
 
 #[test]
@@ -1870,15 +2054,15 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            out_dir.join("chelis_runtime.c").display().to_string(),
+            out_dir.join("libchelis_runtime.a").display().to_string(),
         ))
         .stdout(predicate::str::contains("Peak device memory formula:"))
         .stdout(predicate::str::contains("Estimated peak device memory:"));
 
     assert!(out_dir.join("mnist_hip.cpp").exists());
     assert!(out_dir.join("mnist_hip.h").exists());
-    assert!(out_dir.join("chelis_runtime.c").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("libchelis_runtime.a").exists());
     assert!(out_dir.join("chelis_hip_runtime.h").exists());
 }
 
