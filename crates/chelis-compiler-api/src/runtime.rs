@@ -504,7 +504,15 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::Bool(value) => Ok(RuntimeValue::Bool(!value)),
                 other => Err(format!("unexpected neq result {other:?}")),
             }),
-            "cmplt" => ordered_compare(args, |lhs, rhs| lhs < rhs),
+            "cmplt" => {
+                if let (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) =
+                    (args.first(), args.get(1))
+                {
+                    tensor_compare_value(lhs, rhs, |lhs, rhs| lhs < rhs).map(RuntimeValue::Tensor)
+                } else {
+                    ordered_compare(args, |lhs, rhs| lhs < rhs)
+                }
+            }
             "gt" => ordered_compare(args, |lhs, rhs| lhs > rhs),
             "gte" => ordered_compare(args, |lhs, rhs| lhs >= rhs),
             "lte" => ordered_compare(args, |lhs, rhs| lhs <= rhs),
@@ -607,11 +615,20 @@ impl<'a> EvalContext<'a> {
                 );
                 Ok(RuntimeValue::List(list))
             }
-            "concat" => {
-                let mut lhs = expect_list_arg(args, 0)?;
-                lhs.extend(expect_list_arg(args, 1)?);
-                Ok(RuntimeValue::List(lhs))
-            }
+            "concat" => match (args.first(), args.get(1)) {
+                (Some(RuntimeValue::List(parts)), Some(RuntimeValue::Int(axis)))
+                    if parts
+                        .iter()
+                        .all(|item| matches!(item, RuntimeValue::Tensor(_))) =>
+                {
+                    tensor_concat_value(parts, *axis)
+                }
+                _ => {
+                    let mut lhs = expect_list_arg(args, 0)?;
+                    lhs.extend(expect_list_arg(args, 1)?);
+                    Ok(RuntimeValue::List(lhs))
+                }
+            },
             "take" => {
                 let list = expect_list_arg(args, 0)?;
                 let count = expect_int_arg(args, 1)?;
@@ -914,6 +931,67 @@ impl<'a> EvalContext<'a> {
                     precision,
                 }))
             }
+            "split" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                let sizes = expect_list_arg(args, 2)?;
+                tensor_split_value(&tensor, axis, &sizes)
+            }
+            "gather" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let indices = expect_tensor_arg(args, 1)?;
+                let axis = expect_int_arg(args, 2)?;
+                tensor_gather_value(&tensor, &indices, axis).map(RuntimeValue::Tensor)
+            }
+            "scatter" => {
+                let base = expect_tensor_arg(args, 0)?;
+                let indices = expect_tensor_arg(args, 1)?;
+                let updates = expect_tensor_arg(args, 2)?;
+                let axis = expect_int_arg(args, 3)?;
+                let mode = expect_string_arg(args, 4)?;
+                tensor_scatter_value(&base, &indices, &updates, axis, &mode)
+                    .map(RuntimeValue::Tensor)
+            }
+            "where" => {
+                let cond = expect_tensor_arg(args, 0)?;
+                let then_tensor = expect_tensor_arg(args, 1)?;
+                let else_tensor = expect_tensor_arg(args, 2)?;
+                tensor_where_value(&cond, &then_tensor, &else_tensor).map(RuntimeValue::Tensor)
+            }
+            "cumsum" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_cumsum_value(&tensor, axis).map(RuntimeValue::Tensor)
+            }
+            "sort" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_sort_value(&tensor, axis)
+            }
+            "diagonal" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis1 = expect_int_arg(args, 1)?;
+                let axis2 = expect_int_arg(args, 2)?;
+                tensor_diagonal_value(&tensor, axis1, axis2).map(RuntimeValue::Tensor)
+            }
+            "trace" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis1 = expect_int_arg(args, 1)?;
+                let axis2 = expect_int_arg(args, 2)?;
+                tensor_trace_value(&tensor, axis1, axis2).map(RuntimeValue::Tensor)
+            }
+            "clamp" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let lo = expect_tensor_arg(args, 1)?;
+                let hi = expect_tensor_arg(args, 2)?;
+                tensor_clamp_value(&tensor, &lo, &hi).map(RuntimeValue::Tensor)
+            }
+            "einsum" => {
+                let equation = expect_string_arg(args, 0)?;
+                let lhs = expect_tensor_arg(args, 1)?;
+                let rhs = expect_tensor_arg(args, 2)?;
+                tensor_einsum_value(&equation, &lhs, &rhs).map(RuntimeValue::Tensor)
+            }
             "rank" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 Ok(RuntimeValue::Int(tensor.value.shape.len() as i64))
@@ -1144,6 +1222,30 @@ fn ordered_compare(
     }
 }
 
+fn tensor_compare_value(
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+    cmp: impl Fn(f64, f64) -> bool,
+) -> Result<RuntimeTensorValue, String> {
+    if lhs.precision != rhs.precision {
+        return Err("tensor comparison expects matching tensor precision".to_string());
+    }
+    if lhs.value.shape != rhs.value.shape {
+        return Err("tensor comparison expects matching tensor shape".to_string());
+    }
+    let data = lhs
+        .value
+        .data
+        .iter()
+        .zip(&rhs.value.data)
+        .map(|(lhs, rhs)| if cmp(*lhs, *rhs) { 1.0 } else { 0.0 })
+        .collect::<Vec<_>>();
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
+        precision: Prim::Bool,
+    })
+}
+
 fn bool_binop(
     args: &[RuntimeValue],
     op: impl Fn(bool, bool) -> bool,
@@ -1352,6 +1454,538 @@ fn pad_sequences_value(
         ));
     }
     Ok((pad_precision, data, batch, width))
+}
+
+fn tensor_numel(shape: &[usize]) -> usize {
+    shape.iter().product::<usize>().max(1)
+}
+
+fn linear_to_indices(mut linear: usize, shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        return Vec::new();
+    }
+    let mut indices = vec![0; shape.len()];
+    for axis in (0..shape.len()).rev() {
+        indices[axis] = linear % shape[axis];
+        linear /= shape[axis];
+    }
+    indices
+}
+
+fn indices_to_linear(indices: &[usize], shape: &[usize]) -> usize {
+    let mut linear = 0usize;
+    for (axis, value) in indices.iter().enumerate() {
+        linear *= shape[axis];
+        linear += value;
+    }
+    linear
+}
+
+fn normalize_axis(rank: usize, axis: i64, op: &str) -> Result<usize, String> {
+    if axis < 0 {
+        return Err(format!("{op} requires non-negative axis, got {axis}"));
+    }
+    let axis = axis as usize;
+    if axis >= rank {
+        return Err(format!("{op} axis {axis} out of bounds for rank {rank}"));
+    }
+    Ok(axis)
+}
+
+fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, String> {
+    values
+        .iter()
+        .map(|value| match value {
+            RuntimeValue::Int(value) if *value >= 0 => Ok(*value as usize),
+            RuntimeValue::Int(value) => {
+                Err(format!("{op} expects non-negative sizes, got {value}"))
+            }
+            other => Err(format!("{op} expects int64 sizes, got {other:?}")),
+        })
+        .collect()
+}
+
+fn tensor_concat_value(parts: &[RuntimeValue], axis: i64) -> Result<RuntimeValue, String> {
+    let tensors = parts
+        .iter()
+        .map(|value| match value {
+            RuntimeValue::Tensor(tensor) => Ok(tensor.clone()),
+            other => Err(format!("concat expects tensor parts, got {other:?}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = tensors
+        .first()
+        .ok_or_else(|| "concat expects at least one tensor part".to_string())?;
+    let axis = normalize_axis(first.value.shape.len(), axis, "concat")?;
+    for tensor in &tensors[1..] {
+        if tensor.precision != first.precision {
+            return Err("concat expects matching tensor precision".to_string());
+        }
+        if tensor.value.shape.len() != first.value.shape.len() {
+            return Err("concat expects matching tensor rank".to_string());
+        }
+        for dim in 0..tensor.value.shape.len() {
+            if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
+                return Err(format!(
+                    "concat expects matching non-concatenated axes; axis {dim} differed"
+                ));
+            }
+        }
+    }
+    let mut out_shape = first.value.shape.clone();
+    out_shape[axis] = tensors.iter().map(|tensor| tensor.value.shape[axis]).sum();
+    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    let mut axis_offset = 0usize;
+    for tensor in &tensors {
+        for linear in 0..tensor.value.data.len() {
+            let mut index = linear_to_indices(linear, &tensor.value.shape);
+            index[axis] += axis_offset;
+            let out_linear = indices_to_linear(&index, &out_shape);
+            out[out_linear] = tensor.value.data[linear];
+        }
+        axis_offset += tensor.value.shape[axis];
+    }
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: first.precision,
+    }))
+}
+
+fn tensor_split_value(
+    tensor: &RuntimeTensorValue,
+    axis: i64,
+    sizes: &[RuntimeValue],
+) -> Result<RuntimeValue, String> {
+    let axis = normalize_axis(tensor.value.shape.len(), axis, "split")?;
+    let sizes = expect_int_list(sizes, "split")?;
+    let total: usize = sizes.iter().sum();
+    if total != tensor.value.shape[axis] {
+        return Err(format!(
+            "split sizes sum to {total}, expected {}",
+            tensor.value.shape[axis]
+        ));
+    }
+    let mut parts = Vec::with_capacity(sizes.len());
+    let mut offset = 0usize;
+    for size in sizes {
+        let mut shape = tensor.value.shape.clone();
+        shape[axis] = size;
+        let mut data = vec![0.0; tensor_numel(&shape)];
+        for (linear, slot) in data.iter_mut().enumerate() {
+            let mut index = linear_to_indices(linear, &shape);
+            index[axis] += offset;
+            let src = indices_to_linear(&index, &tensor.value.shape);
+            *slot = tensor.value.data[src];
+        }
+        offset += size;
+        parts.push(RuntimeValue::Tensor(RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, data),
+            precision: tensor.precision,
+        }));
+    }
+    Ok(RuntimeValue::List(parts))
+}
+
+fn tensor_gather_value(
+    tensor: &RuntimeTensorValue,
+    indices: &RuntimeTensorValue,
+    axis: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let axis = normalize_axis(tensor.value.shape.len(), axis, "gather")?;
+    if !indices.precision.is_integer() {
+        return Err("gather expects integer tensor indices".to_string());
+    }
+    let mut out_shape = tensor.value.shape[..axis].to_vec();
+    out_shape.extend_from_slice(&indices.value.shape);
+    out_shape.extend_from_slice(&tensor.value.shape[axis + 1..]);
+    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    for (linear, slot) in out.iter_mut().enumerate() {
+        let out_index = linear_to_indices(linear, &out_shape);
+        let mut src_index = Vec::with_capacity(tensor.value.shape.len());
+        src_index.extend_from_slice(&out_index[..axis]);
+        let gathered_idx = &out_index[axis..axis + indices.value.shape.len()];
+        let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
+        let value = indices.value.data[index_linear] as i64;
+        if value < 0 || value as usize >= tensor.value.shape[axis] {
+            return Err(format!("gather index {value} out of bounds at axis {axis}"));
+        }
+        src_index.push(value as usize);
+        src_index.extend_from_slice(&out_index[axis + indices.value.shape.len()..]);
+        let src_linear = indices_to_linear(&src_index, &tensor.value.shape);
+        *slot = tensor.value.data[src_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+fn tensor_scatter_value(
+    base: &RuntimeTensorValue,
+    indices: &RuntimeTensorValue,
+    updates: &RuntimeTensorValue,
+    axis: i64,
+    mode: &str,
+) -> Result<RuntimeTensorValue, String> {
+    let axis = normalize_axis(base.value.shape.len(), axis, "scatter")?;
+    if !indices.precision.is_integer() {
+        return Err("scatter expects integer tensor indices".to_string());
+    }
+    let expected = tensor_gather_value(base, indices, axis as i64)?;
+    if expected.value.shape != updates.value.shape || expected.precision != updates.precision {
+        return Err("scatter updates must match gathered tensor shape and precision".to_string());
+    }
+    let mut out = base.value.data.clone();
+    let mut seen = std::collections::HashSet::new();
+    for linear in 0..updates.value.data.len() {
+        let update_index = linear_to_indices(linear, &updates.value.shape);
+        let mut out_index = Vec::with_capacity(base.value.shape.len());
+        out_index.extend_from_slice(&update_index[..axis]);
+        let gathered_idx = &update_index[axis..axis + indices.value.shape.len()];
+        let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
+        let value = indices.value.data[index_linear] as i64;
+        if value < 0 || value as usize >= base.value.shape[axis] {
+            return Err(format!(
+                "scatter index {value} out of bounds at axis {axis}"
+            ));
+        }
+        out_index.push(value as usize);
+        out_index.extend_from_slice(&update_index[axis + indices.value.shape.len()..]);
+        let out_linear = indices_to_linear(&out_index, &base.value.shape);
+        match mode {
+            "replace" => {
+                if !seen.insert(out_linear) {
+                    return Err(format!(
+                        "scatter replace mode rejects duplicate target index {}",
+                        out_linear
+                    ));
+                }
+                out[out_linear] = updates.value.data[linear];
+            }
+            "add" => out[out_linear] += updates.value.data[linear],
+            other => return Err(format!("scatter mode must be replace or add, got {other}")),
+        }
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(base.value.shape.clone(), out),
+        precision: base.precision,
+    })
+}
+
+fn tensor_where_value(
+    cond: &RuntimeTensorValue,
+    then_tensor: &RuntimeTensorValue,
+    else_tensor: &RuntimeTensorValue,
+) -> Result<RuntimeTensorValue, String> {
+    if cond.precision != Prim::Bool {
+        return Err("where expects bool tensor condition".to_string());
+    }
+    if cond.value.shape != then_tensor.value.shape
+        || then_tensor.value.shape != else_tensor.value.shape
+    {
+        return Err(
+            "where expects condition and both branches to have identical shape".to_string(),
+        );
+    }
+    if then_tensor.precision != else_tensor.precision {
+        return Err("where expects matching branch precision".to_string());
+    }
+    let data = cond
+        .value
+        .data
+        .iter()
+        .zip(&then_tensor.value.data)
+        .zip(&else_tensor.value.data)
+        .map(|((cond, then_value), else_value)| {
+            if *cond != 0.0 {
+                *then_value
+            } else {
+                *else_value
+            }
+        })
+        .collect();
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(then_tensor.value.shape.clone(), data),
+        precision: then_tensor.precision,
+    })
+}
+
+fn tensor_cumsum_value(
+    tensor: &RuntimeTensorValue,
+    axis: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let axis = normalize_axis(tensor.value.shape.len(), axis, "cumsum")?;
+    let mut data = tensor.value.data.clone();
+    let axis_size = tensor.value.shape[axis];
+    let inner: usize = tensor.value.shape[axis + 1..]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
+    for outer_idx in 0..outer {
+        for inner_idx in 0..inner {
+            let mut running = 0.0;
+            for axis_idx in 0..axis_size {
+                let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                running += data[linear];
+                data[linear] = running;
+            }
+        }
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
+        precision: tensor.precision,
+    })
+}
+
+fn tensor_sort_value(tensor: &RuntimeTensorValue, axis: i64) -> Result<RuntimeValue, String> {
+    let axis = normalize_axis(tensor.value.shape.len(), axis, "sort")?;
+    let axis_size = tensor.value.shape[axis];
+    let inner: usize = tensor.value.shape[axis + 1..]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
+    let mut values = tensor.value.data.clone();
+    let mut indices = vec![0.0; tensor.value.data.len()];
+    for outer_idx in 0..outer {
+        for inner_idx in 0..inner {
+            let mut items = (0..axis_size)
+                .map(|axis_idx| {
+                    let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                    (axis_idx, values[linear])
+                })
+                .collect::<Vec<_>>();
+            items.sort_by(|(lhs_idx, lhs_val), (rhs_idx, rhs_val)| {
+                lhs_val
+                    .partial_cmp(rhs_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(lhs_idx.cmp(rhs_idx))
+            });
+            for (sorted_idx, (original_idx, value)) in items.into_iter().enumerate() {
+                let linear = (outer_idx * axis_size + sorted_idx) * inner + inner_idx;
+                values[linear] = value;
+                indices[linear] = original_idx as f64;
+            }
+        }
+    }
+    Ok(RuntimeValue::Tuple(vec![
+        RuntimeValue::Tensor(RuntimeTensorValue {
+            value: IrTensorValue::from_vec(tensor.value.shape.clone(), values),
+            precision: tensor.precision,
+        }),
+        RuntimeValue::Tensor(RuntimeTensorValue {
+            value: IrTensorValue::from_vec(tensor.value.shape.clone(), indices),
+            precision: Prim::Int64,
+        }),
+    ]))
+}
+
+fn tensor_diagonal_value(
+    tensor: &RuntimeTensorValue,
+    axis1: i64,
+    axis2: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let axis1 = normalize_axis(tensor.value.shape.len(), axis1, "diagonal")?;
+    let axis2 = normalize_axis(tensor.value.shape.len(), axis2, "diagonal")?;
+    if axis1 == axis2 {
+        return Err("diagonal expects distinct axes".to_string());
+    }
+    let diag = tensor.value.shape[axis1].min(tensor.value.shape[axis2]);
+    let mut out_shape = Vec::with_capacity(tensor.value.shape.len() - 1);
+    for (index, size) in tensor.value.shape.iter().enumerate() {
+        if index == axis1 {
+            out_shape.push(diag);
+        } else if index != axis2 {
+            out_shape.push(*size);
+        }
+    }
+    let mut data = vec![0.0; tensor_numel(&out_shape)];
+    for (linear, slot) in data.iter_mut().enumerate() {
+        let out_index = linear_to_indices(linear, &out_shape);
+        let mut src_index = Vec::with_capacity(tensor.value.shape.len());
+        let mut out_pos = 0usize;
+        let diag_idx = out_index[axis1];
+        for index in 0..tensor.value.shape.len() {
+            if index == axis1 || index == axis2 {
+                src_index.push(diag_idx);
+            } else {
+                src_index.push(out_index[out_pos]);
+                out_pos += 1;
+            }
+        }
+        let src_linear = indices_to_linear(&src_index, &tensor.value.shape);
+        *slot = tensor.value.data[src_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, data),
+        precision: tensor.precision,
+    })
+}
+
+fn tensor_trace_value(
+    tensor: &RuntimeTensorValue,
+    axis1: i64,
+    axis2: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
+    let rank = diagonal.value.shape.len();
+    let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
+    let axis_size = diagonal.value.shape[axis];
+    let inner: usize = diagonal.value.shape[axis + 1..]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let outer: usize = diagonal.value.shape[..axis]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let out_shape = diagonal
+        .value
+        .shape
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, size)| (idx != axis).then_some(*size))
+        .collect::<Vec<_>>();
+    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    for outer_idx in 0..outer {
+        for inner_idx in 0..inner {
+            let mut sum = 0.0;
+            for axis_idx in 0..axis_size {
+                let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                sum += diagonal.value.data[linear];
+            }
+            let out_linear = outer_idx * inner + inner_idx;
+            out[out_linear] = sum;
+        }
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+fn tensor_clamp_value(
+    tensor: &RuntimeTensorValue,
+    lo: &RuntimeTensorValue,
+    hi: &RuntimeTensorValue,
+) -> Result<RuntimeTensorValue, String> {
+    let scalar_or_match = |bound: &RuntimeTensorValue| {
+        bound.value.shape.is_empty() || bound.value.shape == tensor.value.shape
+    };
+    if tensor.precision != lo.precision || tensor.precision != hi.precision {
+        return Err("clamp expects matching tensor precision".to_string());
+    }
+    if !scalar_or_match(lo) || !scalar_or_match(hi) {
+        return Err(
+            "clamp expects scalar tensor bounds or matching-shape tensor bounds".to_string(),
+        );
+    }
+    let mut out = Vec::with_capacity(tensor.value.data.len());
+    for linear in 0..tensor.value.data.len() {
+        let lo_value = if lo.value.shape.is_empty() {
+            lo.value.data[0]
+        } else {
+            lo.value.data[linear]
+        };
+        let hi_value = if hi.value.shape.is_empty() {
+            hi.value.data[0]
+        } else {
+            hi.value.data[linear]
+        };
+        out.push(tensor.value.data[linear].clamp(lo_value, hi_value));
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(tensor.value.shape.clone(), out),
+        precision: tensor.precision,
+    })
+}
+
+fn tensor_einsum_value(
+    equation: &str,
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+) -> Result<RuntimeTensorValue, String> {
+    if equation.contains("...") {
+        return Err("einsum ellipsis support is deferred in 3h".to_string());
+    }
+    let (inputs, output) = equation
+        .split_once("->")
+        .ok_or_else(|| "einsum equation must contain explicit output".to_string())?;
+    let operands = inputs.split(',').collect::<Vec<_>>();
+    if operands.len() != 2 {
+        return Err("einsum 3h currently supports exactly two operands".to_string());
+    }
+    let lhs_labels = operands[0].chars().collect::<Vec<_>>();
+    let rhs_labels = operands[1].chars().collect::<Vec<_>>();
+    let out_labels = output.chars().collect::<Vec<_>>();
+    if lhs_labels.len() != lhs.value.shape.len() || rhs_labels.len() != rhs.value.shape.len() {
+        return Err("einsum label count must match operand rank".to_string());
+    }
+    let mut dims = std::collections::BTreeMap::<char, usize>::new();
+    for (label, size) in lhs_labels.iter().zip(&lhs.value.shape) {
+        if let Some(prev) = dims.insert(*label, *size)
+            && prev != *size
+        {
+            return Err(format!("einsum label `{label}` has inconsistent extents"));
+        }
+    }
+    for (label, size) in rhs_labels.iter().zip(&rhs.value.shape) {
+        if let Some(prev) = dims.insert(*label, *size)
+            && prev != *size
+        {
+            return Err(format!("einsum label `{label}` has inconsistent extents"));
+        }
+    }
+    let out_shape = out_labels
+        .iter()
+        .map(|label| {
+            dims.get(label)
+                .copied()
+                .ok_or_else(|| format!("einsum output label `{label}` missing from inputs"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reduction_labels = Vec::<char>::new();
+    for label in lhs_labels.iter().chain(rhs_labels.iter()) {
+        if !out_labels.contains(label) && !reduction_labels.contains(label) {
+            reduction_labels.push(*label);
+        }
+    }
+    let reduction_shape = reduction_labels
+        .iter()
+        .map(|label| dims.get(label).copied().unwrap_or(1))
+        .collect::<Vec<_>>();
+    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    for (out_linear, slot) in out.iter_mut().enumerate() {
+        let out_index = linear_to_indices(out_linear, &out_shape);
+        let mut label_values = std::collections::HashMap::<char, usize>::new();
+        for (label, value) in out_labels.iter().zip(out_index.iter()) {
+            label_values.insert(*label, *value);
+        }
+        let reduction_total = tensor_numel(&reduction_shape);
+        let mut acc = 0.0;
+        for reduction_linear in 0..reduction_total {
+            let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
+            for (label, value) in reduction_labels.iter().zip(reduction_index.iter()) {
+                label_values.insert(*label, *value);
+            }
+            let lhs_index = lhs_labels
+                .iter()
+                .map(|label| label_values[label])
+                .collect::<Vec<_>>();
+            let rhs_index = rhs_labels
+                .iter()
+                .map(|label| label_values[label])
+                .collect::<Vec<_>>();
+            acc += lhs.value.data[indices_to_linear(&lhs_index, &lhs.value.shape)]
+                * rhs.value.data[indices_to_linear(&rhs_index, &rhs.value.shape)];
+        }
+        *slot = acc;
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: lhs.precision,
+    })
 }
 
 fn render_value(value: &RuntimeValue) -> String {

@@ -130,6 +130,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | TUI coding environment | Cove |
 | Project manifest | `reef.toml` |
 | Numerical-method shell | School |
+| Dataframe shell | Coral |
 | Finance shell | Treasure |
 
 Chelis is pronounced **CHEL-is**.
@@ -145,7 +146,12 @@ The Phase 3+ ecosystem stack is:
 - `school`: general numerical methods layered on top of `chelis-std`, including stats,
   distributions, differentiable optimization, ODE/SDE solvers, integration, root
   finding, and later signal-processing work
-- `treasure`: finance/domain shell layered on top of `chelis-std` + `school`
+- `coral`: typed dataframe shell layered on top of `chelis-std` for pandas/Polars-style
+  tabular work, with GPU-accelerated numeric columns, host-side string columns, and AD
+  through dataframe operations where filtering lowers to gather and aggregation lowers
+  to reduction
+- `treasure`: finance/domain shell layered on top of `chelis-std` + `school`, with
+  optional `coral` integration for financial data manipulation
 
 ---
 

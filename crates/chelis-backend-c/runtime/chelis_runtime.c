@@ -1,6 +1,12 @@
 #include "chelis_runtime.h"
 #include <ctype.h>
 
+#define CHELIS_RUNTIME_FAIL(...) \
+    do { \
+        fprintf(stderr, __VA_ARGS__); \
+        exit(1); \
+    } while (0)
+
 static void chelis_init_tensor(chelis_tensor *t, int ndim, const int *shape, int dtype) {
     t->ndim = ndim;
     t->dtype = dtype;
@@ -820,6 +826,536 @@ chelis_tensor* chelis_pad_sequences(const chelis_list *sequences, chelis_value p
     return out;
 }
 
+static int chelis_tensor_normalize_axis(const chelis_tensor *tensor, int64_t axis, const char *op) {
+    if (axis < 0 || axis >= tensor->ndim) {
+        CHELIS_RUNTIME_FAIL(
+            "%s axis %lld out of bounds for rank %d\n",
+            op,
+            (long long)axis,
+            tensor->ndim
+        );
+    }
+    return (int)axis;
+}
+
+static chelis_tensor* chelis_tensor_clone(const chelis_tensor *tensor) {
+    chelis_tensor *out = chelis_alloc(tensor->ndim, tensor->shape, tensor->dtype);
+    memcpy(out->data, tensor->data, (size_t)tensor->size * sizeof(float));
+    return out;
+}
+
+static void chelis_require_same_tensor_shape(
+    const chelis_tensor *lhs,
+    const chelis_tensor *rhs,
+    const char *op
+) {
+    if (lhs->ndim != rhs->ndim) {
+        CHELIS_RUNTIME_FAIL("%s expects matching tensor rank\n", op);
+    }
+    for (int axis = 0; axis < lhs->ndim; axis++) {
+        if (lhs->shape[axis] != rhs->shape[axis]) {
+            CHELIS_RUNTIME_FAIL("%s expects matching tensor shape\n", op);
+        }
+    }
+}
+
+static int chelis_tensor_scalar_or_same_shape(
+    const chelis_tensor *bound,
+    const chelis_tensor *tensor
+) {
+    if (bound->ndim == 0) return 1;
+    if (bound->ndim != tensor->ndim) return 0;
+    for (int axis = 0; axis < tensor->ndim; axis++) {
+        if (bound->shape[axis] != tensor->shape[axis]) return 0;
+    }
+    return 1;
+}
+
+static int64_t chelis_int_list_value(const chelis_list *list, int64_t index, const char *op) {
+    if (!list || index < 0 || index >= list->len || list->items[index].tag != CHELIS_VALUE_INT64) {
+        fprintf(stderr, "%s expects a list of int64 values\n", op);
+        abort();
+    }
+    return list->items[index].as.i64;
+}
+
+chelis_tensor* chelis_tensor_concat(const chelis_list *parts, int64_t axis) {
+    if (!parts || parts->len == 0) {
+        fprintf(stderr, "concat expects at least one tensor part\n");
+        abort();
+    }
+    chelis_tensor *first = chelis_value_as_tensor(parts->items[0]);
+    int axis_i = chelis_tensor_normalize_axis(first, axis, "concat");
+    int out_shape[CHELIS_MAX_DIM];
+    memcpy(out_shape, first->shape, sizeof(int) * CHELIS_MAX_DIM);
+    out_shape[axis_i] = 0;
+    for (int64_t part_idx = 0; part_idx < parts->len; part_idx++) {
+        chelis_tensor *tensor = chelis_value_as_tensor(parts->items[part_idx]);
+        if (tensor->ndim != first->ndim || tensor->dtype != first->dtype) {
+            fprintf(stderr, "concat expects matching tensor rank and dtype\n");
+            abort();
+        }
+        for (int axis2 = 0; axis2 < tensor->ndim; axis2++) {
+            if (axis2 != axis_i && tensor->shape[axis2] != first->shape[axis2]) {
+                fprintf(stderr, "concat expects matching non-concatenated axes\n");
+                abort();
+            }
+        }
+        out_shape[axis_i] += tensor->shape[axis_i];
+    }
+    chelis_tensor *out = chelis_alloc(first->ndim, out_shape, first->dtype);
+    int axis_offset = 0;
+    int indices[CHELIS_MAX_DIM];
+    for (int64_t part_idx = 0; part_idx < parts->len; part_idx++) {
+        chelis_tensor *tensor = chelis_value_as_tensor(parts->items[part_idx]);
+        for (int linear = 0; linear < tensor->size; linear++) {
+            chelis_flat_to_indices(linear, tensor->shape, tensor->ndim, indices);
+            indices[axis_i] += axis_offset;
+            int out_linear = chelis_indices_to_flat(indices, out->strides, out->ndim);
+            out->data[out_linear] = tensor->data[linear];
+            indices[axis_i] -= axis_offset;
+        }
+        axis_offset += tensor->shape[axis_i];
+    }
+    return out;
+}
+
+chelis_list* chelis_tensor_split(const chelis_tensor *tensor, int64_t axis, const chelis_list *sizes) {
+    int axis_i = chelis_tensor_normalize_axis(tensor, axis, "split");
+    int64_t total = 0;
+    for (int64_t i = 0; i < sizes->len; i++) {
+        total += chelis_int_list_value(sizes, i, "split");
+    }
+    if (total != tensor->shape[axis_i]) {
+        fprintf(stderr, "split sizes must sum to the selected axis extent\n");
+        abort();
+    }
+    chelis_value *items = sizes->len > 0 ? (chelis_value*)calloc((size_t)sizes->len, sizeof(chelis_value)) : NULL;
+    int axis_offset = 0;
+    int indices[CHELIS_MAX_DIM];
+    for (int64_t part_idx = 0; part_idx < sizes->len; part_idx++) {
+        int part_size = (int)chelis_int_list_value(sizes, part_idx, "split");
+        int shape[CHELIS_MAX_DIM];
+        memcpy(shape, tensor->shape, sizeof(int) * CHELIS_MAX_DIM);
+        shape[axis_i] = part_size;
+        chelis_tensor *part = chelis_alloc(tensor->ndim, shape, tensor->dtype);
+        for (int linear = 0; linear < part->size; linear++) {
+            chelis_flat_to_indices(linear, part->shape, part->ndim, indices);
+            indices[axis_i] += axis_offset;
+            int src = chelis_indices_to_flat(indices, tensor->strides, tensor->ndim);
+            part->data[linear] = tensor->data[src];
+            indices[axis_i] -= axis_offset;
+        }
+        axis_offset += part_size;
+        items[part_idx] = chelis_value_from_tensor(part);
+    }
+    return chelis_list_from_values(items, sizes->len);
+}
+
+chelis_tensor* chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int64_t axis) {
+    int axis_i = chelis_tensor_normalize_axis(tensor, axis, "gather");
+    int out_ndim = tensor->ndim - 1 + indices->ndim;
+    int out_shape[CHELIS_MAX_DIM];
+    int pos = 0;
+    for (int i = 0; i < axis_i; i++) out_shape[pos++] = tensor->shape[i];
+    for (int i = 0; i < indices->ndim; i++) out_shape[pos++] = indices->shape[i];
+    for (int i = axis_i + 1; i < tensor->ndim; i++) out_shape[pos++] = tensor->shape[i];
+    chelis_tensor *out = chelis_alloc(out_ndim, out_shape, tensor->dtype);
+    int out_index[CHELIS_MAX_DIM];
+    int src_index[CHELIS_MAX_DIM];
+    int gather_index[CHELIS_MAX_DIM];
+    for (int linear = 0; linear < out->size; linear++) {
+        chelis_flat_to_indices(linear, out->shape, out->ndim, out_index);
+        int src_pos = 0;
+        for (int i = 0; i < axis_i; i++) src_index[src_pos++] = out_index[i];
+        for (int i = 0; i < indices->ndim; i++) gather_index[i] = out_index[axis_i + i];
+        int index_linear = chelis_indices_to_flat(gather_index, indices->strides, indices->ndim);
+        int64_t gathered = (int64_t)indices->data[index_linear];
+        if (gathered < 0 || gathered >= tensor->shape[axis_i]) {
+            CHELIS_RUNTIME_FAIL("gather index %lld out of bounds\n", (long long)gathered);
+        }
+        src_index[src_pos++] = (int)gathered;
+        for (int i = axis_i + 1; i < tensor->ndim; i++) {
+            src_index[src_pos++] = out_index[axis_i + indices->ndim + (i - axis_i - 1)];
+        }
+        int src_linear = chelis_indices_to_flat(src_index, tensor->strides, tensor->ndim);
+        out->data[linear] = tensor->data[src_linear];
+    }
+    return out;
+}
+
+chelis_tensor* chelis_tensor_cmplt(const chelis_tensor *lhs, const chelis_tensor *rhs) {
+    chelis_require_same_tensor_shape(lhs, rhs, "cmplt");
+    chelis_tensor *out = chelis_alloc(lhs->ndim, lhs->shape, CHELIS_BOOL);
+    for (int i = 0; i < out->size; i++) {
+        out->data[i] = lhs->data[i] < rhs->data[i] ? 1.0f : 0.0f;
+    }
+    return out;
+}
+
+chelis_tensor* chelis_tensor_scatter(
+    const chelis_tensor *base,
+    const chelis_tensor *indices,
+    const chelis_tensor *updates,
+    int64_t axis,
+    chelis_string mode
+) {
+    int axis_i = chelis_tensor_normalize_axis(base, axis, "scatter");
+    chelis_tensor *expected = chelis_tensor_gather(base, indices, axis);
+    chelis_require_same_tensor_shape(expected, updates, "scatter");
+    chelis_free(expected);
+    chelis_tensor *out = chelis_tensor_clone(base);
+    bool replace_mode = strcmp(mode.data, "replace") == 0;
+    bool add_mode = strcmp(mode.data, "add") == 0;
+    if (!replace_mode && !add_mode) {
+        CHELIS_RUNTIME_FAIL("scatter mode must be replace or add\n");
+    }
+    bool *seen = replace_mode ? (bool*)calloc((size_t)out->size, sizeof(bool)) : NULL;
+    int update_index[CHELIS_MAX_DIM];
+    int out_index[CHELIS_MAX_DIM];
+    int gather_index[CHELIS_MAX_DIM];
+    for (int linear = 0; linear < updates->size; linear++) {
+        chelis_flat_to_indices(linear, updates->shape, updates->ndim, update_index);
+        int out_pos = 0;
+        for (int i = 0; i < axis_i; i++) out_index[out_pos++] = update_index[i];
+        for (int i = 0; i < indices->ndim; i++) gather_index[i] = update_index[axis_i + i];
+        int index_linear = chelis_indices_to_flat(gather_index, indices->strides, indices->ndim);
+        int64_t gathered = (int64_t)indices->data[index_linear];
+        if (gathered < 0 || gathered >= base->shape[axis_i]) {
+            CHELIS_RUNTIME_FAIL("scatter index %lld out of bounds\n", (long long)gathered);
+        }
+        out_index[out_pos++] = (int)gathered;
+        for (int i = axis_i + 1; i < base->ndim; i++) {
+            out_index[out_pos++] = update_index[axis_i + indices->ndim + (i - axis_i - 1)];
+        }
+        int out_linear = chelis_indices_to_flat(out_index, out->strides, out->ndim);
+        if (replace_mode) {
+            if (seen[out_linear]) {
+                CHELIS_RUNTIME_FAIL(
+                    "scatter replace mode rejects duplicate target index %d\n",
+                    out_linear
+                );
+            }
+            seen[out_linear] = true;
+            out->data[out_linear] = updates->data[linear];
+        } else {
+            out->data[out_linear] += updates->data[linear];
+        }
+    }
+    free(seen);
+    return out;
+}
+
+chelis_tensor* chelis_tensor_where(
+    const chelis_tensor *cond,
+    const chelis_tensor *then_tensor,
+    const chelis_tensor *else_tensor
+) {
+    chelis_require_same_tensor_shape(cond, then_tensor, "where");
+    chelis_require_same_tensor_shape(then_tensor, else_tensor, "where");
+    chelis_tensor *out = chelis_alloc(then_tensor->ndim, then_tensor->shape, then_tensor->dtype);
+    for (int i = 0; i < out->size; i++) {
+        out->data[i] = cond->data[i] != 0.0f ? then_tensor->data[i] : else_tensor->data[i];
+    }
+    return out;
+}
+
+chelis_tensor* chelis_tensor_cumsum(const chelis_tensor *tensor, int64_t axis) {
+    int axis_i = chelis_tensor_normalize_axis(tensor, axis, "cumsum");
+    chelis_tensor *out = chelis_tensor_clone(tensor);
+    int axis_size = tensor->shape[axis_i];
+    int inner = 1;
+    int outer = 1;
+    for (int i = axis_i + 1; i < tensor->ndim; i++) inner *= tensor->shape[i];
+    for (int i = 0; i < axis_i; i++) outer *= tensor->shape[i];
+    for (int outer_idx = 0; outer_idx < outer; outer_idx++) {
+        for (int inner_idx = 0; inner_idx < inner; inner_idx++) {
+            float running = 0.0f;
+            for (int axis_idx = 0; axis_idx < axis_size; axis_idx++) {
+                int linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                running += out->data[linear];
+                out->data[linear] = running;
+            }
+        }
+    }
+    return out;
+}
+
+chelis_tuple* chelis_tensor_sort(const chelis_tensor *tensor, int64_t axis) {
+    int axis_i = chelis_tensor_normalize_axis(tensor, axis, "sort");
+    chelis_tensor *values = chelis_tensor_clone(tensor);
+    chelis_tensor *indices = chelis_alloc(tensor->ndim, tensor->shape, CHELIS_I32);
+    int axis_size = tensor->shape[axis_i];
+    int inner = 1;
+    int outer = 1;
+    for (int i = axis_i + 1; i < tensor->ndim; i++) inner *= tensor->shape[i];
+    for (int i = 0; i < axis_i; i++) outer *= tensor->shape[i];
+    for (int outer_idx = 0; outer_idx < outer; outer_idx++) {
+        for (int inner_idx = 0; inner_idx < inner; inner_idx++) {
+            for (int i = 0; i < axis_size; i++) {
+                int linear = (outer_idx * axis_size + i) * inner + inner_idx;
+                indices->data[linear] = (float)i;
+            }
+            for (int i = 1; i < axis_size; i++) {
+                int j = i;
+                while (j > 0) {
+                    int left = (outer_idx * axis_size + (j - 1)) * inner + inner_idx;
+                    int right = (outer_idx * axis_size + j) * inner + inner_idx;
+                    if (values->data[left] <= values->data[right]) break;
+                    float tmpv = values->data[left];
+                    values->data[left] = values->data[right];
+                    values->data[right] = tmpv;
+                    float tmpi = indices->data[left];
+                    indices->data[left] = indices->data[right];
+                    indices->data[right] = tmpi;
+                    j--;
+                }
+            }
+        }
+    }
+    chelis_value items[2];
+    items[0] = chelis_value_from_tensor(values);
+    items[1] = chelis_value_from_tensor(indices);
+    return chelis_tuple_from_values(items, 2);
+}
+
+chelis_tensor* chelis_tensor_diagonal(const chelis_tensor *tensor, int64_t axis1, int64_t axis2) {
+    int axis1_i = chelis_tensor_normalize_axis(tensor, axis1, "diagonal");
+    int axis2_i = chelis_tensor_normalize_axis(tensor, axis2, "diagonal");
+    if (axis1_i == axis2_i) {
+        fprintf(stderr, "diagonal expects distinct axes\n");
+        abort();
+    }
+    int diag = tensor->shape[axis1_i] < tensor->shape[axis2_i] ? tensor->shape[axis1_i] : tensor->shape[axis2_i];
+    int out_shape[CHELIS_MAX_DIM];
+    int pos = 0;
+    for (int i = 0; i < tensor->ndim; i++) {
+        if (i == axis1_i) out_shape[pos++] = diag;
+        else if (i != axis2_i) out_shape[pos++] = tensor->shape[i];
+    }
+    chelis_tensor *out = chelis_alloc(tensor->ndim - 1, out_shape, tensor->dtype);
+    int out_index[CHELIS_MAX_DIM];
+    int src_index[CHELIS_MAX_DIM];
+    for (int linear = 0; linear < out->size; linear++) {
+        chelis_flat_to_indices(linear, out->shape, out->ndim, out_index);
+        int diag_idx = out_index[axis1_i];
+        int out_pos = 0;
+        for (int i = 0; i < tensor->ndim; i++) {
+            if (i == axis1_i || i == axis2_i) src_index[i] = diag_idx;
+            else src_index[i] = out_index[out_pos++];
+        }
+        int src = chelis_indices_to_flat(src_index, tensor->strides, tensor->ndim);
+        out->data[linear] = tensor->data[src];
+    }
+    return out;
+}
+
+chelis_tensor* chelis_tensor_trace(const chelis_tensor *tensor, int64_t axis1, int64_t axis2) {
+    chelis_tensor *diag = chelis_tensor_diagonal(tensor, axis1, axis2);
+    int reduce_axis = (axis1 < axis2 ? axis1 : axis2);
+    int axis_size = diag->shape[reduce_axis];
+    int out_shape[CHELIS_MAX_DIM];
+    int pos = 0;
+    for (int i = 0; i < diag->ndim; i++) {
+        if (i != reduce_axis) out_shape[pos++] = diag->shape[i];
+    }
+    chelis_tensor *out = chelis_alloc(diag->ndim - 1, out_shape, diag->dtype);
+    int inner = 1;
+    int outer = 1;
+    for (int i = reduce_axis + 1; i < diag->ndim; i++) inner *= diag->shape[i];
+    for (int i = 0; i < reduce_axis; i++) outer *= diag->shape[i];
+    for (int outer_idx = 0; outer_idx < outer; outer_idx++) {
+        for (int inner_idx = 0; inner_idx < inner; inner_idx++) {
+            float sum = 0.0f;
+            for (int axis_idx = 0; axis_idx < axis_size; axis_idx++) {
+                int linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                sum += diag->data[linear];
+            }
+            out->data[outer_idx * inner + inner_idx] = sum;
+        }
+    }
+    chelis_free(diag);
+    return out;
+}
+
+chelis_tensor* chelis_tensor_clamp(
+    const chelis_tensor *tensor,
+    const chelis_tensor *lo,
+    const chelis_tensor *hi
+) {
+    if (!chelis_tensor_scalar_or_same_shape(lo, tensor) || !chelis_tensor_scalar_or_same_shape(hi, tensor)) {
+        fprintf(stderr, "clamp expects scalar bounds or matching-shape tensor bounds\n");
+        abort();
+    }
+    chelis_tensor *out = chelis_alloc(tensor->ndim, tensor->shape, tensor->dtype);
+    for (int i = 0; i < out->size; i++) {
+        float low = lo->ndim == 0 ? lo->data[0] : lo->data[i];
+        float high = hi->ndim == 0 ? hi->data[0] : hi->data[i];
+        float value = tensor->data[i];
+        if (value < low) value = low;
+        if (value > high) value = high;
+        out->data[i] = value;
+    }
+    return out;
+}
+
+chelis_tensor* chelis_tensor_einsum(
+    chelis_string equation,
+    const chelis_tensor *lhs,
+    const chelis_tensor *rhs
+) {
+    if (strstr(equation.data, "...") != NULL) {
+        CHELIS_RUNTIME_FAIL("einsum ellipsis support is deferred in 3h\n");
+    }
+    if (lhs->dtype != rhs->dtype) {
+        CHELIS_RUNTIME_FAIL("einsum expects matching tensor dtype\n");
+    }
+
+    const char *arrow = strstr(equation.data, "->");
+    if (arrow == NULL) {
+        CHELIS_RUNTIME_FAIL("einsum equation must contain explicit output\n");
+    }
+    const char *comma = strchr(equation.data, ',');
+    if (comma == NULL || comma > arrow) {
+        CHELIS_RUNTIME_FAIL("einsum 3h currently supports exactly two operands\n");
+    }
+    if (strchr(comma + 1, ',') != NULL && strchr(comma + 1, ',') < arrow) {
+        CHELIS_RUNTIME_FAIL("einsum 3h currently supports exactly two operands\n");
+    }
+
+    int lhs_rank = (int)(comma - equation.data);
+    int rhs_rank = (int)(arrow - comma - 1);
+    int out_rank = (int)strlen(arrow + 2);
+    if (lhs_rank != lhs->ndim || rhs_rank != rhs->ndim) {
+        CHELIS_RUNTIME_FAIL("einsum label count must match operand rank\n");
+    }
+    if (lhs_rank > CHELIS_MAX_DIM || rhs_rank > CHELIS_MAX_DIM || out_rank > CHELIS_MAX_DIM) {
+        CHELIS_RUNTIME_FAIL("einsum rank exceeds CHELIS_MAX_DIM\n");
+    }
+
+    char lhs_labels[CHELIS_MAX_DIM];
+    char rhs_labels[CHELIS_MAX_DIM];
+    char out_labels[CHELIS_MAX_DIM];
+    memcpy(lhs_labels, equation.data, lhs_rank);
+    memcpy(rhs_labels, comma + 1, rhs_rank);
+    memcpy(out_labels, arrow + 2, out_rank);
+
+    int label_dims[256];
+    int label_values[256];
+    bool out_contains[256];
+    bool reduction_seen[256];
+    memset(label_dims, -1, sizeof(label_dims));
+    memset(label_values, 0, sizeof(label_values));
+    memset(out_contains, 0, sizeof(out_contains));
+    memset(reduction_seen, 0, sizeof(reduction_seen));
+
+    for (int i = 0; i < out_rank; i++) {
+        unsigned char label = (unsigned char)out_labels[i];
+        out_contains[label] = true;
+    }
+
+    for (int i = 0; i < lhs_rank; i++) {
+        unsigned char label = (unsigned char)lhs_labels[i];
+        if (label_dims[label] >= 0 && label_dims[label] != lhs->shape[i]) {
+            CHELIS_RUNTIME_FAIL(
+                "einsum label `%c` has inconsistent extents\n",
+                lhs_labels[i]
+            );
+        }
+        label_dims[label] = lhs->shape[i];
+    }
+    for (int i = 0; i < rhs_rank; i++) {
+        unsigned char label = (unsigned char)rhs_labels[i];
+        if (label_dims[label] >= 0 && label_dims[label] != rhs->shape[i]) {
+            CHELIS_RUNTIME_FAIL(
+                "einsum label `%c` has inconsistent extents\n",
+                rhs_labels[i]
+            );
+        }
+        label_dims[label] = rhs->shape[i];
+    }
+
+    int out_shape[CHELIS_MAX_DIM];
+    for (int i = 0; i < out_rank; i++) {
+        unsigned char label = (unsigned char)out_labels[i];
+        if (label_dims[label] < 0) {
+            CHELIS_RUNTIME_FAIL(
+                "einsum output label `%c` missing from inputs\n",
+                out_labels[i]
+            );
+        }
+        out_shape[i] = label_dims[label];
+    }
+
+    char reduction_labels[CHELIS_MAX_DIM];
+    int reduction_shape[CHELIS_MAX_DIM];
+    int reduction_rank = 0;
+    for (int i = 0; i < lhs_rank; i++) {
+        unsigned char label = (unsigned char)lhs_labels[i];
+        if (!out_contains[label] && !reduction_seen[label]) {
+            reduction_seen[label] = true;
+            reduction_labels[reduction_rank] = lhs_labels[i];
+            reduction_shape[reduction_rank] = label_dims[label];
+            reduction_rank++;
+        }
+    }
+    for (int i = 0; i < rhs_rank; i++) {
+        unsigned char label = (unsigned char)rhs_labels[i];
+        if (!out_contains[label] && !reduction_seen[label]) {
+            reduction_seen[label] = true;
+            reduction_labels[reduction_rank] = rhs_labels[i];
+            reduction_shape[reduction_rank] = label_dims[label];
+            reduction_rank++;
+        }
+    }
+
+    chelis_tensor *out = chelis_alloc(out_rank, out_shape, lhs->dtype);
+    int out_index[CHELIS_MAX_DIM];
+    int reduction_index[CHELIS_MAX_DIM];
+    int lhs_index[CHELIS_MAX_DIM];
+    int rhs_index[CHELIS_MAX_DIM];
+    int reduction_total = 1;
+    for (int i = 0; i < reduction_rank; i++) {
+        reduction_total *= reduction_shape[i];
+    }
+
+    for (int out_linear = 0; out_linear < out->size; out_linear++) {
+        if (out_rank > 0) {
+            chelis_flat_to_indices(out_linear, out_shape, out_rank, out_index);
+        }
+        for (int i = 0; i < out_rank; i++) {
+            unsigned char label = (unsigned char)out_labels[i];
+            label_values[label] = out_index[i];
+        }
+
+        float acc = 0.0f;
+        for (int reduction_linear = 0; reduction_linear < reduction_total; reduction_linear++) {
+            if (reduction_rank > 0) {
+                chelis_flat_to_indices(
+                    reduction_linear,
+                    reduction_shape,
+                    reduction_rank,
+                    reduction_index
+                );
+            }
+            for (int i = 0; i < reduction_rank; i++) {
+                unsigned char label = (unsigned char)reduction_labels[i];
+                label_values[label] = reduction_index[i];
+            }
+            for (int i = 0; i < lhs_rank; i++) {
+                lhs_index[i] = label_values[(unsigned char)lhs_labels[i]];
+            }
+            for (int i = 0; i < rhs_rank; i++) {
+                rhs_index[i] = label_values[(unsigned char)rhs_labels[i]];
+            }
+            acc += lhs->data[chelis_indices_to_flat(lhs_index, lhs->strides, lhs_rank)]
+                * rhs->data[chelis_indices_to_flat(rhs_index, rhs->strides, rhs_rank)];
+        }
+        out->data[out_linear] = acc;
+    }
+    return out;
+}
+
 static void chelis_print_value_inline(chelis_value value) {
     switch (value.tag) {
         case CHELIS_VALUE_INT64:
@@ -910,5 +1446,5 @@ void chelis_print_f32(const chelis_tensor *t) {
         }
     }
     if (t->size > 10) printf(", ...");
-    printf("])\n");
+    printf("])");
 }

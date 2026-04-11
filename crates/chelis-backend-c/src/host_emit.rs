@@ -291,6 +291,15 @@ impl HostEmitter {
             .collect::<Vec<_>>();
 
         match name {
+            "tuple-get" => {
+                let value_var = self.next_temp("tuple_value");
+                self.lines.push(format!(
+                    "{}chelis_value {} = chelis_tuple_get({}, {});",
+                    self.indent, value_var, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.assign_unboxed_value(target, ty, &value_var);
+                return;
+            }
             "index" => {
                 let value_var = self.next_temp("list_value");
                 self.lines.push(format!(
@@ -310,9 +319,91 @@ impl HostEmitter {
                 return;
             }
             "concat" => {
+                if matches!(ty, HostType::Tensor(_)) {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_tensor_concat({}, {});",
+                        self.indent, arg_vars[0].0, arg_vars[1].0
+                    ));
+                } else {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_list_concat({}, {});",
+                        self.indent, arg_vars[0].0, arg_vars[1].0
+                    ));
+                }
+                return;
+            }
+            "split" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_concat({}, {});",
+                    "{}{target} = chelis_tensor_split({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "gather" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_gather({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "scatter" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_scatter({}, {}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    arg_vars[2].0,
+                    arg_vars[3].0,
+                    arg_vars[4].0
+                ));
+                return;
+            }
+            "where" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_where({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "cumsum" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_cumsum({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return;
+            }
+            "sort" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_sort({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return;
+            }
+            "diagonal" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_diagonal({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "trace" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_trace({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "clamp" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_clamp({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "einsum" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_tensor_einsum({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
                 ));
                 return;
             }
@@ -472,6 +563,9 @@ impl HostEmitter {
             "mul" => format!("{} * {}", arg_vars[0].0, arg_vars[1].0),
             "div" => format!("{} / {}", arg_vars[0].0, arg_vars[1].0),
             "mod" => format!("{} % {}", arg_vars[0].0, arg_vars[1].0),
+            "cmplt" if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
+                format!("chelis_tensor_cmplt({}, {})", arg_vars[0].0, arg_vars[1].0)
+            }
             "cmplt" => format!("{} < {}", arg_vars[0].0, arg_vars[1].0),
             "gt" => format!("{} > {}", arg_vars[0].0, arg_vars[1].0),
             "gte" => format!("{} >= {}", arg_vars[0].0, arg_vars[1].0),
@@ -1083,7 +1177,7 @@ impl HostEmitter {
                 self.indent, binding.name, binding.name
             )),
             HostType::Tensor(_) => self.lines.push(format!(
-                "{}printf(\"{} = \"); chelis_print_f32({});",
+                "{}printf(\"{} = \"); chelis_print_f32({}); printf(\"\\n\");",
                 self.indent, binding.name, binding.name
             )),
             HostType::List(_) => self.lines.push(format!(

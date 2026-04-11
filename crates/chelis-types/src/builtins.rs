@@ -99,6 +99,16 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "to_tensor",
     "to_list",
     "pad_sequences",
+    "einsum",
+    "split",
+    "gather",
+    "scatter",
+    "where",
+    "cumsum",
+    "sort",
+    "diagonal",
+    "trace",
+    "clamp",
 ];
 
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
@@ -346,6 +356,30 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn generic_pentaop(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let d = vg.fresh_tvar();
+        let e = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, d, e, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(a),
+                    Type::Var(b),
+                    Type::Var(c),
+                    Type::Var(d),
+                    Type::Var(e),
+                ],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_unop_same(name: &str, env: &mut Env, vg: &mut VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
@@ -519,6 +553,16 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("to_tensor", &mut env, &mut vg);
     generic_unop("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
+    generic_triop("einsum", &mut env, &mut vg);
+    generic_triop("split", &mut env, &mut vg);
+    generic_triop("gather", &mut env, &mut vg);
+    generic_pentaop("scatter", &mut env, &mut vg);
+    generic_triop("where", &mut env, &mut vg);
+    generic_binop("cumsum", &mut env, &mut vg);
+    generic_binop("sort", &mut env, &mut vg);
+    generic_triop("diagonal", &mut env, &mut vg);
+    generic_triop("trace", &mut env, &mut vg);
+    generic_triop("clamp", &mut env, &mut vg);
 
     (env, vg)
 }

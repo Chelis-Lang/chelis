@@ -168,6 +168,36 @@ chelis_list* chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor* chelis_tensor_from_value_list(const chelis_list *list);
 chelis_list* chelis_list_from_tensor(const chelis_tensor *tensor);
 chelis_tensor* chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
+chelis_tensor* chelis_tensor_concat(const chelis_list *parts, int64_t axis);
+chelis_list* chelis_tensor_split(const chelis_tensor *tensor, int64_t axis, const chelis_list *sizes);
+chelis_tensor* chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int64_t axis);
+chelis_tensor* chelis_tensor_cmplt(const chelis_tensor *lhs, const chelis_tensor *rhs);
+chelis_tensor* chelis_tensor_scatter(
+    const chelis_tensor *base,
+    const chelis_tensor *indices,
+    const chelis_tensor *updates,
+    int64_t axis,
+    chelis_string mode
+);
+chelis_tensor* chelis_tensor_where(
+    const chelis_tensor *cond,
+    const chelis_tensor *then_tensor,
+    const chelis_tensor *else_tensor
+);
+chelis_tensor* chelis_tensor_cumsum(const chelis_tensor *tensor, int64_t axis);
+chelis_tuple* chelis_tensor_sort(const chelis_tensor *tensor, int64_t axis);
+chelis_tensor* chelis_tensor_diagonal(const chelis_tensor *tensor, int64_t axis1, int64_t axis2);
+chelis_tensor* chelis_tensor_trace(const chelis_tensor *tensor, int64_t axis1, int64_t axis2);
+chelis_tensor* chelis_tensor_clamp(
+    const chelis_tensor *tensor,
+    const chelis_tensor *lo,
+    const chelis_tensor *hi
+);
+chelis_tensor* chelis_tensor_einsum(
+    chelis_string equation,
+    const chelis_tensor *lhs,
+    const chelis_tensor *rhs
+);
 void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
 void chelis_print_dict(const chelis_dict *dict);

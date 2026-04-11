@@ -32,6 +32,12 @@ Phase `3h` expands the practical primitive surface beyond this initial minimal s
 `diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding` remains the named standard-
 library surface over `gather`.
 
+For the `3h` additions, Chelis now rejects deterministic literal-driven value errors
+at check time when enough information is concrete in source (for example, statically
+inconsistent `einsum` extents or duplicate indices in `scatter(..., "replace")`).
+When those constraints depend on runtime values instead, the evaluator and generated C
+runtime reject them during execution; compiled C exits non-zero rather than aborting.
+
 ---
 
 ## 2. RISC Primitives (Tier 1)

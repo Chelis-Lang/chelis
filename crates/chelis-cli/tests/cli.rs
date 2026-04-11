@@ -3,6 +3,8 @@ use chelis_shell::{ShellSymbol, SymbolKind, read_shell, write_shell};
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
@@ -42,6 +44,10 @@ fn iter_foundation_example() -> PathBuf {
     example_path("../../examples/iter_foundation.ch")
 }
 
+fn tensor_structural_ops_example() -> PathBuf {
+    example_path("../../examples/tensor_structural_ops.ch")
+}
+
 fn linreg_example() -> PathBuf {
     example_path("../../examples/linreg.ch")
 }
@@ -50,7 +56,7 @@ fn transformer_block_example() -> PathBuf {
     example_path("../../examples/transformer_block.ch")
 }
 
-fn executable_examples() -> [PathBuf; 9] {
+fn executable_examples() -> [PathBuf; 10] {
     [
         dict_foundation_example(),
         hello_tensor_example(),
@@ -59,6 +65,7 @@ fn executable_examples() -> [PathBuf; 9] {
         linreg_example(),
         mnist_example(),
         scalar_string_foundation_example(),
+        tensor_structural_ops_example(),
         transformer_block_example(),
         vmap_example(),
     ]
@@ -400,6 +407,27 @@ fn eval_supports_map_filter_fold_collections() {
 }
 
 #[test]
+fn eval_supports_phase3h_tensor_structural_ops() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            tensor_structural_ops_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("contracted = tensor(shape=[2, 2]"))
+        .stdout(predicate::str::contains("packed = tensor(shape=[2, 4]"))
+        .stdout(predicate::str::contains("selected = tensor(shape=[2, 2]"))
+        .stdout(predicate::str::contains("scattered = tensor(shape=[3, 2]"))
+        .stdout(predicate::str::contains("sorted_values = tensor(shape=[2]"))
+        .stdout(predicate::str::contains(
+            "sorted_indices = tensor(shape=[2]",
+        ));
+}
+
+#[test]
 fn build_c_runs_list_foundation_and_matches_eval_output() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("list-build-out");
@@ -550,6 +578,310 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         run_output.status
     );
     assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("tensor-structural-build-out");
+    let source = tensor_structural_ops_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            "tensor_structural_ops.c",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "tensor_structural_ops",
+        ])
+        .status()
+        .expect("gcc should run");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("tensor_structural_ops"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+fn assert_reef_std_embedding_builds_to_valid_c() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("embedding-app");
+    let out_dir = dir.path().join("out");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "embedding-app"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Nn.Embedding (forward)
+
+export (main)
+
+def main(
+  ids: tensor[2, 3, int64],
+  table: tensor[8, 4, f32]
+) -> tensor[2, 3, 4, f32] =
+  forward(ids, table)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(app_pkg.join("reef.lock").exists());
+    assert!(out_dir.join("main.c").exists());
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args(["-O2", "-fopenmp", "-c", "main.c", "-o", "main.o"])
+        .status()
+        .expect("gcc should run");
+    assert!(
+        status.success(),
+        "gcc object compile failed with status {status}"
+    );
+}
+
+#[test]
+fn phase3h_numeric_acceptance_oracle() {
+    build_c_runs_tensor_structural_ops_and_matches_eval_output();
+    assert_reef_std_embedding_builds_to_valid_c();
+}
+
+#[test]
+fn check_rejects_static_invalid_phase3h_einsum_extent_mismatch() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("einsum_extent_bad.ch");
+    write_file(
+        &path,
+        r#"
+let a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
+let b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
+let out = einsum("ij,jk->ik", a, b)
+"#,
+    );
+
+    let json = run_json_check(&path);
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "check should report deterministic einsum error"
+    );
+    let messages = errors
+        .iter()
+        .filter_map(|error| error["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("einsum"));
+    assert!(messages.contains("inconsistent extents"));
+}
+
+#[test]
+fn check_rejects_static_invalid_phase3h_scatter_duplicate_replace() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scatter_dup_replace_bad.ch");
+    write_file(
+        &path,
+        r#"
+let base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
+let ids: List[int64] = [cast(1, int64), cast(1, int64)]
+let idx = to_tensor(ids)
+let updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
+let out = scatter(base, idx, updates, 0, "replace")
+"#,
+    );
+
+    let json = run_json_check(&path);
+    assert!(json["score"].as_f64().unwrap() < 1.0);
+    let errors = json["errors"].as_array().expect("errors array");
+    assert!(
+        !errors.is_empty(),
+        "check should report deterministic scatter duplicate-index error"
+    );
+    let messages = errors
+        .iter()
+        .filter_map(|error| error["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("scatter"));
+    assert!(messages.contains("duplicate target index"));
+}
+
+#[test]
+fn build_c_phase3h_runtime_value_errors_exit_cleanly_instead_of_aborting() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("scatter_runtime_bad.ch");
+    let out_dir = dir.path().join("scatter-dup-build");
+    write_file(
+        &source,
+        r#"
+def apply(
+  base: tensor[3, 2, f32],
+  idx: tensor[2, int64],
+  updates: tensor[2, 2, f32]
+) -> tensor[3, 2, f32] =
+  scatter(base, idx, updates, 0, "replace")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    write_file(
+        &out_dir.join("runner.c"),
+        r#"#include "chelis_runtime.h"
+#include "scatter_runtime_bad.h"
+
+int main(void) {
+    int base_shape[2] = {3, 2};
+    int idx_shape[1] = {2};
+    int updates_shape[2] = {2, 2};
+
+    chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
+    chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
+    chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_F32);
+    idx->data[0] = 1.0f;
+    idx->data[1] = 1.0f;
+    updates->data[0] = 5.0f;
+    updates->data[1] = 5.0f;
+    updates->data[2] = 6.0f;
+    updates->data[3] = 6.0f;
+
+    chelis_tensor *output = apply(base, idx, updates);
+
+    if (output != NULL) {
+        chelis_free(output);
+    }
+    chelis_free(base);
+    chelis_free(idx);
+    chelis_free(updates);
+    return 0;
+}
+"#,
+    );
+
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            "runner.c",
+            "scatter_runtime_bad.c",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "scatter_runtime_bad",
+        ])
+        .status()
+        .expect("gcc should run");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scatter_runtime_bad"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        !run_output.status.success(),
+        "compiled binary should fail on duplicate scatter replace"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_output.stderr)
+            .contains("scatter replace mode rejects duplicate target index"),
+        "expected duplicate-index stderr, got {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    assert_eq!(
+        run_output.status.code(),
+        Some(1),
+        "expected clean runtime failure exit code, got {}",
+        run_output.status
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        run_output.status.signal(),
+        None,
+        "expected normal exit instead of signal, got {}",
+        run_output.status
+    );
 }
 
 #[test]
@@ -1071,6 +1403,11 @@ def main(
     assert!(app_pkg.join("reef.lock").exists());
     assert!(out_dir.join("main.c").exists());
     assert!(out_dir.join("main.h").exists());
+}
+
+#[test]
+fn reef_std_embedding_module_checks_and_builds() {
+    assert_reef_std_embedding_builds_to_valid_c();
 }
 
 #[test]

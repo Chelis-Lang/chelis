@@ -272,7 +272,9 @@ fn lower_host_expr(
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
-    if let Some(tensor_ty) = expr_tensor_type(expr, program, scope) {
+    if let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
+        && !should_keep_tensor_expr_in_host_lane(expr)
+    {
         if let Expr::List(list, _) = expr
             && tag(list) == Some("var")
             && let Some(name) = children(list).first().and_then(symbol_name)
@@ -369,6 +371,9 @@ fn lower_host_expr(
         Expr::List(list, _) if tag(list) == Some("match") => {
             lower_match_host_expr(list, program, scope, tensor_helpers)
         }
+        Expr::List(list, _) if tag(list) == Some("tuple-get") => {
+            lower_tuple_get_host_expr(list, program, scope, tensor_helpers)
+        }
         Expr::List(list, _) if tag(list) == Some("cast") => lower_host_expr(
             children(list).first().unwrap_or(expr),
             program,
@@ -381,6 +386,40 @@ fn lower_host_expr(
         Expr::MetaExpr(meta, _) => lower_host_expr(&meta.expr, program, scope, tensor_helpers),
         _ => HostExpr::Unit,
     }
+}
+
+fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
+    let Expr::List(list, _) = expr else {
+        return false;
+    };
+    if tag(list) == Some("tuple-get") {
+        return true;
+    }
+    if tag(list) != Some("app") {
+        return false;
+    }
+    let Some(callee) = children(list).first().and_then(as_list) else {
+        return false;
+    };
+    if tag(callee) != Some("var") {
+        return false;
+    }
+    matches!(
+        children(callee).first().and_then(symbol_name),
+        Some(
+            "concat"
+                | "split"
+                | "gather"
+                | "scatter"
+                | "where"
+                | "cumsum"
+                | "sort"
+                | "diagonal"
+                | "trace"
+                | "clamp"
+                | "einsum"
+        )
+    )
 }
 
 fn lower_match_host_expr(
@@ -450,6 +489,37 @@ fn lower_match_host_expr(
         bind_name,
         some_expr: Box::new(some_expr),
         none_expr: Box::new(none_expr),
+        ty,
+    }
+}
+
+fn lower_tuple_get_host_expr(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> HostExpr {
+    let kids = children(list);
+    let tuple_expr = kids
+        .first()
+        .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers));
+    let index_expr = kids
+        .get(1)
+        .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers));
+    let args = tuple_expr.into_iter().chain(index_expr).collect::<Vec<_>>();
+    let explicit_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    let ty = if explicit_ty == HostType::Unknown {
+        infer_builtin_host_type("tuple-get", &args).unwrap_or(HostType::Unknown)
+    } else {
+        explicit_ty
+    };
+    HostExpr::Builtin {
+        name: "tuple-get".to_string(),
+        args,
         ty,
     }
 }
@@ -628,13 +698,16 @@ fn lower_app_host_expr(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Vec<_>>();
-    let ty = infer_builtin_host_type(&name, &args).unwrap_or_else(|| {
-        expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        )
-    });
+    let explicit_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    let ty = if explicit_ty != HostType::Unknown {
+        explicit_ty
+    } else {
+        infer_builtin_host_type(&name, &args).unwrap_or(HostType::Unknown)
+    };
     HostExpr::Builtin { name, args, ty }
 }
 
@@ -967,8 +1040,15 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
         }
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "string_len" | "rank" | "shape"
         | "numel" => Some(HostType::Int64),
-        "cmplt" | "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not"
-        | "string_contains" | "string_starts_with" | "string_ends_with" => Some(HostType::Bool),
+        "cmplt" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(TensorType {
+                dims: tensor_ty.dims.clone(),
+                precision: chelis_types::types::Prim::Bool,
+            })),
+            _ => Some(HostType::Bool),
+        },
+        "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
+        | "string_starts_with" | "string_ends_with" => Some(HostType::Bool),
         "string_concat" | "string_trim" | "string_slice" | "to_string" => Some(HostType::String),
         "to_int" => Some(HostType::Option(Box::new(HostType::Int64))),
         "to_float" => Some(HostType::Option(Box::new(HostType::Float64))),
@@ -977,7 +1057,49 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
             Some(HostType::List(inner)) => Some((**inner).clone()),
             _ => Some(HostType::Unknown),
         },
-        "append" | "concat" => arg_tys.first().cloned(),
+        "append" => arg_tys.first().cloned(),
+        "concat" => match (arg_tys.first(), arg_tys.get(1)) {
+            (Some(HostType::List(inner)), Some(HostType::Int64))
+                if matches!(inner.as_ref(), HostType::Tensor(_)) =>
+            {
+                match inner.as_ref() {
+                    HostType::Tensor(tensor_ty) => Some(HostType::Tensor(tensor_ty.clone())),
+                    _ => Some(HostType::Unknown),
+                }
+            }
+            (Some(lhs), Some(_)) => Some(lhs.clone()),
+            _ => Some(HostType::Unknown),
+        },
+        "split" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::List(Box::new(HostType::Tensor(
+                tensor_ty.clone(),
+            )))),
+            _ => Some(HostType::Unknown),
+        },
+        "gather" | "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => {
+            arg_tys.first().cloned()
+        }
+        "einsum" => match arg_tys.get(1) {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
+            _ => Some(HostType::Unknown),
+        },
+        "sort" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
+                HostType::Tensor(tensor_ty.clone()),
+                HostType::Tensor(TensorType {
+                    dims: tensor_ty.dims.clone(),
+                    precision: chelis_types::types::Prim::Int64,
+                }),
+            ])),
+            _ => Some(HostType::Unknown),
+        },
+        "tuple-get" => match (arg_tys.first(), args.get(1)) {
+            (Some(HostType::Tuple(items)), Some(HostExpr::Int(index))) => items
+                .get(*index as usize)
+                .cloned()
+                .or(Some(HostType::Unknown)),
+            _ => Some(HostType::Unknown),
+        },
         "take" | "drop" => match arg_tys.first() {
             Some(HostType::List(inner)) => Some(HostType::List(Box::new((**inner).clone()))),
             _ => Some(HostType::Unknown),

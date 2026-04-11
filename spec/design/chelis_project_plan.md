@@ -460,6 +460,13 @@ Shipped.
   wrapper over `gather`, because it is the natural public entrypoint for NLP models
 - treat this as the last major tensor-language expansion before the data/token pipeline
   becomes the critical path
+- require `chelis check` to reject deterministic literal-driven `3h` value errors
+  (such as static `einsum` extent mismatches or duplicate `scatter(..., "replace")`
+  indices) before build; when the bad value is only known at runtime, compiled C should
+  exit non-zero rather than aborting
+- acceptance oracle: `cargo test -p chelis-cli phase3h_numeric_acceptance_oracle -- --nocapture`
+  which covers both the compiled tensor-structural example and the Reef
+  `Std.Nn.Embedding` package-import build path
 
 ### 3g: Data Loading and Tokenization
 
@@ -509,8 +516,14 @@ Post-Phase-3 shell stack:
   distributions, optimization solvers including differentiable optimization,
   interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
   processing once complex numbers land
-- `treasure` sits on top of `chelis-std` + `school` for finance-specific pricing,
-  risk, curves, stochastic processes, and order-book style workloads
+- `coral` sits on top of `chelis-std` as the typed dataframe shell in the marine
+  reef/shells/tide/cove/school/coral/treasure lineup: GPU-accelerated numeric columns,
+  host-side string columns, and AD through dataframe operations where `filter` lowers
+  to gather and aggregation lowers to reduction; aimed at pandas/Polars-style tabular
+  work while staying focused on typed correctness and differentiable composition
+- `treasure` sits on top of `chelis-std` + `school`, with optional `coral`
+  integration, for finance-specific pricing, risk, curves, stochastic processes, and
+  order-book style workloads
 
 ---
 

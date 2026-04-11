@@ -326,6 +326,9 @@ Without this cut, users still hit avoidable walls around:
   make the underlying `gather` primitive part of this phase
 - preserve the Phase 0/1 invariants: explicit shapes, explicit broadcasting, and
   backend agreement with the reference C path
+- reject deterministic literal-driven `3h` value errors during `chelis check` when the
+  offending extents/indices are statically concrete; runtime-only bad values still fail
+  during execution, but compiled C exits non-zero rather than aborting
 
 ### Acceptance Oracle
 
@@ -335,6 +338,13 @@ A pure Chelis model program can:
 - concatenate and split tensor features without falling back to Python
 - perform embedding lookup through `Std.Nn.Embedding`
 - clamp or trace intermediate tensors in compiled programs on the C path
+
+Current shipped oracle for the executable `3h` slice:
+
+- `cargo test -p chelis-cli phase3h_numeric_acceptance_oracle -- --nocapture`
+  which proves both the compiled tensor-structural example path
+  (`examples/tensor_structural_ops.ch`, including `einsum`) and the Reef package path
+  (`Std.Nn.Embedding` imported from `chelis-std`) build to valid C artifacts
 
 ---
 
@@ -474,8 +484,14 @@ The ecosystem layering this phase is setting up is:
   distributions, optimization solvers including differentiable optimization,
   interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
   processing once complex numbers land
-- `treasure` on top of `chelis-std` + `school` for finance-specific pricing, risk,
-  curves, stochastic processes, and order-book workloads
+- `coral` on top of `chelis-std` as the typed dataframe shell in the reef/shells/tide/
+  cove/school/coral/treasure marine lineup: GPU-accelerated numeric columns, host-side
+  string columns, and AD through dataframe operations where `filter` lowers to gather
+  and aggregation lowers to reduction; positioned for pandas/Polars-style tabular work
+  with typed correctness and differentiable composition
+- `treasure` on top of `chelis-std` + `school`, with optional `coral` integration for
+  finance-specific pricing, risk, curves, stochastic processes, and order-book
+  workloads
 
 ---
 

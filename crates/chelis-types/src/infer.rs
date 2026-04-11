@@ -195,24 +195,72 @@ fn validate_phase0e_program(
     type_env: &Phase0eTypeEnv,
     errors: &mut Vec<CheckError>,
 ) {
+    let mut static_env = HashMap::new();
     for expr in exprs {
-        validate_phase0e_expr(expr, type_env, errors);
+        validate_phase0e_expr(expr, type_env, &mut static_env, errors);
     }
 }
 
 fn validate_phase0e_expr(
     expr: &deep::Expr,
     type_env: &Phase0eTypeEnv,
+    static_env: &mut HashMap<String, StaticValue>,
     errors: &mut Vec<CheckError>,
-) {
+) -> StaticValue {
     match expr {
         deep::Expr::List(list, _) => {
+            if get_tag(list) == Some("module") {
+                for elem in list.elements.iter().skip(3) {
+                    validate_phase0e_expr(elem, type_env, static_env, errors);
+                }
+                return StaticValue::Unknown;
+            }
+            if get_tag(list) == Some("def") {
+                let kids = children(list);
+                let Some(name) = kids.first().and_then(symbol_name) else {
+                    return StaticValue::Unknown;
+                };
+                let Some(value_expr) = kids.get(1) else {
+                    return StaticValue::Unknown;
+                };
+                let value = validate_phase0e_expr(value_expr, type_env, static_env, errors);
+                static_env.insert(name.to_string(), value);
+                return StaticValue::Unknown;
+            }
             if get_tag(list) == Some("fn") {
                 let scoped_env = extend_phase0e_env_with_fn_params(list, type_env);
+                let mut scoped_static_env = static_env.clone();
+                bind_fn_params_unknown(list, &mut scoped_static_env);
                 for elem in &list.elements {
-                    validate_phase0e_expr(elem, &scoped_env, errors);
+                    validate_phase0e_expr(elem, &scoped_env, &mut scoped_static_env, errors);
                 }
-                return;
+                return StaticValue::Unknown;
+            }
+            if get_tag(list) == Some("let") {
+                let kids = children(list);
+                let mut scoped_static_env = static_env.clone();
+                if let Some(deep::Expr::List(bind_list, _)) = kids.first()
+                    && get_tag(bind_list) == Some("bind")
+                {
+                    let bind_children = children(bind_list);
+                    let mut index = 0;
+                    while index + 1 < bind_children.len() {
+                        if let Some(name) = symbol_name(&bind_children[index]) {
+                            let value = validate_phase0e_expr(
+                                &bind_children[index + 1],
+                                type_env,
+                                &mut scoped_static_env,
+                                errors,
+                            );
+                            scoped_static_env.insert(name.to_string(), value);
+                        }
+                        index += 2;
+                    }
+                }
+                if let Some(body) = kids.get(1) {
+                    return validate_phase0e_expr(body, type_env, &mut scoped_static_env, errors);
+                }
+                return StaticValue::Unknown;
             }
             if let Some(tag) = get_tag(list) {
                 if matches!(tag, "par" | "jit") {
@@ -233,23 +281,540 @@ fn validate_phase0e_expr(
                 }
             }
 
-            for elem in &list.elements {
-                validate_phase0e_expr(elem, type_env, errors);
+            if get_tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                return if name == "Nil" {
+                    StaticValue::List(Vec::new())
+                } else {
+                    static_env
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(StaticValue::Unknown)
+                };
             }
+            if get_tag(list) == Some("lit") {
+                return literal_static_value(expr);
+            }
+            if get_tag(list) == Some("cast") {
+                let kids = children(list);
+                return kids
+                    .first()
+                    .map(|inner| validate_phase0e_expr(inner, type_env, static_env, errors))
+                    .unwrap_or(StaticValue::Unknown);
+            }
+            if get_tag(list) == Some("app") {
+                let kids = children(list);
+                let func_name = kids.first().and_then(app_builtin_name);
+                let arg_values = kids
+                    .iter()
+                    .skip(1)
+                    .map(|arg| validate_phase0e_expr(arg, type_env, static_env, errors))
+                    .collect::<Vec<_>>();
+                if func_name == Some("Cons") && arg_values.len() == 2 {
+                    if let StaticValue::List(mut tail) = arg_values[1].clone() {
+                        tail.insert(0, arg_values[0].clone());
+                        return StaticValue::List(tail);
+                    }
+                    return StaticValue::Unknown;
+                }
+                if let Some(name) = func_name {
+                    return validate_static_builtin_application(name, &arg_values, expr, errors);
+                }
+                return StaticValue::Unknown;
+            }
+
+            for elem in &list.elements {
+                validate_phase0e_expr(elem, type_env, static_env, errors);
+            }
+            StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                validate_phase0e_expr(value, type_env, errors);
+                validate_phase0e_expr(value, type_env, static_env, errors);
             }
+            StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, value) in &meta.entries {
-                validate_phase0e_expr(value, type_env, errors);
+                validate_phase0e_expr(value, type_env, static_env, errors);
             }
-            validate_phase0e_expr(&meta.expr, type_env, errors);
+            validate_phase0e_expr(&meta.expr, type_env, static_env, errors)
         }
-        deep::Expr::Atom(_, _) => {}
+        deep::Expr::Atom(_, _) => literal_static_value(expr),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum StaticValue {
+    Unknown,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    List(Vec<StaticValue>),
+    Tensor(StaticTensor),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StaticTensor {
+    shape: Vec<usize>,
+    int_values: Option<Vec<i64>>,
+}
+
+fn bind_fn_params_unknown(fn_list: &deep::List, env: &mut HashMap<String, StaticValue>) {
+    let Some(params_expr) = children(fn_list).first() else {
+        return;
+    };
+    let deep::Expr::List(params_list, _) = params_expr else {
+        return;
+    };
+    if get_tag(params_list) != Some("params") {
+        return;
+    }
+    for param in children(params_list) {
+        match param {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => {
+                env.insert(name.clone(), StaticValue::Unknown);
+            }
+            deep::Expr::List(param_list, _) => {
+                if let Some(name) = param_list.elements.first().and_then(symbol_name) {
+                    env.insert(name.to_string(), StaticValue::Unknown);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn literal_static_value(expr: &deep::Expr) -> StaticValue {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Int(value), _) => StaticValue::Int(*value),
+        deep::Expr::Atom(deep::Atom::Float(value), _) => StaticValue::Float(*value),
+        deep::Expr::Atom(deep::Atom::Bool(value), _) => StaticValue::Bool(*value),
+        deep::Expr::Atom(deep::Atom::Str(value), _) => StaticValue::String(value.clone()),
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => children(list)
+            .first()
+            .map(literal_static_value)
+            .unwrap_or(StaticValue::Unknown),
+        _ => StaticValue::Unknown,
+    }
+}
+
+fn app_builtin_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
+fn validate_static_builtin_application(
+    name: &str,
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    match name {
+        "pad_sequences" => static_pad_sequences(args),
+        "to_tensor" => static_to_tensor(args),
+        "concat" => static_concat(args, expr, errors),
+        "split" => static_split(args, expr, errors),
+        "gather" => static_gather(args, expr, errors),
+        "scatter" => static_scatter(args, expr, errors),
+        "clamp" => static_clamp(args, expr, errors),
+        "einsum" => static_einsum(args, expr, errors),
+        _ => StaticValue::Unknown,
+    }
+}
+
+fn static_pad_sequences(args: &[StaticValue]) -> StaticValue {
+    let Some(StaticValue::List(rows)) = args.first() else {
+        return StaticValue::Unknown;
+    };
+    let mut width = 0usize;
+    for row in rows {
+        let StaticValue::List(items) = row else {
+            return StaticValue::Unknown;
+        };
+        width = width.max(items.len());
+    }
+    StaticValue::Tensor(StaticTensor {
+        shape: vec![rows.len(), width],
+        int_values: None,
+    })
+}
+
+fn static_to_tensor(args: &[StaticValue]) -> StaticValue {
+    let Some(StaticValue::List(items)) = args.first() else {
+        return StaticValue::Unknown;
+    };
+    let mut ints = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            StaticValue::Int(value) => ints.push(*value),
+            StaticValue::Float(_) | StaticValue::Bool(_) => {
+                return StaticValue::Tensor(StaticTensor {
+                    shape: vec![items.len()],
+                    int_values: None,
+                });
+            }
+            _ => return StaticValue::Unknown,
+        }
+    }
+    StaticValue::Tensor(StaticTensor {
+        shape: vec![items.len()],
+        int_values: Some(ints),
+    })
+}
+
+fn static_concat(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (Some(StaticValue::List(parts)), Some(StaticValue::Int(axis))) =
+        (args.first(), args.get(1))
+    else {
+        return StaticValue::Unknown;
+    };
+    if *axis < 0 {
+        return StaticValue::Unknown;
+    }
+    let tensors = parts
+        .iter()
+        .map(|value| match value {
+            StaticValue::Tensor(tensor) => Some(tensor.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(tensors) = tensors else {
+        return StaticValue::Unknown;
+    };
+    let Some(first) = tensors.first() else {
+        return StaticValue::Unknown;
+    };
+    let axis = *axis as usize;
+    if axis >= first.shape.len() {
+        return StaticValue::Unknown;
+    }
+    let mut shape = first.shape.clone();
+    let mut axis_total = shape[axis];
+    for tensor in tensors.iter().skip(1) {
+        if tensor.shape.len() != shape.len() {
+            push_static_runtime_error(
+                expr,
+                errors,
+                "concat expects matching tensor rank".to_string(),
+            );
+            return StaticValue::Unknown;
+        }
+        for (dim, expected_extent) in shape.iter().enumerate() {
+            if dim != axis && tensor.shape[dim] != *expected_extent {
+                push_static_runtime_error(
+                    expr,
+                    errors,
+                    "concat expects matching non-concatenated axes".to_string(),
+                );
+                return StaticValue::Unknown;
+            }
+        }
+        axis_total += tensor.shape[axis];
+    }
+    shape[axis] = axis_total;
+    StaticValue::Tensor(StaticTensor {
+        shape,
+        int_values: None,
+    })
+}
+
+fn static_split(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::Tensor(tensor)),
+        Some(StaticValue::Int(axis)),
+        Some(StaticValue::List(sizes)),
+    ) = (args.first(), args.get(1), args.get(2))
+    else {
+        return StaticValue::Unknown;
+    };
+    if *axis < 0 {
+        return StaticValue::Unknown;
+    }
+    let axis = *axis as usize;
+    if axis >= tensor.shape.len() {
+        return StaticValue::Unknown;
+    }
+    let Some(size_values) = sizes
+        .iter()
+        .map(|value| match value {
+            StaticValue::Int(size) if *size >= 0 => Some(*size as usize),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return StaticValue::Unknown;
+    };
+    if size_values.iter().sum::<usize>() != tensor.shape[axis] {
+        push_static_runtime_error(
+            expr,
+            errors,
+            "split sizes must sum to the selected axis extent".to_string(),
+        );
+    }
+    StaticValue::Unknown
+}
+
+fn static_gather(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::Tensor(tensor)),
+        Some(StaticValue::Tensor(indices)),
+        Some(StaticValue::Int(axis)),
+    ) = (args.first(), args.get(1), args.get(2))
+    else {
+        return StaticValue::Unknown;
+    };
+    let Some(axis) = normalize_static_axis(tensor.shape.len(), *axis) else {
+        return StaticValue::Unknown;
+    };
+    if let Some(index_values) = &indices.int_values {
+        for value in index_values {
+            if *value < 0 || *value >= tensor.shape[axis] as i64 {
+                push_static_runtime_error(
+                    expr,
+                    errors,
+                    format!("gather index {value} out of bounds"),
+                );
+                return StaticValue::Unknown;
+            }
+        }
+    }
+    StaticValue::Tensor(StaticTensor {
+        shape: gather_result_shape(&tensor.shape, &indices.shape, axis),
+        int_values: None,
+    })
+}
+
+fn static_scatter(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::Tensor(base)),
+        Some(StaticValue::Tensor(indices)),
+        Some(StaticValue::Tensor(updates)),
+        Some(StaticValue::Int(axis)),
+        Some(StaticValue::String(mode)),
+    ) = (
+        args.first(),
+        args.get(1),
+        args.get(2),
+        args.get(3),
+        args.get(4),
+    )
+    else {
+        return StaticValue::Unknown;
+    };
+    let Some(axis) = normalize_static_axis(base.shape.len(), *axis) else {
+        return StaticValue::Unknown;
+    };
+    let expected_updates = gather_result_shape(&base.shape, &indices.shape, axis);
+    if updates.shape != expected_updates {
+        push_static_runtime_error(
+            expr,
+            errors,
+            "scatter updates must match gathered tensor shape and precision".to_string(),
+        );
+        return StaticValue::Unknown;
+    }
+    if let Some(index_values) = &indices.int_values {
+        let mut seen = HashSet::new();
+        for linear in 0..updates_shape_numel(&updates.shape) {
+            let update_index = unravel_index(linear, &updates.shape);
+            let gather_index = update_index[axis..axis + indices.shape.len()].to_vec();
+            let gather_linear = ravel_index(&gather_index, &indices.shape);
+            let gathered = index_values[gather_linear];
+            if gathered < 0 || gathered >= base.shape[axis] as i64 {
+                push_static_runtime_error(
+                    expr,
+                    errors,
+                    format!("scatter index {gathered} out of bounds"),
+                );
+                return StaticValue::Unknown;
+            }
+            if mode == "replace" {
+                let mut out_index = Vec::with_capacity(base.shape.len());
+                out_index.extend_from_slice(&update_index[..axis]);
+                out_index.push(gathered as usize);
+                out_index.extend_from_slice(&update_index[axis + indices.shape.len()..]);
+                let out_linear = ravel_index(&out_index, &base.shape);
+                if !seen.insert(out_linear) {
+                    push_static_runtime_error(
+                        expr,
+                        errors,
+                        format!("scatter replace mode rejects duplicate target index {out_linear}"),
+                    );
+                    return StaticValue::Unknown;
+                }
+            }
+        }
+    }
+    StaticValue::Tensor(base.clone())
+}
+
+fn static_clamp(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::Tensor(input)),
+        Some(StaticValue::Tensor(low)),
+        Some(StaticValue::Tensor(high)),
+    ) = (args.first(), args.get(1), args.get(2))
+    else {
+        return StaticValue::Unknown;
+    };
+    let low_ok = low.shape.is_empty() || low.shape == input.shape;
+    let high_ok = high.shape.is_empty() || high.shape == input.shape;
+    if !low_ok || !high_ok {
+        push_static_runtime_error(
+            expr,
+            errors,
+            "clamp expects scalar bounds or matching-shape tensor bounds".to_string(),
+        );
+        return StaticValue::Unknown;
+    }
+    StaticValue::Tensor(input.clone())
+}
+
+fn static_einsum(
+    args: &[StaticValue],
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+) -> StaticValue {
+    let (
+        Some(StaticValue::String(equation)),
+        Some(StaticValue::Tensor(lhs)),
+        Some(StaticValue::Tensor(rhs)),
+    ) = (args.first(), args.get(1), args.get(2))
+    else {
+        return StaticValue::Unknown;
+    };
+    let Some((inputs, output)) = equation.split_once("->") else {
+        return StaticValue::Unknown;
+    };
+    let mut input_groups = inputs.split(',');
+    let lhs_labels = input_groups
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .collect::<Vec<_>>();
+    let rhs_labels = input_groups
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .collect::<Vec<_>>();
+    if input_groups.next().is_some()
+        || lhs_labels.len() != lhs.shape.len()
+        || rhs_labels.len() != rhs.shape.len()
+    {
+        return StaticValue::Unknown;
+    }
+    let mut extents = HashMap::<char, usize>::new();
+    for (label, extent) in lhs_labels.iter().zip(&lhs.shape) {
+        if let Some(existing) = extents.insert(*label, *extent)
+            && existing != *extent
+        {
+            push_static_runtime_error(
+                expr,
+                errors,
+                format!("einsum label `{label}` has inconsistent extents"),
+            );
+            return StaticValue::Unknown;
+        }
+    }
+    for (label, extent) in rhs_labels.iter().zip(&rhs.shape) {
+        if let Some(existing) = extents.insert(*label, *extent)
+            && existing != *extent
+        {
+            push_static_runtime_error(
+                expr,
+                errors,
+                format!("einsum label `{label}` has inconsistent extents"),
+            );
+            return StaticValue::Unknown;
+        }
+    }
+    let mut out_shape = Vec::new();
+    for label in output.chars() {
+        let Some(extent) = extents.get(&label).copied() else {
+            return StaticValue::Unknown;
+        };
+        out_shape.push(extent);
+    }
+    StaticValue::Tensor(StaticTensor {
+        shape: out_shape,
+        int_values: None,
+    })
+}
+
+fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
+    let rank = rank as i64;
+    let axis = if axis < 0 { rank + axis } else { axis };
+    (0..rank).contains(&axis).then_some(axis as usize)
+}
+
+fn gather_result_shape(base: &[usize], indices: &[usize], axis: usize) -> Vec<usize> {
+    let mut shape = Vec::with_capacity(base.len().saturating_sub(1) + indices.len());
+    shape.extend_from_slice(&base[..axis]);
+    shape.extend_from_slice(indices);
+    shape.extend_from_slice(&base[axis + 1..]);
+    shape
+}
+
+fn updates_shape_numel(shape: &[usize]) -> usize {
+    shape.iter().copied().product::<usize>().max(1)
+}
+
+fn unravel_index(mut linear: usize, shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![0; shape.len()];
+    for dim in (0..shape.len()).rev() {
+        out[dim] = linear % shape[dim];
+        linear /= shape[dim];
+    }
+    out
+}
+
+fn ravel_index(indices: &[usize], shape: &[usize]) -> usize {
+    let mut flat = 0usize;
+    let mut stride = 1usize;
+    for (index, extent) in indices.iter().zip(shape.iter()).rev() {
+        flat += index * stride;
+        stride *= extent;
+    }
+    flat
+}
+
+fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, message: String) {
+    errors.push(CheckError::new(
+        CheckErrorKind::Other,
+        with_macro_provenance(expr, message),
+        vec![],
+    ));
 }
 
 fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
@@ -978,6 +1543,112 @@ fn collection_helper_type_error(
         with_macro_provenance(expr, format!("{helper} {contract}; {}", te.message)),
         suggestions,
     )
+}
+
+fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => {
+            children(list).first().and_then(|child| match child {
+                deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
+    let Type::Tensor(dims, precision) = element_ty else {
+        return Err(format!(
+            "concat expects List[tensor[...]] for tensor concatenation, got {element_ty}"
+        ));
+    };
+    if dims.is_empty() {
+        return Err("concat expects tensor inputs with at least one axis".to_string());
+    }
+    let mut out_dims = dims.clone();
+    let last_axis = out_dims.len() - 1;
+    out_dims[last_axis] = Dim::Wildcard;
+    Ok(Type::Tensor(out_dims, *precision))
+}
+
+fn infer_gather_result_type(
+    tensor_ty: &Type,
+    indices_ty: &Type,
+    axis: usize,
+) -> Result<Type, String> {
+    let Type::Tensor(tensor_dims, tensor_precision) = tensor_ty else {
+        return Err(format!("gather expects tensor input, got {tensor_ty}"));
+    };
+    let Type::Tensor(index_dims, index_precision) = indices_ty else {
+        return Err(format!(
+            "gather expects integer tensor indices, got {indices_ty}"
+        ));
+    };
+    if !index_precision.is_integer() {
+        return Err(format!(
+            "gather expects integer tensor indices, got tensor[..., {}]",
+            index_precision.name()
+        ));
+    }
+    if axis >= tensor_dims.len() {
+        return Err(format!(
+            "gather axis {axis} out of bounds for rank {}",
+            tensor_dims.len()
+        ));
+    }
+    let mut out_dims = tensor_dims[..axis].to_vec();
+    out_dims.extend(index_dims.clone());
+    out_dims.extend_from_slice(&tensor_dims[axis + 1..]);
+    Ok(Type::Tensor(out_dims, *tensor_precision))
+}
+
+fn infer_trace_result_type(tensor_ty: &Type, axis1: usize, axis2: usize) -> Result<Type, String> {
+    let Type::Tensor(dims, precision) = tensor_ty else {
+        return Err(format!("trace expects tensor input, got {tensor_ty}"));
+    };
+    if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
+        return Err(format!(
+            "trace expects distinct in-bounds axes, got {axis1} and {axis2} for rank {}",
+            dims.len()
+        ));
+    }
+    let out_dims = dims
+        .iter()
+        .enumerate()
+        .filter_map(|(index, dim)| ((index != axis1) && (index != axis2)).then_some(dim.clone()))
+        .collect();
+    Ok(Type::Tensor(out_dims, *precision))
+}
+
+fn infer_diagonal_result_type(
+    tensor_ty: &Type,
+    axis1: usize,
+    axis2: usize,
+) -> Result<Type, String> {
+    let Type::Tensor(dims, precision) = tensor_ty else {
+        return Err(format!("diagonal expects tensor input, got {tensor_ty}"));
+    };
+    if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
+        return Err(format!(
+            "diagonal expects distinct in-bounds axes, got {axis1} and {axis2} for rank {}",
+            dims.len()
+        ));
+    }
+    let diag_dim = match (&dims[axis1], &dims[axis2]) {
+        (Dim::Lit(lhs), Dim::Lit(rhs)) if lhs == rhs => Dim::Lit(*lhs),
+        _ => Dim::Wildcard,
+    };
+    let mut out_dims = Vec::with_capacity(dims.len() - 1);
+    for (index, dim) in dims.iter().enumerate() {
+        if index == axis1 {
+            out_dims.push(diag_dim.clone());
+        } else if index != axis2 {
+            out_dims.push(dim.clone());
+        }
+    }
+    Ok(Type::Tensor(out_dims, *precision))
 }
 
 fn macro_source(expr: &deep::Expr) -> Option<String> {
@@ -2352,6 +3023,327 @@ fn infer_app(
                             }
                         }
                     }
+                    "einsum" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    "einsum expects a string equation as its first argument"
+                                        .to_string(),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        };
+                        if equation.contains("...") {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    "einsum ellipsis support is deferred in 3h".to_string(),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        return result_ty;
+                    }
+                    "gather" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let axis = kids.get(3).and_then(extract_axis_literal).unwrap_or(0);
+                        let tensor_ty = subst.apply(&arg_tys[0]);
+                        let indices_ty = subst.apply(&arg_tys[1]);
+                        match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
+                            Ok(ty) => return ty,
+                            Err(message) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        message,
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "where" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let cond_ty = subst.apply(&arg_tys[0]);
+                        let then_ty = subst.apply(&arg_tys[1]);
+                        let else_ty = subst.apply(&arg_tys[2]);
+                        match (&cond_ty, &then_ty, &else_ty) {
+                            (
+                                Type::Tensor(cond_dims, Prim::Bool),
+                                Type::Tensor(then_dims, then_prec),
+                                Type::Tensor(else_dims, else_prec),
+                            ) => {
+                                if then_prec != else_prec
+                                    || cond_dims != then_dims
+                                    || then_dims != else_dims
+                                {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                return Type::Tensor(then_dims.clone(), *then_prec);
+                            }
+                            (Type::Var(_), _, _)
+                            | (_, Type::Var(_), _)
+                            | (_, _, Type::Var(_))
+                            | (Type::Error, _, _)
+                            | (_, Type::Error, _)
+                            | (_, _, Type::Error) => return result_ty,
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "cumsum" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
+                        match subst.apply(&arg_tys[0]) {
+                            Type::Tensor(dims, precision) => {
+                                if axis >= dims.len() {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "cumsum axis {axis} out of bounds for rank {}",
+                                                dims.len()
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                return Type::Tensor(dims, precision);
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("cumsum expects tensor input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "diagonal" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
+                        let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
+                        match infer_diagonal_result_type(&subst.apply(&arg_tys[0]), axis1, axis2) {
+                            Ok(ty) => return ty,
+                            Err(message) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        message,
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "trace" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
+                        let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
+                        match infer_trace_result_type(&subst.apply(&arg_tys[0]), axis1, axis2) {
+                            Ok(ty) => return ty,
+                            Err(message) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        message,
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "clamp" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let input_ty = subst.apply(&arg_tys[0]);
+                        let low_ty = subst.apply(&arg_tys[1]);
+                        let high_ty = subst.apply(&arg_tys[2]);
+                        match (&input_ty, &low_ty, &high_ty) {
+                            (
+                                Type::Tensor(input_dims, input_prec),
+                                Type::Tensor(low_dims, low_prec),
+                                Type::Tensor(high_dims, high_prec),
+                            ) => {
+                                let low_ok = low_dims.is_empty() || low_dims == input_dims;
+                                let high_ok = high_dims.is_empty() || high_dims == input_dims;
+                                if low_ok
+                                    && high_ok
+                                    && low_prec == input_prec
+                                    && high_prec == input_prec
+                                {
+                                    return input_ty;
+                                }
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                            (Type::Var(_), _, _)
+                            | (_, Type::Var(_), _)
+                            | (_, _, Type::Var(_))
+                            | (Type::Error, _, _)
+                            | (_, Type::Error, _)
+                            | (_, _, Type::Error) => return result_ty,
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "sort" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
+                        match subst.apply(&arg_tys[0]) {
+                            Type::Tensor(dims, precision) => {
+                                if axis >= dims.len() {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "sort axis {axis} out of bounds for rank {}",
+                                                dims.len()
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                return Type::Tuple(vec![
+                                    Type::Tensor(dims.clone(), precision),
+                                    Type::Tensor(dims, Prim::Int64),
+                                ]);
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("sort expects tensor input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "scatter" => {
+                        if arg_tys.len() != 5 {
+                            return Type::Error;
+                        }
+                        let base_ty = subst.apply(&arg_tys[0]);
+                        let indices_ty = subst.apply(&arg_tys[1]);
+                        let updates_ty = subst.apply(&arg_tys[2]);
+                        let axis = kids.get(4).and_then(extract_axis_literal).unwrap_or(0);
+                        let mode = kids.get(5).and_then(extract_string_literal);
+                        match mode.as_deref() {
+                            Some("replace") | Some("add") => {}
+                            _ => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        "scatter mode must be \"replace\" or \"add\"".to_string(),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                        match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                            Ok(expected_updates) => {
+                                if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return base_ty;
+                            }
+                            Err(message) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        message,
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
                     "len" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
@@ -2445,6 +3437,26 @@ fn infer_app(
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
                         match (lhs, rhs) {
+                            (Type::Adt(lhs_name, lhs_args), Type::Prim(precision))
+                                if lhs_name == "List"
+                                    && lhs_args.len() == 1
+                                    && precision.is_integer() =>
+                            {
+                                match tensor_concat_result_type(&lhs_args[0]) {
+                                    Ok(ty) => return ty,
+                                    Err(message) => {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                message,
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                }
+                            }
                             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
                                 if lhs_name == "List"
                                     && rhs_name == "List"
@@ -2473,6 +3485,86 @@ fn infer_app(
                                         &deep::Expr::List(list.clone(), zero_span()),
                                         format!(
                                             "concat expects matching List inputs, got {lhs} and {rhs}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "split" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let tensor_ty = subst.apply(&arg_tys[0]);
+                        let axis_ty = subst.apply(&arg_tys[1]);
+                        let sizes_ty = subst.apply(&arg_tys[2]);
+                        if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
+                            && !matches!(axis_ty, Type::Var(_) | Type::Error)
+                        {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("split expects integer axis, got {axis_ty}"),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        match (tensor_ty, sizes_ty) {
+                            (Type::Tensor(dims, precision), Type::Adt(name, args))
+                                if name == "List" && args.len() == 1 =>
+                            {
+                                if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
+                                    && !matches!(&args[0], Type::Var(_) | Type::Error)
+                                {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            "split expects List[int] sizes".to_string(),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
+                                if axis >= dims.len() {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "split axis {axis} out of bounds for rank {}",
+                                                dims.len()
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                let mut piece_dims = dims.clone();
+                                piece_dims[axis] = Dim::Wildcard;
+                                return Type::Adt(
+                                    "List".to_string(),
+                                    vec![Type::Tensor(piece_dims, precision)],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (tensor_ty, sizes_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
                                         ),
                                     ),
                                     vec![],
@@ -6655,6 +7747,186 @@ let roundtrip = dict_entries(vocab)
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 9);
+    }
+
+    #[test]
+    fn surf_3h_tensor_numeric_builtins_type_check() {
+        let checked = checked_surf(
+            r#"
+def projection(
+  x: tensor[batch, seq, hidden, f32],
+  w: tensor[hidden, out_dim, f32],
+  token_ids: tensor[batch, seq, int64],
+  mask: tensor[batch, seq, out_dim, bool],
+  table: tensor[vocab, out_dim, f32]
+) -> tensor[batch, seq, out_dim, f32] = {
+  logits = einsum("bsh,ho->bso", x, w)
+  embed = gather(table, token_ids, 0)
+  clipped = clamp(add(logits, embed), scalar_to_tensor(0.0), scalar_to_tensor(6.0))
+  running = cumsum(clipped, 1)
+  where(mask, running, clipped)
+}
+"#,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    }
+
+    #[test]
+    fn surf_3h_structural_tensor_builtins_type_check() {
+        let checked = checked_surf(
+            r#"
+def pack_heads(
+  q: tensor[batch, seq, hidden, f32],
+  k: tensor[batch, seq, hidden, f32]
+) -> tensor[batch, seq, *, f32] = {
+  packed = concat([q, k], 2)
+  pieces = split(packed, 2, [hidden, hidden])
+  concat(pieces, 2)
+}
+"#,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    }
+
+    #[test]
+    fn surf_3h_sort_and_trace_type_check() {
+        let checked = checked_surf(
+            r#"
+def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, int64], tensor[batch, f32]) = {
+  diag = diagonal(x, 1, 2)
+  pair = sort(diag, 1)
+  values = tuple-get(pair, 0)
+  indices = tuple-get(pair, 1)
+  total = trace(x, 1, 2)
+  (values, indices, total)
+}
+"#,
+        );
+        assert!(!checked.annotated_exprs().is_empty());
+    }
+
+    #[test]
+    fn surf_einsum_rejects_ellipsis_in_3h() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+def bad(
+  x: tensor[batch, seq, hidden, f32],
+  w: tensor[hidden, out_dim, f32]
+) -> tensor[batch, seq, out_dim, f32] =
+  einsum("...h,ho->...o", x, w)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("ellipsis should be rejected in 3h einsum");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("einsum")
+                    && (error.message.contains("ellipsis") || error.message.contains("..."))
+            }),
+            "expected einsum ellipsis rejection, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_where_rejects_non_bool_condition_tensor() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+def bad(
+  cond: tensor[batch, hidden, f32],
+  x: tensor[batch, hidden, f32],
+  y: tensor[batch, hidden, f32]
+) -> tensor[batch, hidden, f32] =
+  where(cond, x, y)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("where should reject non-bool condition tensors");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| { error.message.contains("where") && error.message.contains("bool") }),
+            "expected where bool mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_scatter_replace_rejects_unknown_mode() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+def bad(
+  base: tensor[seq, hidden, f32],
+  ids: tensor[seq, int64],
+  updates: tensor[seq, hidden, f32]
+) -> tensor[seq, hidden, f32] =
+  scatter(base, ids, updates, 0, "last")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("scatter should reject unsupported mode");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("scatter")
+                    && error.message.contains("replace")
+                    && error.message.contains("add")
+            }),
+            "expected scatter mode rejection, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_einsum_rejects_static_extent_mismatch() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
+let b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
+let out = einsum("ij,jk->ik", a, b)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("static einsum extent mismatch should be rejected");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("einsum") && error.message.contains("inconsistent extents")
+            }),
+            "expected einsum extent mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_scatter_replace_rejects_static_duplicate_indices() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
+let ids: List[int64] = [cast(1, int64), cast(1, int64)]
+let idx = to_tensor(ids)
+let updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
+let out = scatter(base, idx, updates, 0, "replace")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("static scatter duplicate indices should be rejected");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("scatter")
+                    && error.message.contains("duplicate target index")
+            }),
+            "expected scatter duplicate-index rejection, got {:?}",
+            err.errors
+        );
     }
 
     #[test]
