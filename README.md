@@ -165,7 +165,8 @@ crates/
   chelis-types/      Type checker, dimensions, precision, fitness
   chelis-effects/    Effect inference/checking over annotated Deep
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
-  chelis-backend-c/  C backend and runtime
+  chelis-runtime/    Rust runtime library and C ABI header
+  chelis-backend-c/  C backend code emitter
   chelis-tide/       Tide HTTP/JSON API and MCP server
   chelis-lsp/        Tide Language Server Protocol support
   chelis-cove/       Cove terminal coding environment

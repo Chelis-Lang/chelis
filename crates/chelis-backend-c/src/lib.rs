@@ -104,11 +104,6 @@ pub fn codegen_with_options(
     }
 }
 
-/// Return the path to the runtime directory (relative to the crate root).
-pub fn runtime_dir() -> &'static str {
-    "runtime"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
