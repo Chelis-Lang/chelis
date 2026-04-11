@@ -443,16 +443,221 @@ A pure Chelis workflow can:
 
 ---
 
-## 3f: SKILL.md v2 Redo
+## 3j: School — Numerical Methods, Statistics, and Optimization
 
-**Goal:** rewrite the teaching surface after the language-completeness work lands so
-that frontier-model prompting and future training both target the real usable language.
+**Goal:** A reef package providing the numerical methods that sit between raw tensor
+primitives and domain applications. The equivalent of scipy.stats + scipy.optimize +
+scipy.integrate for Chelis.
 
-### Why This Must Move Last
+**Prerequisite:** 3h (core numeric primitives), 3i (Std.Time for time-series stats).
 
-The earlier SKILL refresh is no longer enough. If `SKILL.md` is refreshed before
-scalar/string/collection/tokenization support lands, it will encode the tensor-only
-subset and then need another rewrite.
+### Modules
+
+| Module | Contents | Key Dependencies |
+|---|---|---|
+| `School.Stats` | Descriptive statistics (variance, skew, kurtosis, median), correlation, covariance, shrinkage estimators | 3h: sort, quantile, einsum |
+| `School.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared — PDF, CDF, inverse CDF, sampling | `Random` effect, scalar math |
+| `School.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via implicit differentiation through KKT conditions. NOT neural network optimizers (those are `Std.Optim`). | einsum, linear algebra |
+| `School.Interpolation` | Linear, cubic, spline interpolation | sort, gather |
+| `School.LinAlg` | SVD, PCA, eigendecomposition, Cholesky — higher-level wrappers over tensor primitives + einsum | einsum, existing BLAS |
+| `School.Testing` | Hypothesis testing, confidence intervals, p-values | `School.Distributions`, `School.Stats` |
+| `School.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. | cumsum, host control flow |
+| `School.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. | `School.ODE`, `Random`, cumsum |
+| `School.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) | fold, scalar math |
+| `School.Roots` | Root finding / nonlinear equations (Newton-Raphson, bisection, Brent) | scalar math, host control flow |
+| `School.Signal` | Signal processing (FFT, STFT, filtering). **Blocked by complex numbers (Phase 5f) — stub in 3j.** | Phase 5f complex tensors |
+
+### Implementation Strategy
+
+All modules are pure Chelis programs built from tensor primitives, scalar math, and
+collections. No C FFI, no compiler special-casing. The QP solver is the most complex
+module (iterative algorithm with convergence checking); everything else is functional
+composition over existing operations.
+
+`School.Signal` ships as a typed API stub in 3j (like `Std.IO.Safetensors` was in 3a) —
+correct signatures and documentation, but implementation blocked by complex number
+support in Phase 5f.
+
+`grad` through ODE solvers is the highest-value composition test:
+`grad(solve_ode(f, x0, t), wrt=x0)` must work for neural ODE research.
+
+### Test Plan
+
+- Each module has at least 3 positive tests comparing against scipy/numpy reference
+  values (within tolerance)
+- Negative tests: wrong input shapes, unsupported types
+- AD composition test: `grad` through `School.ODE.rk4`, `School.Optim.solve_qp`,
+  `School.Interpolation.cubic`
+- Effect propagation: `School.Distributions.sample` propagates `Random`,
+  `School.Signal` stub propagates correct effect annotations
+- Package gate: `chelis reef build` produces a valid `.chb`, consumer imports and
+  type-checks
+
+### Acceptance Oracle
+
+`cargo test -p chelis-cli phase3j_school_oracle -- --exact` — builds school from source,
+imports it in a consumer, runs a statistical analysis pipeline (generate data from a
+distribution, fit ODE, compute confidence interval).
+
+**Effort:** large. The QP solver and ODE integrator are the bulk; stats and
+distributions are straightforward.
+
+---
+
+## 3k: Coral — Typed Dataframes
+
+**Goal:** A reef package for structured tabular data where numeric columns are
+GPU-accelerable tensors and string columns are host-side lists. The unique feature: AD
+flows through dataframe operations, enabling sensitivity analysis no existing dataframe
+library supports.
+
+**Prerequisite:** 3h (gather, scatter, argsort for sort-by/group-by), 3d (collections
+for string columns), 3g (Std.IO.Csv/Json for data loading).
+
+### Core Design
+
+A DataFrame is `Dict[String, Column]` where:
+
+```chelis
+type Column =
+  | IntCol(tensor[n, int64])
+  | FloatCol(tensor[n, f32])
+  | StringCol(List[String])
+  | BoolCol(tensor[n, bool])
+```
+
+Numeric columns are tensors on the lazy RISC DAG — they go through the tensor lane, get
+GPU-accelerated, support AD, and benefit from the compiler's operation fusion. A
+`filter → mutate → aggregate` pipeline on numeric columns may compile to a single fused
+kernel. String columns are host-side lists — they go through the host lane and execute
+eagerly. The type system tracks which columns are which. No query optimizer — numeric
+optimization comes from the tensor compiler's existing fusion passes, not a
+dataframe-specific planner.
+
+### Modules
+
+| Module | Contents | Key Primitives Used |
+|---|---|---|
+| `Coral.Frame` | DataFrame construction, column selection, row filtering (boolean mask → `gather`), sorting by column (`argsort` → `gather` all columns), mutation (add computed column), column type queries | gather, argsort, where |
+| `Coral.GroupBy` | Group-by via `argsort` + run-length detection, aggregation (sum, mean, count, min, max per group) via segmented `scatter(..., "add")` | argsort, scatter, cumsum |
+| `Coral.Join` | Sort-merge join on typed key columns, left/inner/outer join variants | argsort, gather, concat |
+| `Coral.Reshape` | Pivot (long → wide), melt (wide → long), stack/unstack | Dict manipulation, tensor reshape |
+| `Coral.IO` | DataFrame-aware CSV loading (wraps `Std.IO.Csv`, auto-detects column types, returns typed DataFrame). DataFrame-aware JSON loading. DataFrame → CSV export. | `Std.IO.Csv`, `Std.IO.Json`, string parsing |
+
+### AD Through Dataframes
+
+The key differentiator. Because filter is `gather` and aggregation is
+`scatter(..., "add")` + `sum`/`mean`, the entire filter → aggregate pipeline is
+differentiable:
+
+```chelis
+def portfolio_risk(prices: Coral.Frame, threshold: f32) -> f32 = {
+  -- filter: gather (differentiable)
+  high_vol = Coral.filter(prices, \row -> get_float(row, "volatility") > threshold)
+  -- aggregate: mean over tensor column (differentiable)
+  Coral.mean_col(high_vol, "return")
+}
+
+-- Sensitivity of risk measure to threshold
+grad(portfolio_risk, wrt=threshold)  -- works because filter → gather → AD
+```
+
+No existing dataframe library supports this.
+
+### Test Plan
+
+- `Coral.Frame`: construct from columns, select, filter, sort_by, mutate — all produce
+  correct results
+- `Coral.GroupBy`: group_by + sum/mean/count matches pandas.groupby reference on test
+  data
+- `Coral.Join`: inner join matches pandas.merge on test data, key type enforcement works
+- `Coral.IO`: CSV round-trip (load → export → reload) preserves data and column types
+- AD: `grad` through filter + aggregate pipeline produces correct gradients
+- GPU: numeric column operations compile to HIP and produce correct results (manual gate)
+- Negative: wrong column name errors, type mismatch errors, join key type mismatch errors
+
+### Acceptance Oracle
+
+`cargo test -p chelis-cli phase3k_coral_oracle -- --exact` — loads a CSV into a
+DataFrame, filters rows, groups by a column, aggregates, and verifies results match
+expected values. Plus a separate AD test computing `grad` through a filter-aggregate
+pipeline.
+
+**Effort:** medium. The core Frame/GroupBy/IO modules are the priority; Join and Reshape
+can ship with minimal implementations and grow.
+
+---
+
+## 3l: Treasure — Finance
+
+**Goal:** A reef package for quantitative finance. Pricing models, risk measures, yield
+curves, stochastic processes, order books. Built entirely on `chelis-std` + `school` +
+`coral`. Contains only finance-specific logic.
+
+**Prerequisite:** 3j (school — distributions, optimization, SDE solvers), 3k (coral —
+for loading/manipulating financial data), 3i (Std.Time for dates, Std.Decimal for cash
+amounts).
+
+### Modules
+
+| Module | Contents | Key Dependencies |
+|---|---|---|
+| `Treasure.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `School.Distributions`, `School.SDE`, `Random` effect, cumsum |
+| `Treasure.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `School.Stats`, sort/quantile, `Random` effect |
+| `Treasure.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `School.Interpolation`, `School.Roots`, `Std.Time` |
+| `Treasure.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `School.SDE`. Variance reduction (antithetic, control variates). | `School.SDE`, `Random`, cumsum, einsum |
+| `Treasure.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
+
+### What Makes This Work in Chelis
+
+- **Greeks for free:** `grad(black_scholes_price, wrt=(spot, vol, rate, T))` gives all
+  four first-order Greeks in one backward pass. `vmap(grad(...))` gives per-instrument
+  Greeks for a portfolio. No bump-and-reprice, no finite differences.
+- **Reproducible Monte Carlo:** The `Random` effect with `withSeed` handlers means every
+  simulation is exactly reproducible. Two runs with the same seed produce identical
+  paths. This is a regulatory requirement.
+- **Typed market data:** Named tensor dimensions like `tensor[instrument, scenario, f32]`
+  prevent accidentally multiplying a `[portfolio, maturity]` matrix by a
+  `[maturity, scenario]` matrix when the dimensions don't match.
+- **Effect-tracked data provenance:** A function that reads from a market data feed has
+  `IO` effect. A function using Monte Carlo has `Random` effect. The type system tracks
+  what each computation depends on.
+
+### Test Plan
+
+- `Treasure.Pricing`: Black-Scholes price matches analytical formula (< 1e-10 error)
+- `Treasure.Pricing`: Monte Carlo price converges to Black-Scholes analytical for
+  vanilla European call (< 1% error with 100K paths)
+- `Treasure.Pricing`: Greeks via `grad` match analytical Black-Scholes Greeks
+  (< 1e-6 error)
+- `Treasure.Risk`: Parametric VaR matches `School.Distributions.Normal.ppf` at standard
+  confidence levels
+- `Treasure.Curves`: Bootstrap reproduces known market instrument prices (< 1bp error)
+- `Treasure.Stochastic`: GBM paths satisfy known statistical properties
+  (mean = spot * exp(mu*T), variance matches theory)
+- `Treasure.Orderbook`: matching logic satisfies price-time priority invariant
+- Effect tracking: MC pricing propagates `Random`, curve construction propagates `IO`
+  for market data
+- Reproducibility: same seed produces identical prices across runs
+
+### Acceptance Oracle
+
+`cargo test -p chelis-cli phase3l_treasure_oracle -- --exact` — prices a European call
+option via Black-Scholes and Monte Carlo, verifies convergence, computes Greeks via
+`grad`, loads market data via `coral`, and produces a risk report.
+
+**Effort:** medium. Black-Scholes + Monte Carlo + basic risk is the core; curves and
+order book are smaller. The bulk of the work is composing existing primitives (`school`
+solvers, `coral` dataframes, tensor ops), not implementing new infrastructure.
+
+---
+
+## 3f: SKILL.md v2
+
+**Goal:** Update the teaching surface for the full Phase 2 + Phase 3 language, including
+domain shells.
+
+**Prerequisite:** All other Phase 3 sub-phases complete.
 
 ### Required Surface
 
@@ -460,38 +665,39 @@ The refreshed skill should teach:
 
 - the shipped pipe-first Surf idiom from `3e`
 - effects, linearity, macros, `vmap`, and tuples
-- scalar/string programming
-- collections and iteration
-- core numeric primitives such as `einsum`, `gather`, and `concat`
-- tokenization and data-loading idioms
-- `Std.Time` / `Std.Decimal` host-program idioms
+- handler syntax (`withSeed`, `withDevice`)
+- scalar types (`Int`, `Float`, `Bool`) and operations
+- strings and string operations
+- collections (`List`, `Dict`) and functional iteration (`map`, `filter`, `fold`)
+- `Option` type and pattern matching
+- core numeric primitives (`einsum`, `concat`, `gather`, `cumsum`, `sort`, etc.)
+- list/tensor bridge (`pad_sequences`, `stack`, `to_tensor`)
+- file I/O and `IO` effect
+- CSV/JSON parsing
+- tokenizer usage
+- `Std.Time` and `Std.Decimal` host-program idioms
+- package imports (`Std.*`, `School.*`, `Coral.*`, `Treasure.*`)
+- dataframe operations (`coral`)
+- numerical methods (`school`)
+- financial models (`treasure` overview, not exhaustive)
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
 ### Acceptance Oracle
 
-The checked-in skill validation suite passes with examples and guidance that reflect the
-post-`3i` language surface.
+All SKILL.md examples validated via `skill_suite.rs` against the current compiler. Eval
+on target base models to measure improvement over SKILL.md v1.
 
 ---
 
-## Post-Phase-3 Shell Stack
+## Shell Ecosystem (Phase 3 Sub-Phases)
 
-The ecosystem layering this phase is setting up is:
+The domain shells are now proper Phase 3 sub-phases (3j, 3k, 3l) with full
+specifications above, not deferred post-phase work. The tier structure is:
 
-- `chelis-std` as the first package-layer target, including `Std.Nn.Embedding` and the
-  later `Std.Time` / `Std.Decimal` host-program surface
-- `school` on top of `chelis-std` for general numerical methods: stats,
-  distributions, optimization solvers including differentiable optimization,
-  interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
-  processing once complex numbers land
-- `coral` on top of `chelis-std` as the typed dataframe shell in the reef/shells/tide/
-  cove/school/coral/treasure marine lineup: GPU-accelerated numeric columns, host-side
-  string columns, and AD through dataframe operations where `filter` lowers to gather
-  and aggregation lowers to reduction; positioned for pandas/Polars-style tabular work
-  with typed correctness and differentiable composition
-- `treasure` on top of `chelis-std` + `school`, with optional `coral` integration for
-  finance-specific pricing, risk, curves, stochastic processes, and order-book
-  workloads
+- `chelis-std` (core) — standard library shipped as the first Reef package
+- `school` (3j) — general numerical methods on top of `chelis-std`
+- `coral` (3k) — typed dataframes on top of `chelis-std`
+- `treasure` (3l) — finance on top of `chelis-std` + `school` + `coral`
 
 ---
 
@@ -530,32 +736,58 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
   compiler-intrinsic assumptions
 - examples/docs do not overclaim backend or tensor-kernel relevance for these modules
 
+**Numerical methods (`3j` School):**
+
+- stats functions agree with scipy reference values within tolerance
+- `grad` through ODE solvers produces correct gradients
+- `School.Signal` stub has correct type signatures but clearly errors at runtime
+- `School.Optim` solvers converge on well-conditioned problems and reject ill-conditioned
+  inputs
+
+**Dataframes (`3k` Coral):**
+
+- filter/group-by/join produce correct results against pandas reference
+- AD flows through filter → aggregate pipelines
+- GPU compilation of numeric column operations works (manual gate)
+- wrong column names and type mismatches produce clear errors
+
+**Finance (`3l` Treasure):**
+
+- Black-Scholes price matches analytical formula
+- Greeks via `grad` match analytical Greeks
+- Monte Carlo converges to analytical for vanilla options
+- same seed produces identical prices across runs
+
 **Teaching surface (`3f`):**
 
 - `SKILL.md` teaches the real executable language, not a stale tensor-only subset
 - examples align with the package/style/python foundations already shipped
+- coverage includes domain shells (School, Coral, Treasure)
 
 ---
 
-## Phase 3 Estimated Timeline
+## Phase 3 Dependency and Size Summary
 
-| Sub-phase | Effort | Dependencies | Nature |
+| Sub-phase | Size | Dependencies | Nature |
 |---|---|---|---|
 | `3e`: Pipe-first style pass | shipped | none | Engineering |
 | `3a`: Package system | shipped | `3e` | Engineering |
 | `3b`: Python FFI interop core | shipped | `3a` | Engineering |
 | `3b-ii`: Direct execution + NumPy | shipped | `3b` | Engineering |
-| `3c`: Scalar and string foundation | shipped | `3e` shipped | Engineering |
+| `3c`: Scalar and string foundation | shipped | `3e` | Engineering |
 | `3d`: Collections and iteration | shipped | `3c` | Engineering |
-| `3h`: Core numeric primitives | ~4-6 weeks | `3d` | Engineering |
-| `3g`: Data loading and tokenization | ~4-6 weeks | `3h` | Engineering |
-| `3i`: `Std.Time` and `Std.Decimal` | ~2-3 weeks | `3g` | Engineering / standard library |
-| `3f`: SKILL.md v2 redo | ~2-3 weeks | `3h`, `3g`, `3i` | Engineering / teaching surface |
+| `3h`: Core numeric primitives | medium | `3d` | Engineering (RISC ops + AD + backends) |
+| `3g`: Data loading and tokenization | medium | `3h` | Engineering (I/O + pure Chelis libraries) |
+| `3i`: `Std.Time` and `Std.Decimal` | small | `3c`, `3a` | Engineering (pure Chelis std modules) |
+| `3j`: School | large | `3h`, `3i` | Pure Chelis library (stats + optim + ODE/SDE) |
+| `3k`: Coral | medium | `3h`, `3d`, `3g` | Pure Chelis library (dataframes) |
+| `3l`: Treasure | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
+| `3f`: SKILL.md v2 | small | all above | Documentation |
 
-This phase is now intentionally sequential and pragmatic. The remaining work is about
-making Chelis usable, not publishable. Remaining estimated effort is roughly
-`12-17 weeks`, and the expanded Phase 3 stack now totals roughly `25-35 weeks` end to
-end across shipped and planned sub-phases.
+This phase is intentionally sequential and pragmatic. The remaining work is about making
+Chelis usable, not publishable. `3j` and `3k` can overlap (no mutual dependency). `3l`
+depends on both. `3f` goes truly last because it must cover the complete ecosystem
+including the domain shells.
 
 ---
 
@@ -569,6 +801,13 @@ Before calling Phase 3 complete:
 - `3h` provides the expanded tensor-language surface needed for real model code
 - `3g` provides text/config/data loading plus tokenizer and batching support
 - `3i` provides `Std.Time` and `Std.Decimal` as practical standard-library host types
-- `3f` reflects the real post-`3i` language in `SKILL.md` and examples
+- `3j` provides numerical methods (stats, optimization, ODE/SDE) as a Reef package
+- `3k` provides typed dataframes with AD through tabular operations as a Reef package
+- `3l` provides finance-specific pricing, risk, and stochastic process tools as a Reef
+  package
+- `3f` reflects the full post-shell language in `SKILL.md` and examples, including
+  `School.*`, `Coral.*`, and `Treasure.*` package imports
 - a pure Chelis program can read text, tokenize it, batch/pad it, run a model, compute
   loss and gradients, and print results without Python
+- domain shells compose correctly: `treasure` depends on `school` + `coral`, all build
+  and import through the Reef pipeline

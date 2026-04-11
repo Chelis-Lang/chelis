@@ -77,7 +77,7 @@ so a symbolic hidden size is not yet supported.
   scalar function parameters
 - preserve the existing repeated-occurrence validation across inputs
 
-**Scope:** ~2 weeks. This is an IR-through-codegen change that touches both backends,
+**Scope:** This is an IR-through-codegen change that touches both backends,
 the memory planner, and the CLI. Test: same MNIST program works with `batch=32` and
 `batch=128` without recompilation.
 

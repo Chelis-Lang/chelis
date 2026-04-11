@@ -48,4 +48,4 @@ Commit 5: Tests
 
 ### Note on Sequencing
 
-Symbolic dimensions could be tackled before or after the GPU backend. Arguments for before: it simplifies the GPU backend design from the start (no hardcoded sizes in kernels). Arguments for after: it's an IR change that touches the CPU backend too and could introduce regressions. **Recommendation: implement symbolic dims first (1-2 weeks), then build the GPU backend on top.** This avoids retrofitting symbolic dims into an already-working GPU backend.
+Symbolic dimensions could be tackled before or after the GPU backend. Arguments for before: it simplifies the GPU backend design from the start (no hardcoded sizes in kernels). Arguments for after: it's an IR change that touches the CPU backend too and could introduce regressions. **Recommendation: implement symbolic dims first, then build the GPU backend on top.** This avoids retrofitting symbolic dims into an already-working GPU backend.

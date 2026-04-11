@@ -337,10 +337,10 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 `3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
 `3d` collections/iteration, and `3e` pipe-first style pass.
 
-**Recommended execution order for remaining work:** `3h`, then `3g`, then `3i`, then
-`3f`.
-`3f` (SKILL.md v2) is intentionally last in Phase 3 now: it needs a real rewrite after
-the numeric, tokenization, and standard-library surfaces stabilize.
+**Recommended execution order for remaining work:** `3h` → `3g` → `3i` → `3j` ∥ `3k` →
+`3l` → `3f`. `3j` and `3k` can overlap (no mutual dependency). `3l` depends on both.
+`3f` (SKILL.md v2) is intentionally last in Phase 3: it needs a real rewrite after the
+numeric, tokenization, standard-library, and domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
 
@@ -490,14 +490,66 @@ Shipped.
 - position them after `3g` so tokenization/data-loading ships first, but before `3f` so
   the teaching surface can show complete real-world host-program idioms
 
-### 3f: SKILL.md v2 Refresh
+### 3j: School — Numerical Methods, Statistics, and Optimization
 
-- rewrite `SKILL.md` after `3c`, `3d`, and `3g`, not before them
-- cover effects, linearity, macros, `vmap`, tuples, scalar/string code, collections,
-  iteration, tokenization, and the finalized pipe-first Surf idiom
-- keep teaching examples aligned with the real executable language surface, not the
-  earlier tensor-only subset
-- treat this as a genuine redo of the teaching surface, not a minor patch-up pass
+A reef package. A school of fish — marine naming alongside shells, reef, tide, cove.
+Depends on `chelis-std` + 3h primitives. All modules are pure Chelis programs, no C FFI.
+`School.Signal` ships as a typed stub (blocked by complex numbers, Phase 5f).
+
+| Module | Contents |
+|---|---|
+| `School.Stats` | Descriptive statistics, correlation, covariance, shrinkage estimators |
+| `School.Distributions` | Normal, LogNormal, Uniform, Student-t — PDF, CDF, inverse CDF, sampling (`Random` effect) |
+| `School.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via KKT. NOT `Std.Optim` (neural network optimizers). |
+| `School.Interpolation` | Linear, cubic, spline interpolation |
+| `School.LinAlg` | SVD, PCA, eigendecomposition, Cholesky — wrappers over tensor primitives + einsum |
+| `School.Testing` | Hypothesis testing, confidence intervals, p-values |
+| `School.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. |
+| `School.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. |
+| `School.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) |
+| `School.Roots` | Root finding (Newton-Raphson, bisection, Brent) |
+| `School.Signal` | Signal processing (FFT, STFT, filtering). **Stub — blocked by complex numbers (Phase 5f).** |
+
+### 3k: Coral — Typed Dataframes
+
+A reef package. Numeric columns are tensors on the lazy RISC DAG (GPU-accelerable,
+fusible — a filter→mutate→aggregate pipeline on numeric columns may compile to one fused
+kernel). String columns are host-side lists (eager). AD flows through dataframe
+operations (filter → gather, aggregation → reduction) — sensitivity analysis no existing
+dataframe library supports. Depends on `chelis-std` + 3h primitives (gather, scatter,
+argsort). Single-machine, no query optimizer — does NOT compete with Polars/DuckDB query
+planning or Spark distributed processing.
+
+| Module | Contents |
+|---|---|
+| `Coral.Frame` | Core DataFrame type, column selection, row filtering, sorting by column, mutation |
+| `Coral.GroupBy` | Group-by via argsort + segmented scatter, aggregation per group |
+| `Coral.Join` | Sort-merge and hash joins on typed key columns |
+| `Coral.Reshape` | Pivot, melt, stack/unstack |
+| `Coral.IO` | DataFrame-aware CSV/JSON loading, typed column auto-detection |
+
+### 3l: Treasure — Finance
+
+A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `school` + `coral`.
+Contains only finance-specific logic — nothing a non-finance programmer would need.
+Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed market
+data via named tensor dimensions.
+
+| Module | Contents |
+|---|---|
+| `Treasure.Pricing` | Black-Scholes, Heston, SABR, Monte Carlo engines. Greeks via `grad`. |
+| `Treasure.Risk` | VaR, CVaR, expected shortfall, stress testing |
+| `Treasure.Curves` | Yield curve construction, bootstrapping, day count conventions |
+| `Treasure.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
+| `Treasure.Orderbook` | Limit order book representation, matching logic (host-side collections) |
+
+### 3f: SKILL.md v2
+
+Full-surface teaching refresh covering Phase 2 + Phase 3 including domain shells:
+effects, linearity, macros, vmap, tuples, pipes, scalars, strings, collections,
+iteration, I/O, tokenization, core numeric primitives, package imports, dataframes
+(`coral`), numerical methods (`school`), finance (`treasure` overview). Goes truly last.
+Validated via `skill_suite.rs`.
 
 Phase 3 success condition:
 
@@ -505,53 +557,71 @@ Phase 3 success condition:
   compute loss and gradients, and print results without dropping to Python
 - the package, Python, and style foundations already shipped in `3a`, `3b`, `3b-ii`,
   and `3e` remain valid while the language grows beyond tensor-kernel scope
-- `SKILL.md` and examples match the fuller language rather than the earlier
-  tensor-compute-only subset
-
-Post-Phase-3 shell stack:
-
-- `chelis-std` remains the first package-layer target, now including `Std.Nn.Embedding`
-  plus the later `Std.Time` / `Std.Decimal` host-program surface
-- `school` sits on top of `chelis-std` for general numerical methods: stats,
-  distributions, optimization solvers including differentiable optimization,
-  interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
-  processing once complex numbers land
-- `coral` sits on top of `chelis-std` as the typed dataframe shell in the marine
-  reef/shells/tide/cove/school/coral/treasure lineup: GPU-accelerated numeric columns,
-  host-side string columns, and AD through dataframe operations where `filter` lowers
-  to gather and aggregation lowers to reduction; aimed at pandas/Polars-style tabular
-  work while staying focused on typed correctness and differentiable composition
-- `treasure` sits on top of `chelis-std` + `school`, with optional `coral`
-  integration, for finance-specific pricing, risk, curves, stochastic processes, and
-  order-book style workloads
+- domain shells (`school`, `coral`, `treasure`) build and import through the Reef
+  pipeline, composing correctly on top of `chelis-std`
+- `SKILL.md` and examples match the fuller language including domain shells rather than
+  the earlier tensor-compute-only subset
 
 ---
 
 ## Phase 4
 
 **Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
-through `3h`, `3g`, `3i`, and `3f` complete.
-**Deliverable:** first-party ML and coding-assistance stack built on the finalized
-language-complete Chelis surface and finalized example idioms, plus a reproducible
-benchmark proving the "designed for LLMs" thesis.
+through `3h`, `3g`, `3i`, `3j`, `3k`, `3l`, and `3f` complete.
+**Deliverable:** Chelis ships with a local coding model as standard tooling and a
+reproducible benchmark proving the "designed for LLMs" thesis. The turtle carries its
+home.
+
+### Why This Is a Distinct Phase
+
+Phase 2 planned a seed corpus (2s) that was supposed to accumulate organically during
+development. In practice, the programs written during Phase 2 are compiler test fixtures,
+not curated training data. Building a real corpus and training a real model requires
+dedicated ML effort — data curation, experiment design, training runs, evaluation — that
+doesn't fit as a side effect of compiler development.
 
 ### 4a: Seed Corpus Collection and Curation
 
-- collect and curate 50-100 Chelis programs
-- stratify by complexity rather than filtering to one difficulty band
-- treat the corpus as shared infrastructure for evaluation, examples, and later training
+Build a corpus of 50-100 Chelis programs that serve as: training data for the local
+model, few-shot examples in the SKILL.md, evaluation anchors for model quality, and
+documentation for users.
+
+**Stratification (informed by the Twist et al. complexity research):**
+- ~20 single-operation programs (1-3 ops, baseline structural competence)
+- ~40 single-layer programs (5-15 ops, one model component)
+- ~30 multi-layer programs (15-40 ops, composition of components)
+- ~10 full models (40+ ops, end-to-end training pipelines)
+
+**Each program ships as:**
+- `corpus/NNN_name.ch` — Surf source (pipe-first style)
+- `corpus/NNN_name.dp` — Canonical Deep (pretty-printed)
+- `corpus/NNN_name.json` — Fitness score, type info, effect info
+
+**Coverage requirements:** Basic tensor ops, MLP forward/backward, pattern matching on
+ADTs, dimension polymorphism, pipe-heavy data flow, effects (Random, Resource),
+linearity (copy, borrow), macros, vmap, tuple returns, grad with multiple wrt targets,
+PyTorch-equivalent translation pairs.
+
+**Quality gate:** All programs compile, type-check with fitness >= 0.9, use idiomatic
+pipe-first style, and exercise the full Phase 2 language surface.
 
 ### 4b: ICL Effect Measurement
 
-- measure SKILL-assisted generation with and without the relevant context in prompt
-- stratify results by corpus complexity band
-- use this as the prerequisite experiment before choosing a heavier training path
-- **additional measurement (informed by Vera's de Bruijn research):** test generation
-  accuracy with named-Deep vs a positional-reference Deep variant; if positional
-  references measurably improve generation accuracy, consider adopting them for the
-  LLM-facing representation; if not (hypothesis: Deep's closed vocabulary already
-  provides sufficient structural constraint), document the result and keep named
-  references
+The prerequisite experiment before any training investment.
+
+**Protocol:** Run the SKILL.md eval on 2-3 target base models (Qwen 35B, Llama 4, etc.)
+with and without the spec in context. Measure the delta in compiler fitness scores. If
+putting the spec in context measurably improves output quality (fitness score increase
+> 0.2), distillation-based methods (SDFT) are viable. If the delta is small, skip
+distillation and use standard LoRA.
+
+**Additional measurement (informed by Vera's de Bruijn research):** test generation
+accuracy with named-Deep vs a positional-reference Deep variant. If positional references
+measurably improve generation accuracy, consider adopting them for the LLM-facing
+representation. If not (hypothesis: Deep's closed vocabulary already provides sufficient
+structural constraint), document the result and keep named references.
+
+**Cost:** Free. API calls or local inference. But it gates the entire training strategy.
 
 ### 4c: Trajectory Collection via Compiler Loop
 
@@ -600,16 +670,31 @@ ML Code in a Language Designed for Them?"
 
 ### 4e: Local Coding Model Training
 
-- start with SSD for distributional shaping
-- fine-tune with the simplest method that meets the quality bar
-- quantize and ship GGUF artifacts for local use
-- preserve PyTorch/JAX semantic knowledge as a hard anti-forgetting constraint
+The training method is determined empirically. The hard constraint is
+**anti-forgetting**: the model must preserve its PyTorch/JAX semantic knowledge.
+
+**Decision protocol:**
+1. LoRA on trajectories + seed corpus + SKILL.md examples. Measure fitness scores AND
+   forgetting on a PyTorch comprehension benchmark.
+2. If fitness good AND forgetting minimal → ship.
+3. If forgetting measured → replace LoRA with SDFT (same data, on-policy, KL
+   regularization prevents drift).
+4. If fitness plateau → add RLVR with compiler fitness as continuous reward.
+
+**Target:** >0.95 fitness score on 80%+ of generated programs, including Deep generation
+and Deep repair tasks.
+
+**Ship:** GGUF quantization (Q4_K_M) for consumer hardware (8GB VRAM). Published as
+`chelis-lang/chelis-coder` on HuggingFace.
 
 ### 4f: Coding Model Integration
 
-- integrate the local model into `chelis cove --assist`
-- expose the same capability through the MCP tool surface with local-model fallback
-- baseline coding assistance should work without an API key or internet requirement
+Wire the local model into the toolchain:
+- `chelis model pull` downloads the GGUF weights
+- `chelis cove --assist` loads the local model for inline completions
+- Tide MCP server's `chelis_generate` tool uses the local model when available, falls
+  back to API models when not
+- No API key, no internet connection required for the default assist experience
 
 **Distribution summary:**
 
@@ -628,72 +713,111 @@ Phase 4 success condition:
 
 ---
 
-## Phase 5
+## Phase 5: Advanced Backends + Research
 
-**Prerequisite:** Phase 4 complete or explicit product demand that justifies backend
-expansion.
-**Deliverable:** specialized backend expansion plus deferred research work that becomes
-valuable only after Chelis is already usable as a full AI programming language.
+**Prerequisite:** Phase 1 HIP backend mature, Phase 2 language stable.
+**Deliverable:** Chelis targets additional hardware platforms beyond CPU and AMD GPU.
+Research-grade type extensions and mechanized type theory produce publications.
+
+Items ordered by likely demand. All are additive — the HIP backend remains the primary
+GPU target.
 
 ### 5a: StableHLO Backend
 
-- direct DAG to StableHLO emission
-- TPU and XLA-family interop
-- JAX DLPack guarantee, deferred from `3b`, once Chelis and JAX share a richer
-  StableHLO/XLA integration story
+- **Direct emission:** RISC DAG → StableHLO operations. Following the Nx/EXLA pattern
+  (not via JAX tracing).
+- **TPU access:** The primary motivation. StableHLO is the only serious path to Google
+  TPUs.
+- **Alternative GPU path:** StableHLO → XLA → GPU code. Useful for comparison against the
+  HIP backend.
+- **JAX DLPack guarantee:** JAX's `jax.dlpack.from_dlpack()` has device placement
+  semantics that interact with JAX's lazy evaluation and XLA compilation — more complex
+  than PyTorch or NumPy interop. Slot here alongside StableHLO because at this point
+  Chelis and JAX share a compilation target and the interop story is richer than tensor
+  exchange alone.
 
 ### 5b: FX Graph Backend
 
-- DAG to PyTorch FX graph export
-- interoperability with TorchInductor, Triton kernels, and export flows
+- **RISC DAG → FX operator graph:** Map the ~12 primitives to ATen operators.
+- **TorchInductor:** FX graphs compile via TorchInductor to Triton kernels (NVIDIA),
+  C++/OpenMP (CPU), ROCm (AMD).
+- **torch.export → ExecuTorch:** Edge deployment path.
+- **Use case:** Interop with PyTorch ecosystem. A Chelis model can be exported as a
+  PyTorch module.
 
 ### 5c: Triton Backend
 
-- emit Triton IR directly where it is a better fit than FX export
-- reuse Triton's optimization passes when they materially help Chelis workloads
+- **RISC DAG → Triton IR:** Emit Triton code (or Triton Python via codegen) instead of
+  raw HIP.
+- **Access Triton's optimization passes:** Memory coalescing, shared memory staging,
+  warp-level primitives — without implementing them in the Chelis compiler.
+- **Helion as higher-level target:** Optionally emit Helion code and let Helion's
+  autotuner handle kernel-level optimization.
+- **Use case:** NVIDIA GPU performance without writing CUDA. Cross-vendor via Triton's
+  AMD support.
 
-### 5d: Multi-GPU Data Parallelism Infrastructure
+### 5d: Multi-GPU Data Parallelism
 
-- add explicit multi-GPU support only if Phase 4 or downstream product needs justify it
-- treat this as conditional infrastructure, not a default near-term commitment
+- **Data parallelism requires no language changes.** The orchestration layer calls the
+  compiled artifact on each GPU with different batch shards, then all-reduces gradients
+  via RCCL.
+- **Model parallelism** would require a `transfer` primitive, device-aware DAG
+  partitioning, and RCCL integration. Scope TBD based on demand.
+- **Pipeline parallelism** is an orchestration concern handled externally (DeepSpeed,
+  FSDP, etc.).
+- **Priority:** Low. Chelis targets single-GPU workloads for Phases 1-4. Multi-GPU
+  becomes relevant only for models that don't fit in one GPU's memory.
 
-### 5e: Sparse Tensors
+### 5e: Sparse Tensor Support
 
-- add sparse tensor representations only after the dense language and backend story are
-  already strong
-- target practical sparse-dense interop rather than speculative generalized sparse
-  semantics first
-- keep this aligned with the advanced-backend phase rather than the Phase 3 usability
-  phase
+Core numerical infrastructure that benefits ML (sparse attention, graph neural networks,
+sparse rewards in RL) and numerical computing (large correlation matrices, sparse linear
+systems). Not domain-specific.
 
-### 5f: Complex Numbers
+- **Sparse tensor types:** `sparse_tensor[m, n, f32, CSR]` /
+  `sparse_tensor[m, n, f32, COO]`. Named dimensions carry through.
+- **Sparse operations:** Sparse matmul (SpMM, SpMV), sparse-dense element-wise ops,
+  sparse reduction, format conversion (dense↔CSR↔COO).
+- **Backend:** hipSPARSE/rocsparse integration for GPU, reference C implementation for
+  CPU.
+- **AD:** Sparse adjoints for sparse matmul and element-wise ops. Gradients through
+  sparse operations produce sparse gradients.
+- **Effort:** large. Significant backend addition.
 
-- add first-class complex numeric support once the demand from signal-processing and
-  advanced linear-algebra workloads justifies it
-- unblock `School.Signal` and related FFT/STFT workflows after this lands
-- keep complex support out of Phase 3 so the host-language/data pipeline can stabilize
-  first
+### 5f: Complex Number Support
+
+Native `complex64` / `complex128` tensor dtypes with correct AD (Wirtinger derivatives).
+
+- **Operations:** Complex arithmetic, conjugate, magnitude, phase, real/imag extraction.
+- **FFT:** Built on complex tensors. Forward and inverse FFT as Tier 2 built-ins.
+- **Use cases:** Spectral methods, signal processing, Fourier-based pricing methods,
+  frequency-domain analysis.
+- **Effort:** small. Dtype addition + RISC op implementations + Wirtinger AD rules.
 
 ### 5g: Research Type Features
 
-- investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit
-  `expand` operations during inference while preserving Chelis's
-  no-implicit-broadcasting rule
-- evaluate size-dependent types and refinement-style constraints as research
-  extensions, not baseline language commitments
-- keep distribution types, equivariance constraints, optimization-property annotations,
-  and related type research in this advanced/research phase rather than the pragmatic
-  language-completeness phase
-- follow a paper-first workflow: draft, prototype, corpus validation, revise, submit,
-  then merge
+Moved from Phase 3. Publication-grade type system extensions — each should be a paper
+before it's an implementation.
 
-### 5h: Lean Formalization
+- **Rank polymorphism via ILP elaboration:** AUTOMAP-style, insert `expand` operations
+  during type inference via integer linear programming.
+  No-implicit-broadcasting guarantee preserved.
+- **Size-dependent types:** Futhark-style syntactic dimension equality with dynamic
+  coercion fallback.
+- **Distribution types:** For probabilistic models.
+  `Distribution(Normal, {mean: tensor, std: tensor})`. Sampling is `Random` effect.
+- **Equivariance constraints:** Track symmetry groups through composition. Most
+  novel/publishable.
+- **Optimization properties:** `@convex`, `@lipschitz(1.0)`. Trusted annotations
+  initially.
+- **Inference as a typed effect:** LLM calls as a typed, mockable algebraic effect
+  (inspired by Vera). Research direction.
 
-- mechanize the core type system only
-- prove soundness for the stable formalized subset
-- treat Lean as the conformance oracle for that subset when Lean and Rust disagree
-- keep this as publication-grade research work rather than a blocker for practical
-  language completeness
+### 5h: Mechanized Type System (Lean 4)
+
+Moved from Phase 3. Formalize Chelis's core type system in Lean 4. Prove type soundness.
+Publication target: POPL/ICFP/PLDI. The Lean formalization doubles as an executable
+reference type checker — the ultimate conformance oracle.
 
 ---
 
@@ -706,18 +830,18 @@ These are settled decisions, not open prompts.
 
 | Library | Phase | Purpose |
 |---|---|---|
-| `egg` | Phase 1b (prototype) | Equality saturation for fusion if greedy heuristics are not enough |
-| `salsa` | Phase 2 | Incremental / demand-driven compilation for Tide, LSP, and agent loops |
-| `ariadne` or `miette` | Phase 1+ (evaluate) | Rich diagnostics and fitness-report UX |
+| `egg` | Phase 1b (prototype) | Equality saturation for kernel fusion. Prototype alongside hand-written heuristics — adopt if fusion space is genuinely combinatorial, skip if greedy heuristics suffice. |
+| `salsa` | Phase 2+ (adopt) | Incremental/demand-driven compilation for Tide API, LSP, and AI agent loops. Design for it now (pure function crate boundaries), adopt when interactive use cases materialize. |
+| `ariadne` or `miette` | Phase 1+ (evaluate) | Rich diagnostic rendering for fitness reports and error messages. Higher ROI than parser replacement for improving compiler UX. Evaluate when fitness scoring UX is prioritized. |
 
 ### Rejected
 
 | Library | Reason |
 |---|---|
-| `logos` | Existing lexer works; hybrid handling would dilute the benefit |
-| `chumsky` | Existing Pratt parser works; rewrite cost is too high |
-| `petgraph` | Custom DAG is small and fits compiler invariants better |
-| `cranelift` | Speculative second backend with high maintenance cost; evaluator and cached C paths come first |
+| `logos` | Lexer works, bugs are fixed, nested block comment handling requires hybrid approach that dilutes the declarative benefit. Revisit only if lexer maintenance becomes a recurring cost. |
+| `chumsky` | Parser works, error recovery can be added incrementally to existing Pratt parser. Full rewrite is high-cost, low-marginal-gain. If partial parse recovery is needed for fitness scoring, add recovery points at declaration boundaries in existing code. |
+| `petgraph` | Custom DAG is small, specialized, append-only-by-construction, and backed by `verify.rs`. Generic graph API makes compiler-specific structural mutations less ergonomic, and index invalidation on node removal is a footgun. |
+| `cranelift` | Speculative second backend with high maintenance cost. The IR evaluator (`eval.rs`) handles interactive execution. If that's too slow, cached C compilation and persistent helper processes are cheaper solutions. No JIT unless measured latency justifies it. |
 
 ### Architectural Discipline (Salsa Readiness)
 

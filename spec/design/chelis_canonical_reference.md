@@ -120,38 +120,34 @@ the public spec yet.
 
 All project-level naming follows the turtle/ocean metaphor.
 
-| Concept | Name |
-|---|---|
-| Surface syntax | Surf |
-| Canonical s-expression syntax | Deep |
-| Packages | Shells |
-| Package registry | Reef |
-| Interactive mode | Tide |
-| TUI coding environment | Cove |
-| Project manifest | `reef.toml` |
-| Numerical-method shell | School |
-| Dataframe shell | Coral |
-| Finance shell | Treasure |
+| Concept | Name | Rationale |
+|---|---|---|
+| Surface syntax | **Surf** | The surface — what you see |
+| Canonical s-expression syntax | **Deep** | The depths — what's underneath |
+| Packages | **Shells** | Turtles have shells; self-contained |
+| Package registry | **Reef** (reef.chelis.ch) | Where shells live |
+| Interactive mode | **Tide** (`chelis tide`) | Comes and goes; interactive |
+| TUI coding environment | **Cove** (`chelis cove`) | Sheltered workspace where Surf meets shore |
+| Project manifest | `reef.toml` | A project's place in the reef |
+| Stats/optimization shell | **School** | A school of fish — numerical methods swim together |
+| Dataframe shell | **Coral** | Structured colonies built from the reef |
+| Finance shell | **Treasure** | Treasure from the deep |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
 
 ### Shell Ecosystem
 
-The Phase 3+ ecosystem stack is:
+Four tiers of packages, each built on the one below:
 
-- `chelis-std`: standard library shell with `Std.Nn` (including `Std.Nn.Embedding`),
-  optimizer/loss/init helpers, tokenizer/data-loading surfaces, and the later
-  `Std.Time` / `Std.Decimal` host-program modules
-- `school`: general numerical methods layered on top of `chelis-std`, including stats,
-  distributions, differentiable optimization, ODE/SDE solvers, integration, root
-  finding, and later signal-processing work
-- `coral`: typed dataframe shell layered on top of `chelis-std` for pandas/Polars-style
-  tabular work, with GPU-accelerated numeric columns, host-side string columns, and AD
-  through dataframe operations where filtering lowers to gather and aggregation lowers
-  to reduction
-- `treasure`: finance/domain shell layered on top of `chelis-std` + `school`, with
-  optional `coral` integration for financial data manipulation
+| Shell | Depends On | Contents |
+|---|---|---|
+| `chelis-std` | (core) | `Std.Nn` (Linear, Embedding, LayerNorm, etc.), `Std.Optim`, `Std.Loss`, `Std.Init`, `Std.IO` (safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
+| `school` | `chelis-std` | Statistics, distributions, optimization solvers (+ differentiable optimization), interpolation, SVD/PCA, hypothesis testing, ODE/SDE solvers, numerical integration, root finding, signal processing (blocked by complex numbers until Phase 5f) |
+| `coral` | `chelis-std` | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, DataFrame-aware CSV/JSON I/O. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
+| `treasure` | `chelis-std` + `school` + `coral` | Options pricing, risk measures, yield curves, stochastic processes, order books |
+
+Design rule: if a non-domain-specialist would use it, it goes in `chelis-std`, `school`, or `coral`. If only a finance practitioner needs it, it goes in `treasure`. Time and decimal are `chelis-std` because every domain needs dates and exact arithmetic. Distributions and optimization are `school` because they're general numerical methods. Dataframes are `coral` because any data scientist uses them. Black-Scholes and VaR are `treasure` because they're finance-specific.
 
 ---
 
