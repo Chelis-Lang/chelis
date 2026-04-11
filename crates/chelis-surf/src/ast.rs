@@ -98,6 +98,7 @@ pub enum Expr {
     Var(String, Span),
     Constructor(String, Span),         // Uppercase name
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
+    List(Vec<Expr>, Span),
     Record(String, Vec<(String, Expr)>, Span),
     Access(Box<Expr>, String, Span),
     TupleGet(Box<Expr>, i64, Span),

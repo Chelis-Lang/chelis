@@ -55,6 +55,30 @@ pub fn lower_program(program: &CheckedProgram) -> Dag {
     crate::optimize::dead_code_eliminate(&ctx.dag)
 }
 
+pub fn tensor_type_from_deep(expr: &Expr) -> TensorType {
+    LowerCtx::type_from_type_expr(expr)
+}
+
+pub fn lower_subexpr_program(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+) -> Dag {
+    let mut merged_types = full_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+        .collect::<HashMap<_, _>>();
+    merged_types.extend(scoped_tensor_types);
+
+    let mut ctx = LowerCtx::new(merged_types, program_defs, LinearityInfo::default());
+    let value = ctx.lower_expr(expr);
+    for id in value.flatten_nodes() {
+        ctx.dag.add_root(id);
+    }
+    crate::optimize::dead_code_eliminate(&ctx.dag)
+}
+
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -180,6 +204,37 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "numel"
                         | "tensor_to_scalar"
                         | "scalar_to_tensor"
+                        | "len"
+                        | "index"
+                        | "append"
+                        | "concat"
+                        | "take"
+                        | "drop"
+                        | "chunk"
+                        | "range"
+                        | "map"
+                        | "filter"
+                        | "fold"
+                        | "scan"
+                        | "partition"
+                        | "flat_map"
+                        | "flatten"
+                        | "zip"
+                        | "enumerate"
+                        | "dict_of"
+                        | "dict_get"
+                        | "dict_contains"
+                        | "dict_remove"
+                        | "dict_insert"
+                        | "dict_merge"
+                        | "dict_keys"
+                        | "dict_values"
+                        | "dict_entries"
+                        | "to_tensor"
+                        | "to_list"
+                        | "pad_sequences"
+                        | "Cons"
+                        | "Nil"
                 ) {
                     return true;
                 }

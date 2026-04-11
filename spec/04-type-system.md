@@ -171,6 +171,21 @@ surfaces practical and executable:
 - `Option[T]` as the ergonomic failure-returning surface for parse/lookups
 - `List[T]` and `Dict[K, V]` as practical collection types
 - explicit bridges between collection values and tensor values
+- later Phase 3 core numeric surfaces such as `einsum`, `gather`, `where`, `sort`,
+  `diagonal` / `trace`, and `clamp`
+- later standard-library host types such as `Std.Time` and `Std.Decimal`
+
+The currently shipped executable `3d` slice covers compiled collection foundations:
+`List[T]`, list literals, `len`, `index`, `append`, `concat`, `take`, `drop`,
+`chunk`, `flatten`, `range`, `zip`, `enumerate`, numeric `to_tensor`, practical rank-1
+`to_list`, `pad_sequences`, and the first immutable `Dict[K, V]` surface (`dict_of`,
+`dict_get`, `dict_contains`, `dict_remove`, `dict_insert`, `dict_merge`, `dict_keys`,
+`dict_values`, `dict_entries`) plus higher-order iteration (`map`, `filter`, `fold`,
+`scan`, `partition`, `flat_map`) compile through the host-value lane, and callback
+effects propagate through iteration in the shipped checker. This compiled helper set is
+now the practical collection foundation for `3g`: nested token lists can be flattened
+or chunked on the host side, dictionaries can be updated/trimmed immutably, and
+`pad_sequences` still marks the explicit bridge into fixed-shape tensors.
 
 Those items should be treated as Phase 3 implementation targets, not as a claim that the
 current evaluator/backends already provide the full runtime behavior implied by the type

@@ -4,6 +4,7 @@ use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 fn example_path(rel: &str) -> PathBuf {
@@ -29,6 +30,18 @@ fn scalar_string_foundation_example() -> PathBuf {
     example_path("../../examples/scalar_string_foundation.ch")
 }
 
+fn list_foundation_example() -> PathBuf {
+    example_path("../../examples/list_foundation.ch")
+}
+
+fn dict_foundation_example() -> PathBuf {
+    example_path("../../examples/dict_foundation.ch")
+}
+
+fn iter_foundation_example() -> PathBuf {
+    example_path("../../examples/iter_foundation.ch")
+}
+
 fn linreg_example() -> PathBuf {
     example_path("../../examples/linreg.ch")
 }
@@ -37,9 +50,12 @@ fn transformer_block_example() -> PathBuf {
     example_path("../../examples/transformer_block.ch")
 }
 
-fn executable_examples() -> [PathBuf; 6] {
+fn executable_examples() -> [PathBuf; 9] {
     [
+        dict_foundation_example(),
         hello_tensor_example(),
+        iter_foundation_example(),
+        list_foundation_example(),
         linreg_example(),
         mnist_example(),
         scalar_string_foundation_example(),
@@ -186,8 +202,12 @@ fn eval_prints_labeled_tuple_components() {
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("grads.0 = tensor(shape=[], data=[1.0])"))
-        .stdout(predicate::str::contains("grads.1 = tensor(shape=[], data=[2.5])"));
+        .stdout(predicate::str::contains(
+            "grads.0 = tensor(shape=[], data=[1.0])",
+        ))
+        .stdout(predicate::str::contains(
+            "grads.1 = tensor(shape=[], data=[2.5])",
+        ));
 }
 
 #[test]
@@ -227,6 +247,64 @@ fn eval_surfaces_debug_transcript() {
 }
 
 #[test]
+fn check_collection_callback_errors_name_the_helper_contract() {
+    let dir = tempdir().expect("tempdir");
+    let cases = [
+        (
+            "filter_non_bool.ch",
+            r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
+"#,
+            vec!["filter", "callback", "bool"],
+        ),
+        (
+            "partition_non_bool.ch",
+            r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
+"#,
+            vec!["partition", "callback", "bool"],
+        ),
+        (
+            "fold_acc_mismatch.ch",
+            r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+"#,
+            vec!["fold", "accumulator", "string", "int64"],
+        ),
+        (
+            "scan_acc_mismatch.ch",
+            r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+"#,
+            vec!["scan", "accumulator", "string", "int64"],
+        ),
+    ];
+
+    for (name, source, required_fragments) in cases {
+        let path = dir.path().join(name);
+        write_file(&path, source);
+        let json = run_json_check(&path);
+        let errors = json["errors"]
+            .as_array()
+            .expect("errors should be an array");
+        assert!(!errors.is_empty(), "{name} should fail");
+        let message = errors[0]["message"]
+            .as_str()
+            .expect("error should contain a message");
+        for fragment in required_fragments {
+            assert!(
+                message.contains(fragment),
+                "{name} message should contain `{fragment}`, got `{message}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn phase3c_scalar_string_acceptance_oracle() {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -239,6 +317,429 @@ fn phase3c_scalar_string_acceptance_oracle() {
         .success()
         .stdout(predicate::str::contains("progress: ckpt-7.safetensors"))
         .stdout(predicate::str::contains("stop"));
+}
+
+#[test]
+fn eval_supports_lists_and_tensor_bridge() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            list_foundation_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("len=4, items=4, shape=2x2"))
+        .stdout(predicate::str::contains("prefix = [1, 2, 3]"))
+        .stdout(predicate::str::contains("suffix = [2, 3, 4]"))
+        .stdout(predicate::str::contains("flat_tokens = [1, 2, 3]"))
+        .stdout(predicate::str::contains("token_batches = [[1, 2], [3]]"))
+        .stdout(predicate::str::contains("roundtrip = [1, 2, 3, 4]"));
+}
+
+#[test]
+fn eval_supports_dicts_and_iteration_collections() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            dict_foundation_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "[(alpha, 1), (beta, 2), (gamma, 3)]",
+        ))
+        .stdout(predicate::str::contains(
+            "[(0, alpha), (1, beta), (2, gamma)]",
+        ))
+        .stdout(predicate::str::contains(
+            "dict(alpha: 1, beta: 2, gamma: 3)",
+        ))
+        .stdout(predicate::str::contains(
+            "merged = dict(alpha: 1, beta: 20, gamma: 3, delta: 4, epsilon: 5)",
+        ))
+        .stdout(predicate::str::contains("key_count = 3"))
+        .stdout(predicate::str::contains("entry_count = 3"))
+        .stdout(predicate::str::contains(
+            "entries = [(alpha, 1), (beta, 2), (gamma, 3)]",
+        ))
+        .stdout(predicate::str::contains(
+            "merged_entries = [(alpha, 1), (beta, 20), (gamma, 3), (delta, 4), (epsilon, 5)]",
+        ))
+        .stdout(predicate::str::contains(
+            "trimmed_entries = [(alpha, 1), (beta, 20), (delta, 4), (epsilon, 5)]",
+        ))
+        .stdout(predicate::str::contains("has_beta = true"))
+        .stdout(predicate::str::contains("beta_id = 2"))
+        .stdout(predicate::str::contains("merged_beta_id = 20"))
+        .stdout(predicate::str::contains("trimmed_count = 4"));
+}
+
+#[test]
+fn eval_supports_map_filter_fold_collections() {
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "eval",
+            "--file",
+            iter_foundation_example().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[2, 3, 4, 5]"))
+        .stdout(predicate::str::contains("[2, 4]"))
+        .stdout(predicate::str::contains("[1, 3, 6, 10]"))
+        .stdout(predicate::str::contains("([3, 4], [1, 2])"))
+        .stdout(predicate::str::contains("[1, 11, 2, 12]"))
+        .stdout(predicate::str::contains("[[1, 11], [2, 12]]"))
+        .stdout(predicate::str::contains("total=6"))
+        .stdout(predicate::str::contains("total = 6"));
+}
+
+#[test]
+fn build_c_runs_list_foundation_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("list-build-out");
+    let source = list_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            "list_foundation.c",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "list_foundation",
+        ])
+        .status()
+        .expect("gcc should run");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("list_foundation"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_c_runs_dict_foundation_and_matches_eval_output() {
+    let temp = tempdir().expect("tempdir");
+    let out_dir = temp.path().join("build");
+    let source = dict_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let runtime_sources = ["dict_foundation.c", "chelis_runtime.c"];
+    let mut compile = StdCommand::new("gcc");
+    compile.current_dir(&out_dir);
+    compile.args(["-O2", "-fopenmp"]);
+    compile.args(runtime_sources);
+    compile.args(["-lm", "-o", "dict_foundation"]);
+    let status = compile.status().expect("gcc status");
+    assert!(status.success(), "generated C should compile");
+
+    let run_output = StdCommand::new(out_dir.join("dict_foundation"))
+        .current_dir(&out_dir)
+        .output()
+        .expect("run compiled program");
+    assert!(run_output.status.success(), "compiled program should run");
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_c_runs_iter_foundation_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("iter-build-out");
+    let source = iter_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            "iter_foundation.c",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "iter_foundation",
+        ])
+        .status()
+        .expect("gcc should run");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("iter_foundation"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_hip_accepts_dict_foundation_host_program() {
+    let temp = tempdir().expect("tempdir");
+    let out_dir = temp.path().join("hip-build");
+    let source = dict_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dict_foundation_hip.cpp"));
+
+    assert!(out_dir.join("dict_foundation_hip.cpp").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("chelis_hip_runtime.h").exists());
+}
+
+#[test]
+fn build_hip_accepts_iter_foundation_host_program() {
+    let temp = tempdir().expect("tempdir");
+    let out_dir = temp.path().join("hip-iter-build");
+    let source = iter_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("iter_foundation_hip.cpp"))
+        .stdout(predicate::str::contains("Compile: hipcc"))
+        .stdout(predicate::str::contains("-lm"))
+        .stdout(predicate::str::contains("-fopenmp").not());
+
+    assert!(out_dir.join("iter_foundation_hip.cpp").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("chelis_hip_runtime.h").exists());
+}
+
+#[test]
+fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("build-out");
+    let source = scalar_string_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-fopenmp",
+            "scalar_string_foundation.c",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "scalar_string_foundation",
+        ])
+        .status()
+        .expect("gcc should run");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_string_foundation"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
+fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mixed_3c.ch");
+    let out_dir = dir.path().join("mixed-build-out");
+    write_file(
+        &path,
+        "def check_loss(x: tensor[4, f32], threshold: f32) -> string =\n  if tensor_to_scalar(mean(x, 0)) < threshold then \"converged\" else \"training\"\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compile object:"));
+
+    let source = fs::read_to_string(out_dir.join("mixed_3c.c")).expect("generated source");
+    assert!(source.contains("chelis_string check_loss(chelis_tensor* x, double threshold)"));
+    assert!(source.contains("check_loss__tensor_0"));
+    assert!(source.contains("chelis_tensor_to_f64"));
+}
+
+#[test]
+#[ignore = "manual gate: hipcc is environment-dependent"]
+fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-build-out");
+    let source = scalar_string_foundation_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = StdCommand::new("hipcc")
+        .current_dir(&out_dir)
+        .args([
+            "scalar_string_foundation_hip.cpp",
+            "chelis_runtime.c",
+            "-lm",
+            "-o",
+            "scalar_string_foundation_hip",
+        ])
+        .status()
+        .expect("hipcc should run");
+    assert!(status.success(), "hipcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("scalar_string_foundation_hip"))
+        .output()
+        .expect("compiled hip binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled hip binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
 }
 
 #[test]

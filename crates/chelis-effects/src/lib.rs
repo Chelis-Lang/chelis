@@ -628,11 +628,19 @@ fn zero_span() -> Span {
 mod tests {
     use super::*;
     use chelis_deep::parser::parse_str;
+    use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 
     fn checked(src: &str) -> CheckedProgram {
         let exprs = parse_str(src).unwrap();
         let checked = chelis_types::check_phase0e_program(&exprs).unwrap();
         check_program(&checked).unwrap()
+    }
+
+    fn surf_checked(src: &str) -> CheckedProgram {
+        let decls = parse_surf(src).expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        check_program(&checked).expect("effect check")
     }
 
     #[test]
@@ -697,6 +705,125 @@ mod tests {
         assert!(
             text.contains("effects"),
             "expected inferred effect metadata on checked fn body, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn map_propagates_io_effect_from_callback() {
+        let program = surf_checked(
+            r#"
+def emit(x: int64) -> int64 = debug(add(x, cast(1, int64)))
+let xs: List[int64] = [cast(1, int64), cast(2, int64)]
+let ys = map(emit, xs)
+"#,
+        );
+        let inferred = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("ys")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on map result, got {:?}",
+            inferred.get("ys")
+        );
+    }
+
+    #[test]
+    fn fold_propagates_io_effect_from_inline_callback() {
+        let program = surf_checked(
+            r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64)]
+let total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+"#,
+        );
+        let inferred = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("total")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on fold result, got {:?}",
+            inferred.get("total")
+        );
+    }
+
+    #[test]
+    fn scan_propagates_io_effect_from_inline_callback() {
+        let program = surf_checked(
+            r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64)]
+let totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+"#,
+        );
+        let inferred = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("totals")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on scan result, got {:?}",
+            inferred.get("totals")
+        );
+    }
+
+    #[test]
+    fn partition_propagates_random_effect_to_root() {
+        let decls = parse_surf(
+            r#"
+def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
+let xs: List[tensor[f32]] = [(x1 : tensor[f32]), (x2 : tensor[f32])]
+let buckets = partition(keep, xs)
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let errors = check_program(&checked).expect_err("partition should propagate Random effect");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
+                    && error.message.contains("Random")),
+            "expected unhandled Random effect, got {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn flat_map_propagates_io_effect_from_callback() {
+        let program = surf_checked(
+            r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64)]
+let ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
+"#,
+        );
+        let inferred = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("ys")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on flat_map result, got {:?}",
+            inferred.get("ys")
+        );
+    }
+
+    #[test]
+    fn map_propagates_random_effect_to_root() {
+        let decls = parse_surf(
+            r#"
+def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+let xs: List[tensor[8, f32]] = [(x1 : tensor[8, f32]), (x2 : tensor[8, f32])]
+let ys = map(step, xs)
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let errors = check_program(&checked).expect_err("map should propagate Random effect");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
+                    && error.message.contains("Random")),
+            "expected unhandled Random effect, got {:?}",
+            errors
         );
     }
 }

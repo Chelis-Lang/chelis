@@ -236,7 +236,7 @@ Planned command surface:
 - `chelis build app.ch`
 - `chelis build app.ch --target hip`
 
-Additional targets may be added later as StableHLO and FX land.
+Additional targets may be added later as StableHLO, FX, and Triton land.
 
 ## 7. Invariants
 

@@ -215,7 +215,8 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         .iter()
         .find(|root| root["name"] == "loss")
         .expect("loss root");
-    assert_eq!(loss_root["value"]["data"][0], 2.5);
+    assert_eq!(loss_root["value"]["type"], "tensor");
+    assert_eq!(loss_root["value"]["value"]["data"][0], 2.5);
 
     let (_, bad) = post_json(
         router(),
@@ -247,7 +248,182 @@ async fn eval_endpoint_returns_host_values_and_transcript() {
         .iter()
         .find(|root| root["name"] == "value")
         .expect("value root");
-    assert_eq!(value_root["value"], "ok-2");
+    assert_eq!(value_root["value"]["type"], "string");
+    assert_eq!(value_root["value"]["value"], "ok-2");
+}
+
+#[tokio::test]
+async fn eval_endpoint_returns_dict_and_tuple_collection_values() {
+    let source = r#"
+let keys: List[string] = ["alpha", "beta"]
+let ids: List[int64] = [cast(1, int64), cast(2, int64)]
+let pairs = zip(keys, ids)
+let enumerated = enumerate(keys)
+let vocab: Dict[string, int64] = dict_of(pairs)
+let entries = dict_entries(vocab)
+"#;
+    let (_, ok) = post_json(
+        router(),
+        "/eval",
+        json!({"source_kind":"surf","source":source,"bindings":{}}),
+    )
+    .await;
+    assert!(ok["ok"].as_bool().unwrap());
+    let roots = ok["result"]["roots"].as_array().expect("roots");
+    let pairs = roots
+        .iter()
+        .find(|root| root["name"] == "pairs")
+        .expect("pairs root");
+    assert_eq!(pairs["value"]["type"], "list");
+    assert_eq!(pairs["value"]["value"][0]["type"], "tuple");
+    let enumerated = roots
+        .iter()
+        .find(|root| root["name"] == "enumerated")
+        .expect("enumerated root");
+    assert_eq!(enumerated["value"]["type"], "list");
+    assert_eq!(enumerated["value"]["value"][0]["type"], "tuple");
+    let vocab = roots
+        .iter()
+        .find(|root| root["name"] == "vocab")
+        .expect("vocab root");
+    assert_eq!(vocab["value"]["type"], "dict");
+    assert_eq!(vocab["value"]["entries"][0]["key"]["type"], "string");
+    assert_eq!(vocab["value"]["entries"][0]["value"]["type"], "int64");
+    let entries = roots
+        .iter()
+        .find(|root| root["name"] == "entries")
+        .expect("entries root");
+    assert_eq!(entries["value"]["type"], "list");
+    assert_eq!(entries["value"]["value"][0]["type"], "tuple");
+    assert_eq!(entries["value"]["value"][0]["value"][0]["type"], "string");
+    assert_eq!(entries["value"]["value"][0]["value"][1]["type"], "int64");
+}
+
+#[tokio::test]
+async fn eval_endpoint_returns_list_from_tensor_bridge() {
+    let source = r#"
+let x = (x : tensor[4, f32])
+let items = to_list(x)
+"#;
+    let (_, ok) = post_json(
+        router(),
+        "/eval",
+        json!({
+            "source_kind":"surf",
+            "source":source,
+            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+        }),
+    )
+    .await;
+    assert!(ok["ok"].as_bool().unwrap());
+    let items = ok["result"]["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|root| root["name"] == "items")
+        .expect("items root");
+    assert_eq!(items["value"]["type"], "list");
+    assert_eq!(items["value"]["value"][0]["type"], "float64");
+    assert_eq!(items["value"]["value"][3]["value"], 4.0);
+}
+
+#[tokio::test]
+async fn eval_endpoint_returns_sequence_and_dict_helper_values() {
+    let source = r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+let prefix = take(xs, cast(2, int64))
+let suffix = drop(xs, cast(1, int64))
+let groups = chunk(xs, cast(2, int64))
+let scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
+let buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
+let exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], take(xs, cast(2, int64)))
+let flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
+let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+let key_count = len(base)
+let extended = dict_insert(base, "beta", cast(2, int64))
+let merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+let trimmed = dict_remove(merged, "gamma")
+"#;
+    let (_, ok) = post_json(
+        router(),
+        "/eval",
+        json!({"source_kind":"surf","source":source,"bindings":{}}),
+    )
+    .await;
+    assert!(ok["ok"].as_bool().unwrap());
+    let roots = ok["result"]["roots"].as_array().expect("roots");
+    let prefix = roots
+        .iter()
+        .find(|root| root["name"] == "prefix")
+        .expect("prefix root");
+    assert_eq!(prefix["value"]["type"], "list");
+    assert_eq!(prefix["value"]["value"].as_array().unwrap().len(), 2);
+    assert_eq!(prefix["value"]["value"][1]["value"], 2);
+    let suffix = roots
+        .iter()
+        .find(|root| root["name"] == "suffix")
+        .expect("suffix root");
+    assert_eq!(suffix["value"]["type"], "list");
+    assert_eq!(suffix["value"]["value"][0]["value"], 2);
+    let groups = roots
+        .iter()
+        .find(|root| root["name"] == "groups")
+        .expect("groups root");
+    assert_eq!(groups["value"]["type"], "list");
+    assert_eq!(groups["value"]["value"][0]["type"], "list");
+    assert_eq!(groups["value"]["value"][1]["value"][0]["value"], 3);
+    let scanned = roots
+        .iter()
+        .find(|root| root["name"] == "scanned")
+        .expect("scanned root");
+    assert_eq!(scanned["value"]["type"], "list");
+    assert_eq!(scanned["value"]["value"][2]["value"], 6);
+    let buckets = roots
+        .iter()
+        .find(|root| root["name"] == "buckets")
+        .expect("buckets root");
+    assert_eq!(buckets["value"]["type"], "tuple");
+    assert_eq!(buckets["value"]["value"][0]["type"], "list");
+    assert_eq!(buckets["value"]["value"][0]["value"][0]["value"], 2);
+    assert_eq!(buckets["value"]["value"][1]["type"], "list");
+    assert_eq!(buckets["value"]["value"][1]["value"][0]["value"], 1);
+    let exploded = roots
+        .iter()
+        .find(|root| root["name"] == "exploded")
+        .expect("exploded root");
+    assert_eq!(exploded["value"]["type"], "list");
+    assert_eq!(exploded["value"]["value"][1]["value"], 11);
+    let flattened = roots
+        .iter()
+        .find(|root| root["name"] == "flattened")
+        .expect("flattened root");
+    assert_eq!(flattened["value"]["type"], "list");
+    assert_eq!(flattened["value"]["value"][2]["value"], 3);
+    let merged = roots
+        .iter()
+        .find(|root| root["name"] == "merged")
+        .expect("merged root");
+    assert_eq!(merged["value"]["type"], "dict");
+    assert_eq!(merged["value"]["entries"].as_array().unwrap().len(), 3);
+    let beta = merged["value"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"]["value"] == "beta")
+        .expect("beta entry");
+    assert_eq!(beta["value"]["type"], "int64");
+    assert_eq!(beta["value"]["value"], 20);
+    let trimmed = roots
+        .iter()
+        .find(|root| root["name"] == "trimmed")
+        .expect("trimmed root");
+    assert_eq!(trimmed["value"]["type"], "dict");
+    assert_eq!(trimmed["value"]["entries"].as_array().unwrap().len(), 2);
+    let key_count = roots
+        .iter()
+        .find(|root| root["name"] == "key_count")
+        .expect("key_count root");
+    assert_eq!(key_count["value"]["value"], 1);
 }
 
 #[tokio::test]

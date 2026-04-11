@@ -1,0 +1,31 @@
+let keys: List[string] = ["alpha", "beta", "gamma"]
+let ids: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+let pairs = zip(keys, ids)
+let enumerated = enumerate(keys)
+let vocab: Dict[string, int64] = dict_of(pairs)
+let extended = dict_insert(vocab, "delta", cast(4, int64))
+let overlay: Dict[string, int64] = dict_of([("beta", cast(20, int64)), ("epsilon", cast(5, int64))])
+let merged = dict_merge(extended, overlay)
+let trimmed = dict_remove(merged, "gamma")
+let key_count = len(vocab)
+let entries = dict_entries(vocab)
+let merged_entries = dict_entries(merged)
+let trimmed_entries = dict_entries(trimmed)
+let entry_count = len(entries)
+let trimmed_count = len(trimmed)
+let has_beta = dict_contains(vocab, "beta")
+let beta_id = match dict_get(vocab, "beta") with {
+  | Some(value) => value
+  | None => cast(0, int64)
+}
+let merged_beta_id = match dict_get(merged, "beta") with {
+  | Some(value) => value
+  | None => cast(0, int64)
+}
+let pairs_view = print(pairs)
+let enumerated_view = print(enumerated)
+let keys_view = print(dict_keys(vocab))
+let values_view = print(dict_values(vocab))
+let entries_view = print(entries)
+let merged_entries_view = print(merged_entries)
+let trimmed_entries_view = print(trimmed_entries)

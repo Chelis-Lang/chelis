@@ -224,6 +224,10 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Lit(lit, _) => format_lit(lit),
         Expr::Var(name, _) | Expr::Constructor(name, _) => name.clone(),
         Expr::Apply(func, args, _) => format!("{}({})", format_expr(func), format_args(args)),
+        Expr::List(items, _) => format!(
+            "[{}]",
+            items.iter().map(format_expr).collect::<Vec<_>>().join(", ")
+        ),
         Expr::Record(name, fields, _) => format!(
             "{name} {{ {} }}",
             fields
@@ -514,6 +518,7 @@ fn wrap_simple(expr: &Expr) -> String {
         | Expr::Var(_, _)
         | Expr::Constructor(_, _)
         | Expr::Apply(_, _, _)
+        | Expr::List(_, _)
         | Expr::Access(_, _, _)
         | Expr::TupleGet(_, _, _)
         | Expr::Tuple(_, _) => format_expr(expr),

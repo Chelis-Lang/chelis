@@ -27,6 +27,11 @@ RISC primitives are built-in functions in the compiler's scope, not syntax tags.
 
 Together, the two tiers define everything the compiler has special knowledge of. Anything that can be expressed as a Chelis program composing these primitives — without requiring custom AD adjoints, backend fusion rules, or compiler-recognized names — belongs in the standard library (`Std.*`) or in external packages, not in the core. See `spec/design/chelis_canonical_reference.md` §8.5 for the full scope boundary taxonomy.
 
+Phase `3h` expands the practical primitive surface beyond this initial minimal set with
+`einsum`, `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`,
+`diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding` remains the named standard-
+library surface over `gather`.
+
 ---
 
 ## 2. RISC Primitives (Tier 1)

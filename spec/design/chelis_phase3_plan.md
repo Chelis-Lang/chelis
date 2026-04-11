@@ -24,8 +24,9 @@ self-sufficient AI programming language.
 text, tokenizes it, batches and pads it, runs a model, computes loss and gradients, and
 prints results, without dropping to Python for preprocessing or orchestration.
 
-**Phase 3 does NOT deliver:** research type extensions or Lean formalization. Those move
-to Phase `5e` and `5f`. Phase 3 is the pragmatic language-completeness phase.
+**Phase 3 does NOT deliver:** sparse tensors, complex numbers, research type
+extensions, or Lean formalization. Those move to Phase `5e`, `5f`, `5g`, and `5h`.
+Phase 3 is the pragmatic language-completeness phase.
 
 ---
 
@@ -38,17 +39,19 @@ Shipped foundations
 3a: Package System
 3b: Python FFI
 3b-ii: Direct Python Execution + NumPy
+3c: Scalar & String Foundation
+3d: Collections & Iteration
 
 Remaining work
 
-3c: Scalar & String Foundation -> 3d: Collections & Iteration -> 3g: Data Loading & Tokenization -> 3f: SKILL.md v2 Redo
+3h: Core Numeric Primitives -> 3g: Data Loading & Tokenization -> 3i: Std.Time & Std.Decimal -> 3f: SKILL.md v2 Redo
 ```
 
 **Recommended execution order:**
 
-1. `3c`: Scalar and string foundation
-2. `3d`: Collections and iteration
-3. `3g`: Data loading and tokenization
+1. `3h`: Core numeric primitives
+2. `3g`: Data loading and tokenization
+3. `3i`: `Std.Time` and `Std.Decimal`
 4. `3f`: SKILL.md v2 redo
 
 Shipped Phase 3 foundations stay in place and continue to constrain the remaining work:
@@ -57,10 +60,14 @@ Shipped Phase 3 foundations stay in place and continue to constrain the remainin
 - `3a` defines the package/distribution story new libraries should use
 - `3b` / `3b-ii` define the Python interop boundary the fuller language must still fit
 
-`3c` must precede `3d` because collections need scalar and string element types.
-`3d` must precede `3g` because tokenization and file/config processing produce lists,
-dicts, and variable-length sequences. `3f` goes last because the teaching surface
-should describe the real full Phase 3 language, not a partially complete midpoint.
+`3h` follows the shipped `3c`/`3d` foundations because real AI model code still needs
+practical tensor-language primitives such as `einsum`, `concat`, `gather`, and
+`clamp`. `3g` depends on that fuller host-and-tensor surface because tokenization,
+batching, and model ingress should not force awkward library workarounds. `3i` comes
+after `3g` because time/exact-decimal support rounds out the standard library rather
+than blocking the pure-AI workflow milestone. `3f` goes last because the teaching
+surface should describe the real full Phase 3 language, not a partially complete
+midpoint.
 
 ---
 
@@ -77,7 +84,7 @@ This remains the public style foundation for all remaining Phase 3 work:
 - width-aware multiline pipe layout
 - examples and docs that read like human-written Surf rather than typed Deep debug text
 
-All new examples introduced in `3c`, `3d`, `3g`, and `3f` should continue to follow
+All new examples introduced in `3h`, `3g`, `3i`, and `3f` should continue to follow
 this style.
 
 ### 3a: Package System (Shells + Reef)
@@ -107,6 +114,8 @@ program authoring.
 ---
 
 ## 3c: Scalar and String Foundation
+
+**Status:** shipped.
 
 **Goal:** make Chelis a real programming language for AI workflows by adding first-class
 scalar values and strings outside the tensor-only world.
@@ -153,8 +162,11 @@ Without first-class scalars and strings, Chelis cannot naturally express:
   conditionals
 - extend type inference/checking for non-tensor scalar and string operations
 - extend the evaluator for scalar/string execution
-- extend C/HIP codegen only where these values must survive through executable programs;
-  host-side runtime support is acceptable where GPU execution is not the point
+- lower scalar/string/`Option`/print logic through a compiled host-value lane so
+  `chelis build` does not fall back to evaluator-only behavior for mixed programs
+- keep that host-value lane on CPU for both C and HIP targets; tensor kernels still use
+  the existing tensor DAG/device paths
+- use tagged execution values on the Tide/Python wire surface
 - keep tensor computation semantics unchanged: no implicit scalar/tensor blending
 
 ### Acceptance Oracle
@@ -164,10 +176,13 @@ A pure Chelis training-step-style program can:
 - compute scalar stopping criteria
 - build or format a checkpoint/log path as a string
 - print progress without Python
+- compile with `chelis build --target c`, run as a native binary, and match `chelis eval`
 
 ---
 
 ## 3d: Collections and Iteration
+
+**Status:** shipped.
 
 **Goal:** add the variable-length data structures and functional iteration primitives
 required for preprocessing and dataset plumbing.
@@ -190,16 +205,35 @@ Tensors alone cannot express that variable-length host-side structure.
 - immutable `List[T]`
 - immutable `Dict[K, V]` with practical key types such as `String` and `Int`
 
+**Current executable slice:**
+
+- shipped compiled collection slice: list literals, `List[T]`, `len`, `index`,
+  `append`, `concat`, `take`, `drop`, `chunk`, `flatten`, `range`, `zip`,
+  `enumerate`, numeric `to_tensor`, practical rank-1 `to_list`, `pad_sequences`, and
+  the first immutable `Dict[K, V]` builtins: `dict_of`, `dict_get`,
+  `dict_contains`, `dict_remove`, `dict_insert`, `dict_merge`, `dict_keys`,
+  `dict_values`, `dict_entries`, plus compiled higher-order iteration (`map`,
+  `filter`, `fold`, `scan`, `partition`, `flat_map`)
+- this now covers the practical compiled collection surface needed to hand off cleanly
+  to `3g` tokenization/data-loading work rather than leaving obvious batching or
+  nested-list gaps behind
+
 **Iteration primitives:**
 
-- `map`, `filter`, `fold`, `zip`, `enumerate`, `range`
-- collection length, indexing, append/concat, key lookup, key/value/entry enumeration
+- `map`, `filter`, `fold`, `scan`, `partition`, `flat_map`, `zip`, `enumerate`,
+  `range`
+- collection length (lists and dicts), indexing, append/concat, sequence truncation
+  (`take`, `drop`), batching (`chunk`), nested-list flattening, key lookup, immutable
+  dict remove/update/overlay, key/value/entry enumeration, and dataset-friendly
+  helpers such as cumulative scans, stable boolean partitioning, and callback-driven
+  list expansion
 - effect propagation through iteration
+  this is now covered by checker tests for callback-driven `IO` and `Random`
 
 **Collection/tensor bridge:**
 
 - list-to-tensor conversion for numeric lists
-- tensor-to-list conversion where practical
+- practical rank-1 tensor-to-list conversion
 - stacking and padding helpers
 - `pad_sequences` as the critical bridge from variable-length token lists to batched
   tensor inputs
@@ -211,7 +245,11 @@ Tensors alone cannot express that variable-length host-side structure.
 - add evaluator/runtime support for immutable collections
 - document linearly typed tensor elements inside collections without making collections
   themselves linear by default
-- keep collection data host-side; tensors remain the compiled compute substrate
+- compile collections through the same host-value lane used by `3c` in both C and HIP
+  builds; collections stay host-side as CPU data structures, but they are not
+  evaluator-only
+- keep tensors as the fixed-shape compute substrate and make the list/tensor bridge
+  explicit
 
 ### Acceptance Oracle
 
@@ -219,7 +257,84 @@ A pure Chelis preprocessing program can:
 
 - build a vocabulary/config map
 - transform a list of examples with functional iteration
+- truncate a variable-length sequence before tensorization
+- immutably extend or overlay a config/vocabulary dictionary
 - pad variable-length integer sequences into a batched tensor input
+
+Current shipped oracles for the executable collection slices:
+
+- `examples/list_foundation.ch` survives `chelis fmt`, `chelis check`, `chelis eval`,
+  and `chelis build --target c`, and the compiled binary matches eval output
+- `examples/dict_foundation.ch` survives `chelis fmt`, `chelis check`, `chelis eval`,
+  and `chelis build --target c`, and the compiled binary matches eval output
+- `examples/iter_foundation.ch` survives `chelis fmt`, `chelis check`, `chelis eval`,
+  and `chelis build --target c`, and the compiled binary matches eval output
+
+---
+
+## 3h: Core Numeric Primitives
+
+**Goal:** close the most important tensor-language expressiveness gaps between the
+initial RISC + derived surface and the operations real models and numerical libraries
+expect to use directly.
+
+### Why This Matters
+
+The shipped scalar/string/collection/data foundations make Chelis a host language, but
+serious AI/model code still needs a richer tensor core than the original minimal set.
+Without this cut, users still hit avoidable walls around:
+
+- Einstein-style contractions and batched linear algebra
+- skip connections and multi-head packing/unpacking flows
+- embedding lookup and index-driven tensor access
+- masked/conditional tensor updates
+- cumulative and order-sensitive tensor statistics
+- diagonal/trace style linear-algebra utilities
+- basic value clipping and training-control helpers
+
+### Required Surface
+
+**Core primitives added in this phase:**
+
+- `einsum`
+- `concat` / `split`
+- `gather` / `scatter`
+- `where`
+- `cumsum`
+- `sort`
+- `diagonal` / `trace`
+- `clamp`
+
+**Priority notes:**
+
+- `einsum` is the single highest-impact addition because it covers matmul, batched
+  matmul, transpose, trace, outer products, and common contraction patterns in one
+  primitive
+- `concat` / `split` are the minimal structural operations needed for modern
+  transformer-style model blocks
+- `diagonal` / `trace` and `clamp` are small but broadly useful numerical surfaces
+
+**Standard-library addition unlocked here:**
+
+- `Std.Nn.Embedding` as the explicit named surface over `gather`
+
+### Implementation Shape
+
+- extend the type/checking/lowering/backend docs and implementation for the new tensor
+  primitives
+- keep `Std.Nn.Embedding` in the standard library rather than the compiler core, but
+  make the underlying `gather` primitive part of this phase
+- preserve the Phase 0/1 invariants: explicit shapes, explicit broadcasting, and
+  backend agreement with the reference C path
+
+### Acceptance Oracle
+
+A pure Chelis model program can:
+
+- express common contraction-heavy blocks using `einsum`
+- concatenate and split tensor features without falling back to Python
+- perform embedding lookup through `Std.Nn.Embedding`
+- clamp or trace intermediate tensors in compiled programs on the C path
 
 ---
 
@@ -279,6 +394,45 @@ A pure Chelis program can:
 
 ---
 
+## 3i: `Std.Time` and `Std.Decimal`
+
+**Goal:** round out the standard-library host-language surface with time and
+exact-arithmetic utilities that real workflows need but the compiler core should not own.
+
+### Why This Matters
+
+Pure Chelis workflows still need ordinary application scaffolding around the model:
+
+- dates and durations in schedules, checkpoints, and reporting
+- exact decimal arithmetic for money/config/reporting cases where binary floats are the
+  wrong surface
+
+These do not justify new compiler intrinsics, but they do belong in the Phase 3
+language-completeness story rather than an indefinite backlog.
+
+### Required Surface
+
+- `Std.Time` for dates, timestamps, durations, and basic time arithmetic
+- `Std.Decimal` for exact decimal values and arithmetic
+
+### Implementation Shape
+
+- ship both as standard-library modules, not new core-language primitives
+- keep the APIs package-friendly under the existing Reef / `chelis-std` model
+- sequence this after `3g` so data/tokenization remains the critical practical
+  milestone and before `3f` so the teaching surface can cover the complete host-side
+  standard stack
+
+### Acceptance Oracle
+
+A pure Chelis workflow can:
+
+- represent and format a timestamp or duration without Python
+- represent exact decimal configuration/reporting values without binary-float drift
+- use those values in package-friendly standard-library code
+
+---
+
 ## 3f: SKILL.md v2 Redo
 
 **Goal:** rewrite the teaching surface after the language-completeness work lands so
@@ -298,13 +452,30 @@ The refreshed skill should teach:
 - effects, linearity, macros, `vmap`, and tuples
 - scalar/string programming
 - collections and iteration
+- core numeric primitives such as `einsum`, `gather`, and `concat`
 - tokenization and data-loading idioms
+- `Std.Time` / `Std.Decimal` host-program idioms
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
 ### Acceptance Oracle
 
 The checked-in skill validation suite passes with examples and guidance that reflect the
-post-`3g` language surface.
+post-`3i` language surface.
+
+---
+
+## Post-Phase-3 Shell Stack
+
+The ecosystem layering this phase is setting up is:
+
+- `chelis-std` as the first package-layer target, including `Std.Nn.Embedding` and the
+  later `Std.Time` / `Std.Decimal` host-program surface
+- `school` on top of `chelis-std` for general numerical methods: stats,
+  distributions, optimization solvers including differentiable optimization,
+  interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
+  processing once complex numbers land
+- `treasure` on top of `chelis-std` + `school` for finance-specific pricing, risk,
+  curves, stochastic processes, and order-book workloads
 
 ---
 
@@ -324,11 +495,24 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 - effect propagation through `map` / `fold` is correct
 - list/tensor bridging rejects malformed shape cases clearly
 
+**Core numeric primitives (`3h`):**
+
+- `einsum` agrees with the reference backend on the supported contraction corpus
+- `concat` / `split`, `diagonal` / `trace`, and `clamp` behave consistently across
+  evaluator and compiled paths
+- `Std.Nn.Embedding` exercises the real `gather` path rather than a fake host-side stub
+
 **Data loading/tokenization (`3g`):**
 
 - text/CSV/JSON loading returns the documented structures
 - tokenizer encode/decode is deterministic against the documented assets
 - batching/padding produces the expected tensor shapes and values
+
+**Standard library host types (`3i`):**
+
+- `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
+  compiler-intrinsic assumptions
+- examples/docs do not overclaim backend or tensor-kernel relevance for these modules
 
 **Teaching surface (`3f`):**
 
@@ -345,13 +529,17 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3a`: Package system | shipped | `3e` | Engineering |
 | `3b`: Python FFI interop core | shipped | `3a` | Engineering |
 | `3b-ii`: Direct execution + NumPy | shipped | `3b` | Engineering |
-| `3c`: Scalar and string foundation | ~4-6 weeks | `3e` shipped | Engineering |
-| `3d`: Collections and iteration | ~4-6 weeks | `3c` | Engineering |
-| `3g`: Data loading and tokenization | ~4-6 weeks | `3d` | Engineering |
-| `3f`: SKILL.md v2 redo | ~2-3 weeks | `3c`, `3d`, `3g` | Engineering / teaching surface |
+| `3c`: Scalar and string foundation | shipped | `3e` shipped | Engineering |
+| `3d`: Collections and iteration | shipped | `3c` | Engineering |
+| `3h`: Core numeric primitives | ~4-6 weeks | `3d` | Engineering |
+| `3g`: Data loading and tokenization | ~4-6 weeks | `3h` | Engineering |
+| `3i`: `Std.Time` and `Std.Decimal` | ~2-3 weeks | `3g` | Engineering / standard library |
+| `3f`: SKILL.md v2 redo | ~2-3 weeks | `3h`, `3g`, `3i` | Engineering / teaching surface |
 
 This phase is now intentionally sequential and pragmatic. The remaining work is about
-making Chelis usable, not publishable.
+making Chelis usable, not publishable. Remaining estimated effort is roughly
+`12-17 weeks`, and the expanded Phase 3 stack now totals roughly `25-35 weeks` end to
+end across shipped and planned sub-phases.
 
 ---
 
@@ -362,7 +550,9 @@ Before calling Phase 3 complete:
 - `3a`, `3b`, `3b-ii`, and `3e` remain honest shipped foundations
 - `3c` provides practical scalar/string programming without Python fallback
 - `3d` provides collections and iteration for variable-length host-side data
+- `3h` provides the expanded tensor-language surface needed for real model code
 - `3g` provides text/config/data loading plus tokenizer and batching support
-- `3f` reflects the real post-`3g` language in `SKILL.md` and examples
+- `3i` provides `Std.Time` and `Std.Decimal` as practical standard-library host types
+- `3f` reflects the real post-`3i` language in `SKILL.md` and examples
 - a pure Chelis program can read text, tokenize it, batch/pad it, run a model, compute
   loss and gradients, and print results without Python

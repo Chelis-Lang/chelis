@@ -168,12 +168,34 @@ pub fn diagnostics_text(analysis: &LiveAnalysis) -> String {
 
 fn render_execution_value(value: &ExecutionValue) -> String {
     match value {
-        ExecutionValue::Tensor(value) => format!("shape={:?} data={:?}", value.shape, value.data),
-        ExecutionValue::Int(value) => value.to_string(),
-        ExecutionValue::Float(value) => value.to_string(),
-        ExecutionValue::Bool(value) => value.to_string(),
-        ExecutionValue::String(value) => value.clone(),
-        ExecutionValue::Tuple(items) => format!(
+        ExecutionValue::Tensor { value } => {
+            format!("shape={:?} data={:?}", value.shape, value.data)
+        }
+        ExecutionValue::Int64 { value } => value.to_string(),
+        ExecutionValue::Float64 { value } => value.to_string(),
+        ExecutionValue::Bool { value } => value.to_string(),
+        ExecutionValue::String { value } => value.clone(),
+        ExecutionValue::List { value: items } => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(render_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Dict { entries } => format!(
+            "dict({})",
+            entries
+                .iter()
+                .map(|entry| format!(
+                    "{}: {}",
+                    render_execution_value(&entry.key),
+                    render_execution_value(&entry.value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Tuple { value: items } => format!(
             "({})",
             items
                 .iter()
@@ -191,7 +213,7 @@ fn render_execution_value(value: &ExecutionValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        ExecutionValue::Unit { .. } => "()".to_string(),
+        ExecutionValue::Unit => "()".to_string(),
     }
 }
 

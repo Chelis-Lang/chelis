@@ -87,21 +87,43 @@ pub struct TensorValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
+pub struct DictEntryValue {
+    pub key: ExecutionValue,
+    pub value: ExecutionValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionValue {
-    Tensor(TensorValue),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    String(String),
-    Tuple(Vec<ExecutionValue>),
+    Tensor {
+        value: TensorValue,
+    },
+    Int64 {
+        value: i64,
+    },
+    Float64 {
+        value: f64,
+    },
+    Bool {
+        value: bool,
+    },
+    String {
+        value: String,
+    },
+    List {
+        value: Vec<ExecutionValue>,
+    },
+    Dict {
+        entries: Vec<DictEntryValue>,
+    },
+    Tuple {
+        value: Vec<ExecutionValue>,
+    },
     Adt {
         ctor: String,
         fields: Vec<ExecutionValue>,
     },
-    Unit {
-        kind: String,
-    },
+    Unit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -441,6 +463,10 @@ pub enum WireSurfExpr {
     Apply {
         func: Box<WireSurfExpr>,
         args: Vec<WireSurfExpr>,
+        span: Span,
+    },
+    List {
+        items: Vec<WireSurfExpr>,
         span: Span,
     },
     Record {

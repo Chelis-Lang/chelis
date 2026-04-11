@@ -2,6 +2,7 @@
 
 pub mod blas;
 pub mod emit;
+pub mod host_emit;
 pub mod memory;
 
 /// Result of C code generation.
@@ -46,6 +47,23 @@ pub struct CodegenOptions {
 /// remaining DAG roots are appended afterward as `root{index}`.
 pub fn codegen(dag: &chelis_ir::dag::Dag, func_name: &str) -> CodegenResult {
     codegen_with_options(dag, func_name, CodegenOptions::default())
+}
+
+pub fn codegen_host_program(
+    program: &chelis_ir::host::HostProgram,
+    func_name: &str,
+) -> CodegenResult {
+    let c_source = host_emit::emit_host_program(program, func_name);
+    let h_header = host_emit::emit_host_header(program);
+    CodegenResult {
+        c_source,
+        h_header,
+        compile_flags: vec!["-fopenmp".to_string()],
+        link_flags: vec!["-lm".to_string(), "-fopenmp".to_string()],
+        input_labels: Vec::new(),
+        output_labels: Vec::new(),
+        symbolic_dims: Vec::new(),
+    }
 }
 
 /// Generate C source code from a RISC DAG with explicit backend options.

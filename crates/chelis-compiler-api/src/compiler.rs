@@ -142,12 +142,27 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    let host_compiled = chelis_ir::host::lower_compiled_program(&compiled.checked);
     let func_name = request
         .entry_name
         .unwrap_or_else(|| "chelis_main".to_string());
 
     match request.target {
         CompileTarget::C => {
+            if compiled.dag.roots().is_empty()
+                && let Some(host_program) = host_compiled.host.as_ref()
+            {
+                let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
+                return Ok(compiled_execution_artifact(
+                    request.target,
+                    &func_name,
+                    None,
+                    compile_result_c(request.target, &func_name, &result),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let fused = chelis_ir::fuse::fuse(&compiled.dag);
             let result = chelis_backend_c::codegen(&fused, &func_name);
@@ -162,6 +177,20 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             ))
         }
         CompileTarget::Hip => {
+            if compiled.dag.roots().is_empty()
+                && let Some(host_program) = host_compiled.host.as_ref()
+            {
+                let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
+                return Ok(compiled_execution_artifact(
+                    request.target,
+                    &func_name,
+                    None,
+                    compile_result_hip_host(request.target, &func_name, &result),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
             reject_unsized_named_dims(&compiled.dag, "hip")?;
             reject_unsupported_hip_ops(&compiled.dag)?;
             let fused = chelis_ir::fuse::fuse(&compiled.dag);
@@ -660,6 +689,42 @@ fn compile_result_hip(
     }
 }
 
+fn compile_result_hip_host(
+    target: CompileTarget,
+    func_name: &str,
+    result: &CodegenResult,
+) -> CompileResult {
+    CompileResult {
+        target,
+        entry_name: func_name.to_string(),
+        files: vec![
+            GeneratedFile {
+                path: format!("{func_name}_hip.cpp"),
+                contents: result.c_source.clone(),
+            },
+            GeneratedFile {
+                path: format!("{func_name}_hip.h"),
+                contents: result.h_header.clone(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime.h".to_string(),
+                contents: RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime.c".to_string(),
+                contents: RUNTIME_C.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_hip_runtime.h".to_string(),
+                contents: HIP_RUNTIME_H.to_string(),
+            },
+        ],
+        compile_flags: result.compile_flags.clone(),
+        link_flags: result.link_flags.clone(),
+        peak_device_bytes_estimate: None,
+    }
+}
+
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpec> {
     let mut load_types = HashMap::<String, TensorType>::new();
     for node in dag.nodes() {
@@ -1022,6 +1087,10 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
             func: Box::new(wire_expr(func)),
             args: args.iter().map(wire_expr).collect(),
+            span: span(*s),
+        },
+        Expr::List(items, s) => WireSurfExpr::List {
+            items: items.iter().map(wire_expr).collect(),
             span: span(*s),
         },
         Expr::Record(name, fields, s) => WireSurfExpr::Record {
@@ -1495,7 +1564,7 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
     }
 
     #[test]
-    fn compile_source_keeps_scalar_string_foundation_host_only() {
+    fn compile_source_preserves_scalar_string_foundation_root_names() {
         let source = include_str!("../../../examples/scalar_string_foundation.ch");
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
@@ -1504,7 +1573,6 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
             compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
             Vec::<String>::new()
         );
-        assert_eq!(compiled.dag.roots().len(), 0);
         assert!(compiled.all_root_names.iter().any(|name| name == "status"));
         assert!(compiled.all_root_names.iter().any(|name| name == "loss"));
         assert!(
@@ -1513,6 +1581,28 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
                 .iter()
                 .any(|name| name == "should_stop")
         );
+    }
+
+    #[test]
+    fn compile_emits_host_program_for_scalar_string_foundation() {
+        let source = include_str!("../../../examples/scalar_string_foundation.ch");
+
+        let result = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("scalar_string_foundation".to_string()),
+        })
+        .expect("compile");
+
+        let c_file = result
+            .files
+            .iter()
+            .find(|file| file.path == "scalar_string_foundation.c")
+            .expect("c file");
+        assert!(c_file.contents.contains("int main(void)"));
+        assert!(c_file.contents.contains("chelis_string_eq"));
+        assert!(c_file.contents.contains("chelis_string_concat"));
     }
 
     #[test]
@@ -1540,21 +1630,21 @@ let dims = (rank(x), shape(x, 1), numel(x))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.0")
-                    && matches!(root.value, ExecutionValue::Int(2)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.1")
-                    && matches!(root.value, ExecutionValue::Int(3)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 3 }))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.2")
-                    && matches!(root.value, ExecutionValue::Int(6)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
         );
     }
 
@@ -1586,7 +1676,7 @@ let result = if matches_path then parsed else cast(0, int64)
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("result")
-                    && matches!(root.value, ExecutionValue::Int(42)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 42 }))
         );
         assert_eq!(result.transcript, vec!["ckpt-42.safetensors".to_string()]);
     }
@@ -1610,21 +1700,21 @@ let shifted = shr(cast(8, int64), cast(1, int64))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("bits")
-                    && matches!(root.value, ExecutionValue::Int(7)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 7 }))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("rem")
-                    && matches!(root.value, ExecutionValue::Int(2)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("shifted")
-                    && matches!(root.value, ExecutionValue::Int(4)))
+                    && matches!(root.value, ExecutionValue::Int64 { value: 4 }))
         );
     }
 

@@ -1322,6 +1322,13 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
             Expr::Constructor(resolve_name(name, resolver, locals), *span)
         }
         Expr::Lit(lit, span) => Expr::Lit(lit.clone(), *span),
+        Expr::List(items, span) => Expr::List(
+            items
+                .iter()
+                .map(|item| rewrite_expr(item, resolver, locals))
+                .collect(),
+            *span,
+        ),
         Expr::Apply(func, args, span) => Expr::Apply(
             Box::new(rewrite_expr(func, resolver, locals)),
             args.iter()

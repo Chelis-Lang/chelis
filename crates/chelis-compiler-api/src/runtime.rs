@@ -5,7 +5,7 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{CheckedProgram, types::Prim};
 
-use crate::schema::{ExecutionValue, TensorValue};
+use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTensorValue {
@@ -20,6 +20,8 @@ pub(crate) enum RuntimeValue {
     Float(f64),
     Bool(bool),
     String(String),
+    List(Vec<RuntimeValue>),
+    Dict(Vec<(RuntimeValue, RuntimeValue)>),
     Tuple(Vec<RuntimeValue>),
     Adt {
         ctor: String,
@@ -85,25 +87,41 @@ pub(crate) fn evaluate_host_program(
 
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> ExecutionValue {
     match value {
-        RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor(TensorValue {
-            shape: tensor.value.shape.clone(),
-            data: tensor.value.data.clone(),
-        }),
-        RuntimeValue::Int(value) => ExecutionValue::Int(*value),
-        RuntimeValue::Float(value) => ExecutionValue::Float(*value),
-        RuntimeValue::Bool(value) => ExecutionValue::Bool(*value),
-        RuntimeValue::String(value) => ExecutionValue::String(value.clone()),
-        RuntimeValue::Tuple(items) => {
-            ExecutionValue::Tuple(items.iter().map(runtime_value_to_schema).collect())
-        }
+        RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: tensor.value.shape.clone(),
+                data: tensor.value.data.clone(),
+            },
+        },
+        RuntimeValue::Int(value) => ExecutionValue::Int64 { value: *value },
+        RuntimeValue::Float(value) => ExecutionValue::Float64 { value: *value },
+        RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
+        RuntimeValue::String(value) => ExecutionValue::String {
+            value: value.clone(),
+        },
+        RuntimeValue::List(items) => ExecutionValue::List {
+            value: items.iter().map(runtime_value_to_schema).collect(),
+        },
+        RuntimeValue::Dict(entries) => ExecutionValue::Dict {
+            entries: entries
+                .iter()
+                .map(|(key, value)| DictEntryValue {
+                    key: runtime_value_to_schema(key),
+                    value: runtime_value_to_schema(value),
+                })
+                .collect(),
+        },
+        RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
+            value: items.iter().map(runtime_value_to_schema).collect(),
+        },
         RuntimeValue::Adt { ctor, fields } => ExecutionValue::Adt {
             ctor: ctor.clone(),
             fields: fields.iter().map(runtime_value_to_schema).collect(),
         },
-        RuntimeValue::Closure { .. } => ExecutionValue::String("<closure>".to_string()),
-        RuntimeValue::Unit => ExecutionValue::Unit {
-            kind: "unit".to_string(),
+        RuntimeValue::Closure { .. } => ExecutionValue::String {
+            value: "<closure>".to_string(),
         },
+        RuntimeValue::Unit => ExecutionValue::Unit,
     }
 }
 
@@ -201,6 +219,9 @@ impl<'a> EvalContext<'a> {
         if let Some(value) = self.tensor_bindings.get(name) {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
+        if name == "Nil" {
+            return Ok(RuntimeValue::List(Vec::new()));
+        }
         if name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
@@ -221,7 +242,7 @@ impl<'a> EvalContext<'a> {
         }
         let params = children(params_list)
             .iter()
-            .filter_map(symbol_name)
+            .filter_map(runtime_param_name)
             .map(str::to_string)
             .collect::<Vec<_>>();
         let body = kids
@@ -245,17 +266,30 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
-        if let Some(name) = builtin_name(func) {
-            return self.eval_builtin(name, &args);
-        }
-
         if let Some(name) = var_name(func)
             && name.chars().next().is_some_and(|ch| ch.is_uppercase())
         {
+            if name == "Cons" {
+                if args.len() != 2 {
+                    return Err(format!("Cons expects 2 arguments, got {}", args.len()));
+                }
+                let mut items = match &args[1] {
+                    RuntimeValue::List(items) => items.clone(),
+                    other => {
+                        return Err(format!("Cons tail must be a List, got {other:?}"));
+                    }
+                };
+                items.insert(0, args[0].clone());
+                return Ok(RuntimeValue::List(items));
+            }
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
                 fields: args,
             });
+        }
+
+        if let Some(name) = builtin_name(func) {
+            return self.eval_builtin(name, &args);
         }
 
         match self.eval_expr(func)? {
@@ -397,6 +431,19 @@ impl<'a> EvalContext<'a> {
         }
         match self.eval_expr(stage)? {
             RuntimeValue::Closure { params, body, env } => {
+                self.apply_resolved_callable(RuntimeValue::Closure { params, body, env }, args)
+            }
+            other => Err(format!("pipe stage is not callable: {other:?}")),
+        }
+    }
+
+    fn apply_resolved_callable(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        match callable {
+            RuntimeValue::Closure { params, body, env } => {
                 if params.len() != args.len() {
                     return Err(format!(
                         "closure expected {} args, got {}",
@@ -413,7 +460,7 @@ impl<'a> EvalContext<'a> {
                 self.bindings = saved;
                 value
             }
-            other => Err(format!("pipe stage is not callable: {other:?}")),
+            other => Err(format!("value is not callable: {other:?}")),
         }
     }
 
@@ -535,6 +582,337 @@ impl<'a> EvalContext<'a> {
                         fields: Vec::new(),
                     },
                 })
+            }
+            "len" => match args.first() {
+                Some(RuntimeValue::List(list)) => Ok(RuntimeValue::Int(list.len() as i64)),
+                Some(RuntimeValue::Dict(entries)) => Ok(RuntimeValue::Int(entries.len() as i64)),
+                other => Err(format!("len expects list or dict arg, got {other:?}")),
+            },
+            "index" => {
+                let list = expect_list_arg(args, 0)?;
+                let index = expect_int_arg(args, 1)?;
+                if index < 0 {
+                    return Err(format!("index requires non-negative index, got {index}"));
+                }
+                list.get(index as usize).cloned().ok_or_else(|| {
+                    format!("index {index} out of bounds for list of len {}", list.len())
+                })
+            }
+            "append" => {
+                let mut list = expect_list_arg(args, 0)?;
+                list.push(
+                    args.get(1)
+                        .cloned()
+                        .ok_or_else(|| "append expects 2 arguments".to_string())?,
+                );
+                Ok(RuntimeValue::List(list))
+            }
+            "concat" => {
+                let mut lhs = expect_list_arg(args, 0)?;
+                lhs.extend(expect_list_arg(args, 1)?);
+                Ok(RuntimeValue::List(lhs))
+            }
+            "take" => {
+                let list = expect_list_arg(args, 0)?;
+                let count = expect_int_arg(args, 1)?;
+                if count < 0 {
+                    return Err(format!("take requires non-negative count, got {count}"));
+                }
+                Ok(RuntimeValue::List(
+                    list.into_iter().take(count as usize).collect(),
+                ))
+            }
+            "drop" => {
+                let list = expect_list_arg(args, 0)?;
+                let count = expect_int_arg(args, 1)?;
+                if count < 0 {
+                    return Err(format!("drop requires non-negative count, got {count}"));
+                }
+                Ok(RuntimeValue::List(
+                    list.into_iter().skip(count as usize).collect(),
+                ))
+            }
+            "chunk" => {
+                let list = expect_list_arg(args, 0)?;
+                let size = expect_int_arg(args, 1)?;
+                if size <= 0 {
+                    return Err(format!("chunk requires positive size, got {size}"));
+                }
+                let mut out = Vec::new();
+                let size = size as usize;
+                for chunk in list.chunks(size) {
+                    out.push(RuntimeValue::List(chunk.to_vec()));
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "range" => {
+                let start = expect_int_arg(args, 0)?;
+                let end = expect_int_arg(args, 1)?;
+                Ok(RuntimeValue::List(
+                    (start..end).map(RuntimeValue::Int).collect(),
+                ))
+            }
+            "map" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "map expects 2 arguments".to_string())?;
+                let items = expect_list_arg(args, 1)?;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.apply_resolved_callable(callback.clone(), vec![item])?);
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "filter" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "filter expects 2 arguments".to_string())?;
+                let items = expect_list_arg(args, 1)?;
+                let mut out = Vec::new();
+                for item in items {
+                    let keep =
+                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    match keep {
+                        RuntimeValue::Bool(true) => out.push(item),
+                        RuntimeValue::Bool(false) => {}
+                        other => {
+                            return Err(format!("filter callback must return bool, got {other:?}"));
+                        }
+                    }
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "fold" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "fold expects 3 arguments".to_string())?;
+                let mut acc = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| "fold expects 3 arguments".to_string())?;
+                let items = expect_list_arg(args, 2)?;
+                for item in items {
+                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                }
+                Ok(acc)
+            }
+            "scan" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "scan expects 3 arguments".to_string())?;
+                let mut acc = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| "scan expects 3 arguments".to_string())?;
+                let items = expect_list_arg(args, 2)?;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    out.push(acc.clone());
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "partition" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "partition expects 2 arguments".to_string())?;
+                let items = expect_list_arg(args, 1)?;
+                let mut kept = Vec::new();
+                let mut rejected = Vec::new();
+                for item in items {
+                    let keep =
+                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    match keep {
+                        RuntimeValue::Bool(true) => kept.push(item),
+                        RuntimeValue::Bool(false) => rejected.push(item),
+                        other => {
+                            return Err(format!(
+                                "partition callback must return bool, got {other:?}"
+                            ));
+                        }
+                    }
+                }
+                Ok(RuntimeValue::Tuple(vec![
+                    RuntimeValue::List(kept),
+                    RuntimeValue::List(rejected),
+                ]))
+            }
+            "flat_map" => {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "flat_map expects 2 arguments".to_string())?;
+                let items = expect_list_arg(args, 1)?;
+                let mut out = Vec::new();
+                for item in items {
+                    let mapped =
+                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let RuntimeValue::List(inner) = mapped else {
+                        return Err(format!(
+                            "flat_map callback must return List, got {mapped:?}"
+                        ));
+                    };
+                    out.extend(inner);
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "flatten" => {
+                let lists = expect_list_arg(args, 0)?;
+                let mut out = Vec::new();
+                for item in lists {
+                    let RuntimeValue::List(inner) = item else {
+                        return Err(format!("flatten expects nested List input, got {item:?}"));
+                    };
+                    out.extend(inner);
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "zip" => {
+                let lhs = expect_list_arg(args, 0)?;
+                let rhs = expect_list_arg(args, 1)?;
+                Ok(RuntimeValue::List(
+                    lhs.into_iter()
+                        .zip(rhs)
+                        .map(|(lhs, rhs)| RuntimeValue::Tuple(vec![lhs, rhs]))
+                        .collect(),
+                ))
+            }
+            "enumerate" => {
+                let items = expect_list_arg(args, 0)?;
+                Ok(RuntimeValue::List(
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            RuntimeValue::Tuple(vec![RuntimeValue::Int(index as i64), value])
+                        })
+                        .collect(),
+                ))
+            }
+            "dict_of" => {
+                let entries = expect_list_arg(args, 0)?;
+                let mut dict = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let RuntimeValue::Tuple(items) = entry else {
+                        return Err("dict_of expects a List of 2-tuples".to_string());
+                    };
+                    if items.len() != 2 {
+                        return Err("dict_of expects a List of 2-tuples".to_string());
+                    }
+                    ensure_dict_key_supported(&items[0])?;
+                    upsert_dict_entry(&mut dict, items[0].clone(), items[1].clone());
+                }
+                Ok(RuntimeValue::Dict(dict))
+            }
+            "dict_get" => {
+                let dict = expect_dict_arg(args, 0)?;
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| "dict_get expects 2 arguments".to_string())?;
+                ensure_dict_key_supported(key)?;
+                Ok(match dict_lookup(&dict, key) {
+                    Some(value) => RuntimeValue::Adt {
+                        ctor: "Some".to_string(),
+                        fields: vec![value.clone()],
+                    },
+                    None => RuntimeValue::Adt {
+                        ctor: "None".to_string(),
+                        fields: Vec::new(),
+                    },
+                })
+            }
+            "dict_contains" => {
+                let dict = expect_dict_arg(args, 0)?;
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| "dict_contains expects 2 arguments".to_string())?;
+                ensure_dict_key_supported(key)?;
+                Ok(RuntimeValue::Bool(dict_lookup(&dict, key).is_some()))
+            }
+            "dict_remove" => {
+                let dict = expect_dict_arg(args, 0)?;
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| "dict_remove expects 2 arguments".to_string())?;
+                ensure_dict_key_supported(key)?;
+                Ok(RuntimeValue::Dict(
+                    dict.into_iter()
+                        .filter(|(existing_key, _)| !runtime_value_eq(existing_key, key))
+                        .collect(),
+                ))
+            }
+            "dict_insert" => {
+                let mut dict = expect_dict_arg(args, 0)?;
+                let key = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
+                ensure_dict_key_supported(&key)?;
+                let value = args
+                    .get(2)
+                    .cloned()
+                    .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
+                upsert_dict_entry(&mut dict, key, value);
+                Ok(RuntimeValue::Dict(dict))
+            }
+            "dict_merge" => {
+                let mut lhs = expect_dict_arg(args, 0)?;
+                let rhs = expect_dict_arg(args, 1)?;
+                for (key, value) in rhs {
+                    ensure_dict_key_supported(&key)?;
+                    upsert_dict_entry(&mut lhs, key, value);
+                }
+                Ok(RuntimeValue::Dict(lhs))
+            }
+            "dict_keys" => {
+                let dict = expect_dict_arg(args, 0)?;
+                Ok(RuntimeValue::List(
+                    dict.into_iter().map(|(key, _)| key).collect(),
+                ))
+            }
+            "dict_values" => {
+                let dict = expect_dict_arg(args, 0)?;
+                Ok(RuntimeValue::List(
+                    dict.into_iter().map(|(_, value)| value).collect(),
+                ))
+            }
+            "dict_entries" => {
+                let dict = expect_dict_arg(args, 0)?;
+                Ok(RuntimeValue::List(
+                    dict.into_iter()
+                        .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                        .collect(),
+                ))
+            }
+            "to_tensor" => {
+                let values = expect_list_arg(args, 0)?;
+                let (precision, data) = list_to_tensor_data(&values)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(vec![data.len()], data),
+                    precision,
+                }))
+            }
+            "to_list" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let values = tensor_to_list_values(&tensor)?;
+                Ok(RuntimeValue::List(values))
+            }
+            "pad_sequences" => {
+                let sequences = expect_list_arg(args, 0)?;
+                let pad = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
+                let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(vec![batch, width], data),
+                    precision,
+                }))
             }
             "rank" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -803,11 +1181,177 @@ fn expect_string_arg(args: &[RuntimeValue], index: usize) -> Result<String, Stri
     }
 }
 
+fn expect_list_arg(args: &[RuntimeValue], index: usize) -> Result<Vec<RuntimeValue>, String> {
+    match args.get(index) {
+        Some(RuntimeValue::List(items)) => Ok(items.clone()),
+        other => Err(format!("expected list arg at index {index}, got {other:?}")),
+    }
+}
+
+fn expect_dict_arg(
+    args: &[RuntimeValue],
+    index: usize,
+) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
+        other => Err(format!("expected dict arg at index {index}, got {other:?}")),
+    }
+}
+
 fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64, String> {
     match args.get(index) {
         Some(RuntimeValue::Int(value)) => Ok(*value),
         other => Err(format!("expected int arg at index {index}, got {other:?}")),
     }
+}
+
+fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), String> {
+    match value {
+        RuntimeValue::Int(_) | RuntimeValue::String(_) => Ok(()),
+        other => Err(format!(
+            "dict keys must be int64 or string in 3d, got {other:?}"
+        )),
+    }
+}
+
+fn runtime_value_eq(lhs: &RuntimeValue, rhs: &RuntimeValue) -> bool {
+    match (lhs, rhs) {
+        (RuntimeValue::Int(lhs), RuntimeValue::Int(rhs)) => lhs == rhs,
+        (RuntimeValue::Float(lhs), RuntimeValue::Float(rhs)) => lhs == rhs,
+        (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => lhs == rhs,
+        (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs == rhs,
+        (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
+            lhs.len() == rhs.len()
+                && lhs
+                    .iter()
+                    .zip(rhs)
+                    .all(|(lhs, rhs)| runtime_value_eq(lhs, rhs))
+        }
+        _ => false,
+    }
+}
+
+fn upsert_dict_entry(
+    dict: &mut Vec<(RuntimeValue, RuntimeValue)>,
+    key: RuntimeValue,
+    value: RuntimeValue,
+) {
+    if let Some((_, existing)) = dict
+        .iter_mut()
+        .find(|(existing_key, _)| runtime_value_eq(existing_key, &key))
+    {
+        *existing = value;
+    } else {
+        dict.push((key, value));
+    }
+}
+
+fn dict_lookup<'a>(
+    dict: &'a [(RuntimeValue, RuntimeValue)],
+    key: &RuntimeValue,
+) -> Option<&'a RuntimeValue> {
+    dict.iter()
+        .find(|(existing_key, _)| runtime_value_eq(existing_key, key))
+        .map(|(_, value)| value)
+}
+
+fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
+    let mut precision = None;
+    let mut data = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            RuntimeValue::Int(value) => {
+                precision.get_or_insert(Prim::Int64);
+                if precision != Some(Prim::Int64) {
+                    return Err("to_tensor requires homogeneous numeric list elements".to_string());
+                }
+                data.push(*value as f64);
+            }
+            RuntimeValue::Float(value) => {
+                precision.get_or_insert(Prim::F64);
+                if precision != Some(Prim::F64) {
+                    return Err("to_tensor requires homogeneous numeric list elements".to_string());
+                }
+                data.push(*value);
+            }
+            other => {
+                return Err(format!(
+                    "to_tensor expects numeric list elements, got {other:?}"
+                ));
+            }
+        }
+    }
+    Ok((precision.unwrap_or(Prim::F64), data))
+}
+
+fn tensor_to_list_values(tensor: &RuntimeTensorValue) -> Result<Vec<RuntimeValue>, String> {
+    if tensor.value.shape.len() != 1 {
+        return Err(format!(
+            "to_list expects a rank-1 tensor, got rank {} tensor",
+            tensor.value.shape.len()
+        ));
+    }
+    let mut values = Vec::with_capacity(tensor.value.data.len());
+    for value in &tensor.value.data {
+        values.push(match tensor.precision {
+            Prim::Bool => RuntimeValue::Bool(*value != 0.0),
+            Prim::Int8 | Prim::Int32 | Prim::Int64 => RuntimeValue::Int(*value as i64),
+            Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 | Prim::F8e4m3 => {
+                RuntimeValue::Float(*value)
+            }
+            other => {
+                return Err(format!(
+                    "to_list expects numeric or bool tensor input, got {other:?}"
+                ));
+            }
+        });
+    }
+    Ok(values)
+}
+
+fn pad_sequences_value(
+    sequences: &[RuntimeValue],
+    pad: &RuntimeValue,
+) -> Result<(Prim, Vec<f64>, usize, usize), String> {
+    let pad_precision = match pad {
+        RuntimeValue::Int(_) => Prim::Int64,
+        RuntimeValue::Float(_) => Prim::F64,
+        other => {
+            return Err(format!(
+                "pad_sequences expects numeric pad value, got {other:?}"
+            ));
+        }
+    };
+    let mut rows = Vec::<Vec<f64>>::with_capacity(sequences.len());
+    let mut width = 0usize;
+    for sequence in sequences {
+        let RuntimeValue::List(items) = sequence else {
+            return Err(format!(
+                "pad_sequences expects nested lists, got {sequence:?}"
+            ));
+        };
+        let (row_precision, row) = list_to_tensor_data(items)?;
+        if row_precision != pad_precision {
+            return Err("pad_sequences requires homogeneous numeric nested lists".to_string());
+        }
+        width = width.max(row.len());
+        rows.push(row);
+    }
+    let pad_value = match pad {
+        RuntimeValue::Int(value) => *value as f64,
+        RuntimeValue::Float(value) => *value,
+        _ => unreachable!(),
+    };
+    let batch = rows.len();
+    let mut data = Vec::with_capacity(batch * width);
+    for row in rows {
+        data.extend(row.iter().copied());
+        data.extend(std::iter::repeat_n(
+            pad_value,
+            width.saturating_sub(row.len()),
+        ));
+    }
+    Ok((pad_precision, data, batch, width))
 }
 
 fn render_value(value: &RuntimeValue) -> String {
@@ -820,6 +1364,22 @@ fn render_value(value: &RuntimeValue) -> String {
         RuntimeValue::Float(value) => value.to_string(),
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::String(value) => value.clone(),
+        RuntimeValue::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RuntimeValue::Dict(entries) => format!(
+            "dict({})",
+            entries
+                .iter()
+                .map(|(key, value)| format!("{}: {}", render_value(key), render_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         RuntimeValue::Tuple(items) => format!(
             "({})",
             items
@@ -853,6 +1413,18 @@ fn var_name(expr: &Expr) -> Option<&str> {
         return None;
     }
     children(list).first().and_then(symbol_name)
+}
+
+fn runtime_param_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(symbol_name)
+            .or_else(|| children(list).first().and_then(symbol_name)),
+        _ => None,
+    }
 }
 
 fn as_list(expr: &Expr) -> Option<&List> {

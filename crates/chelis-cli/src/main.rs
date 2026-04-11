@@ -376,6 +376,7 @@ fn cmd_build(
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
+    let compiled_program = chelis_ir::host::lower_compiled_program(&checked);
     let mut dag = chelis_ir::lower::lower_program(&checked);
     let all_root_names = lowered_root_names_from_decls(&decls, checked.type_env());
     let entry_root_names = lowered_root_names_from_decls(&entry_decls, checked.type_env());
@@ -402,18 +403,32 @@ fn cmd_build(
 
     match target {
         "c" => {
-            reject_unsupported_effect_ops(&dag, "c")?;
-            let fused = chelis_ir::fuse::fuse(&dag);
-            cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
+            if dag.roots().is_empty()
+                && let Some(host_program) = compiled_program.host.as_ref()
+            {
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_c_result(result, func_name, output, &symbolic_dims)
+            } else {
+                reject_unsupported_effect_ops(&dag, "c")?;
+                let fused = chelis_ir::fuse::fuse(&dag);
+                cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
+            }
         }
         "hip" => {
-            reject_unsupported_effect_ops(&dag, "hip")?;
-            reject_unsupported_hip_ops(&dag)?;
-            // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
-            // When grad participates in a GPU compilation pipeline, the intended ordering is:
-            // lower -> optimize -> grad -> optimize -> fuse -> codegen.
-            let fused = chelis_ir::fuse::fuse(&dag);
-            cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
+            if dag.roots().is_empty()
+                && let Some(host_program) = compiled_program.host.as_ref()
+            {
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_hip_host(result, func_name, output)
+            } else {
+                reject_unsupported_effect_ops(&dag, "hip")?;
+                reject_unsupported_hip_ops(&dag)?;
+                // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
+                // When grad participates in a GPU compilation pipeline, the intended ordering is:
+                // lower -> optimize -> grad -> optimize -> fuse -> codegen.
+                let fused = chelis_ir::fuse::fuse(&dag);
+                cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
+            }
         }
         other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
     }
@@ -549,7 +564,16 @@ fn cmd_build_c(
     symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = chelis_backend_c::codegen(dag, func_name);
+    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    cmd_build_c_result(result, func_name, output, &symbolic_dims)
+}
 
+fn cmd_build_c_result(
+    result: chelis_backend_c::CodegenResult,
+    func_name: &str,
+    output: Option<&std::path::Path>,
+    symbolic_dims: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -564,19 +588,28 @@ fn cmd_build_c(
     }
 
     fs::write(&c_path, &result.c_source)?;
-    fs::write(&h_path, &result.h_header)?;
+    if result.h_header.is_empty() {
+        if h_path.exists() {
+            fs::remove_file(&h_path)?;
+        }
+    } else {
+        fs::write(&h_path, &result.h_header)?;
+    }
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
     fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
 
-    println!("Wrote {} and {}", c_path.display(), h_path.display());
+    if result.h_header.is_empty() {
+        println!("Wrote {}", c_path.display());
+    } else {
+        println!("Wrote {} and {}", c_path.display(), h_path.display());
+    }
     println!(
         "Wrote {} and {}",
         runtime_dir.join("chelis_runtime.h").display(),
         runtime_dir.join("chelis_runtime.c").display()
     );
-    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
@@ -588,12 +621,92 @@ fn cmd_build_c(
         .collect();
     flags.sort();
     flags.dedup();
+    if result.c_source.contains("int main(") {
+        println!(
+            "Compile: gcc -O2 {} {} chelis_runtime.c -o {}",
+            flags.join(" "),
+            c_path.display(),
+            c_path.with_extension("").display()
+        );
+    } else {
+        println!(
+            "Compile object: gcc -O2 {} -c {}",
+            flags.join(" "),
+            c_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_build_hip_host(
+    result: chelis_backend_c::CodegenResult,
+    func_name: &str,
+    output: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let c_path = if matches!(
+        out_dir.extension().and_then(|e| e.to_str()),
+        Some("c") | Some("cc") | Some("cpp") | Some("cxx")
+    ) {
+        out_dir.clone()
+    } else {
+        out_dir.join(format!("{func_name}_hip.cpp"))
+    };
+    let h_path = c_path.with_extension("h");
+    if let Some(parent) = c_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&c_path, &result.c_source)?;
+    if result.h_header.is_empty() {
+        if h_path.exists() {
+            fs::remove_file(&h_path)?;
+        }
+    } else {
+        fs::write(&h_path, &result.h_header)?;
+    }
+
+    let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
+    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_runtime.c"), RUNTIME_C)?;
+    fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+
+    if result.h_header.is_empty() {
+        println!("Wrote {}", c_path.display());
+    } else {
+        println!("Wrote {} and {}", c_path.display(), h_path.display());
+    }
     println!(
-        "Compile: gcc -O2 {} {} chelis_runtime.c -o {}",
-        flags.join(" "),
-        c_path.display(),
-        c_path.with_extension("").display()
+        "Wrote runtime: chelis_runtime.{{h,c}}, chelis_hip_runtime.h in {}",
+        runtime_dir.display()
     );
+
+    let mut flags: Vec<&str> = result
+        .compile_flags
+        .iter()
+        .chain(result.link_flags.iter())
+        .map(|s| s.as_str())
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags.retain(|flag| *flag != "-fopenmp");
+    if result.c_source.contains("int main(") {
+        println!(
+            "Compile: hipcc {} {} {} -o {}",
+            flags.join(" "),
+            c_path.display(),
+            runtime_dir.join("chelis_runtime.c").display(),
+            c_path.with_extension("").display()
+        );
+    } else {
+        println!(
+            "Compile object: hipcc {} -c {}",
+            flags.join(" "),
+            c_path.display()
+        );
+    }
     Ok(())
 }
 
@@ -773,16 +886,36 @@ fn try_eval(source: &str) -> Result<String, String> {
 
 fn format_execution_value(value: &ExecutionValue) -> String {
     match value {
-        ExecutionValue::Tensor(value) => format!(
+        ExecutionValue::Tensor { value } => format!(
             "tensor(shape={:?}, data={:?})",
             value.shape,
             &value.data[..value.data.len().min(10)]
         ),
-        ExecutionValue::Int(value) => value.to_string(),
-        ExecutionValue::Float(value) => value.to_string(),
-        ExecutionValue::Bool(value) => value.to_string(),
-        ExecutionValue::String(value) => value.clone(),
-        ExecutionValue::Tuple(items) => format!(
+        ExecutionValue::Int64 { value } => value.to_string(),
+        ExecutionValue::Float64 { value } => value.to_string(),
+        ExecutionValue::Bool { value } => value.to_string(),
+        ExecutionValue::String { value } => value.clone(),
+        ExecutionValue::List { value: items } => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(format_execution_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Dict { entries } => format!(
+            "dict({})",
+            entries
+                .iter()
+                .map(|entry| format!(
+                    "{}: {}",
+                    format_execution_value(&entry.key),
+                    format_execution_value(&entry.value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ExecutionValue::Tuple { value: items } => format!(
             "({})",
             items
                 .iter()
@@ -800,7 +933,7 @@ fn format_execution_value(value: &ExecutionValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        ExecutionValue::Unit { .. } => "()".to_string(),
+        ExecutionValue::Unit => "()".to_string(),
     }
 }
 

@@ -80,15 +80,22 @@ class TensorValue:
 
 
 @dataclass(frozen=True)
+class AdtValue:
+    ctor: str
+    fields: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
 class EvaluatedRoot:
     node_id: int
     name: str | None
-    value: TensorValue
+    value: Any
 
 
 @dataclass(frozen=True)
 class EvalResult:
     roots: tuple[EvaluatedRoot, ...]
+    transcript: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -280,10 +287,11 @@ def eval(
             EvaluatedRoot(
                 node_id=root["node_id"],
                 name=root.get("name"),
-                value=_tensor_value(root["value"]),
+                value=_execution_value(root["value"]),
             )
             for root in payload["roots"]
-        )
+        ),
+        transcript=tuple(str(item) for item in payload.get("transcript", [])),
     )
 
 
@@ -349,6 +357,37 @@ def _tensor_value(payload: dict[str, Any]) -> TensorValue:
     )
 
 
+def _execution_value(payload: dict[str, Any]) -> Any:
+    kind = payload["type"]
+    if kind == "tensor":
+        return _tensor_value(payload["value"])
+    if kind == "int64":
+        return int(payload["value"])
+    if kind == "float64":
+        return float(payload["value"])
+    if kind == "bool":
+        return bool(payload["value"])
+    if kind == "string":
+        return str(payload["value"])
+    if kind == "list":
+        return tuple(_execution_value(item) for item in payload["value"])
+    if kind == "dict":
+        return {
+            _execution_value(entry["key"]): _execution_value(entry["value"])
+            for entry in payload["entries"]
+        }
+    if kind == "tuple":
+        return tuple(_execution_value(item) for item in payload["value"])
+    if kind == "adt":
+        return AdtValue(
+            ctor=payload["ctor"],
+            fields=tuple(_execution_value(item) for item in payload["fields"]),
+        )
+    if kind == "unit":
+        return ()
+    raise ChelisError(f"unknown execution value type: {kind}")
+
+
 def _tensor_value_payload(value: Any) -> dict[str, Any]:
     array = _tensor_to_numpy(value)
     flat = np.asarray(array, dtype=np.float64).reshape(-1)
@@ -400,6 +439,7 @@ def _device_kind(value: Any) -> str:
 __all__ = [
     "ChelisError",
     "ChelisTensor",
+    "AdtValue",
     "CheckResult",
     "CompiledModel",
     "CompileResult",

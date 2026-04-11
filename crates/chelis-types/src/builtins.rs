@@ -71,6 +71,34 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "numel",
     "tensor_to_scalar",
     "scalar_to_tensor",
+    "len",
+    "index",
+    "append",
+    "concat",
+    "take",
+    "drop",
+    "chunk",
+    "range",
+    "map",
+    "filter",
+    "fold",
+    "scan",
+    "partition",
+    "flat_map",
+    "flatten",
+    "zip",
+    "enumerate",
+    "dict_of",
+    "dict_get",
+    "dict_contains",
+    "dict_insert",
+    "dict_merge",
+    "dict_keys",
+    "dict_values",
+    "dict_entries",
+    "to_tensor",
+    "to_list",
+    "pad_sequences",
 ];
 
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
@@ -428,6 +456,69 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("numel", &mut env, &mut vg);
     generic_unop("tensor_to_scalar", &mut env, &mut vg);
     generic_unop("scalar_to_tensor", &mut env, &mut vg);
+    generic_unop("len", &mut env, &mut vg);
+    generic_binop("index", &mut env, &mut vg);
+    generic_binop("append", &mut env, &mut vg);
+    generic_binop("concat", &mut env, &mut vg);
+    generic_binop("take", &mut env, &mut vg);
+    generic_binop("drop", &mut env, &mut vg);
+    generic_binop("chunk", &mut env, &mut vg);
+    generic_binop("range", &mut env, &mut vg);
+    generic_binop("map", &mut env, &mut vg);
+    generic_binop("filter", &mut env, &mut vg);
+    let fold_acc = vg.fresh_tvar();
+    let fold_item = vg.fresh_tvar();
+    let fold_ret = vg.fresh_tvar();
+    env.bind(
+        "fold".to_string(),
+        Scheme {
+            tvars: vec![fold_acc, fold_item, fold_ret],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(fold_acc),
+                    Type::Var(fold_item),
+                    Type::Var(fold_ret),
+                ],
+                Box::new(Type::Var(fold_ret)),
+            ),
+        },
+    );
+    let scan_acc = vg.fresh_tvar();
+    let scan_item = vg.fresh_tvar();
+    let scan_ret = vg.fresh_tvar();
+    env.bind(
+        "scan".to_string(),
+        Scheme {
+            tvars: vec![scan_acc, scan_item, scan_ret],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(scan_acc),
+                    Type::Var(scan_item),
+                    Type::Var(scan_ret),
+                ],
+                Box::new(Type::Var(scan_ret)),
+            ),
+        },
+    );
+    generic_binop("partition", &mut env, &mut vg);
+    generic_binop("flat_map", &mut env, &mut vg);
+    generic_unop("flatten", &mut env, &mut vg);
+    generic_binop("zip", &mut env, &mut vg);
+    generic_unop("enumerate", &mut env, &mut vg);
+    generic_unop("dict_of", &mut env, &mut vg);
+    generic_binop("dict_get", &mut env, &mut vg);
+    generic_binop("dict_contains", &mut env, &mut vg);
+    generic_binop("dict_remove", &mut env, &mut vg);
+    generic_triop("dict_insert", &mut env, &mut vg);
+    generic_binop("dict_merge", &mut env, &mut vg);
+    generic_unop("dict_keys", &mut env, &mut vg);
+    generic_unop("dict_values", &mut env, &mut vg);
+    generic_unop("dict_entries", &mut env, &mut vg);
+    generic_unop("to_tensor", &mut env, &mut vg);
+    generic_unop("to_list", &mut env, &mut vg);
+    generic_binop("pad_sequences", &mut env, &mut vg);
 
     (env, vg)
 }
@@ -466,6 +557,47 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
                 },
                 VariantInfo {
                     name: "None".to_string(),
+                    fields: Vec::new(),
+                },
+            ],
+        });
+
+    let list_tvar = vg.fresh_tvar();
+    let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
+
+    env.bind(
+        "Cons".to_string(),
+        Scheme {
+            tvars: vec![list_tvar],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(list_tvar), list_type.clone()],
+                Box::new(list_type.clone()),
+            ),
+        },
+    );
+    env.bind(
+        "Nil".to_string(),
+        Scheme {
+            tvars: vec![list_tvar],
+            dvars: vec![],
+            body: list_type.clone(),
+        },
+    );
+
+    adt_reg
+        .defs
+        .entry("List".to_string())
+        .or_insert_with(|| AdtDef {
+            name: "List".to_string(),
+            type_params: vec!["a".to_string()],
+            variants: vec![
+                VariantInfo {
+                    name: "Cons".to_string(),
+                    fields: vec![(None, Type::Var(list_tvar)), (None, list_type.clone())],
+                },
+                VariantInfo {
+                    name: "Nil".to_string(),
                     fields: Vec::new(),
                 },
             ],

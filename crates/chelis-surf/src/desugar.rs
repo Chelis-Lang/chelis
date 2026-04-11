@@ -201,6 +201,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Lit(_, _) => false,
         Expr::Var(found, _) | Expr::Constructor(found, _) => found == name,
+        Expr::List(items, _) => items.iter().any(|item| expr_mentions_name(item, name)),
         Expr::Apply(func, args, _) => {
             expr_mentions_name(func, name) || args.iter().any(|arg| expr_mentions_name(arg, name))
         }
@@ -649,6 +650,12 @@ impl DesugarCtx {
             Expr::Lit(lit, _) => desugar_literal(lit),
             Expr::Var(name, _) => dvar(name),
             Expr::Constructor(name, _) => dvar(name),
+            Expr::List(items, _) => desugar_list_literal(
+                &items
+                    .iter()
+                    .map(|item| self.desugar_expr_with_scope(item, local_fn_params))
+                    .collect::<Vec<_>>(),
+            ),
             Expr::Record(name, fields, _) => {
                 let mut fields = fields.clone();
                 fields.sort_by(|a, b| a.0.cmp(&b.0));
@@ -972,6 +979,14 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
             vec![deep::Expr::Atom(deep::Atom::Str(s.clone()), sp())],
         ),
     }
+}
+
+fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
+    let mut out = dvar("Nil");
+    for item in items.iter().rev() {
+        out = node("app", vec![dvar("Cons"), item.clone(), out]);
+    }
+    out
 }
 
 impl DesugarCtx {

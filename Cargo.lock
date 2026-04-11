@@ -420,6 +420,7 @@ name = "chelis-effects"
 version = "0.1.0"
 dependencies = [
  "chelis-deep",
+ "chelis-surf",
  "chelis-types",
 ]
 

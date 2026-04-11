@@ -846,6 +846,12 @@ impl Parser {
                     }
                 }
             }
+            TokenKind::LBracket => {
+                let start = self.advance().span;
+                let items = self.parse_expr_list(TokenKind::RBracket)?;
+                let end = self.expect(&TokenKind::RBracket)?;
+                Expr::List(items, start.merge(end.span))
+            }
             TokenKind::If => self.parse_if()?,
             TokenKind::Match => self.parse_match()?,
             TokenKind::Let => self.parse_let_expr()?,
@@ -983,6 +989,12 @@ impl Parser {
                     self.expect(&TokenKind::RParen)?;
                     Ok(first)
                 }
+            }
+            TokenKind::LBracket => {
+                let start = self.advance().span;
+                let items = self.parse_expr_list(TokenKind::RBracket)?;
+                let end = self.expect(&TokenKind::RBracket)?;
+                Ok(Expr::List(items, start.merge(end.span)))
             }
             TokenKind::If => self.parse_if(),
             TokenKind::Amp => {
@@ -1834,6 +1846,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Var(_, s) => *s,
         Expr::Constructor(_, s) => *s,
         Expr::Apply(_, _, s) => *s,
+        Expr::List(_, s) => *s,
         Expr::Record(_, _, s) => *s,
         Expr::Access(_, _, s) => *s,
         Expr::TupleGet(_, _, s) => *s,
@@ -2560,6 +2573,41 @@ mod tests {
                 _ => panic!("expected App type, got {ty:?}"),
             },
             _ => panic!("expected typed let"),
+        }
+    }
+
+    #[test]
+    fn list_literal() {
+        let decls = p("let xs = [1, 2, 3]");
+        match &decls[0] {
+            Decl::LetDef { value, .. } => match value {
+                Expr::List(items, _) => {
+                    assert_eq!(items.len(), 3);
+                    assert!(matches!(&items[0], Expr::Lit(Literal::Int(1), _)));
+                    assert!(matches!(&items[1], Expr::Lit(Literal::Int(2), _)));
+                    assert!(matches!(&items[2], Expr::Lit(Literal::Int(3), _)));
+                }
+                other => panic!("expected list literal, got {other:?}"),
+            },
+            other => panic!("expected let def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_list_literal_with_type() {
+        let decls = p("let xs: List[int64] = []");
+        match &decls[0] {
+            Decl::LetDef {
+                ty: Some(TypeExpr::App(name, args, _)),
+                value,
+                ..
+            } => {
+                assert_eq!(name, "List");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], TypeExpr::Named(inner, _) if inner == "int64"));
+                assert!(matches!(value, Expr::List(items, _) if items.is_empty()));
+            }
+            other => panic!("expected typed empty list let, got {other:?}"),
         }
     }
 

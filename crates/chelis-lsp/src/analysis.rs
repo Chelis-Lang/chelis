@@ -614,6 +614,19 @@ fn collect_expr_symbols(
                 );
             }
         }
+        Expr::List(items, _) => {
+            for item in items {
+                collect_expr_symbols(
+                    text,
+                    item,
+                    top_level,
+                    locals,
+                    references,
+                    definitions,
+                    completions,
+                );
+            }
+        }
         Expr::Record(_, fields, _) => {
             for (_, value) in fields {
                 collect_expr_symbols(
@@ -1213,6 +1226,7 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Var(_, span)
         | Expr::Constructor(_, span)
         | Expr::Apply(_, _, span)
+        | Expr::List(_, span)
         | Expr::Record(_, _, span)
         | Expr::Access(_, _, span)
         | Expr::TupleGet(_, _, span)

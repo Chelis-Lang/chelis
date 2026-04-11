@@ -129,9 +129,23 @@ All project-level naming follows the turtle/ocean metaphor.
 | Interactive mode | Tide |
 | TUI coding environment | Cove |
 | Project manifest | `reef.toml` |
+| Numerical-method shell | School |
+| Finance shell | Treasure |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
+
+### Shell Ecosystem
+
+The Phase 3+ ecosystem stack is:
+
+- `chelis-std`: standard library shell with `Std.Nn` (including `Std.Nn.Embedding`),
+  optimizer/loss/init helpers, tokenizer/data-loading surfaces, and the later
+  `Std.Time` / `Std.Decimal` host-program modules
+- `school`: general numerical methods layered on top of `chelis-std`, including stats,
+  distributions, differentiable optimization, ODE/SDE solvers, integration, root
+  finding, and later signal-processing work
+- `treasure`: finance/domain shell layered on top of `chelis-std` + `school`
 
 ---
 
@@ -225,11 +239,16 @@ phase. The remaining practical language work is:
 - first-class immutable `String` values with practical non-tensor operations
 - collection types such as `List[T]` and `Dict[K, V]`
 - functional iteration over variable-length host-side data
+- core numeric primitives such as `einsum`, `concat` / `split`, `gather` / `scatter`,
+  `where`, `cumsum`, `sort`, `diagonal` / `trace`, and `clamp`
 - data-loading and tokenization support that removes the mandatory Python
   preprocessing step
+- standard-library host modules such as `Std.Time` and `Std.Decimal`
 
 ### Deferred to Phase 5+
 
+- sparse tensors
+- complex numbers
 - distribution types
 - equivariance constraints
 - optimization-property annotations
@@ -244,6 +263,11 @@ Chelis lowers typed programs to a RISC DAG built from a small set of primitive t
 operations.
 High-level operations such as `matmul`, `softmax`, and `relu` are library-facing names
 that lower into primitive compositions during compilation.
+
+The remaining core-language expansion planned for Phase `3h` adds the practical tensor
+surface real model code expects: `einsum`, `concat` / `split`, `gather` / `scatter`,
+`where`, `cumsum`, `sort`, `diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding`
+remains the explicit public shell/library surface over `gather`.
 
 Core transforms remain first-class:
 
@@ -323,13 +347,17 @@ They ship as Shells (Chelis packages) in the `Std` namespace.
 Expected contents:
 
 - common initializers (Xavier, Kaiming, normal, uniform)
+- standard neural-network building blocks such as `Std.Nn.Embedding`
 - standard optimizers beyond SGD (Adam, AdamW, LAMB — update rules composed from
   primitives)
 - learning rate schedulers
 - data loading utilities
+- tokenizer utilities
 - metric computation (accuracy, F1, AUC)
 - common loss functions that are compositions of primitives (focal loss, hinge loss)
 - basic I/O (tensor serialization, checkpoint save/load)
+- time/date helpers (`Std.Time`)
+- exact-decimal helpers (`Std.Decimal`)
 
 ### External libraries
 
@@ -378,8 +406,10 @@ That means the next practical surfaces are:
 
 - scalar/string programming
 - collections and iteration
+- core numeric primitives beyond the original minimal tensor surface
 - file/config/data loading
 - tokenization and batching
+- standard-library time and exact-decimal support
 
 Broader hosted registry work, research type features, and Lean formalization remain
 later work.
@@ -402,8 +432,9 @@ HIP is the single GPU code generation path.
 
 ### Later
 
-StableHLO and FX are additive integration layers for TPU and PyTorch ecosystem access.
-They do not replace the C/HIP story. The Python interop stack now includes CPU-only
+StableHLO, FX, and Triton are additive integration layers for TPU and PyTorch/NVIDIA
+ecosystem access. They do not replace the C/HIP story. The Python interop stack now
+includes CPU-only
 PyTorch DLPack plus PyO3 compiler bindings from `bindings/python`, and `3b-ii` adds
 direct execution via `compile_and_load` / `load` plus the NumPy DLPack guarantee. The
 JAX DLPack guarantee remains deferred to the StableHLO phase.
@@ -494,7 +525,8 @@ general coding ability.
 The full-surface `SKILL.md` v2 refresh belongs to late Phase 3, after the shipped
 public Surf idiom and the remaining language-completeness surfaces are stabilized:
 pipe-first chains, short-form block bindings, scalar/string code, collections,
-iteration, and tokenization/data-loading workflows.
+iteration, core numeric primitives, tokenization/data-loading workflows, and the later
+`Std.Time` / `Std.Decimal` host-program surfaces.
 
 Current validation result:
 

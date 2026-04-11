@@ -951,6 +951,35 @@ fn with_macro_provenance(expr: &deep::Expr, message: String) -> String {
     format!("{message} (in expansion of {source})")
 }
 
+fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
+    match kind {
+        TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
+        TypeErrorKind::PrecisionMismatch => CheckErrorKind::PrecisionMismatch,
+        TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
+        TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
+        TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
+        TypeErrorKind::NotAFunction => CheckErrorKind::NotAFunction,
+    }
+}
+
+fn collection_helper_type_error(
+    expr: &deep::Expr,
+    helper: &str,
+    contract: &str,
+    te: TypeError,
+) -> CheckError {
+    let kind = check_error_kind_from_type_error_kind(&te.kind);
+    let suggestions = match kind {
+        CheckErrorKind::PrecisionMismatch => vec!["Insert explicit cast".to_string()],
+        _ => vec![],
+    };
+    CheckError::new(
+        kind,
+        with_macro_provenance(expr, format!("{helper} {contract}; {}", te.message)),
+        suggestions,
+    )
+}
+
 fn macro_source(expr: &deep::Expr) -> Option<String> {
     let deep::Expr::List(list, _) = expr else {
         return None;
@@ -2320,6 +2349,1041 @@ fn infer_app(
                                     ));
                                     return Type::Error;
                                 }
+                            }
+                        }
+                    }
+                    "len" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, _) if name == "List" || name == "Dict" => {
+                                    return Type::Prim(Prim::Int64);
+                                }
+                                Type::Var(_) | Type::Error => return Type::Prim(Prim::Int64),
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("len expects List or Dict input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "index" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let list_arg = subst.apply(&arg_tys[0]);
+                        let index_arg = subst.apply(&arg_tys[1]);
+                        if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
+                            && !matches!(index_arg, Type::Var(_) | Type::Error)
+                        {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("index expects integer index, got {index_arg}"),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        match list_arg {
+                            Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
+                                return args.remove(0);
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("index expects List input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "append" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let list_arg = subst.apply(&arg_tys[0]);
+                        let value_arg = subst.apply(&arg_tys[1]);
+                        match list_arg {
+                            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                if let Err(te) = unify(&args[0], &value_arg, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("append expects List input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "concat" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let lhs = subst.apply(&arg_tys[0]);
+                        let rhs = subst.apply(&arg_tys[1]);
+                        match (lhs, rhs) {
+                            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                                if lhs_name == "List"
+                                    && rhs_name == "List"
+                                    && lhs_args.len() == 1
+                                    && rhs_args.len() == 1 =>
+                            {
+                                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt(
+                                    "List".to_string(),
+                                    vec![subst.apply(&lhs_args[0])],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (lhs, rhs) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "concat expects matching List inputs, got {lhs} and {rhs}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "take" | "drop" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let op_name = func_name.as_deref().unwrap_or("collection helper");
+                        let list_arg = subst.apply(&arg_tys[0]);
+                        let count_arg = subst.apply(&arg_tys[1]);
+                        if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
+                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                        {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{op_name} expects integer count, got {count_arg}"),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        match list_arg {
+                            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                return Type::Adt("List".to_string(), vec![args[0].clone()]);
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{op_name} expects List input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "chunk" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let list_arg = subst.apply(&arg_tys[0]);
+                        let count_arg = subst.apply(&arg_tys[1]);
+                        if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
+                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                        {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("chunk expects integer size, got {count_arg}"),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        match list_arg {
+                            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                return Type::Adt(
+                                    "List".to_string(),
+                                    vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
+                                );
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("chunk expects List input, got {other}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "range" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        for arg_ty in &arg_tys {
+                            match subst.apply(arg_ty) {
+                                Type::Prim(prec) if prec.is_integer() => {}
+                                Type::Var(_) | Type::Error => {}
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("range expects integer arguments, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                        return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                    }
+                    "map" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let out_ty = vg.fresh_type();
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Adt("List".to_string(), vec![elem_ty]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        return Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]);
+                    }
+                    "filter" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "filter",
+                                "expects a callback that returns bool",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        return Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
+                    }
+                    "fold" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let acc_ty = vg.fresh_type();
+                        let elem_ty = vg.fresh_type();
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(
+                                vec![acc_ty.clone(), elem_ty.clone()],
+                                Box::new(acc_ty.clone()),
+                            ),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "fold",
+                                "expects a callback whose accumulator/result type matches the initial accumulator",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "fold",
+                                "expects a callback whose accumulator/result type matches the initial accumulator",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[2]),
+                            &Type::Adt("List".to_string(), vec![elem_ty]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        return subst.apply(&acc_ty);
+                    }
+                    "scan" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let acc_ty = vg.fresh_type();
+                        let elem_ty = vg.fresh_type();
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(
+                                vec![acc_ty.clone(), elem_ty.clone()],
+                                Box::new(acc_ty.clone()),
+                            ),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "scan",
+                                "expects a callback whose accumulator/result type matches the initial accumulator",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "scan",
+                                "expects a callback whose accumulator/result type matches the initial accumulator",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[2]),
+                            &Type::Adt("List".to_string(), vec![elem_ty]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
+                    }
+                    "partition" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let list_expr = deep::Expr::List(list.clone(), zero_span());
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
+                            subst,
+                        ) {
+                            errors.push(collection_helper_type_error(
+                                &list_expr,
+                                "partition",
+                                "expects a callback that returns bool",
+                                te,
+                            ));
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
+                        return Type::Tuple(vec![out_list.clone(), out_list]);
+                    }
+                    "flat_map" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let elem_ty = vg.fresh_type();
+                        let out_elem_ty = vg.fresh_type();
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[0]),
+                            &Type::Fn(
+                                vec![elem_ty.clone()],
+                                Box::new(Type::Adt("List".to_string(), vec![out_elem_ty.clone()])),
+                            ),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        if let Err(te) = unify(
+                            &subst.apply(&arg_tys[1]),
+                            &Type::Adt("List".to_string(), vec![elem_ty]),
+                            subst,
+                        ) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        return Type::Adt("List".to_string(), vec![subst.apply(&out_elem_ty)]);
+                    }
+                    "flatten" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(outer_name, outer_args)
+                                    if outer_name == "List" && outer_args.len() == 1 =>
+                                {
+                                    match &outer_args[0] {
+                                        Type::Adt(inner_name, inner_args)
+                                            if inner_name == "List" && inner_args.len() == 1 =>
+                                        {
+                                            return Type::Adt(
+                                                "List".to_string(),
+                                                vec![inner_args[0].clone()],
+                                            );
+                                        }
+                                        Type::Var(_) | Type::Error => return result_ty,
+                                        other => {
+                                            errors.push(CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(
+                                                        list.clone(),
+                                                        zero_span(),
+                                                    ),
+                                                    format!(
+                                                        "flatten expects List[List[T]] input, got List[{other}]"
+                                                    ),
+                                                ),
+                                                vec![],
+                                            ));
+                                            return Type::Error;
+                                        }
+                                    }
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "flatten expects List[List[T]] input, got {other}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "zip" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let lhs = subst.apply(&arg_tys[0]);
+                        let rhs = subst.apply(&arg_tys[1]);
+                        match (lhs, rhs) {
+                            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                                if lhs_name == "List"
+                                    && rhs_name == "List"
+                                    && lhs_args.len() == 1
+                                    && rhs_args.len() == 1 =>
+                            {
+                                return Type::Adt(
+                                    "List".to_string(),
+                                    vec![Type::Tuple(vec![
+                                        lhs_args[0].clone(),
+                                        rhs_args[0].clone(),
+                                    ])],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (lhs, rhs) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("zip expects List inputs, got {lhs} and {rhs}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "enumerate" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                    return Type::Adt(
+                                        "List".to_string(),
+                                        vec![Type::Tuple(vec![
+                                            Type::Prim(Prim::Int64),
+                                            args[0].clone(),
+                                        ])],
+                                    );
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("enumerate expects List input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "dict_of" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                    match &args[0] {
+                                        Type::Tuple(items) if items.len() == 2 => {
+                                            match &items[0] {
+                                                Type::Prim(Prim::Int64)
+                                                | Type::Prim(Prim::String) => {}
+                                                Type::Var(_) | Type::Error => return result_ty,
+                                                other => {
+                                                    errors.push(CheckError::new(
+                                                        CheckErrorKind::TypeMismatch,
+                                                        with_macro_provenance(
+                                                            &deep::Expr::List(list.clone(), zero_span()),
+                                                            format!(
+                                                                "dict_of keys must be int64 or string, got {other}"
+                                                            ),
+                                                        ),
+                                                        vec![],
+                                                    ));
+                                                    return Type::Error;
+                                                }
+                                            }
+                                            return Type::Adt(
+                                                "Dict".to_string(),
+                                                vec![items[0].clone(), items[1].clone()],
+                                            );
+                                        }
+                                        Type::Var(_) | Type::Error => return result_ty,
+                                        other => {
+                                            errors.push(CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "dict_of expects List[(K, V)] input, got List[{other}]"
+                                                    ),
+                                                ),
+                                                vec![],
+                                            ));
+                                            return Type::Error;
+                                        }
+                                    }
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("dict_of expects List input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "dict_get" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                            (Type::Adt(name, args), key_ty)
+                                if name == "Dict" && args.len() == 2 =>
+                            {
+                                if let Err(te) = unify(&args[0], &key_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt(
+                                    "Option".to_string(),
+                                    vec![subst.apply(&args[1])],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (dict_ty, key_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "dict_contains" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                            (Type::Adt(name, args), key_ty)
+                                if name == "Dict" && args.len() == 2 =>
+                            {
+                                if let Err(te) = unify(&args[0], &key_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Prim(Prim::Bool);
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (dict_ty, key_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "dict_remove" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                            (Type::Adt(name, args), key_ty)
+                                if name == "Dict" && args.len() == 2 =>
+                            {
+                                if let Err(te) = unify(&args[0], &key_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt(
+                                    "Dict".to_string(),
+                                    vec![subst.apply(&args[0]), subst.apply(&args[1])],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (dict_ty, key_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "dict_insert" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        match (
+                            subst.apply(&arg_tys[0]),
+                            subst.apply(&arg_tys[1]),
+                            subst.apply(&arg_tys[2]),
+                        ) {
+                            (Type::Adt(name, args), key_ty, value_ty)
+                                if name == "Dict" && args.len() == 2 =>
+                            {
+                                if let Err(te) = unify(&args[0], &key_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                if let Err(te) = unify(&args[1], &value_ty, subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt(
+                                    "Dict".to_string(),
+                                    vec![subst.apply(&args[0]), subst.apply(&args[1])],
+                                );
+                            }
+                            (Type::Var(_), _, _)
+                            | (_, Type::Var(_), _)
+                            | (_, _, Type::Var(_))
+                            | (Type::Error, _, _)
+                            | (_, Type::Error, _)
+                            | (_, _, Type::Error) => {
+                                return result_ty;
+                            }
+                            (dict_ty, key_ty, value_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "dict_merge" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
+                            (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
+                                if lhs_name == "Dict"
+                                    && rhs_name == "Dict"
+                                    && lhs_args.len() == 2
+                                    && rhs_args.len() == 2 =>
+                            {
+                                if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                if let Err(te) = unify(&lhs_args[1], &rhs_args[1], subst) {
+                                    errors.push(te.into());
+                                    return Type::Error;
+                                }
+                                return Type::Adt(
+                                    "Dict".to_string(),
+                                    vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
+                                );
+                            }
+                            (Type::Var(_), _)
+                            | (_, Type::Var(_))
+                            | (Type::Error, _)
+                            | (_, Type::Error) => {
+                                return result_ty;
+                            }
+                            (lhs_ty, rhs_ty) => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "dict_keys" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                                    return Type::Adt("List".to_string(), vec![args[0].clone()]);
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("dict_keys expects Dict input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "dict_values" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                                    return Type::Adt("List".to_string(), vec![args[1].clone()]);
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("dict_values expects Dict input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "dict_entries" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
+                                    return Type::Adt(
+                                        "List".to_string(),
+                                        vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
+                                    );
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("dict_entries expects Dict input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "to_tensor" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                                    match &args[0] {
+                                        Type::Prim(precision) if precision.is_numeric() => {
+                                            return Type::Tensor(vec![Dim::Wildcard], *precision);
+                                        }
+                                        Type::Var(_) | Type::Error => return result_ty,
+                                        other => {
+                                            errors.push(CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_tensor expects numeric List elements, got {other}"
+                                                    ),
+                                                ),
+                                                vec![],
+                                            ));
+                                            return Type::Error;
+                                        }
+                                    }
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("to_tensor expects List input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "to_list" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Tensor(dims, precision) => {
+                                    if dims.len() != 1 {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_list expects a rank-1 tensor, got rank {} tensor",
+                                                    dims.len()
+                                                ),
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                    if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_list expects numeric or bool tensor input, got {precision:?}"
+                                                ),
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                    return Type::Adt(
+                                        "List".to_string(),
+                                        vec![Type::Prim(precision)],
+                                    );
+                                }
+                                Type::Var(_) | Type::Error => return result_ty,
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("to_list expects Tensor input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
+                    "pad_sequences" => {
+                        if arg_tys.len() != 2 {
+                            return Type::Error;
+                        }
+                        let seqs_ty = subst.apply(&arg_tys[0]);
+                        let pad_ty = subst.apply(&arg_tys[1]);
+                        match seqs_ty {
+                            Type::Adt(outer_name, outer_args)
+                                if outer_name == "List" && outer_args.len() == 1 =>
+                            {
+                                match &outer_args[0] {
+                                    Type::Adt(inner_name, inner_args)
+                                        if inner_name == "List" && inner_args.len() == 1 =>
+                                    {
+                                        if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
+                                            errors.push(te.into());
+                                            return Type::Error;
+                                        }
+                                        match subst.apply(&inner_args[0]) {
+                                            Type::Prim(precision) if precision.is_numeric() => {
+                                                return Type::Tensor(
+                                                    vec![Dim::Wildcard, Dim::Wildcard],
+                                                    precision,
+                                                );
+                                            }
+                                            Type::Var(_) | Type::Error => return result_ty,
+                                            other => {
+                                                errors.push(CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "pad_sequences expects numeric nested lists, got {other}"
+                                                        ),
+                                                    ),
+                                                    vec![],
+                                                ));
+                                                return Type::Error;
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "pad_sequences expects List[List[T]], got List[{other}]"
+                                                ),
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                }
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "pad_sequences expects List[List[T]] input, got {other}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
                             }
                         }
                     }
@@ -5547,6 +6611,394 @@ def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
             missing.is_none(),
             "expected typed shape-sensitive apps after permute, missing: {:?}",
             missing
+        );
+    }
+
+    #[test]
+    fn surf_list_builtins_type_check() {
+        let checked = checked_surf(
+            r#"
+let xs: List[f32] = [1.0, 2.0]
+let ys = append(xs, 3.0)
+let total = tensor_to_scalar(sum(to_tensor(ys), 0))
+let roundtrip = to_list(to_tensor(ys))
+"#,
+        );
+        assert!(checked.annotated_exprs().len() >= 4);
+    }
+
+    #[test]
+    fn surf_pad_sequences_type_checks() {
+        let checked = checked_surf(
+            r#"
+let tokens: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
+let padded = pad_sequences(tokens, cast(0, int64))
+"#,
+        );
+        assert!(checked.annotated_exprs().len() >= 2);
+    }
+
+    #[test]
+    fn surf_dict_and_iteration_builtins_type_check() {
+        let checked = checked_surf(
+            r#"
+let keys: List[string] = ["alpha", "beta"]
+let ids: List[int64] = [cast(1, int64), cast(2, int64)]
+let pairs = zip(keys, ids)
+let indexed = enumerate(keys)
+let vocab: Dict[string, int64] = dict_of(pairs)
+let found = dict_contains(vocab, "alpha")
+let id = dict_get(vocab, "beta")
+let only_keys = dict_keys(vocab)
+let only_values = dict_values(vocab)
+let roundtrip = dict_entries(vocab)
+"#,
+        );
+        assert!(checked.annotated_exprs().len() >= 9);
+    }
+
+    #[test]
+    fn surf_map_filter_fold_type_check() {
+        let checked = checked_surf(
+            r#"
+def inc(x: int64) -> int64 = add(x, cast(1, int64))
+let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+let mapped = map(inc, xs)
+let filtered = filter(fn (x: int64) -> eq(mod(x, cast(2, int64)), cast(0, int64)), mapped)
+let total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
+"#,
+        );
+        assert!(checked.annotated_exprs().len() >= 5);
+    }
+
+    #[test]
+    fn surf_append_rejects_wrong_element_type() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = append(xs, "oops")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("append should reject mismatched element type");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("List") || error.message.contains("string")),
+            "expected list element mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_filter_rejects_non_bool_callback() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("filter should reject non-bool callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("filter")
+                    && error.message.contains("bool")
+                    && error.message.contains("callback")),
+            "expected bool callback mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_dict_entries_rejects_non_dict_input() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = dict_entries(xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("dict_entries should reject non-dict input");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_entries")
+                    || error.message.contains("Dict")),
+            "expected dict input mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_to_list_rejects_rank2_tensor() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("to_list should reject rank-2 tensor input");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("rank-1 tensor") || error.message.contains("to_list")
+            }),
+            "expected rank mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_fold_rejects_accumulator_mismatch() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("fold should reject mismatched accumulator type");
+        assert!(
+            err.errors.iter().any(|error| error.message.contains("fold")
+                && error.message.contains("accumulator")
+                && error.message.contains("string")
+                && error.message.contains("int64")),
+            "expected accumulator mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_collection_helper_builtins_type_check() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+let prefix = take(xs, cast(2, int64))
+let suffix = drop(xs, cast(1, int64))
+let groups = chunk(xs, cast(2, int64))
+let scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
+let buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
+let exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], xs)
+let flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
+let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+let extended = dict_insert(base, "beta", cast(2, int64))
+let merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+let trimmed = dict_remove(merged, "gamma")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        result.expect("collection helper builtins should type check");
+    }
+
+    #[test]
+    fn surf_take_rejects_non_integer_count() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64), cast(2, int64)]
+let bad = take(xs, "two")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("take should reject non-integer count");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("take") || error.message.contains("integer")),
+            "expected integer count mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_dict_insert_rejects_value_type_mismatch() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+let bad = dict_insert(base, "beta", "two")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("dict_insert should reject mismatched value type");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_insert")
+                    || error.message.contains("int64")
+                    || error.message.contains("string")),
+            "expected dict value mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_dict_merge_rejects_mismatched_dict_value_types() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let lhs: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+let rhs: Dict[string, string] = dict_of([("beta", "two")])
+let bad = dict_merge(lhs, rhs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("dict_merge should reject mismatched dict value types");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("dict_merge")
+                    || error.message.contains("Dict")
+                    || error.message.contains("int64")
+                    || error.message.contains("string")),
+            "expected dict merge mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_scan_rejects_accumulator_mismatch() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("scan should reject mismatched accumulator type");
+        assert!(
+            err.errors.iter().any(|error| error.message.contains("scan")
+                && error.message.contains("accumulator")
+                && error.message.contains("string")
+                && error.message.contains("int64")),
+            "expected scan accumulator mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_partition_rejects_non_bool_callback() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("partition should reject non-bool callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("partition")
+                    && error.message.contains("bool")
+                    && error.message.contains("callback")),
+            "expected partition callback mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_flat_map_rejects_non_list_callback() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("flat_map should reject non-list callback");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("List") || error.message.contains("flat_map")),
+            "expected flat_map callback mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_flatten_rejects_non_nested_list_input() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = flatten(xs)
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("flatten should reject non-nested list input");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("flatten") || error.message.contains("List")),
+            "expected flatten input mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_dict_remove_rejects_mismatched_key_type() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+let bad = dict_remove(base, cast(7, int64))
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("dict_remove should reject mismatched key type");
+        assert!(
+            err.errors.iter().any(|error| {
+                error.message.contains("dict_remove")
+                    || (error.message.contains("string") && error.message.contains("int64"))
+            }),
+            "expected dict_remove key mismatch, got {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn surf_chunk_rejects_non_integer_size() {
+        let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+let xs: List[int64] = [cast(1, int64)]
+let bad = chunk(xs, "two")
+"#,
+            )
+            .expect("surf parse"),
+        ));
+        let err = result.expect_err("chunk should reject non-integer size");
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.message.contains("chunk") || error.message.contains("integer")),
+            "expected chunk size mismatch, got {:?}",
+            err.errors
         );
     }
 }

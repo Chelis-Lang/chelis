@@ -1383,7 +1383,8 @@ let loss = (mean(x, 0) : tensor[f32])
                 .iter()
                 .find(|root| root["name"] == "loss")
                 .expect("loss root");
-            assert_eq!(loss["value"]["data"][0].as_f64(), Some(2.5));
+            assert_eq!(loss["value"]["type"].as_str(), Some("tensor"));
+            assert_eq!(loss["value"]["value"]["data"][0].as_f64(), Some(2.5));
         });
     }
 

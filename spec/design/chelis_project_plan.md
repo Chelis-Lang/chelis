@@ -33,9 +33,9 @@ backend limitations carried forward explicitly rather than treated as hidden blo
 | **0i** | Tide v0.1 (REPL, `chelis deep`, `chelis surf`, `chelis fmt`, `chelis eval`) | ✅ Complete |
 | **1** | Futhark-style GPU backend (HIP) + executable grammar (`chelis validate`) | Structurally complete with known limitations carried forward |
 | **2** | Effects, linear types, macros, Tide Agent API + MCP, LSP, TUI (`chelis cove`) |  |
-| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, data loading/tokenization, SKILL.md v2 |  |
+| **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, data loading/tokenization, `Std.Time`/`Std.Decimal`, SKILL.md v2 |  |
 | **4** | ML & AI coding: seed corpus, ICL measurement, ChelisBench, trajectory collection, local model training, model integration |  |
-| **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, research type features, Lean formalization |  |
+| **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
 
 **Red team checkpoints** after: 0a, 0d, 0h, and each major phase.
 A red team round means adversarial review of design decisions, test coverage, spec
@@ -327,17 +327,20 @@ provenance annotation format — not whether LLMs interact with macros (they don
 **Deliverable:** language completeness that makes Chelis self-sufficient for real AI
 programs rather than only tensor compute kernels.
 This phase is about closing the non-tensor gaps after the Phase 2 language surface is
-stable: first-class scalar/string values, collections, iteration, data loading,
-tokenization, and the teaching material refresh that matches that fuller language.
+stable: first-class scalar/string values, collections, iteration, core numeric
+primitives beyond the initial RISC surface, data loading, tokenization, standard
+library time/exact-decimal support, and the teaching material refresh that matches that
+fuller language.
 The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 
 **Shipped Phase 3 foundations:** `3a` package system, `3b` Python FFI interop,
-`3b-ii` direct Python execution + NumPy guarantee, and `3e` pipe-first style pass.
+`3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
+`3d` collections/iteration, and `3e` pipe-first style pass.
 
-**Recommended execution order for remaining work:** `3c`, then `3d`, then `3g`, then
+**Recommended execution order for remaining work:** `3h`, then `3g`, then `3i`, then
 `3f`.
 `3f` (SKILL.md v2) is intentionally last in Phase 3 now: it needs a real rewrite after
-the scalar/string, collection, and tokenization surfaces stabilize.
+the numeric, tokenization, and standard-library surfaces stabilize.
 
 ### 3e: Style Foundation
 
@@ -401,6 +404,8 @@ Shipped.
 
 ### 3c: Scalar and String Foundation
 
+Shipped.
+
 - add first-class unrestricted `Int`, `Float`, and `Bool` values outside tensors
 - add first-class immutable `String` values for file paths, tokens, labels, config
   keys, and logging
@@ -409,10 +414,15 @@ Shipped.
   named integer bitwise helpers, formatting, parsing, and tensor shape queries
 - make `Option[T]` part of the practical language surface for failure-returning APIs
 - add `print` / `debug` as the minimum IO-based debugging surface
+- compile scalar/string/`Option`/print programs through a host-value lane in both C and
+  HIP builds instead of leaving them evaluator-only
+- tag Tide/Python execution values by runtime type on the wire surface
 - keep tensor scalars distinct from host-language scalar values; conversions stay
   explicit
 
 ### 3d: Collections and Iteration
+
+Shipped.
 
 - add immutable `List[T]` and `Dict[K, V]` as first-class collection types
 - add iteration primitives such as `map`, `filter`, `fold`, `zip`, `enumerate`, and
@@ -421,7 +431,35 @@ Shipped.
   `Random`, IO, and later effects
 - add the boundary between variable-length collections and fixed-shape tensors:
   list/tensor conversion, stacking, and `pad_sequences`
+- compile collection code through the `3c` host-value lane in both C and HIP builds
+  rather than leaving list processing evaluator-only
+- current shipped slice covers compiled collection foundations: list literals,
+  `List[T]`, `len`, `index`, `append`, `concat`, `take`, `drop`, `chunk`,
+  `flatten`, `range`, `zip`, `enumerate`, numeric `to_tensor`, practical rank-1
+  `to_list`, `pad_sequences`, and the first immutable `Dict[K, V]` builtins
+  (`dict_of`, `dict_get`, `dict_contains`, `dict_remove`, `dict_insert`,
+  `dict_merge`, `dict_keys`, `dict_values`, `dict_entries`), plus compiled
+  higher-order iteration (`map`, `filter`, `fold`, `scan`, `partition`,
+  `flat_map`); callback effects now propagate through iteration under the shipped
+  checker, and this compiled helper set now covers the practical collection surface
+  needed before `3g` data loading/tokenization work starts
 - make preprocessing and dataset plumbing expressible in pure Chelis rather than Python
+
+### 3h: Core Numeric Primitives
+
+- expand the post-RISC practical numeric surface with `einsum`, `concat`, `split`,
+  `gather`, `scatter`, `where`, `cumsum`, `sort`, `diagonal`, `trace`, and `clamp`
+- treat `einsum` as the highest-leverage single addition because it subsumes matmul,
+  batched matmul, transpose, trace, outer products, and common contractions under one
+  primitive
+- land `concat` / `split` as mandatory model-building tools for skip connections,
+  multi-head attention, and tensor packing/unpacking flows
+- land `diagonal` / `trace` and `clamp` as the minimum practical linear-algebra and
+  training-control additions
+- keep `Std.Nn.Embedding` explicit in the standard library even though it is a thin
+  wrapper over `gather`, because it is the natural public entrypoint for NLP models
+- treat this as the last major tensor-language expansion before the data/token pipeline
+  becomes the critical path
 
 ### 3g: Data Loading and Tokenization
 
@@ -433,6 +471,17 @@ Shipped.
   inputs
 - make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
   sidecar
+
+### 3i: `Std.Time` and `Std.Decimal`
+
+- add `Std.Time` as the standard-library home for dates, timestamps, durations, and
+  scheduling-friendly utilities needed by real workflows
+- add `Std.Decimal` as the exact-arithmetic home for money/config/reporting cases where
+  binary floating point is the wrong user-facing surface
+- keep both in the standard library rather than the core language; they are broadly
+  useful but do not need compiler intrinsics
+- position them after `3g` so tokenization/data-loading ships first, but before `3f` so
+  the teaching surface can show complete real-world host-program idioms
 
 ### 3f: SKILL.md v2 Refresh
 
@@ -452,12 +501,23 @@ Phase 3 success condition:
 - `SKILL.md` and examples match the fuller language rather than the earlier
   tensor-compute-only subset
 
+Post-Phase-3 shell stack:
+
+- `chelis-std` remains the first package-layer target, now including `Std.Nn.Embedding`
+  plus the later `Std.Time` / `Std.Decimal` host-program surface
+- `school` sits on top of `chelis-std` for general numerical methods: stats,
+  distributions, optimization solvers including differentiable optimization,
+  interpolation, SVD/PCA, ODE/SDE solvers, integration, root finding, and later signal
+  processing once complex numbers land
+- `treasure` sits on top of `chelis-std` + `school` for finance-specific pricing,
+  risk, curves, stochastic processes, and order-book style workloads
+
 ---
 
 ## Phase 4
 
 **Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
-through `3g` and `3f` complete.
+through `3h`, `3g`, `3i`, and `3f` complete.
 **Deliverable:** first-party ML and coding-assistance stack built on the finalized
 language-complete Chelis surface and finalized example idioms, plus a reproducible
 benchmark proving the "designed for LLMs" thesis.
@@ -584,7 +644,24 @@ valuable only after Chelis is already usable as a full AI programming language.
 - add explicit multi-GPU support only if Phase 4 or downstream product needs justify it
 - treat this as conditional infrastructure, not a default near-term commitment
 
-### 5e: Research Type Features
+### 5e: Sparse Tensors
+
+- add sparse tensor representations only after the dense language and backend story are
+  already strong
+- target practical sparse-dense interop rather than speculative generalized sparse
+  semantics first
+- keep this aligned with the advanced-backend phase rather than the Phase 3 usability
+  phase
+
+### 5f: Complex Numbers
+
+- add first-class complex numeric support once the demand from signal-processing and
+  advanced linear-algebra workloads justifies it
+- unblock `School.Signal` and related FFT/STFT workflows after this lands
+- keep complex support out of Phase 3 so the host-language/data pipeline can stabilize
+  first
+
+### 5g: Research Type Features
 
 - investigate ILP/AUTOMAP-style rank-polymorphism support that inserts explicit
   `expand` operations during inference while preserving Chelis's
@@ -597,7 +674,7 @@ valuable only after Chelis is already usable as a full AI programming language.
 - follow a paper-first workflow: draft, prototype, corpus validation, revise, submit,
   then merge
 
-### 5f: Lean Formalization
+### 5h: Lean Formalization
 
 - mechanize the core type system only
 - prove soundness for the stable formalized subset
