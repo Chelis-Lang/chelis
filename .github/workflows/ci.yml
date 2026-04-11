@@ -38,6 +38,23 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: Install tokei
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cargo install tokei --locked
+
+      - name: Generate LOC report
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 scripts/loc_report.py
+
+      - name: Commit LOC report
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/loc_report.md
+          git diff --cached --quiet || git commit -m "Update LOC report"
+          git push
+
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest

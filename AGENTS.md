@@ -101,6 +101,15 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Decide the executable-vs-illustrative split early in a phase, not after examples have
   already been used as proof artifacts.
 
+## Scripting Language Policy
+
+- **Python** for all scripts, utilities, report generators, and automation helpers.
+  Write tests for them.
+- **Rust** where the task naturally fits a compiled workspace member.
+- **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
+  Python instead. Shell is fragile and untestable.
+- Existing `scripts/` directory uses Python; follow that convention.
+
 ## Build And Gate Commands
 
 Minimum repo gate:
