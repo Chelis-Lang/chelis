@@ -6,7 +6,10 @@
 )]
 
 use libc::{c_char, c_int};
+use memmap2::Mmap;
 use std::ffi::{CStr, CString};
+use std::fs;
+use std::fs::File;
 use std::ptr;
 
 const CHELIS_F32: c_int = 0;
@@ -50,6 +53,7 @@ pub enum chelis_value_tag {
     CHELIS_VALUE_LIST,
     CHELIS_VALUE_TUPLE,
     CHELIS_VALUE_DICT,
+    CHELIS_VALUE_ADT,
 }
 
 #[repr(C)]
@@ -63,6 +67,7 @@ pub union chelis_value_union {
     pub list: *mut chelis_list,
     pub tuple: *mut chelis_tuple,
     pub dict: *mut chelis_dict,
+    pub adt: *mut chelis_adt,
 }
 
 unsafe fn chelis_flat_to_indices(flat: c_int, shape: *const c_int, ndim: c_int, out: *mut c_int) {
@@ -149,6 +154,19 @@ pub struct chelis_dict {
     entries: Vec<chelis_dict_entry>,
 }
 
+#[repr(C)]
+pub struct chelis_adt {
+    refcount: usize,
+    ctor: chelis_string,
+    fields: Vec<chelis_value>,
+}
+
+#[repr(C)]
+pub struct chelis_mapped_file {
+    refcount: usize,
+    mmap: Mmap,
+}
+
 struct RuntimeString {
     refcount: usize,
     value: String,
@@ -189,6 +207,12 @@ unsafe fn retain_dict_ptr(dict: *mut chelis_dict) {
     }
 }
 
+unsafe fn retain_adt_ptr(adt: *mut chelis_adt) {
+    if !adt.is_null() {
+        (*adt).refcount += 1;
+    }
+}
+
 unsafe fn release_list_ptr(list: *mut chelis_list) {
     if !list.is_null() {
         let inner = &mut *list;
@@ -225,6 +249,20 @@ unsafe fn release_dict_ptr(dict: *mut chelis_dict) {
                 chelis_value_release(entry.value);
             }
             drop(Box::from_raw(dict));
+        }
+    }
+}
+
+unsafe fn release_adt_ptr(adt: *mut chelis_adt) {
+    if !adt.is_null() {
+        let inner = &mut *adt;
+        inner.refcount -= 1;
+        if inner.refcount == 0 {
+            chelis_string_release(inner.ctor);
+            for field in &inner.fields {
+                chelis_value_release(*field);
+            }
+            drop(Box::from_raw(adt));
         }
     }
 }
@@ -656,6 +694,74 @@ pub unsafe extern "C" fn chelis_dict_len(dict: *const chelis_dict) -> i64 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_adt_retain(adt: *const chelis_adt) {
+    retain_adt_ptr(adt as *mut chelis_adt);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_release(adt: *const chelis_adt) {
+    release_adt_ptr(adt as *mut chelis_adt);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_construct(
+    ctor: chelis_string,
+    fields: *const chelis_value,
+    len: i64,
+) -> *mut chelis_adt {
+    let slice = if fields.is_null() || len <= 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(fields, len as usize)
+    };
+    chelis_string_retain(ctor);
+    Box::into_raw(Box::new(chelis_adt {
+        refcount: 1,
+        ctor,
+        fields: clone_items(slice),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_get_tag(adt: *const chelis_adt) -> chelis_string {
+    if adt.is_null() {
+        runtime_fail!("expected adt");
+    }
+    let tag = (*adt).ctor;
+    chelis_string_retain(tag);
+    tag
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_tag_equals(
+    adt: *const chelis_adt,
+    ctor: chelis_string,
+) -> bool {
+    if adt.is_null() {
+        runtime_fail!("expected adt");
+    }
+    chelis_string_eq((*adt).ctor, ctor)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_field_count(adt: *const chelis_adt) -> i64 {
+    if adt.is_null() {
+        runtime_fail!("expected adt");
+    }
+    (*adt).fields.len() as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_adt_get_field(adt: *const chelis_adt, index: i64) -> chelis_value {
+    if adt.is_null() || index < 0 || index >= (*adt).fields.len() as i64 {
+        runtime_fail!("adt field index out of bounds");
+    }
+    let value = (*adt).fields[index as usize];
+    chelis_value_retain(value);
+    value
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_value_from_int64(value: i64) -> chelis_value {
     chelis_value {
         tag: chelis_value_tag::CHELIS_VALUE_INT64,
@@ -720,12 +826,21 @@ pub unsafe extern "C" fn chelis_value_from_dict(value: *mut chelis_dict) -> chel
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_value_from_adt(value: *mut chelis_adt) -> chelis_value {
+    chelis_value {
+        tag: chelis_value_tag::CHELIS_VALUE_ADT,
+        as_: chelis_value_union { adt: value },
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_value_retain(value: chelis_value) {
     match value.tag {
         chelis_value_tag::CHELIS_VALUE_STRING => retain_string_handle(value.as_.string.handle),
         chelis_value_tag::CHELIS_VALUE_LIST => retain_list_ptr(value.as_.list),
         chelis_value_tag::CHELIS_VALUE_TUPLE => retain_tuple_ptr(value.as_.tuple),
         chelis_value_tag::CHELIS_VALUE_DICT => retain_dict_ptr(value.as_.dict),
+        chelis_value_tag::CHELIS_VALUE_ADT => retain_adt_ptr(value.as_.adt),
         _ => {}
     }
 }
@@ -737,6 +852,7 @@ pub unsafe extern "C" fn chelis_value_release(value: chelis_value) {
         chelis_value_tag::CHELIS_VALUE_LIST => release_list_ptr(value.as_.list),
         chelis_value_tag::CHELIS_VALUE_TUPLE => release_tuple_ptr(value.as_.tuple),
         chelis_value_tag::CHELIS_VALUE_DICT => release_dict_ptr(value.as_.dict),
+        chelis_value_tag::CHELIS_VALUE_ADT => release_adt_ptr(value.as_.adt),
         _ => {}
     }
 }
@@ -806,6 +922,14 @@ pub unsafe extern "C" fn chelis_value_as_dict(value: chelis_value) -> *mut cheli
         runtime_fail!("expected dict value");
     }
     value.as_.dict
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_value_as_adt(value: chelis_value) -> *mut chelis_adt {
+    if value.tag != chelis_value_tag::CHELIS_VALUE_ADT {
+        runtime_fail!("expected adt value");
+    }
+    value.as_.adt
 }
 
 #[no_mangle]
@@ -1391,6 +1515,53 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                         chelis_value_tag::CHELIS_VALUE_INT64 => (*seq).items[col].as_.i64_ as f64,
                         chelis_value_tag::CHELIS_VALUE_FLOAT64 => (*seq).items[col].as_.f64_,
                         _ => runtime_fail!("pad_sequences expects numeric nested lists"),
+                    }
+                } else {
+                    pad
+                };
+                *(*out).data.add(flat) = value as f32;
+            }
+        }
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_pad_sequences_to(
+    sequences: *const chelis_list,
+    width: i64,
+    pad_value: chelis_value,
+) -> *mut chelis_tensor {
+    if width < 0 {
+        runtime_fail!("pad_sequences_to requires non-negative width");
+    }
+    let batch = chelis_list_len(sequences) as usize;
+    let width = width as usize;
+    let shape = [batch as c_int, width as c_int];
+    let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
+        CHELIS_I32
+    } else {
+        CHELIS_F64
+    };
+    let out = chelis_alloc(2, shape.as_ptr(), dtype);
+    let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
+        pad_value.as_.i64_ as f64
+    } else {
+        pad_value.as_.f64_
+    };
+    if !sequences.is_null() {
+        for (row, item) in (*sequences).items.iter().enumerate() {
+            if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
+                runtime_fail!("pad_sequences_to expects nested lists");
+            }
+            let seq = item.as_.list;
+            for col in 0..width {
+                let flat = row * width + col;
+                let value = if col < (*seq).items.len() {
+                    match (*seq).items[col].tag {
+                        chelis_value_tag::CHELIS_VALUE_INT64 => (*seq).items[col].as_.i64_ as f64,
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => (*seq).items[col].as_.f64_,
+                        _ => runtime_fail!("pad_sequences_to expects numeric nested lists"),
                     }
                 } else {
                     pad
@@ -2012,6 +2183,7 @@ unsafe fn value_to_string_inline(value: chelis_value) -> String {
         chelis_value_tag::CHELIS_VALUE_LIST => list_to_string(value.as_.list),
         chelis_value_tag::CHELIS_VALUE_TUPLE => tuple_to_string(value.as_.tuple),
         chelis_value_tag::CHELIS_VALUE_DICT => dict_to_string(value.as_.dict),
+        chelis_value_tag::CHELIS_VALUE_ADT => adt_to_string(value.as_.adt),
     }
 }
 
@@ -2028,6 +2200,113 @@ pub unsafe extern "C" fn chelis_print_tuple(tuple: *const chelis_tuple) {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_print_dict(dict: *const chelis_dict) {
     write_stdout(&dict_to_string(dict));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_print_adt(adt: *const chelis_adt) {
+    write_stdout(&adt_to_string(adt));
+}
+
+fn bytes_to_value_list(bytes: &[u8]) -> *mut chelis_list {
+    let items = bytes
+        .iter()
+        .map(|byte| unsafe { chelis_value_from_int64(i64::from(*byte)) })
+        .collect::<Vec<_>>();
+    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_read_file(path: chelis_string) -> chelis_string {
+    let path_text = string_value(path).value.clone();
+    let contents = fs::read_to_string(&path_text)
+        .unwrap_or_else(|err| runtime_fail!("read_file failed for `{path_text}`: {err}"));
+    new_runtime_string(contents)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_write_file(path: chelis_string, contents: chelis_string) {
+    let path_text = string_value(path).value.clone();
+    fs::write(&path_text, &string_value(contents).value)
+        .unwrap_or_else(|err| runtime_fail!("write_file failed for `{path_text}`: {err}"));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_read_lines(path: chelis_string) -> *mut chelis_list {
+    let path_text = string_value(path).value.clone();
+    let contents = fs::read_to_string(&path_text)
+        .unwrap_or_else(|err| runtime_fail!("read_lines failed for `{path_text}`: {err}"));
+    let items = contents
+        .lines()
+        .map(|line| chelis_value_from_string(new_runtime_string(line.to_string())))
+        .collect::<Vec<_>>();
+    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_read_bytes(path: chelis_string) -> *mut chelis_list {
+    let path_text = string_value(path).value.clone();
+    let bytes = fs::read(&path_text)
+        .unwrap_or_else(|err| runtime_fail!("read_bytes failed for `{path_text}`: {err}"));
+    bytes_to_value_list(&bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_file_exists(path: chelis_string) -> bool {
+    let path_text = string_value(path).value.clone();
+    std::path::Path::new(&path_text).exists()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_list {
+    let path_text = string_value(path).value.clone();
+    let iter = fs::read_dir(&path_text)
+        .unwrap_or_else(|err| runtime_fail!("list_dir failed for `{path_text}`: {err}"));
+    let mut items = Vec::new();
+    for entry in iter {
+        let entry =
+            entry.unwrap_or_else(|err| runtime_fail!("list_dir failed for `{path_text}`: {err}"));
+        items.push(chelis_value_from_string(new_runtime_string(
+            entry.file_name().to_string_lossy().into_owned(),
+        )));
+    }
+    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_file(path: chelis_string) -> *mut chelis_mapped_file {
+    let path_text = string_value(path).value.clone();
+    let file = File::open(&path_text)
+        .unwrap_or_else(|err| runtime_fail!("mmap_file failed for `{path_text}`: {err}"));
+    let mmap = Mmap::map(&file)
+        .unwrap_or_else(|err| runtime_fail!("mmap_file failed for `{path_text}`: {err}"));
+    Box::into_raw(Box::new(chelis_mapped_file { refcount: 1, mmap }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_read(
+    mapped: *const chelis_mapped_file,
+    offset: i64,
+    len: i64,
+) -> *mut chelis_list {
+    if mapped.is_null() || offset < 0 || len < 0 {
+        runtime_fail!("mmap_read requires non-null mapping and non-negative offsets");
+    }
+    let mapped = &*mapped;
+    let offset = offset as usize;
+    let len = len as usize;
+    if offset > mapped.mmap.len() {
+        runtime_fail!("mmap_read offset out of bounds");
+    }
+    let end = offset.saturating_add(len).min(mapped.mmap.len());
+    bytes_to_value_list(&mapped.mmap[offset..end])
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i64 {
+    if mapped.is_null() {
+        runtime_fail!("mmap_len requires non-null mapping");
+    }
+    (*mapped).mmap.len() as i64
 }
 
 #[no_mangle]
@@ -2091,6 +2370,25 @@ unsafe fn dict_to_string(dict: *const chelis_dict) -> String {
             out.push_str(": ");
             out.push_str(&value_to_string_inline(entry.value));
         }
+    }
+    out.push(')');
+    out
+}
+
+unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
+    if adt.is_null() {
+        return "<null-adt>".to_string();
+    }
+    let ctor = string_value((*adt).ctor).value.clone();
+    if (*adt).fields.is_empty() {
+        return ctor;
+    }
+    let mut out = format!("{ctor}(");
+    for (index, field) in (*adt).fields.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&value_to_string_inline(*field));
     }
     out.push(')');
     out

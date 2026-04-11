@@ -266,29 +266,35 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
     let host_outcome = evaluate_host_program(&compiled.checked, &tensor_values_by_name)
         .map_err(|message| stage_error("eval", message, "eval_error"))?;
 
-    Ok(EvalResult {
-        roots: compiled
-            .all_root_names
-            .iter()
-            .enumerate()
-            .filter_map(|(index, name)| {
-                let value = lookup_runtime_value_for_root(
-                    name,
-                    &host_outcome.host_bindings,
-                    &tensor_values_by_name,
-                )?;
-                let node_id = compiled
-                    .named_roots
-                    .get(name)
-                    .map(|id| id.0)
-                    .unwrap_or(index);
-                Some(EvaluatedRoot {
-                    node_id,
-                    name: Some(name.clone()),
-                    value: runtime_value_to_schema(&value),
-                })
+    let roots = compiled
+        .all_root_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            let value = lookup_runtime_value_for_root(
+                name,
+                &host_outcome.host_bindings,
+                &tensor_values_by_name,
+            )?;
+            let node_id = compiled
+                .named_roots
+                .get(name)
+                .map(|id| id.0)
+                .unwrap_or(index);
+            Some((node_id, name.clone(), value))
+        })
+        .map(|(node_id, name, value)| {
+            Ok(EvaluatedRoot {
+                node_id,
+                name: Some(name),
+                value: runtime_value_to_schema(&value)
+                    .map_err(|message| stage_error("eval", message, "eval_error"))?,
             })
-            .collect(),
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(EvalResult {
+        roots,
         transcript: host_outcome.transcript,
     })
 }
@@ -1587,6 +1593,57 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
         assert!(c_file.contents.contains("int main(void)"));
         assert!(c_file.contents.contains("chelis_string_eq"));
         assert!(c_file.contents.contains("chelis_string_concat"));
+    }
+
+    #[test]
+    fn compile_emits_generic_adt_runtime_calls_for_recursive_host_program() {
+        let source = r#"
+type Json =
+  | JsonNull
+  | JsonInt(int64)
+  | JsonString(string)
+  | JsonArray(List[Json])
+
+def describe(value: Json) -> string =
+  match value with {
+    | JsonNull => "null"
+    | JsonInt(n) => to_string(n)
+    | JsonString(s) => s
+    | JsonArray(items) => to_string(len(items))
+  }
+
+let sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+let result = describe(sample)
+"#;
+
+        let result = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("jsonish".to_string()),
+        })
+        .expect("compile");
+
+        let c_file = result
+            .files
+            .iter()
+            .find(|file| file.path == "jsonish.c")
+            .expect("c file");
+        assert!(
+            c_file.contents.contains("chelis_adt_construct"),
+            "expected generic ADT runtime construction in generated C, got:\n{}",
+            c_file.contents
+        );
+        assert!(
+            c_file.contents.contains("chelis_adt_get_tag"),
+            "expected generic ADT runtime tag checks in generated C, got:\n{}",
+            c_file.contents
+        );
+        assert!(
+            !c_file.contents.contains("unsupported builtin"),
+            "generated C must not fall back to unsupported builtin stubs:\n{}",
+            c_file.contents
+        );
     }
 
     #[test]

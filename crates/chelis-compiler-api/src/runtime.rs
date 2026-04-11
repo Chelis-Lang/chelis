@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
-use chelis_types::{CheckedProgram, types::Prim};
+use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
@@ -27,6 +28,7 @@ pub(crate) enum RuntimeValue {
         ctor: String,
         fields: Vec<RuntimeValue>,
     },
+    MappedFile(Vec<u8>),
     Closure {
         params: Vec<String>,
         body: Expr,
@@ -85,8 +87,8 @@ pub(crate) fn evaluate_host_program(
     })
 }
 
-pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> ExecutionValue {
-    match value {
+pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
+    Ok(match value {
         RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor {
             value: TensorValue {
                 shape: tensor.value.shape.clone(),
@@ -100,29 +102,45 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> ExecutionValue {
             value: value.clone(),
         },
         RuntimeValue::List(items) => ExecutionValue::List {
-            value: items.iter().map(runtime_value_to_schema).collect(),
+            value: items
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
         },
         RuntimeValue::Dict(entries) => ExecutionValue::Dict {
             entries: entries
                 .iter()
-                .map(|(key, value)| DictEntryValue {
-                    key: runtime_value_to_schema(key),
-                    value: runtime_value_to_schema(value),
+                .map(|(key, value)| {
+                    Ok(DictEntryValue {
+                        key: runtime_value_to_schema(key)?,
+                        value: runtime_value_to_schema(value)?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?,
         },
         RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
-            value: items.iter().map(runtime_value_to_schema).collect(),
+            value: items
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
         },
         RuntimeValue::Adt { ctor, fields } => ExecutionValue::Adt {
             ctor: ctor.clone(),
-            fields: fields.iter().map(runtime_value_to_schema).collect(),
+            fields: fields
+                .iter()
+                .map(runtime_value_to_schema)
+                .collect::<Result<Vec<_>, _>>()?,
         },
+        RuntimeValue::MappedFile(_) => {
+            return Err(
+                "MappedFile values are not serializable on machine-facing APIs".to_string(),
+            );
+        }
         RuntimeValue::Closure { .. } => ExecutionValue::String {
             value: "<closure>".to_string(),
         },
         RuntimeValue::Unit => ExecutionValue::Unit,
-    }
+    })
 }
 
 pub(crate) fn lookup_runtime_value_for_root(
@@ -931,6 +949,106 @@ impl<'a> EvalContext<'a> {
                     precision,
                 }))
             }
+            "pad_sequences_to" => {
+                let sequences = expect_list_arg(args, 0)?;
+                let width = expect_int_arg(args, 1)?;
+                let pad = args
+                    .get(2)
+                    .cloned()
+                    .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
+                let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(vec![batch, width.max(0) as usize], data),
+                    precision,
+                }))
+            }
+            "read_file" => {
+                let path = expect_string_arg(args, 0)?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
+                Ok(RuntimeValue::String(text))
+            }
+            "write_file" => {
+                let path = expect_string_arg(args, 0)?;
+                let contents = expect_string_arg(args, 1)?;
+                fs::write(&path, contents)
+                    .map_err(|err| format!("write_file failed for `{path}`: {err}"))?;
+                Ok(RuntimeValue::Unit)
+            }
+            "read_lines" => {
+                let path = expect_string_arg(args, 0)?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|err| format!("read_lines failed for `{path}`: {err}"))?;
+                Ok(RuntimeValue::List(
+                    text.lines()
+                        .map(|line| RuntimeValue::String(line.to_string()))
+                        .collect(),
+                ))
+            }
+            "read_bytes" => {
+                let path = expect_string_arg(args, 0)?;
+                let bytes = fs::read(&path)
+                    .map_err(|err| format!("read_bytes failed for `{path}`: {err}"))?;
+                Ok(RuntimeValue::List(
+                    bytes
+                        .into_iter()
+                        .map(|byte| RuntimeValue::Int(i64::from(byte)))
+                        .collect(),
+                ))
+            }
+            "file_exists" => {
+                let path = expect_string_arg(args, 0)?;
+                Ok(RuntimeValue::Bool(std::path::Path::new(&path).exists()))
+            }
+            "list_dir" => {
+                let path = expect_string_arg(args, 0)?;
+                let entries = fs::read_dir(&path)
+                    .map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
+                let mut out = Vec::new();
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
+                    out.push(RuntimeValue::String(
+                        entry.file_name().to_string_lossy().into_owned(),
+                    ));
+                }
+                Ok(RuntimeValue::List(out))
+            }
+            "mmap_file" => {
+                let path = expect_string_arg(args, 0)?;
+                let bytes = fs::read(&path)
+                    .map_err(|err| format!("mmap_file failed for `{path}`: {err}"))?;
+                Ok(RuntimeValue::MappedFile(bytes))
+            }
+            "mmap_read" => {
+                let mapped = args
+                    .first()
+                    .ok_or_else(|| "mmap_read expects 3 arguments".to_string())?;
+                let offset = expect_int_arg(args, 1)?;
+                let len = expect_int_arg(args, 2)?;
+                let RuntimeValue::MappedFile(bytes) = mapped else {
+                    return Err(format!("mmap_read expects MappedFile, got {mapped:?}"));
+                };
+                if offset < 0 || len < 0 {
+                    return Err("mmap_read requires non-negative offset and length".to_string());
+                }
+                let offset = offset as usize;
+                let len = len as usize;
+                if offset > bytes.len() {
+                    return Err("mmap_read offset out of bounds".to_string());
+                }
+                let end = offset.saturating_add(len).min(bytes.len());
+                Ok(RuntimeValue::List(
+                    bytes[offset..end]
+                        .iter()
+                        .map(|byte| RuntimeValue::Int(i64::from(*byte)))
+                        .collect(),
+                ))
+            }
+            "mmap_len" => match args.first() {
+                Some(RuntimeValue::MappedFile(bytes)) => Ok(RuntimeValue::Int(bytes.len() as i64)),
+                other => Err(format!("mmap_len expects MappedFile, got {other:?}")),
+            },
             "split" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
@@ -1454,6 +1572,54 @@ fn pad_sequences_value(
         ));
     }
     Ok((pad_precision, data, batch, width))
+}
+
+fn pad_sequences_to_value(
+    sequences: &[RuntimeValue],
+    width: i64,
+    pad: &RuntimeValue,
+) -> Result<(Prim, Vec<f64>, usize), String> {
+    if width < 0 {
+        return Err(format!(
+            "pad_sequences_to requires non-negative width, got {width}"
+        ));
+    }
+    let pad_precision = match pad {
+        RuntimeValue::Int(_) => Prim::Int64,
+        RuntimeValue::Float(_) => Prim::F64,
+        other => {
+            return Err(format!(
+                "pad_sequences_to expects numeric pad value, got {other:?}"
+            ));
+        }
+    };
+    let width = width as usize;
+    let mut rows = Vec::<Vec<f64>>::with_capacity(sequences.len());
+    for sequence in sequences {
+        let RuntimeValue::List(items) = sequence else {
+            return Err(format!(
+                "pad_sequences_to expects nested lists, got {sequence:?}"
+            ));
+        };
+        let (row_precision, row) = list_to_tensor_data(items)?;
+        if row_precision != pad_precision {
+            return Err("pad_sequences_to requires homogeneous numeric nested lists".to_string());
+        }
+        rows.push(row);
+    }
+    let pad_value = match pad {
+        RuntimeValue::Int(value) => *value as f64,
+        RuntimeValue::Float(value) => *value,
+        _ => unreachable!(),
+    };
+    let batch = rows.len();
+    let mut data = Vec::with_capacity(batch * width);
+    for row in rows {
+        let used = row.len().min(width);
+        data.extend(row.into_iter().take(used));
+        data.extend(std::iter::repeat_n(pad_value, width.saturating_sub(used)));
+    }
+    Ok((pad_precision, data, batch))
 }
 
 fn tensor_numel(shape: &[usize]) -> usize {
@@ -2032,13 +2198,15 @@ fn render_value(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        RuntimeValue::MappedFile(bytes) => format!("<mapped-file:{}>", bytes.len()),
         RuntimeValue::Closure { .. } => "<closure>".to_string(),
         RuntimeValue::Unit => "()".to_string(),
     }
 }
 
 fn builtin_name(expr: &Expr) -> Option<&str> {
-    var_name(expr)
+    let name = var_name(expr)?;
+    BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {

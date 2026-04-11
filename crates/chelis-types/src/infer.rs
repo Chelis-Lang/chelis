@@ -4479,6 +4479,103 @@ fn infer_app(
                             }
                         }
                     }
+                    "pad_sequences_to" => {
+                        if arg_tys.len() != 3 {
+                            return Type::Error;
+                        }
+                        let seqs_ty = subst.apply(&arg_tys[0]);
+                        let width_ty = subst.apply(&arg_tys[1]);
+                        let pad_ty = subst.apply(&arg_tys[2]);
+                        if let Err(te) = unify(&width_ty, &Type::Prim(Prim::Int64), subst) {
+                            errors.push(te.into());
+                            return Type::Error;
+                        }
+                        match seqs_ty {
+                            Type::Adt(outer_name, outer_args)
+                                if outer_name == "List" && outer_args.len() == 1 =>
+                            {
+                                match &outer_args[0] {
+                                    Type::Adt(inner_name, inner_args)
+                                        if inner_name == "List" && inner_args.len() == 1 =>
+                                    {
+                                        if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
+                                            errors.push(te.into());
+                                            return Type::Error;
+                                        }
+                                        match subst.apply(&inner_args[0]) {
+                                            Type::Prim(precision) if precision.is_numeric() => {
+                                                return Type::Tensor(
+                                                    vec![Dim::Wildcard, Dim::Wildcard],
+                                                    precision,
+                                                );
+                                            }
+                                            Type::Var(_) | Type::Error => return result_ty,
+                                            other => {
+                                                errors.push(CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "pad_sequences_to expects numeric nested lists, got {other}"
+                                                        ),
+                                                    ),
+                                                    vec![],
+                                                ));
+                                                return Type::Error;
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "pad_sequences_to expects List[List[T]], got List[{other}]"
+                                                ),
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
+                                    }
+                                }
+                            }
+                            Type::Var(_) | Type::Error => return result_ty,
+                            other => {
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "pad_sequences_to expects List[List[T]] input, got {other}"
+                                        ),
+                                    ),
+                                    vec![],
+                                ));
+                                return Type::Error;
+                            }
+                        }
+                    }
+                    "read_file" => return Type::Prim(Prim::String),
+                    "write_file" => return Type::Unit,
+                    "read_lines" => {
+                        return Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]);
+                    }
+                    "read_bytes" => {
+                        return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                    }
+                    "file_exists" => return Type::Prim(Prim::Bool),
+                    "list_dir" => {
+                        return Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]);
+                    }
+                    "mmap_file" => return Type::Adt("MappedFile".to_string(), Vec::new()),
+                    "mmap_read" => {
+                        return Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                    }
+                    "mmap_len" => return Type::Prim(Prim::Int64),
                     _ => {}
                 }
             }
@@ -7728,6 +7825,24 @@ let padded = pad_sequences(tokens, cast(0, int64))
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 2);
+    }
+
+    #[test]
+    fn surf_3g_io_and_exact_padding_builtins_type_check() {
+        let checked = checked_surf(
+            r#"
+let contents = read_file("dataset.txt")
+let lines = read_lines("dataset.txt")
+let bytes = read_bytes("dataset.txt")
+let exists = file_exists("dataset.txt")
+let names = list_dir(".")
+let mapped = mmap_file("dataset.txt")
+let mapped_len = mmap_len(mapped)
+let prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+let padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], cast(4, int64), cast(0, int64))
+"#,
+        );
+        assert!(checked.annotated_exprs().len() >= 9);
     }
 
     #[test]

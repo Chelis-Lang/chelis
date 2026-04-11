@@ -1109,6 +1109,65 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
 }
 
 #[test]
+fn build_c_runs_recursive_adt_program_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("jsonish.ch");
+    let out_dir = dir.path().join("jsonish-build-out");
+    write_file(
+        &path,
+        r#"type Json =
+  | JsonNull
+  | JsonInt(int64)
+  | JsonString(string)
+  | JsonArray(List[Json])
+
+let sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+let result = match sample with {
+  | JsonNull => "null"
+  | JsonInt(n) => to_string(n)
+  | JsonString(s) => s
+  | JsonArray(items) => string_concat("items=", to_string(len(items)))
+}
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = gcc_link_generated(&out_dir, "jsonish.c", "jsonish");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("jsonish"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+}
+
+#[test]
 #[ignore = "manual gate: hipcc is environment-dependent"]
 fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
     let dir = tempdir().expect("tempdir");

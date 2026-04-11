@@ -25,19 +25,23 @@ fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
     const LIB_PREFIX: &str = "libchelis_runtime";
 
     fn find_in_dir(dir: &Path) -> Option<PathBuf> {
+        let mut hashed_matches = Vec::new();
         let exact = dir.join(LIB_NAME);
-        if exact.exists() {
-            return Some(exact);
-        }
         let entries = fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name()?.to_str()?;
             if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
-                return Some(path);
+                if name == LIB_NAME {
+                    continue;
+                }
+                hashed_matches.push(path);
             }
         }
-        None
+        hashed_matches
+            .into_iter()
+            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+            .or_else(|| exact.exists().then_some(exact))
     }
 
     if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
@@ -54,44 +58,16 @@ fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let exe_dir = exe
         .parent()
         .ok_or("cannot determine chelis executable directory")?;
-    let candidates = [
-        exe_dir.join(LIB_NAME),
-        exe_dir.join("deps").join(LIB_NAME),
-        exe_dir.join("lib").join(LIB_NAME),
-        exe_dir
-            .parent()
-            .map(|p| p.join(LIB_NAME))
-            .unwrap_or_default(),
-        exe_dir
-            .parent()
-            .map(|p| p.join("deps").join(LIB_NAME))
-            .unwrap_or_default(),
-        exe_dir
-            .parent()
-            .map(|p| p.join("lib").join(LIB_NAME))
-            .unwrap_or_default(),
-    ];
-    for candidate in candidates {
-        if !candidate.as_os_str().is_empty() {
-            if candidate.is_dir() {
-                if let Some(found) = find_in_dir(&candidate) {
-                    return Ok(found);
-                }
-            } else if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-    }
     for candidate_dir in [
-        exe_dir.to_path_buf(),
         exe_dir.join("deps"),
+        exe_dir.to_path_buf(),
         exe_dir.join("lib"),
+        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
         exe_dir
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default(),
         exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
-        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
     ] {
         if !candidate_dir.as_os_str().is_empty()
             && let Some(found) = find_in_dir(&candidate_dir)

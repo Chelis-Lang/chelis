@@ -31,6 +31,8 @@ typedef struct {
 typedef struct chelis_list chelis_list;
 typedef struct chelis_tuple chelis_tuple;
 typedef struct chelis_dict chelis_dict;
+typedef struct chelis_adt chelis_adt;
+typedef struct chelis_mapped_file chelis_mapped_file;
 
 typedef enum {
     CHELIS_VALUE_INT64,
@@ -40,7 +42,8 @@ typedef enum {
     CHELIS_VALUE_TENSOR,
     CHELIS_VALUE_LIST,
     CHELIS_VALUE_TUPLE,
-    CHELIS_VALUE_DICT
+    CHELIS_VALUE_DICT,
+    CHELIS_VALUE_ADT
 } chelis_value_tag;
 
 typedef struct {
@@ -54,6 +57,7 @@ typedef struct {
         chelis_list *list;
         chelis_tuple *tuple;
         chelis_dict *dict;
+        chelis_adt *adt;
     } as;
 } chelis_value;
 
@@ -119,6 +123,13 @@ int64_t chelis_tuple_len(const chelis_tuple *tuple);
 void chelis_dict_retain(const chelis_dict *dict);
 void chelis_dict_release(const chelis_dict *dict);
 int64_t chelis_dict_len(const chelis_dict *dict);
+void chelis_adt_retain(const chelis_adt *adt);
+void chelis_adt_release(const chelis_adt *adt);
+chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len);
+chelis_string chelis_adt_get_tag(const chelis_adt *adt);
+bool chelis_adt_tag_equals(const chelis_adt *adt, chelis_string ctor);
+int64_t chelis_adt_field_count(const chelis_adt *adt);
+chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index);
 
 chelis_value chelis_value_from_int64(int64_t value);
 chelis_value chelis_value_from_f64(double value);
@@ -128,6 +139,7 @@ chelis_value chelis_value_from_tensor(chelis_tensor *value);
 chelis_value chelis_value_from_list(chelis_list *value);
 chelis_value chelis_value_from_tuple(chelis_tuple *value);
 chelis_value chelis_value_from_dict(chelis_dict *value);
+chelis_value chelis_value_from_adt(chelis_adt *value);
 void chelis_value_retain(chelis_value value);
 void chelis_value_release(chelis_value value);
 int64_t chelis_value_as_int64(chelis_value value);
@@ -138,6 +150,7 @@ chelis_tensor *chelis_value_as_tensor(chelis_value value);
 chelis_list *chelis_value_as_list(chelis_value value);
 chelis_tuple *chelis_value_as_tuple(chelis_value value);
 chelis_dict *chelis_value_as_dict(chelis_value value);
+chelis_adt *chelis_value_as_adt(chelis_value value);
 
 chelis_list *chelis_list_empty(void);
 chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len);
@@ -167,6 +180,7 @@ chelis_list *chelis_dict_entries(const chelis_dict *dict);
 chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
 chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
 chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
+chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);
 chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int64_t axis);
 chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int64_t axis, const chelis_list *sizes);
 chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int64_t axis);
@@ -200,6 +214,16 @@ chelis_tensor *chelis_tensor_einsum(
 void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
 void chelis_print_dict(const chelis_dict *dict);
+void chelis_print_adt(const chelis_adt *adt);
+chelis_string chelis_read_file(chelis_string path);
+void chelis_write_file(chelis_string path, chelis_string contents);
+chelis_list *chelis_read_lines(chelis_string path);
+chelis_list *chelis_read_bytes(chelis_string path);
+bool chelis_file_exists(chelis_string path);
+chelis_list *chelis_list_dir(chelis_string path);
+chelis_mapped_file *chelis_mmap_file(chelis_string path);
+chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
+int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
 
 static inline void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {
     for (int d = ndim - 1; d >= 0; d--) {

@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    HostBinding, HostCallback, HostCallbackKind, HostExpr, HostFunction, HostParam, HostProgram,
-    HostTensorHelper, HostType,
+    HostBinding, HostCallback, HostCallbackKind, HostExpr, HostFunction, HostMatchArm, HostParam,
+    HostProgram, HostTensorHelper, HostType,
 };
 
 use crate::emit::CEmitter;
@@ -167,8 +167,14 @@ impl HostEmitter {
             HostExpr::Var(name, _) => self
                 .lines
                 .push(format!("{}{target} = {};", self.indent, name)),
+            HostExpr::Call { function, args, ty } => {
+                self.assign_call(target, function, args, ty);
+            }
             HostExpr::Builtin { name, args, ty } => {
                 self.assign_builtin(target, name, args, ty);
+            }
+            HostExpr::AdtConstruct { ctor, fields, ty } => {
+                self.assign_adt_construct(target, ctor, fields, ty);
             }
             HostExpr::If {
                 cond,
@@ -240,6 +246,13 @@ impl HostEmitter {
                 self.assign_expr(target, none_expr, expr_ty);
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+            }
+            HostExpr::MatchAdt {
+                scrutinee,
+                arms,
+                ty: expr_ty,
+            } => {
+                self.assign_match_adt(target, scrutinee, arms, expr_ty);
             }
             HostExpr::Map { callback, list, ty } => {
                 self.assign_map(target, callback, list, ty);
@@ -554,6 +567,80 @@ impl HostEmitter {
                 ));
                 return;
             }
+            "pad_sequences_to" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_pad_sequences_to({}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)
+                ));
+                return;
+            }
+            "read_file" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_read_file({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "write_file" => {
+                self.lines.push(format!(
+                    "{}chelis_write_file({}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                self.lines.push(format!("{}{target} = 0;", self.indent));
+                return;
+            }
+            "read_lines" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_read_lines({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "read_bytes" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_read_bytes({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "file_exists" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_file_exists({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "list_dir" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_list_dir({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "mmap_file" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_mmap_file({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
+            "mmap_read" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_mmap_read({}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                ));
+                return;
+            }
+            "mmap_len" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_mmap_len({});",
+                    self.indent, arg_vars[0].0
+                ));
+                return;
+            }
             _ => {}
         }
 
@@ -692,6 +779,111 @@ impl HostEmitter {
         ));
         self.lines
             .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+    }
+
+    fn assign_call(&mut self, target: &str, function: &str, args: &[HostExpr], _ty: &HostType) {
+        let arg_vars = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let arg_name = self.next_temp(&format!("call_arg{index}"));
+                let arg_ty = host_type(arg);
+                self.emit_expr_to_var(arg, &arg_name, &arg_ty);
+                arg_name
+            })
+            .collect::<Vec<_>>();
+        self.lines.push(format!(
+            "{}{target} = {}({});",
+            self.indent,
+            function,
+            arg_vars.join(", ")
+        ));
+    }
+
+    fn assign_adt_construct(
+        &mut self,
+        target: &str,
+        ctor: &str,
+        fields: &[HostExpr],
+        _ty: &HostType,
+    ) {
+        let values_name = self.next_temp("adt_fields");
+        self.lines.push(format!(
+            "{}chelis_value {}[{}];",
+            self.indent,
+            values_name,
+            fields.len()
+        ));
+        for (index, field) in fields.iter().enumerate() {
+            let field_var = self.next_temp(&format!("adt_field{index}"));
+            let field_ty = host_type(field);
+            self.emit_expr_to_var(field, &field_var, &field_ty);
+            self.lines.push(format!(
+                "{}{}[{index}] = {};",
+                self.indent,
+                values_name,
+                self.box_value_expr(&field_var, &field_ty)
+            ));
+        }
+        self.lines.push(format!(
+            "{}{target} = chelis_adt_construct(chelis_string_from_cstr({:?}), {}, {});",
+            self.indent,
+            ctor,
+            values_name,
+            fields.len()
+        ));
+    }
+
+    fn assign_match_adt(
+        &mut self,
+        target: &str,
+        scrutinee: &HostExpr,
+        arms: &[HostMatchArm],
+        expr_ty: &HostType,
+    ) {
+        let scrutinee_var = self.next_temp("adt");
+        self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee));
+        let tag_var = self.next_temp("adt_tag");
+        self.lines.push(format!(
+            "{}chelis_string {} = chelis_adt_get_tag({});",
+            self.indent, tag_var, scrutinee_var
+        ));
+        for (index, arm) in arms.iter().enumerate() {
+            let prefix = if index == 0 { "if" } else { "else if" };
+            self.lines.push(format!(
+                "{}{prefix} (chelis_string_eq({}, chelis_string_from_cstr({:?}))) {{",
+                self.indent, tag_var, arm.ctor
+            ));
+            let nested_indent = format!("{}    ", self.indent);
+            let previous = std::mem::replace(&mut self.indent, nested_indent);
+            for binding in &arm.bindings {
+                let field_var = self.next_temp(&format!("{}_field", binding.name));
+                self.lines.push(format!(
+                    "{}chelis_value {} = chelis_adt_get_field({}, {});",
+                    self.indent, field_var, scrutinee_var, binding.field_index
+                ));
+                self.lines.push(format!(
+                    "{}{} {};",
+                    self.indent,
+                    c_type(&binding.ty),
+                    binding.name
+                ));
+                self.assign_unboxed_value(&binding.name, &binding.ty, &field_var);
+            }
+            self.assign_expr(target, &arm.expr, expr_ty);
+            self.indent = previous;
+            self.lines.push(format!("{}}}", self.indent));
+        }
+        self.lines.push(format!("{}else {{", self.indent));
+        let nested_indent = format!("{}    ", self.indent);
+        let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.lines.push(format!(
+            "{}fprintf(stderr, \"non-exhaustive ADT match\\n\");",
+            self.indent
+        ));
+        self.lines.push(format!("{}exit(1);", self.indent));
+        self.indent = previous;
+        self.lines.push(format!("{}}}", self.indent));
     }
 
     fn assign_list_literal(&mut self, target: &str, items: &[HostExpr], _ty: &HostType) {
@@ -1134,6 +1326,7 @@ impl HostEmitter {
             HostType::Float64 => format!("chelis_value_from_f64({value})"),
             HostType::Bool => format!("chelis_value_from_bool({value})"),
             HostType::String => format!("chelis_value_from_string({value})"),
+            HostType::Adt(_) => format!("chelis_value_from_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_from_tensor({value})"),
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
@@ -1148,6 +1341,7 @@ impl HostEmitter {
             HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
             HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
+            HostType::Adt(_) => format!("chelis_value_as_adt({value_expr})"),
             HostType::Tensor(_) => format!("chelis_value_as_tensor({value_expr})"),
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
@@ -1174,6 +1368,10 @@ impl HostEmitter {
             )),
             HostType::String => self.lines.push(format!(
                 "{}printf(\"{} = %s\\n\", chelis_string_data({}));",
+                self.indent, binding.name, binding.name
+            )),
+            HostType::Adt(_) => self.lines.push(format!(
+                "{}printf(\"{} = \"); chelis_print_adt({}); printf(\"\\n\");",
                 self.indent, binding.name, binding.name
             )),
             HostType::Tensor(_) => self.lines.push(format!(
@@ -1220,6 +1418,10 @@ impl HostEmitter {
                 "{}printf(\"%s\\n\", {} ? \"true\" : \"false\");",
                 self.indent, value
             )),
+            HostType::Adt(_) => self.lines.push(format!(
+                "{}chelis_print_adt({}); printf(\"\\n\");",
+                self.indent, value
+            )),
             HostType::List(_) => self.lines.push(format!(
                 "{}chelis_print_list({}); printf(\"\\n\");",
                 self.indent, value
@@ -1251,10 +1453,12 @@ fn c_type(ty: &HostType) -> &'static str {
         HostType::Float64 => "double",
         HostType::Bool => "bool",
         HostType::String => "chelis_string",
+        HostType::Adt(_) => "chelis_adt*",
         HostType::List(_) => "chelis_list*",
         HostType::Dict(_, _) => "chelis_dict*",
         HostType::Tuple(_) => "chelis_tuple*",
         HostType::Tensor(_) => "chelis_tensor*",
+        HostType::MappedFile => "chelis_mapped_file*",
         HostType::Option(inner) => match inner.as_ref() {
             HostType::Int64 => "chelis_option_i64",
             HostType::Float64 => "chelis_option_f64",
@@ -1274,9 +1478,12 @@ fn host_type(expr: &HostExpr) -> HostType {
         HostExpr::List(_, ty) => ty.clone(),
         HostExpr::Tuple(_, ty) => ty.clone(),
         HostExpr::Var(_, ty)
+        | HostExpr::Call { ty, .. }
         | HostExpr::Builtin { ty, .. }
+        | HostExpr::AdtConstruct { ty, .. }
         | HostExpr::If { ty, .. }
         | HostExpr::MatchOption { ty, .. }
+        | HostExpr::MatchAdt { ty, .. }
         | HostExpr::Map { ty, .. }
         | HostExpr::Filter { ty, .. }
         | HostExpr::Fold { ty, .. }

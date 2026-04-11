@@ -10,3 +10,4 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 libc.workspace = true
+memmap2 = "0.9"

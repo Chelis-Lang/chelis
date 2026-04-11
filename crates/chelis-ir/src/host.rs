@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chelis_deep::ast::{Atom, Expr, List};
-use chelis_types::CheckedProgram;
+use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
 use crate::dag::TensorType;
 use crate::lower::{lower_program, top_level_lowering_map};
@@ -62,6 +62,20 @@ pub struct HostCallback {
 }
 
 #[derive(Debug, Clone)]
+pub struct HostMatchArm {
+    pub ctor: String,
+    pub bindings: Vec<HostPatternBinding>,
+    pub expr: HostExpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostPatternBinding {
+    pub name: String,
+    pub ty: HostType,
+    pub field_index: usize,
+}
+
+#[derive(Debug, Clone)]
 pub enum HostCallbackKind {
     Named {
         function: String,
@@ -79,11 +93,13 @@ pub enum HostType {
     Float64,
     Bool,
     String,
+    Adt(String),
     List(Box<HostType>),
     Dict(Box<HostType>, Box<HostType>),
     Tuple(Vec<HostType>),
     Tensor(TensorType),
     Option(Box<HostType>),
+    MappedFile,
     Unit,
     Unknown,
 }
@@ -97,9 +113,19 @@ pub enum HostExpr {
     List(Vec<HostExpr>, HostType),
     Tuple(Vec<HostExpr>, HostType),
     Var(String, HostType),
+    Call {
+        function: String,
+        args: Vec<HostExpr>,
+        ty: HostType,
+    },
     Builtin {
         name: String,
         args: Vec<HostExpr>,
+        ty: HostType,
+    },
+    AdtConstruct {
+        ctor: String,
+        fields: Vec<HostExpr>,
         ty: HostType,
     },
     If {
@@ -113,6 +139,11 @@ pub enum HostExpr {
         bind_name: String,
         some_expr: Box<HostExpr>,
         none_expr: Box<HostExpr>,
+        ty: HostType,
+    },
+    MatchAdt {
+        scrutinee: Box<HostExpr>,
+        arms: Vec<HostMatchArm>,
         ty: HostType,
     },
     Map {
@@ -430,9 +461,11 @@ fn lower_match_host_expr(
 ) -> HostExpr {
     let kids = children(list);
     let scrutinee = lower_host_expr(&kids[0], program, scope, tensor_helpers);
+    let scrutinee_ty = host_expr_type(&scrutinee);
     let mut bind_name = "value".to_string();
     let mut some_expr = HostExpr::Unit;
     let mut none_expr = HostExpr::Unit;
+    let mut generic_arms = Vec::new();
 
     for arm in kids.iter().skip(1) {
         let Some(arm_list) = as_list(arm) else {
@@ -446,7 +479,8 @@ fn lower_match_host_expr(
             continue;
         };
         if let Some("pat-ctor") = tag(pattern) {
-            match children(pattern).first().and_then(symbol_name) {
+            let ctor = children(pattern).first().and_then(symbol_name);
+            match ctor {
                 Some("Some") => {
                     if let Some(bound) = children(pattern).get(1).and_then(as_list)
                         && tag(bound) == Some("pat-var")
@@ -461,7 +495,48 @@ fn lower_match_host_expr(
                 Some("None") => {
                     none_expr = lower_host_expr(&arm_kids[2], program, scope, tensor_helpers);
                 }
-                _ => {}
+                Some(ctor_name) => {
+                    let ctor_field_tys = lookup_adt_ctor(program, ctor_name)
+                        .map(|(_, fields)| fields)
+                        .or_else(|| {
+                            program
+                                .type_env()
+                                .get(ctor_name)
+                                .and_then(parse_fn_type_expr)
+                                .map(|(args, _)| args)
+                        })
+                        .unwrap_or_default();
+                    let mut scoped = scope.clone();
+                    let mut bindings = Vec::new();
+                    for (field_index, subpat) in children(pattern).iter().skip(1).enumerate() {
+                        let Some(subpat_list) = as_list(subpat) else {
+                            continue;
+                        };
+                        if tag(subpat_list) != Some("pat-var") {
+                            continue;
+                        }
+                        let Some(name) = children(subpat_list).first().and_then(symbol_name) else {
+                            continue;
+                        };
+                        let ty = ctor_field_tys
+                            .get(field_index)
+                            .cloned()
+                            .or_else(|| expr_type(subpat))
+                            .unwrap_or(HostType::Unknown);
+                        scoped.insert(name.to_string(), ty.clone());
+                        bindings.push(HostPatternBinding {
+                            name: name.to_string(),
+                            ty,
+                            field_index,
+                        });
+                    }
+                    generic_arms.push(HostMatchArm {
+                        ctor: ctor_name.to_string(),
+                        bindings,
+                        expr: lower_host_expr(&arm_kids[2], program, &scoped, tensor_helpers),
+                    });
+                }
+                None => {}
             }
         }
     }
@@ -483,6 +558,14 @@ fn lower_match_host_expr(
             explicit
         }
     };
+
+    if matches!(scrutinee_ty, HostType::Adt(_)) {
+        return HostExpr::MatchAdt {
+            scrutinee: Box::new(scrutinee),
+            arms: generic_arms,
+            ty,
+        };
+    }
 
     HostExpr::MatchOption {
         scrutinee: Box::new(scrutinee),
@@ -543,6 +626,17 @@ fn lower_app_host_expr(
         })
         .unwrap_or("call")
         .to_string();
+    let fn_sig = program.type_env().get(&name).and_then(parse_fn_type_expr);
+    let ctor_info = lookup_adt_ctor(program, &name);
+    let explicit_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    let inferred_ret_ty = fn_sig
+        .as_ref()
+        .map(|(_, ret_ty)| ret_ty.clone())
+        .unwrap_or(HostType::Unknown);
     if name == "Cons" && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers) {
@@ -698,11 +792,35 @@ fn lower_app_host_expr(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Vec<_>>();
-    let explicit_ty = expr_host_type(
-        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-        program,
-        scope,
-    );
+    let construct_ty = if matches!(explicit_ty, HostType::Adt(_)) {
+        explicit_ty.clone()
+    } else if let Some((adt_name, _)) = &ctor_info {
+        HostType::Adt(adt_name.clone())
+    } else {
+        inferred_ret_ty.clone()
+    };
+    if matches!(construct_ty, HostType::Adt(_)) && !matches!(name.as_str(), "Some" | "None") {
+        return HostExpr::AdtConstruct {
+            ctor: name,
+            fields: args,
+            ty: construct_ty,
+        };
+    }
+    if !BUILTIN_NAMES.contains(&name.as_str())
+        && name != "Some"
+        && name != "None"
+        && fn_sig.is_some()
+    {
+        return HostExpr::Call {
+            function: name,
+            args,
+            ty: if explicit_ty != HostType::Unknown {
+                explicit_ty
+            } else {
+                inferred_ret_ty
+            },
+        };
+    }
     let ty = if explicit_ty != HostType::Unknown {
         explicit_ty
     } else {
@@ -985,6 +1103,8 @@ fn parse_host_type(expr: &Expr) -> HostType {
                     Box::new(parse_host_type(&kids[1])),
                     Box::new(parse_host_type(&kids[2])),
                 ),
+                Some("MappedFile") if kids.len() == 1 => HostType::MappedFile,
+                Some(name) => HostType::Adt(name.to_string()),
                 _ => HostType::Unknown,
             }
         }
@@ -1014,9 +1134,12 @@ fn host_expr_type(expr: &HostExpr) -> HostType {
         HostExpr::List(_, ty) => ty.clone(),
         HostExpr::Tuple(_, ty) => ty.clone(),
         HostExpr::Var(_, ty)
+        | HostExpr::Call { ty, .. }
         | HostExpr::Builtin { ty, .. }
+        | HostExpr::AdtConstruct { ty, .. }
         | HostExpr::If { ty, .. }
         | HostExpr::MatchOption { ty, .. }
+        | HostExpr::MatchAdt { ty, .. }
         | HostExpr::Map { ty, .. }
         | HostExpr::Filter { ty, .. }
         | HostExpr::Fold { ty, .. }
@@ -1297,8 +1420,84 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
             },
             _ => Some(HostType::Unknown),
         },
+        "pad_sequences_to" => match arg_tys.first() {
+            Some(HostType::List(inner)) => match &**inner {
+                HostType::List(nested) => match &**nested {
+                    HostType::Int64 => Some(HostType::Tensor(TensorType {
+                        dims: vec![
+                            crate::dag::DimInfo::Named("batch".to_string(), None),
+                            crate::dag::DimInfo::Named("seq".to_string(), None),
+                        ],
+                        precision: chelis_types::types::Prim::Int64,
+                    })),
+                    HostType::Float64 => Some(HostType::Tensor(TensorType {
+                        dims: vec![
+                            crate::dag::DimInfo::Named("batch".to_string(), None),
+                            crate::dag::DimInfo::Named("seq".to_string(), None),
+                        ],
+                        precision: chelis_types::types::Prim::F64,
+                    })),
+                    _ => Some(HostType::Unknown),
+                },
+                _ => Some(HostType::Unknown),
+            },
+            _ => Some(HostType::Unknown),
+        },
+        "read_file" => Some(HostType::String),
+        "write_file" => Some(HostType::Unit),
+        "read_lines" => Some(HostType::List(Box::new(HostType::String))),
+        "read_bytes" => Some(HostType::List(Box::new(HostType::Int64))),
+        "file_exists" => Some(HostType::Bool),
+        "list_dir" => Some(HostType::List(Box::new(HostType::String))),
+        "mmap_file" => Some(HostType::MappedFile),
+        "mmap_read" => Some(HostType::List(Box::new(HostType::Int64))),
+        "mmap_len" => Some(HostType::Int64),
         _ => None,
     }
+}
+
+fn lookup_adt_ctor(program: &CheckedProgram, ctor_name: &str) -> Option<(String, Vec<HostType>)> {
+    for expr in program.exprs() {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("deftype") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(adt_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        for variant in kids.iter().skip(2) {
+            let Some(variant_list) = as_list(variant) else {
+                continue;
+            };
+            if tag(variant_list) != Some("variant") {
+                continue;
+            }
+            let variant_kids = children(variant_list);
+            let Some(name) = variant_kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            if name != ctor_name {
+                continue;
+            }
+            let mut fields = Vec::new();
+            for field in variant_kids.iter().skip(1) {
+                if let Some(field_list) = as_list(field)
+                    && tag(field_list) == Some("field")
+                {
+                    if let Some(ty_expr) = children(field_list).get(1) {
+                        fields.push(parse_host_type(ty_expr));
+                    }
+                } else {
+                    fields.push(parse_host_type(field));
+                }
+            }
+            return Some((adt_name.to_string(), fields));
+        }
+    }
+    None
 }
 
 fn tag(list: &List) -> Option<&str> {

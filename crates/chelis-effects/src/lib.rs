@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -20,11 +20,11 @@ pub struct EffectError {
 }
 
 pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<EffectError>> {
-    let effects_by_def = infer_program_effects(program.annotated_exprs());
+    let (effects_by_def, top_level_callables) = infer_program_effects(program.annotated_exprs());
     let annotated_exprs: Vec<Expr> = program
         .annotated_exprs()
         .iter()
-        .map(|expr| annotate_effects(expr, &effects_by_def, &HashMap::new()))
+        .map(|expr| annotate_effects(expr, &effects_by_def, &top_level_callables, &HashMap::new()))
         .collect();
 
     let mut errors = Vec::new();
@@ -56,14 +56,16 @@ pub fn validate_build_target(
     }
 }
 
-fn infer_program_effects(exprs: &[Expr]) -> HashMap<String, EffectSet> {
+fn infer_program_effects(exprs: &[Expr]) -> (HashMap<String, EffectSet>, HashSet<String>) {
     let bodies = top_level_def_bodies(exprs);
+    let top_level_callables = top_level_callable_names(&bodies);
     let mut effects = HashMap::<String, EffectSet>::new();
 
     for _ in 0..=bodies.len() {
         let mut changed = false;
         for (name, body) in &bodies {
-            let inferred = infer_expr_effects(body, &effects, &HashMap::new());
+            let inferred =
+                infer_expr_effects(body, &effects, &top_level_callables, &HashMap::new());
             if effects.get(name) != Some(&inferred) {
                 effects.insert(name.clone(), inferred);
                 changed = true;
@@ -74,7 +76,7 @@ fn infer_program_effects(exprs: &[Expr]) -> HashMap<String, EffectSet> {
         }
     }
 
-    effects
+    (effects, top_level_callables)
 }
 
 fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
@@ -94,20 +96,35 @@ fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     defs
 }
 
+fn top_level_callable_names(bodies: &HashMap<String, Expr>) -> HashSet<String> {
+    bodies
+        .iter()
+        .filter_map(|(name, body)| match body {
+            Expr::List(list, _) if get_tag(list) == Some("fn") => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn infer_expr_effects(
     expr: &Expr,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) -> EffectSet {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => EffectSet::new(),
-        Expr::MetaExpr(meta, _) => infer_expr_effects(&meta.expr, top_level_effects, locals),
+        Expr::MetaExpr(meta, _) => {
+            infer_expr_effects(&meta.expr, top_level_effects, top_level_callables, locals)
+        }
         Expr::List(list, _) => {
             let Some(tag) = get_tag(list) else {
                 return list
                     .elements
                     .iter()
-                    .map(|elem| infer_expr_effects(elem, top_level_effects, locals))
+                    .map(|elem| {
+                        infer_expr_effects(elem, top_level_effects, top_level_callables, locals)
+                    })
                     .fold(EffectSet::new(), |mut acc, set| {
                         acc.extend(&set);
                         acc
@@ -118,37 +135,55 @@ fn infer_expr_effects(
                 "var" => children(list)
                     .first()
                     .and_then(symbol_name)
-                    .and_then(|name| locals.get(name).or_else(|| top_level_effects.get(name)))
-                    .cloned()
+                    .and_then(|name| {
+                        locals.get(name).cloned().or_else(|| {
+                            top_level_callables
+                                .contains(name)
+                                .then(|| top_level_effects.get(name).cloned())
+                                .flatten()
+                        })
+                    })
                     .unwrap_or_default(),
-                "app" => infer_app_effects(list, top_level_effects, locals),
+                "app" => infer_app_effects(list, top_level_effects, top_level_callables, locals),
                 "fn" => {
                     let kids = children(list);
                     kids.get(1)
-                        .map(|body| infer_expr_effects(body, top_level_effects, locals))
+                        .map(|body| {
+                            infer_expr_effects(body, top_level_effects, top_level_callables, locals)
+                        })
                         .unwrap_or_default()
                 }
-                "let" => infer_let_effects(list, top_level_effects, locals),
+                "let" => infer_let_effects(list, top_level_effects, top_level_callables, locals),
                 "if" | "tuple" | "pipe" | "par" | "record" | "access" | "tuple-get" | "cast"
                 | "copy" | "realize" | "jit" | "match" | "def" => children(list)
                     .iter()
-                    .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
                     .fold(EffectSet::new(), |mut acc, set| {
                         acc.extend(&set);
                         acc
                     }),
                 "grad" => children(list)
                     .first()
-                    .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
                     .unwrap_or_default(),
                 "vmap" => children(list)
                     .first()
-                    .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
                     .unwrap_or_default(),
-                "handle-effect" => infer_handle_effects(list, top_level_effects, locals),
+                "handle-effect" => {
+                    infer_handle_effects(list, top_level_effects, top_level_callables, locals)
+                }
                 _ => children(list)
                     .iter()
-                    .map(|kid| infer_expr_effects(kid, top_level_effects, locals))
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
                     .fold(EffectSet::new(), |mut acc, set| {
                         acc.extend(&set);
                         acc
@@ -161,19 +196,38 @@ fn infer_expr_effects(
 fn infer_app_effects(
     list: &List,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) -> EffectSet {
     let kids = children(list);
     let mut effects = EffectSet::new();
     for kid in kids {
-        effects.extend(&infer_expr_effects(kid, top_level_effects, locals));
+        effects.extend(&infer_expr_effects(
+            kid,
+            top_level_effects,
+            top_level_callables,
+            locals,
+        ));
     }
 
     let builtin_name = kids.first().and_then(var_name);
     if builtin_name == Some("dropout") {
         effects.insert(Effect::Random);
     }
-    if matches!(builtin_name, Some("print" | "debug")) {
+    if matches!(
+        builtin_name,
+        Some(
+            "print"
+                | "debug"
+                | "read_file"
+                | "write_file"
+                | "read_lines"
+                | "read_bytes"
+                | "file_exists"
+                | "list_dir"
+                | "mmap_file"
+        )
+    ) {
         effects.insert(Effect::Io);
     }
 
@@ -183,6 +237,7 @@ fn infer_app_effects(
 fn infer_let_effects(
     list: &List,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) -> EffectSet {
     let kids = children(list);
@@ -197,11 +252,16 @@ fn infer_let_effects(
         let bind_kids = children(bind_list);
         let mut i = 0;
         while i + 1 < bind_kids.len() {
+            let value = &bind_kids[i + 1];
             let value_effects =
-                infer_expr_effects(&bind_kids[i + 1], top_level_effects, &local_scope);
+                infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
             effects.extend(&value_effects);
             if let Some(name) = symbol_name(&bind_kids[i]) {
-                local_scope.insert(name.to_string(), value_effects);
+                let binding_effects = match value {
+                    Expr::List(value_list, _) if get_tag(value_list) == Some("fn") => value_effects,
+                    _ => EffectSet::new(),
+                };
+                local_scope.insert(name.to_string(), binding_effects);
             }
             i += 2;
         }
@@ -210,6 +270,7 @@ fn infer_let_effects(
     effects.extend(&infer_expr_effects(
         &kids[1],
         top_level_effects,
+        top_level_callables,
         &local_scope,
     ));
     effects
@@ -218,14 +279,16 @@ fn infer_let_effects(
 fn infer_handle_effects(
     list: &List,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) -> EffectSet {
     let kids = children(list);
     if kids.len() < 2 {
         return EffectSet::new();
     }
-    let mut effects = infer_expr_effects(&kids[0], top_level_effects, locals);
-    let mut body_effects = infer_expr_effects(&kids[1], top_level_effects, locals);
+    let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
+    let mut body_effects =
+        infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
     match effect_name(list) {
         Some("random") => body_effects.remove(&Effect::Random),
         Some("resource") => {}
@@ -238,6 +301,7 @@ fn infer_handle_effects(
 fn annotate_effects(
     expr: &Expr,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) -> Expr {
     match expr {
@@ -250,7 +314,7 @@ fn annotate_effects(
                     .map(|(key, value)| {
                         (
                             key.clone(),
-                            annotate_effects(value, top_level_effects, locals),
+                            annotate_effects(value, top_level_effects, top_level_callables, locals),
                         )
                     })
                     .collect(),
@@ -259,14 +323,19 @@ fn annotate_effects(
         ),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             chelis_deep::ast::MetaExpr {
-                expr: Box::new(annotate_effects(&meta.expr, top_level_effects, locals)),
+                expr: Box::new(annotate_effects(
+                    &meta.expr,
+                    top_level_effects,
+                    top_level_callables,
+                    locals,
+                )),
                 entries: meta
                     .entries
                     .iter()
                     .map(|(key, value)| {
                         (
                             key.clone(),
-                            annotate_effects(value, top_level_effects, locals),
+                            annotate_effects(value, top_level_effects, top_level_callables, locals),
                         )
                     })
                     .collect(),
@@ -289,31 +358,53 @@ fn annotate_effects(
                             let value = annotate_effects(
                                 &bind_kids[i + 1],
                                 top_level_effects,
+                                top_level_callables,
                                 &local_scope,
                             );
                             let value_effects = infer_expr_effects(
                                 &bind_kids[i + 1],
                                 top_level_effects,
+                                top_level_callables,
                                 &local_scope,
                             );
                             if let Some(name) = symbol_name(&bind_kids[i]) {
-                                local_scope.insert(name.to_string(), value_effects);
+                                let binding_effects = match &bind_kids[i + 1] {
+                                    Expr::List(value_list, _)
+                                        if get_tag(value_list) == Some("fn") =>
+                                    {
+                                        value_effects
+                                    }
+                                    _ => EffectSet::new(),
+                                };
+                                local_scope.insert(name.to_string(), binding_effects);
                             }
                             elements.push(value);
                             i += 2;
                         }
                         Expr::List(chelis_deep::ast::List { elements }, *bind_span)
                     } else {
-                        annotate_effects(&kids[0], top_level_effects, &local_scope)
+                        annotate_effects(
+                            &kids[0],
+                            top_level_effects,
+                            top_level_callables,
+                            &local_scope,
+                        )
                     };
                     vec![
                         bind,
-                        annotate_effects(&kids[1], top_level_effects, &local_scope),
+                        annotate_effects(
+                            &kids[1],
+                            top_level_effects,
+                            top_level_callables,
+                            &local_scope,
+                        ),
                     ]
                 }
                 _ => kids
                     .iter()
-                    .map(|kid| annotate_effects(kid, top_level_effects, &local_scope))
+                    .map(|kid| {
+                        annotate_effects(kid, top_level_effects, top_level_callables, &local_scope)
+                    })
                     .collect(),
             };
 
@@ -322,7 +413,13 @@ fn annotate_effects(
                 elements.truncate(2);
                 elements.extend(annotated_children);
                 if let Some(meta) = elements.get_mut(1) {
-                    update_effect_metadata(meta, list, top_level_effects, locals);
+                    update_effect_metadata(
+                        meta,
+                        list,
+                        top_level_effects,
+                        top_level_callables,
+                        locals,
+                    );
                 }
                 Expr::List(chelis_deep::ast::List { elements }, *span)
             } else {
@@ -331,7 +428,14 @@ fn annotate_effects(
                         elements: list
                             .elements
                             .iter()
-                            .map(|elem| annotate_effects(elem, top_level_effects, locals))
+                            .map(|elem| {
+                                annotate_effects(
+                                    elem,
+                                    top_level_effects,
+                                    top_level_callables,
+                                    locals,
+                                )
+                            })
                             .collect(),
                     },
                     *span,
@@ -345,6 +449,7 @@ fn update_effect_metadata(
     meta_expr: &mut Expr,
     list: &List,
     top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
     locals: &HashMap<String, EffectSet>,
 ) {
     let Expr::Map(meta, _) = meta_expr else {
@@ -354,6 +459,7 @@ fn update_effect_metadata(
         let effects = infer_expr_effects(
             &Expr::List(list.clone(), zero_span()),
             top_level_effects,
+            top_level_callables,
             locals,
         );
         if !effects.is_empty() {
@@ -650,7 +756,7 @@ mod tests {
              (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
-        let inferred = infer_program_effects(&exprs);
+        let (inferred, _) = infer_program_effects(&exprs);
         assert!(
             inferred
                 .get("y")
@@ -717,7 +823,7 @@ let xs: List[int64] = [cast(1, int64), cast(2, int64)]
 let ys = map(emit, xs)
 "#,
         );
-        let inferred = infer_program_effects(program.annotated_exprs());
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
                 .get("ys")
@@ -735,7 +841,7 @@ let xs: List[int64] = [cast(1, int64), cast(2, int64)]
 let total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
 "#,
         );
-        let inferred = infer_program_effects(program.annotated_exprs());
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
                 .get("total")
@@ -753,7 +859,7 @@ let xs: List[int64] = [cast(1, int64), cast(2, int64)]
 let totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
 "#,
         );
-        let inferred = infer_program_effects(program.annotated_exprs());
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
                 .get("totals")
@@ -794,7 +900,7 @@ let xs: List[int64] = [cast(1, int64), cast(2, int64)]
 let ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
 "#,
         );
-        let inferred = infer_program_effects(program.annotated_exprs());
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
             inferred
                 .get("ys")
@@ -824,6 +930,47 @@ let ys = map(step, xs)
                     && error.message.contains("Random")),
             "expected unhandled Random effect, got {:?}",
             errors
+        );
+    }
+
+    #[test]
+    fn file_io_builtins_infer_io_but_mmap_reads_stay_pure() {
+        let program = surf_checked(
+            r#"
+let mapped = mmap_file("dataset.txt")
+let prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+let width = mmap_len(mapped)
+let contents = read_file("dataset.txt")
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("mapped")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on mmap_file root, got {:?}",
+            inferred.get("mapped")
+        );
+        assert!(
+            inferred
+                .get("prefix")
+                .is_none_or(|effects| effects.is_empty()),
+            "expected mmap_read to stay pure, got {:?}",
+            inferred.get("prefix")
+        );
+        assert!(
+            inferred
+                .get("width")
+                .is_none_or(|effects| effects.is_empty()),
+            "expected mmap_len to stay pure, got {:?}",
+            inferred.get("width")
+        );
+        assert!(
+            inferred
+                .get("contents")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on read_file root, got {:?}",
+            inferred.get("contents")
         );
     }
 }
