@@ -428,48 +428,167 @@ Manual HIP mirror gate:
 
 ## 3g: Data Loading and Tokenization
 
-**Goal:** make Chelis self-sufficient for the preprocessing path every serious AI
-program needs.
+**Goal:** Chelis can load data from files and tokenize text, making it self-sufficient
+for the complete AI training pipeline.
 
 ### Why This Matters
 
-Without file I/O and tokenization, Chelis can only consume already-prepared tensors.
-That leaves the most basic LLM/data workflow steps in Python:
+This is the capstone of Phase 3. With scalars (3c), strings (3c), and collections (3d),
+Chelis has the data types needed for preprocessing. But without file I/O and
+tokenization, the data still has to come from Python. This phase makes Chelis's
+preprocessing story complete.
 
-- read text
-- parse configs/data
-- tokenize text
-- batch and pad tokens
+The test: can you write a complete training pipeline — from raw text file to trained
+model — in pure Chelis? After 3g, the answer is yes.
 
-Phase 3 is not complete until those steps are expressible in pure Chelis.
+### Design
 
-### Required Surface
+**File I/O:**
 
-**Data loading:**
+Pragmatic surface. IO effect on everything.
 
-- text file I/O: read/write text files
-- CSV loading for small/medium structured datasets
-- JSON loading for configs, vocabularies, and metadata
+| Operation | Signature | Effect | Notes |
+|---|---|---|---|
+| `read_file` | `String -> String` | IO | Read entire file as UTF-8 string |
+| `write_file` | `(String, String) -> ()` | IO | Write string to file |
+| `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
+| `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
+| `file_exists` | `String -> Bool` | IO | Check file existence |
+| `list_dir` | `String -> List[String]` | IO | List directory contents |
+| `mmap_file` | `String -> MappedFile` | IO | Memory-map a file for zero-copy random access |
+| `mmap_read` | `(MappedFile, Int, Int) -> List[Int]` | Pure | Read bytes from offset+length, no copy |
+| `mmap_len` | `MappedFile -> Int` | Pure | File size in bytes |
 
-**Tokenization:**
+**Memory-mapped I/O:** For datasets that don't fit in memory (billions of trade events,
+large token corpora), `mmap_file` provides zero-copy random access to file contents. The
+file is memory-mapped via the Rust runtime (`memmap2` crate behind the C ABI).
+`mmap_read` returns a view of bytes at an offset without copying the entire file.
+`MappedFile` is an opaque runtime handle (like strings and collections after 3m). The IO
+effect is on `mmap_file` (opening the file); subsequent reads are pure (the data is
+already mapped).
 
-- a BPE tokenizer as the minimum practical tokenizer surface
-- ability to load an external vocabulary/merge artifact format used in real workflows
-- encode/decode text to and from integer token sequences
+**CSV parsing:**
 
-**Batching bridge:**
+```chelis
+import Std.IO.Csv
 
-- batch encode helpers
-- padding to fixed sequence length
-- clean handoff from `List[List[Int]]` to model-ready tensors
+-- Returns List[Dict[String, String]] — each row is a dict keyed by header names
+data = read_csv("train.csv")
 
-### Implementation Shape
+-- Access fields
+labels = map((\row -> to_int(get(row, "label"))), data)
+```
 
-- model file I/O as explicit IO-effect operations
-- document tokenizer/state formats and library placement without inventing unnecessary
-  registry or remote-service machinery
-- keep the first tokenizer target pragmatic: enough to ingest ordinary HuggingFace-style
-  BPE assets rather than inventing a novel Chelis-native tokenizer format
+Implementation: a simple CSV parser in pure Chelis (using string split, not a C library).
+Handles quoted fields and escaped commas. Ships as a `Std.IO.Csv` module in chelis-std.
+
+**JSON parsing:**
+
+```chelis
+import Std.IO.Json
+
+-- Parse JSON string to a dynamic value type
+config = parse_json(read_file("config.json"))
+
+-- Access fields (returns Option)
+lr = json_float(json_get(config, "learning_rate"))
+epochs = json_int(json_get(config, "epochs"))
+```
+
+Implementation: a JSON parser in pure Chelis. Returns a `Json` ADT:
+```chelis
+type Json =
+  | JsonNull
+  | JsonBool(Bool)
+  | JsonInt(Int)
+  | JsonFloat(Float)
+  | JsonString(String)
+  | JsonArray(List[Json])
+  | JsonObject(Dict[String, Json])
+```
+
+**Tokenizer:**
+
+The critical capability. A BPE tokenizer that can load HuggingFace tokenizer
+vocabularies.
+
+```chelis
+import Std.Tokenizer
+
+-- Load a pretrained tokenizer
+tok = load_tokenizer("tokenizer.json")  -- HuggingFace format
+
+-- Encode text to token IDs
+tokens = encode(tok, "Hello, world!")  -- List[Int]
+
+-- Decode token IDs to text
+text = decode(tok, tokens)  -- String
+
+-- Batch encode with padding
+inputs = batch_encode(tok, sentences, max_length=512, pad_value=0)
+-- Returns tensor[batch, 512, Int] — ready for model input
+```
+
+Implementation: the tokenizer is a Chelis program, not a C library wrapper. BPE merge
+rules are stored as a `Dict[String, Int]` (merge priority). Encoding walks the input
+string, applies merges greedily, and returns a `List[Int]`. This is slower than
+HuggingFace's Rust tokenizer but it's pure Chelis — the model can learn to write and
+modify tokenizer code.
+
+`load_tokenizer` reads the HuggingFace `tokenizer.json` format (using the JSON parser
+from this phase) and constructs the internal merge table and vocabulary dict.
+
+`batch_encode` is the bridge function: encode N strings, pad to max_length, and call
+`pad_sequences` from 3d to produce a model-ready tensor.
+
+**Data loading pipeline:**
+
+Compose the above into a training data loader:
+
+```chelis
+import Std.IO
+import Std.IO.Csv
+import Std.Tokenizer
+
+def load_training_data(data_path: String, tok_path: String,
+                       max_len: Int, batch_size: Int) -> List[tensor[batch, max_len, Int]] = {
+  tok = load_tokenizer(tok_path)
+  lines = read_lines(data_path)
+  encoded = map((\line -> encode(tok, line)), lines)
+  -- Chunk into batches
+  batches = chunk(encoded, batch_size)
+  -- Pad each batch to a tensor
+  map((\batch -> pad_sequences(batch, max_len, 0)), batches)
+}
+```
+
+### Implementation Plan
+
+1. Add file I/O built-ins with IO effect (read_file, write_file, read_lines, read_bytes,
+   file_exists, list_dir)
+2. Add memory-mapped I/O (mmap_file, mmap_read, mmap_len) backed by Rust runtime's
+   memmap2
+3. Implement `Std.IO.Csv` as a pure Chelis package module
+4. Add Json ADT and implement `Std.IO.Json` as a pure Chelis parser
+5. Implement `Std.Tokenizer` with BPE encode/decode in pure Chelis
+6. Add `load_tokenizer` for HuggingFace tokenizer.json format
+7. Implement `batch_encode` bridging to pad_sequences from 3d
+8. Add `chunk` utility for batching lists
+9. Write a complete training data loader example using mmap for large datasets
+
+### Test Plan
+
+- File I/O: read_file/write_file round-trip, read_lines splits correctly, read_bytes
+  returns correct values, file_exists works
+- Memory-mapped I/O: mmap_file opens successfully, mmap_read returns correct bytes at
+  offset, mmap_len matches file size, IO effect on mmap_file only (reads are pure)
+- CSV: parse a simple CSV, handle quoted fields, handle headers
+- JSON: parse all JSON value types, nested objects/arrays, malformed JSON returns error
+- Tokenizer: BPE encode matches HuggingFace reference output for a small vocabulary
+- Tokenizer: decode(encode(text)) round-trips for ASCII text
+- Tokenizer: batch_encode produces correctly padded tensor
+- Tokenizer: load_tokenizer parses HuggingFace tokenizer.json correctly
+- Data loader: load_training_data produces batches of the right shape
 
 ### Acceptance Oracle
 
@@ -482,42 +601,148 @@ A pure Chelis program can:
 
 ---
 
-## 3i: `Std.Time` and `Std.Decimal`
+## 3i: Standard Library Expansion
 
-**Goal:** round out the standard-library host-language surface with time and
-exact-arithmetic utilities that real workflows need but the compiler core should not own.
+**Goal:** Fill out the standard library modules needed for real model training and
+inference. Includes date/time types, exact decimal arithmetic, autoregressive generation
+with KV caching, optimizer variants, and learning rate scheduling.
 
-### Why This Matters
+### Std.Time
 
-Pure Chelis workflows still need ordinary application scaffolding around the model:
+Pure Chelis standard library module for dates and durations.
 
-- dates and durations in schedules, checkpoints, and reporting
-- exact decimal arithmetic for money/config/reporting cases where binary floats are the
-  wrong surface
+- `Date` type: year, month, day. Constructed via `date(2024, 1, 15)`.
+- `Duration` type: days, hours, minutes, seconds.
+- Arithmetic: `add_days(date, n)`, `sub_days(date, n)`, `days_between(date1, date2)`.
+- Comparison and ordering on dates.
+- Formatting: `date_to_string(date)` → ISO 8601 (`"2024-01-15"`).
+- Parsing: `parse_date(string)` → `Option[Date]`.
+- Queries: `day_of_week(date)`, `day_of_year(date)`, `is_leap_year(year)`.
+- No timezone handling in v1 — UTC only. Timezone support deferred.
 
-These do not justify new compiler intrinsics, but they do belong in the Phase 3
-language-completeness story rather than an indefinite backlog.
+### Std.Decimal
 
-### Required Surface
+Pure Chelis standard library module for fixed-point exact arithmetic.
 
-- `Std.Time` for dates, timestamps, durations, and basic time arithmetic
-- `Std.Decimal` for exact decimal values and arithmetic
+- `Decimal` type: exact representation with configurable scale.
+- Construction: `decimal("0.1")`, `decimal_from_int(42)`.
+- Arithmetic: `decimal_add`, `decimal_sub`, `decimal_mul`, `decimal_div` with explicit
+  rounding mode.
+- Rounding modes: `round_half_up`, `round_half_even` (banker's rounding), `round_down`,
+  `round_up`.
+- Comparison and ordering.
+- Conversion: `decimal_to_float(d)` → `Float`, `decimal_to_string(d)` → `String`.
+- Property: `0.1 + 0.2 == 0.3` is true with Decimal arithmetic.
+- Not a tensor dtype — host-value type only. Exact, not fast.
 
-### Implementation Shape
+### Std.Nn.Generate
 
-- ship both as standard-library modules, not new core-language primitives
-- keep the APIs package-friendly under the existing Reef / `chelis-std` model
-- sequence this after `3g` so data/tokenization remains the critical practical
-  milestone and before `3f` so the teaching surface can cover the complete host-side
-  standard stack
+Autoregressive generation with KV cache management — the core inference pattern for
+generative models. Exposed as the TradeFM analysis showed: generate-one-token-then-
+feed-back is the fundamental inference loop, and doing it manually via `fold` is correct
+but verbose.
+
+```chelis
+import Std.Nn.Generate
+
+-- Simple greedy generation
+generated = generate(model_fn, context, max_tokens=512)
+
+-- With sampling controls
+generated = generate_with(model_fn, context, {
+  max_tokens: 512,
+  temperature: 0.8,
+  top_k: 50,
+  top_p: 0.95
+})
+```
+
+Internals:
+- `KVCache` type: stores past key/value tensors per layer to avoid recomputing attention
+  over the full sequence at each step. Internally a
+  `List[tensor[batch, n_heads, seq, head_dim]]` per layer, grown on each generation step.
+- `generate` runs the autoregressive loop: call the model with cached KV, get logits for
+  the next position, sample or argmax, append to the sequence, update the cache.
+- Sampling: `sample_token(logits, temperature, top_k, top_p)` applies temperature
+  scaling, top-k filtering (via `argsort`), top-p (nucleus) filtering (via `cumsum` on
+  sorted probabilities), and categorical sampling (`Random` effect).
+- The model function signature:
+  `(input_ids: tensor[batch, seq, int64], cache: Option[KVCache]) -> (logits: tensor[batch, seq, vocab, f32], new_cache: KVCache)`.
+
+Effects: `generate` has `Random` effect when sampling (temperature > 0). Greedy
+generation (temperature = 0, argmax) is pure.
+
+### Std.Optim (expansion)
+
+Add optimizer variants beyond the existing SGD and Adam:
+
+- **AdamW:** Adam with decoupled weight decay. The standard optimizer for modern
+  transformer training. Difference from Adam: weight decay is applied directly to
+  parameters, not through the gradient. One additional parameter
+  (`weight_decay: Float`).
+- **LAMB:** Layer-wise Adaptive Moments optimizer for large-batch training. Scales
+  learning rates per-layer based on parameter and gradient norms.
+
+Both are pure Chelis library functions composed from existing tensor operations. AdamW is
+a small modification of the existing Adam implementation.
+
+### Std.Schedule
+
+Learning rate scheduling — adjust the learning rate over the course of training.
+
+```chelis
+import Std.Schedule
+
+-- Cosine annealing with warmup
+lr = cosine_with_warmup(step, warmup_steps=1000, total_steps=100000,
+                        min_lr=1e-6, max_lr=3e-4)
+
+-- Linear warmup then constant
+lr = linear_warmup(step, warmup_steps=1000, target_lr=3e-4)
+
+-- Step decay
+lr = step_decay(step, initial_lr=3e-4, decay_factor=0.1, decay_steps=[30000, 60000])
+```
+
+All schedulers are pure functions: `(step: Int, config...) -> Float`. They compute the
+learning rate from the step number and configuration parameters. No state, no mutation —
+pass the step counter explicitly. This composes cleanly with the training loop (`fold`
+where the accumulator carries step count + model parameters).
+
+### Implementation
+
+All modules are pure Chelis code shipped as part of `chelis-std` via the reef package
+system. `Date` is internally an ADT with integer fields. `Decimal` is internally a
+scaled integer representation. `KVCache` is a `List` of layer caches. Optimizers and
+schedulers are pure functions over tensors and scalars. No C runtime additions needed —
+these are host-value computations (Time, Decimal, Schedule) and tensor computations
+(Generate, Optim) using existing primitives.
+
+### Test Plan
+
+- Date arithmetic: add/subtract days, month boundaries, leap years
+- Date parsing: ISO 8601 round-trip
+- Date comparison: ordering works correctly across year boundaries
+- Decimal: `decimal("0.1") + decimal("0.2") == decimal("0.3")`
+- Decimal: banker's rounding matches expected behavior
+- Decimal: division with explicit rounding mode
+- Generate: greedy generation produces correct tokens for a trivial model
+- Generate: KV cache produces identical results to full-context recomputation (no cache
+  correctness bug)
+- Generate: temperature sampling with seed produces reproducible output
+- Generate: top-k and top-p filtering produce valid token distributions
+- AdamW: parameter update matches PyTorch AdamW reference on a simple model
+- AdamW: weight decay is decoupled (applied to params, not through gradients)
+- Schedule: cosine_with_warmup matches expected curve at key points (step 0, warmup end,
+  midpoint, end)
+- Schedule: step_decay triggers at correct steps
+- All modules build and import through reef package system
 
 ### Acceptance Oracle
 
-A pure Chelis workflow can:
-
-- represent and format a timestamp or duration without Python
-- represent exact decimal configuration/reporting values without binary-float drift
-- use those values in package-friendly standard-library code
+All `Std.*` tests pass. A Chelis program trains a small transformer with AdamW + cosine
+warmup, then generates tokens autoregressively with KV caching and top-k sampling —
+using only standard library imports.
 
 ---
 
@@ -813,14 +1038,23 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 **Data loading/tokenization (`3g`):**
 
 - text/CSV/JSON loading returns the documented structures
+- read_bytes returns correct values for binary files
+- memory-mapped I/O: mmap_file opens, mmap_read returns correct bytes at offset,
+  mmap_len matches file size, IO effect on mmap_file only (reads are pure)
 - tokenizer encode/decode is deterministic against the documented assets
 - batching/padding produces the expected tensor shapes and values
 
-**Standard library host types (`3i`):**
+**Standard library expansion (`3i`):**
 
 - `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
-- examples/docs do not overclaim backend or tensor-kernel relevance for these modules
+- `Std.Nn.Generate` with KV cache produces identical results to full-context
+  recomputation
+- temperature + top-k + top-p sampling with seed is reproducible
+- AdamW parameter update matches PyTorch reference; weight decay is decoupled
+- cosine_with_warmup matches expected curve at key points
+- examples/docs do not overclaim backend or tensor-kernel relevance for host-value
+  modules
 
 **Numerical methods (`3j` School):**
 
@@ -865,7 +1099,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3h`: Core numeric primitives | medium | `3d` | Engineering (RISC ops + AD + backends) |
 | `3m`: Rust runtime rewrite | large | `3h`, `3d` | Engineering (runtime ABI + codegen + CLI/build) |
 | `3g`: Data loading and tokenization | medium | `3h`, `3m` | Engineering (I/O + pure Chelis libraries) |
-| `3i`: `Std.Time` and `Std.Decimal` | small | `3c`, `3a` | Engineering (pure Chelis std modules) |
+| `3i`: Std library expansion | medium | `3h`, `3g` | Pure Chelis library (Time, Decimal, Generate, AdamW, Schedule) |
 | `3j`: School | large | `3h`, `3i` | Pure Chelis library (stats + optim + ODE/SDE) |
 | `3k`: Coral | medium | `3h`, `3d`, `3g` | Pure Chelis library (dataframes) |
 | `3l`: Treasure | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
@@ -890,7 +1124,8 @@ Before calling Phase 3 complete:
 - `3m` provides a Rust-owned compiled runtime so later host-language/library work does
   not keep expanding the old C runtime
 - `3g` provides text/config/data loading plus tokenizer and batching support
-- `3i` provides `Std.Time` and `Std.Decimal` as practical standard-library host types
+- `3i` provides `Std.Time`, `Std.Decimal`, `Std.Nn.Generate` (KV cache), AdamW/LAMB
+  optimizers, and `Std.Schedule` as practical standard-library modules
 - `3j` provides numerical methods (stats, optimization, ODE/SDE) as a Reef package
 - `3k` provides typed dataframes with AD through tabular operations as a Reef package
 - `3l` provides finance-specific pricing, risk, and stochastic process tools as a Reef

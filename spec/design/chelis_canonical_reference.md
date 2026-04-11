@@ -142,7 +142,7 @@ Four tiers of packages, each built on the one below:
 
 | Shell | Depends On | Contents |
 |---|---|---|
-| `chelis-std` | (core) | `Std.Nn` (Linear, Embedding, LayerNorm, etc.), `Std.Optim`, `Std.Loss`, `Std.Init`, `Std.IO` (safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
+| `chelis-std` | (core) | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss`, `Std.Init`, `Std.Schedule` (cosine warmup, linear warmup, step decay), `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
 | `school` | `chelis-std` | Statistics, distributions, optimization solvers (+ differentiable optimization), interpolation, SVD/PCA, hypothesis testing, ODE/SDE solvers, numerical integration, root finding, signal processing (blocked by complex numbers until Phase 5f) |
 | `coral` | `chelis-std` | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, DataFrame-aware CSV/JSON I/O. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `treasure` | `chelis-std` + `school` + `coral` | Options pricing, risk measures, yield curves, stochastic processes, order books |

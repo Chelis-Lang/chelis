@@ -490,25 +490,34 @@ Shipped.
 
 ### 3g: Data Loading and Tokenization
 
-- add text file I/O as the minimum host-data ingress surface
-- add CSV and JSON loading for tabular data, configs, and lightweight corpora
-- add a BPE tokenizer that can load existing vocabulary/merge artifacts and
+- add text file I/O as the minimum host-data ingress surface with IO effect
+  (`read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`)
+- add memory-mapped I/O (`mmap_file`, `mmap_read`, `mmap_len`) backed by Rust runtime's
+  memmap2 for large datasets — IO effect on open, pure reads after that
+- add CSV loading returning `List[Dict[String, String]]` for tabular data
+- add JSON loading returning a recursive `Json` ADT for configs and metadata
+- add a BPE tokenizer that loads HuggingFace `tokenizer.json` format and can
   encode/decode text
 - add batch encode + padding flows that bridge `List[List[Int]]` into tensor model
   inputs
 - make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
   sidecar
 
-### 3i: `Std.Time` and `Std.Decimal`
+### 3i: Standard Library Expansion
 
-- add `Std.Time` as the standard-library home for dates, timestamps, durations, and
-  scheduling-friendly utilities needed by real workflows
-- add `Std.Decimal` as the exact-arithmetic home for money/config/reporting cases where
-  binary floating point is the wrong user-facing surface
-- keep both in the standard library rather than the core language; they are broadly
-  useful but do not need compiler intrinsics
-- position them after `3g` so tokenization/data-loading ships first, but before `3f` so
-  the teaching surface can show complete real-world host-program idioms
+Standard library modules for real model training and inference:
+
+- **`Std.Time`:** Date and duration types. Date arithmetic, comparison,
+  formatting/parsing (ISO 8601). UTC only in v1.
+- **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
+  rounding. Host-value type, not tensor dtype.
+- **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
+  sampled generation (temperature, top-k, top-p). The core inference pattern for
+  generative models — eliminates the need for manual fold-based generation loops.
+- **`Std.Optim` (expansion):** AdamW (decoupled weight decay, the standard transformer
+  optimizer), LAMB (large-batch training).
+- **`Std.Schedule`:** Learning rate scheduling — cosine annealing with warmup, linear
+  warmup, step decay. Pure functions from step number to learning rate.
 
 ### 3j: School — Numerical Methods, Statistics, and Optimization
 
