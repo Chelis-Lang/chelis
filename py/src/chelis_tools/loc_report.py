@@ -33,6 +33,7 @@ class LangEntry:
     comments: int
     blanks: int
     notes: str = ""
+    bold: bool = False
 
     @property
     def total_lines(self) -> int:
@@ -73,13 +74,14 @@ class CustomLang:
     display: str
     notes: str
     line_comment: str | None = None
+    bold: bool = False
 
 
 CUSTOM_LANGUAGES: list[CustomLang] = [
     CustomLang("*.ch", "**Chelis Surf** (.ch)",
-               "Examples, std library, test fixtures", line_comment="--"),
+               "Examples, std library, test fixtures", line_comment="--", bold=True),
     CustomLang("*.dp", "**Chelis Deep** (.dp)",
-               "Deep test fixtures", line_comment=";;"),
+               "Deep test fixtures", line_comment=";;", bold=True),
     CustomLang("*.pest", "PEG Grammars (.pest)",
                "Validator grammars (Surf + Deep)", line_comment="//"),
     CustomLang("*.scm", "Tree-sitter Queries (.scm)",
@@ -180,6 +182,7 @@ def count_custom_files(
         comments=total_comments,
         blanks=total_blanks,
         notes=lang.notes,
+        bold=lang.bold,
     )
 
 
@@ -222,12 +225,21 @@ def render_markdown(entries: list[LangEntry]) -> str:
     ]
 
     for e in entries:
-        lines.append(
-            f"| {e.language} | {format_number(e.files)} "
-            f"| {format_number(e.code)} | {format_number(e.comments)} "
-            f"| {format_number(e.blanks)} | {format_number(e.total_lines)} "
-            f"| {e.notes} |"
-        )
+        if e.bold:
+            b = "**"
+            lines.append(
+                f"| {e.language} | {b}{format_number(e.files)}{b} "
+                f"| {b}{format_number(e.code)}{b} | {b}{format_number(e.comments)}{b} "
+                f"| {b}{format_number(e.blanks)}{b} | {b}{format_number(e.total_lines)}{b} "
+                f"| {b}{e.notes}{b} |"
+            )
+        else:
+            lines.append(
+                f"| {e.language} | {format_number(e.files)} "
+                f"| {format_number(e.code)} | {format_number(e.comments)} "
+                f"| {format_number(e.blanks)} | {format_number(e.total_lines)} "
+                f"| {e.notes} |"
+            )
 
     lines.append(
         f"| **Total** | **{format_number(total_files)}** "
