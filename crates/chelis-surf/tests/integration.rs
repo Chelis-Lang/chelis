@@ -66,8 +66,8 @@ fn roundtrip_adt() {
 }
 
 #[test]
-fn roundtrip_let_expr() {
-    roundtrip(include_str!("fixtures/let_expr.ch"));
+fn roundtrip_block_binding_expr() {
+    roundtrip(include_str!("fixtures/block_binding_expr.ch"));
 }
 
 #[test]

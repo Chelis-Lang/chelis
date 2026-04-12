@@ -88,20 +88,6 @@ impl Parser {
             .unwrap_or(self.tokens.last().map(|t| t.span.end()).unwrap_or(0))
     }
 
-    fn current_span(&self) -> Span {
-        let mut pos = self.pos;
-        while matches!(
-            self.tokens.get(pos).map(|t| &t.kind),
-            Some(TokenKind::Newline)
-        ) {
-            pos += 1;
-        }
-        self.tokens
-            .get(pos)
-            .map(|t| t.span)
-            .unwrap_or(Span::new(self.current_offset(), 0))
-    }
-
     fn advance_raw(&mut self) -> Token {
         let tok = self.tokens[self.pos].clone();
         self.pos += 1;
@@ -176,8 +162,96 @@ impl Parser {
         pos
     }
 
+    fn is_decl_start_at(&self, pos: usize) -> bool {
+        matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(
+                TokenKind::Def
+                    | TokenKind::Sig
+                    | TokenKind::Ident(_)
+                    | TokenKind::Type
+                    | TokenKind::Dim
+                    | TokenKind::Macro
+                    | TokenKind::Module
+                    | TokenKind::Import
+                    | TokenKind::Export
+            )
+        )
+    }
+
+    fn decl_expr_end(&self) -> usize {
+        let mut pos = self.pos;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut started = false;
+        while let Some(token) = self.tokens.get(pos) {
+            match token.kind {
+                TokenKind::Newline | TokenKind::Semicolon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    if !started {
+                        pos += 1;
+                        continue;
+                    }
+                    let next_sig = self
+                        .tokens
+                        .iter()
+                        .enumerate()
+                        .skip(pos + 1)
+                        .find(|(_, next)| !matches!(next.kind, TokenKind::Newline))
+                        .map(|(idx, _)| idx);
+                    if matches!(
+                        next_sig.and_then(|idx| self.tokens.get(idx).map(|t| &t.kind)),
+                        Some(TokenKind::Pipe)
+                    ) {
+                        pos += 1;
+                        continue;
+                    }
+                    if next_sig.is_none_or(|idx| {
+                        self.is_decl_start_at(idx)
+                            || matches!(self.tokens[idx].kind, TokenKind::Eof)
+                    }) {
+                        break;
+                    }
+                }
+                TokenKind::Eof if started => break,
+                TokenKind::LParen => {
+                    started = true;
+                    paren_depth += 1;
+                }
+                TokenKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                TokenKind::LBracket => {
+                    started = true;
+                    bracket_depth += 1;
+                }
+                TokenKind::RBracket if bracket_depth > 0 => bracket_depth -= 1,
+                TokenKind::LBrace => {
+                    started = true;
+                    brace_depth += 1;
+                }
+                TokenKind::RBrace if brace_depth > 0 => brace_depth -= 1,
+                TokenKind::Eof => break,
+                _ => {
+                    started = true;
+                }
+            }
+            pos += 1;
+        }
+        pos
+    }
+
     fn parse_expr_until_block_separator(&mut self) -> Result<Expr, ParseError> {
         let end = self.block_expr_end();
+        self.parse_expr_in_range(end, "end of block expression")
+    }
+
+    fn parse_expr_until_decl_separator(&mut self) -> Result<Expr, ParseError> {
+        let end = self.decl_expr_end();
+        self.parse_expr_in_range(end, "end of declaration expression")
+    }
+
+    fn parse_expr_in_range(&mut self, end: usize, expected: &str) -> Result<Expr, ParseError> {
         let mut expr_tokens = self.tokens[self.pos..end].to_vec();
         expr_tokens.push(Token {
             kind: TokenKind::Eof,
@@ -191,7 +265,7 @@ impl Parser {
         let expr = nested.parse_expr(0)?;
         if !nested.at_eof() {
             return Err(ParseError::Expected {
-                expected: "end of block expression".into(),
+                expected: expected.into(),
                 found: format!("{:?}", nested.peek()),
                 offset: nested.current_offset(),
             });
@@ -300,7 +374,7 @@ impl Parser {
         match self.peek() {
             TokenKind::Def => self.parse_fun_def(),
             TokenKind::Sig => self.parse_sig_decl(),
-            TokenKind::Let => self.parse_let_def(),
+            TokenKind::Ident(_) => self.parse_let_def(),
             TokenKind::Type => self.parse_type_decl(),
             TokenKind::Dim => self.parse_dim_decl(),
             TokenKind::Macro => self.parse_macro_def(),
@@ -319,8 +393,9 @@ impl Parser {
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
             _ => Err(ParseError::Expected {
-                expected: "declaration (def, sig, let, type, dim, macro, module, import, export)"
-                    .into(),
+                expected:
+                    "declaration (def, sig, binding, type, dim, macro, module, import, export)"
+                        .into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -360,7 +435,7 @@ impl Parser {
         let effects = self.parse_optional_effects()?;
 
         self.expect(&TokenKind::Eq)?;
-        let body = self.parse_expr(0)?;
+        let body = self.parse_expr_until_decl_separator()?;
         let span = start.merge(expr_span(&body));
 
         Ok(Decl::FunDef {
@@ -449,8 +524,7 @@ impl Parser {
     }
 
     fn parse_let_def(&mut self) -> Result<Decl, ParseError> {
-        let start = self.advance().span; // consume Let
-        let (name, _) = self.expect_ident()?;
+        let (name, start) = self.expect_ident()?;
         let ty = if *self.peek() == TokenKind::Colon {
             self.advance();
             Some(self.parse_type()?)
@@ -458,7 +532,7 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
-        let value = self.parse_expr(0)?;
+        let value = self.parse_expr_until_decl_separator()?;
         let span = start.merge(expr_span(&value));
         Ok(Decl::LetDef {
             name,
@@ -475,7 +549,7 @@ impl Parser {
         let params = self.parse_plain_ident_params()?;
         self.expect(&TokenKind::RParen)?;
         self.expect(&TokenKind::Eq)?;
-        let body = self.parse_expr(0)?;
+        let body = self.parse_expr_until_decl_separator()?;
         let span = start.merge(expr_span(&body));
         Ok(Decl::MacroDef {
             name,
@@ -854,7 +928,6 @@ impl Parser {
             }
             TokenKind::If => self.parse_if()?,
             TokenKind::Match => self.parse_match()?,
-            TokenKind::Let => self.parse_let_expr()?,
             TokenKind::Fn => self.parse_lambda()?,
             TokenKind::Cast => self.parse_cast()?,
             TokenKind::Grad => self.parse_grad()?,
@@ -1079,36 +1152,6 @@ impl Parser {
         ))
     }
 
-    fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut bindings = Vec::new();
-
-        while *self.peek() == TokenKind::Let {
-            self.advance(); // consume Let
-            let pattern = self.parse_let_pattern()?;
-            let ty = if matches!(pattern, LetPattern::Var(_, _)) && *self.peek() == TokenKind::Colon
-            {
-                self.advance();
-                Some(self.parse_type()?)
-            } else {
-                None
-            };
-            self.expect(&TokenKind::Eq)?;
-            let value = self.parse_expr(0)?;
-            bindings.push(LetBinding {
-                style: BindingStyle::ExplicitLet,
-                pattern,
-                ty,
-                value,
-            });
-        }
-
-        self.expect(&TokenKind::In)?;
-        let body = self.parse_expr(0)?;
-        let span = start.merge(expr_span(&body));
-        Ok(Expr::Let(bindings, Box::new(body), span))
-    }
-
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume Fn
         self.expect(&TokenKind::LParen)?;
@@ -1304,9 +1347,7 @@ impl Parser {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
         self.consume_block_separators();
-        while !self.at_eof()
-            && (*self.peek() == TokenKind::Let || self.is_short_block_binding_start())
-        {
+        while !self.at_eof() && self.is_short_block_binding_start() {
             bindings.push(self.parse_block_let_binding()?);
             let sep_count = self.consume_block_separators();
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
@@ -1342,12 +1383,6 @@ impl Parser {
     }
 
     fn parse_block_let_binding(&mut self) -> Result<LetBinding, ParseError> {
-        let style = if *self.peek() == TokenKind::Let {
-            self.expect(&TokenKind::Let)?;
-            BindingStyle::ExplicitLet
-        } else {
-            BindingStyle::Short
-        };
         let pattern = self.parse_let_pattern()?;
         let ty = if matches!(pattern, LetPattern::Var(_, _)) && *self.peek() == TokenKind::Colon {
             self.advance();
@@ -1358,12 +1393,7 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         self.consume_block_separators();
         let value = self.parse_expr_until_block_separator()?;
-        Ok(LetBinding {
-            style,
-            pattern,
-            ty,
-            value,
-        })
+        Ok(LetBinding { pattern, ty, value })
     }
 
     fn parse_let_pattern(&mut self) -> Result<LetPattern, ParseError> {
@@ -1398,7 +1428,7 @@ impl Parser {
                 Ok(LetPattern::Tuple(pats, start.merge(end.span)))
             }
             _ => Err(ParseError::Expected {
-                expected: "let binding pattern".into(),
+                expected: "binding pattern".into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
             }),
@@ -1855,7 +1885,6 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Pipe(_, _, s) => *s,
         Expr::If(_, _, _, s) => *s,
         Expr::Match(_, _, s) => *s,
-        Expr::Let(_, _, s) => *s,
         Expr::Lambda(_, _, s) => *s,
         Expr::Tuple(_, s) => *s,
         Expr::Cast(_, _, s) => *s,
@@ -2038,8 +2067,8 @@ mod tests {
     }
 
     #[test]
-    fn top_level_let() {
-        let decls = p("let x = 42");
+    fn top_level_binding_decl() {
+        let decls = p("x = 42");
         match &decls[0] {
             Decl::LetDef { name, ty, .. } => {
                 assert_eq!(name, "x");
@@ -2050,8 +2079,8 @@ mod tests {
     }
 
     #[test]
-    fn typed_let() {
-        let decls = p("let x: f32 = 42.0");
+    fn typed_binding_decl() {
+        let decls = p("x: f32 = 42.0");
         match &decls[0] {
             Decl::LetDef { name, ty, .. } => {
                 assert_eq!(name, "x");
@@ -2181,7 +2210,7 @@ mod tests {
 
     #[test]
     fn add_mul_precedence() {
-        let e = body("let x = a + b * c");
+        let e = body("x = a + b * c");
         match e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
                 assert!(matches!(*lhs, Expr::Var(ref n, _) if n == "a"));
@@ -2193,7 +2222,7 @@ mod tests {
 
     #[test]
     fn mul_add_precedence() {
-        let e = body("let x = a * b + c");
+        let e = body("x = a * b + c");
         match e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
                 assert!(matches!(*lhs, Expr::Binary(BinOp::Mul, _, _, _)));
@@ -2205,7 +2234,7 @@ mod tests {
 
     #[test]
     fn left_assoc_add() {
-        let e = body("let x = a + b + c");
+        let e = body("x = a + b + c");
         match e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
                 assert!(matches!(*lhs, Expr::Binary(BinOp::Add, _, _, _)));
@@ -2217,7 +2246,7 @@ mod tests {
 
     #[test]
     fn unary_neg_plus() {
-        let e = body("let x = -a + b");
+        let e = body("x = -a + b");
         match e {
             Expr::Binary(BinOp::Add, lhs, _, _) => {
                 assert!(matches!(*lhs, Expr::Unary(UnaryOp::Neg, _, _)));
@@ -2228,13 +2257,13 @@ mod tests {
 
     #[test]
     fn non_assoc_eq_chain_error() {
-        let err = p_err("let x = a == b == c");
+        let err = p_err("x = a == b == c");
         assert!(matches!(err, ParseError::NonAssocChain { .. }));
     }
 
     #[test]
     fn parens_override() {
-        let e = body("let x = (a + b) * c");
+        let e = body("x = (a + b) * c");
         match e {
             Expr::Binary(BinOp::Mul, lhs, _, _) => {
                 assert!(matches!(*lhs, Expr::Binary(BinOp::Add, _, _, _)));
@@ -2247,7 +2276,7 @@ mod tests {
 
     #[test]
     fn pipe_chain() {
-        let e = body("let x = x |> f |> g");
+        let e = body("x = x |> f |> g");
         match e {
             Expr::Pipe(_, stages, _) => {
                 assert_eq!(stages.len(), 2);
@@ -2260,7 +2289,7 @@ mod tests {
 
     #[test]
     fn paren_apply() {
-        let e = body("let x = f(x, y)");
+        let e = body("x = f(x, y)");
         match e {
             Expr::Apply(func, args, _) => {
                 assert!(matches!(*func, Expr::Var(ref n, _) if n == "f"));
@@ -2274,7 +2303,7 @@ mod tests {
 
     #[test]
     fn type_annotation_expr() {
-        let e = body("let x = y : f32");
+        let e = body("x = y : f32");
         match e {
             Expr::Annotate(inner, ty, _) => {
                 assert!(matches!(*inner, Expr::Var(ref n, _) if n == "y"));
@@ -2288,13 +2317,13 @@ mod tests {
 
     #[test]
     fn if_then_else() {
-        let e = body("let x = if a then b else c");
+        let e = body("x = if a then b else c");
         assert!(matches!(e, Expr::If(_, _, _, _)));
     }
 
     #[test]
     fn match_expr() {
-        let e = body("let x = match x with { | Some y => y | None => 0 }");
+        let e = body("x = match x with { | Some y => y | None => 0 }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 2);
@@ -2310,42 +2339,20 @@ mod tests {
     }
 
     #[test]
-    fn let_in_expr() {
-        let e = body("def f(x) = let y = 1 in y + 1");
-        match e {
-            Expr::Let(bindings, body, _) => {
-                assert_eq!(bindings.len(), 1);
-                assert!(matches!(
-                    &bindings[0].pattern,
-                    LetPattern::Var(name, _) if name == "y"
-                ));
-                assert!(matches!(*body, Expr::Binary(BinOp::Add, _, _, _)));
-            }
-            _ => panic!("expected Let, got {e:?}"),
-        }
+    fn let_in_expr_is_rejected() {
+        let err = p_err("def f(x) = let y = 1 in y + 1");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[test]
-    fn let_in_tuple_destructuring() {
-        let e = body("def f(x) = let (a, b) = pair in a");
-        match e {
-            Expr::Let(bindings, body, _) => {
-                assert_eq!(bindings.len(), 1);
-                assert!(matches!(
-                    &bindings[0].pattern,
-                    LetPattern::Tuple(parts, _)
-                        if matches!(&parts[0], LetPattern::Var(name, _) if name == "a")
-                            && matches!(&parts[1], LetPattern::Var(name, _) if name == "b")
-                ));
-                assert!(matches!(*body, Expr::Var(ref n, _) if n == "a"));
-            }
-            _ => panic!("expected Let, got {e:?}"),
-        }
+    fn let_in_tuple_destructuring_is_rejected() {
+        let err = p_err("def f(x) = let (a, b) = pair in a");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[test]
     fn lambda_expr() {
-        let e = body("let x = fn (x, y) -> x + y");
+        let e = body("x = fn (x, y) -> x + y");
         match e {
             Expr::Lambda(params, body, _) => {
                 assert_eq!(params.len(), 2);
@@ -2359,8 +2366,8 @@ mod tests {
     fn block_accepts_newline_separators() {
         let e = body(
             "def f() = {
-                let x = 1
-                let y = 2
+                x = 1
+                y = 2
                 y
             }",
         );
@@ -2385,8 +2392,6 @@ mod tests {
         match e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 2);
-                assert!(matches!(bindings[0].style, BindingStyle::Short));
-                assert!(matches!(bindings[1].style, BindingStyle::Short));
                 assert!(matches!(*body, Expr::Var(ref n, _) if n == "y"));
             }
             _ => panic!("expected Block, got {e:?}"),
@@ -2404,7 +2409,6 @@ mod tests {
         match e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
-                assert!(matches!(bindings[0].style, BindingStyle::Short));
                 assert!(bindings[0].ty.is_some());
                 assert!(matches!(*body, Expr::Var(ref n, _) if n == "x"));
             }
@@ -2426,7 +2430,6 @@ mod tests {
         match e {
             Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 1);
-                assert!(matches!(bindings[0].style, BindingStyle::Short));
                 assert!(matches!(bindings[0].value, Expr::Pipe(_, _, _)));
                 assert!(matches!(*body, Expr::Var(ref n, _) if n == "loss"));
             }
@@ -2442,7 +2445,7 @@ mod tests {
 
     #[test]
     fn block_rejects_missing_separator_between_lets() {
-        let err = p_err("def f() = { let x = 1 let y = 2 y }");
+        let err = p_err("def f() = { x = 1 y = 2 y }");
         assert!(matches!(err, ParseError::Expected { .. }));
     }
 
@@ -2492,7 +2495,7 @@ mod tests {
 
     #[test]
     fn type_named() {
-        let decls = p("let x: f32 = 1.0");
+        let decls = p("x: f32 = 1.0");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => {
                 assert!(matches!(ty, TypeExpr::Named(n, _) if n == "f32"));
@@ -2503,7 +2506,7 @@ mod tests {
 
     #[test]
     fn type_tensor() {
-        let decls = p("let x: tensor[batch, hidden, f32] = x");
+        let decls = p("x: tensor[batch, hidden, f32] = x");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::Tensor(dims, prec, _) => {
@@ -2518,7 +2521,7 @@ mod tests {
 
     #[test]
     fn type_tensor_with_literal_dims() {
-        let decls = p("let x: tensor[32, 784, f32] = x");
+        let decls = p("x: tensor[32, 784, f32] = x");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::Tensor(dims, prec, _) => {
@@ -2562,7 +2565,7 @@ mod tests {
 
     #[test]
     fn type_app() {
-        let decls = p("let x: Option[f32] = x");
+        let decls = p("x: Option[f32] = x");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::App(name, args, _) => {
@@ -2578,7 +2581,7 @@ mod tests {
 
     #[test]
     fn list_literal() {
-        let decls = p("let xs = [1, 2, 3]");
+        let decls = p("xs = [1, 2, 3]");
         match &decls[0] {
             Decl::LetDef { value, .. } => match value {
                 Expr::List(items, _) => {
@@ -2595,7 +2598,7 @@ mod tests {
 
     #[test]
     fn empty_list_literal_with_type() {
-        let decls = p("let xs: List[int64] = []");
+        let decls = p("xs: List[int64] = []");
         match &decls[0] {
             Decl::LetDef {
                 ty: Some(TypeExpr::App(name, args, _)),
@@ -2613,7 +2616,7 @@ mod tests {
 
     #[test]
     fn type_tuple() {
-        let decls = p("let x: (f32, f32) = x");
+        let decls = p("x: (f32, f32) = x");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => match ty {
                 TypeExpr::Tuple(types, _) => {
@@ -2627,7 +2630,7 @@ mod tests {
 
     #[test]
     fn type_infer() {
-        let decls = p("let x: _ = 1");
+        let decls = p("x: _ = 1");
         match &decls[0] {
             Decl::LetDef { ty: Some(ty), .. } => {
                 assert!(matches!(ty, TypeExpr::Infer(_)));
@@ -2640,7 +2643,7 @@ mod tests {
 
     #[test]
     fn cast_expr() {
-        let e = body("let x = cast(y, f64)");
+        let e = body("x = cast(y, f64)");
         match e {
             Expr::Cast(_, prec, _) => assert_eq!(prec, "f64"),
             _ => panic!("expected Cast, got {e:?}"),
@@ -2649,13 +2652,13 @@ mod tests {
 
     #[test]
     fn grad_expr() {
-        let e = body("let x = grad(f)");
+        let e = body("x = grad(f)");
         assert!(matches!(e, Expr::Grad(_, None, _)));
     }
 
     #[test]
     fn grad_expr_with_single_wrt() {
-        let e = body("let x = grad(f, wrt=w)");
+        let e = body("x = grad(f, wrt=w)");
         match e {
             Expr::Grad(_, Some(wrt), _) => assert_eq!(wrt, vec!["w".to_string()]),
             _ => panic!("expected Grad with wrt, got {e:?}"),
@@ -2664,7 +2667,7 @@ mod tests {
 
     #[test]
     fn grad_expr_with_multiple_wrt() {
-        let e = body("let x = grad(f, wrt=(w, b))");
+        let e = body("x = grad(f, wrt=(w, b))");
         match e {
             Expr::Grad(_, Some(wrt), _) => {
                 assert_eq!(wrt, vec!["w".to_string(), "b".to_string()])
@@ -2675,7 +2678,7 @@ mod tests {
 
     #[test]
     fn vmap_expr() {
-        let e = body("let x = vmap(f)");
+        let e = body("x = vmap(f)");
         match e {
             Expr::Vmap(_, axis, _) => assert!(axis.is_none()),
             _ => panic!("expected Vmap, got {e:?}"),
@@ -2684,7 +2687,7 @@ mod tests {
 
     #[test]
     fn vmap_with_axis() {
-        let e = body("let x = vmap(f, axis=1)");
+        let e = body("x = vmap(f, axis=1)");
         match e {
             Expr::Vmap(_, axis, _) => assert_eq!(axis, Some(1)),
             _ => panic!("expected Vmap, got {e:?}"),
@@ -2693,7 +2696,7 @@ mod tests {
 
     #[test]
     fn vmap_result_can_be_applied() {
-        let e = body("let x = vmap(f)(xs)");
+        let e = body("x = vmap(f)(xs)");
         match e {
             Expr::Apply(func, args, _) => {
                 assert_eq!(args.len(), 1);
@@ -2712,7 +2715,7 @@ mod tests {
 
     #[test]
     fn jit_expr() {
-        let e = body("let x = jit(f)");
+        let e = body("x = jit(f)");
         assert!(matches!(e, Expr::Jit(_, _)));
     }
 
@@ -2720,13 +2723,13 @@ mod tests {
 
     #[test]
     fn multiple_decls() {
-        let decls = p("let x = 1 let y = 2 def f(z) = z");
+        let decls = p("x = 1\ny = 2\ndef f(z) = z");
         assert_eq!(decls.len(), 3);
     }
 
     #[test]
     fn module_must_be_first_decl() {
-        let err = p_err("let x = 1\nmodule M\ndef y = 2");
+        let err = p_err("x = 1\nmodule M\ny = 2");
         assert!(matches!(
             err,
             ParseError::Expected { ref expected, .. }
@@ -2736,7 +2739,7 @@ mod tests {
 
     #[test]
     fn nested_module_is_rejected() {
-        let err = p_err("module Outer\nmodule Inner\ndef y = 2");
+        let err = p_err("module Outer\nmodule Inner\ny = 2");
         assert!(matches!(
             err,
             ParseError::Expected { ref expected, .. }
@@ -2748,7 +2751,7 @@ mod tests {
 
     #[test]
     fn and_or_precedence() {
-        let e = body("let x = a || b && c");
+        let e = body("x = a || b && c");
         match e {
             Expr::Binary(BinOp::Or, _, rhs, _) => {
                 assert!(matches!(*rhs, Expr::Binary(BinOp::And, _, _, _)));
@@ -2761,7 +2764,7 @@ mod tests {
 
     #[test]
     fn tuple_expr() {
-        let e = body("let x = (1, 2, 3)");
+        let e = body("x = (1, 2, 3)");
         match e {
             Expr::Tuple(elems, _) => assert_eq!(elems.len(), 3),
             _ => panic!("expected Tuple, got {e:?}"),
@@ -2772,9 +2775,9 @@ mod tests {
 
     #[test]
     fn bool_lits() {
-        let e = body("let x = true");
+        let e = body("x = true");
         assert!(matches!(e, Expr::Lit(Literal::Bool(true), _)));
-        let e = body("let x = false");
+        let e = body("x = false");
         assert!(matches!(e, Expr::Lit(Literal::Bool(false), _)));
     }
 
@@ -2782,7 +2785,7 @@ mod tests {
 
     #[test]
     fn string_lit_expr() {
-        let e = body("let x = \"hello\"");
+        let e = body("x = \"hello\"");
         assert!(matches!(e, Expr::Lit(Literal::Str(_), _)));
     }
 
@@ -2790,28 +2793,41 @@ mod tests {
 
     #[test]
     fn constructor_expr() {
-        let e = body("let x = None");
+        let e = body("x = None");
         assert!(matches!(e, Expr::Constructor(ref n, _) if n == "None"));
     }
 
-    // ===== Chained let bindings =====
+    // ===== Removed let/in surface =====
 
     #[test]
-    fn chained_let_in() {
-        let e = body("def f(x) = let a = 1 let b = 2 in a + b");
+    fn chained_let_in_is_rejected() {
+        let err = p_err("def f(x) = let a = 1 let b = 2 in a + b");
+        assert!(matches!(err, ParseError::Expected { .. }));
+    }
+
+    #[test]
+    fn let_and_in_are_valid_identifiers_in_blocks() {
+        let e = body(
+            "def f() = {
+                let = 5
+                in = 6
+                add(let, in)
+            }",
+        );
         match e {
-            Expr::Let(bindings, _, _) => {
+            Expr::Block(bindings, body, _) => {
                 assert_eq!(bindings.len(), 2);
                 assert!(matches!(
                     &bindings[0].pattern,
-                    LetPattern::Var(name, _) if name == "a"
+                    LetPattern::Var(name, _) if name == "let"
                 ));
                 assert!(matches!(
                     &bindings[1].pattern,
-                    LetPattern::Var(name, _) if name == "b"
+                    LetPattern::Var(name, _) if name == "in"
                 ));
+                assert!(matches!(*body, Expr::Apply(_, _, _)));
             }
-            _ => panic!("expected Let, got {e:?}"),
+            _ => panic!("expected Block, got {e:?}"),
         }
     }
 
@@ -2819,7 +2835,7 @@ mod tests {
 
     #[test]
     fn non_assoc_lt_chain_error() {
-        let err = p_err("let x = a < b < c");
+        let err = p_err("x = a < b < c");
         assert!(matches!(err, ParseError::NonAssocChain { .. }));
     }
 
@@ -2828,14 +2844,14 @@ mod tests {
         // == and < are in different classes, so this should parse.
         // Actually wait, both are non-assoc. Let's test same-class.
         // a < b is fine on its own.
-        let _decls = p("let x = a < b");
+        let _decls = p("x = a < b");
     }
 
     // ===== Unary bang =====
 
     #[test]
     fn unary_not() {
-        let e = body("let x = !a");
+        let e = body("x = !a");
         assert!(matches!(e, Expr::Unary(UnaryOp::Not, _, _)));
     }
 
@@ -2843,7 +2859,7 @@ mod tests {
 
     #[test]
     fn juxtaposition_single_arg() {
-        let e = body("let x = f x");
+        let e = body("x = f x");
         match &e {
             Expr::Apply(func, args, _) => {
                 assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
@@ -2857,7 +2873,7 @@ mod tests {
     #[test]
     fn juxtaposition_two_args() {
         // f x y → Apply(Apply(f, [x]), [y])
-        let e = body("let x = f x y");
+        let e = body("x = f x y");
         match &e {
             Expr::Apply(inner, args2, _) => {
                 assert_eq!(args2.len(), 1);
@@ -2878,7 +2894,7 @@ mod tests {
     #[test]
     fn juxtaposition_with_infix() {
         // f x + g y → Binary(Add, Apply(f, [x]), Apply(g, [y]))
-        let e = body("let x = f x + g y");
+        let e = body("x = f x + g y");
         match &e {
             Expr::Binary(BinOp::Add, lhs, rhs, _) => {
                 match lhs.as_ref() {
@@ -2905,7 +2921,7 @@ mod tests {
     #[test]
     fn juxtaposition_grouped_arg() {
         // f (x + y) → Apply(f, [Binary(Add, x, y)])
-        let e = body("let x = f (x + y)");
+        let e = body("x = f (x + y)");
         match &e {
             Expr::Apply(func, args, _) => {
                 assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
@@ -2918,7 +2934,7 @@ mod tests {
 
     #[test]
     fn borrow_prefix_parses() {
-        let e = body("let y = f(&x)");
+        let e = body("y = f(&x)");
         match &e {
             Expr::Apply(_, args, _) => {
                 assert!(
@@ -2931,7 +2947,7 @@ mod tests {
 
     #[test]
     fn borrow_juxtaposition_argument_parses() {
-        let e = body("let y = f &x");
+        let e = body("y = f &x");
         match &e {
             Expr::Apply(_, args, _) => {
                 assert!(
@@ -2945,7 +2961,7 @@ mod tests {
     #[test]
     fn constructor_juxtaposition() {
         // Some x → Apply(Constructor("Some"), [Var("x")])
-        let e = body("let x = Some x");
+        let e = body("x = Some x");
         match &e {
             Expr::Apply(func, args, _) => {
                 assert!(matches!(func.as_ref(), Expr::Constructor(n, _) if n == "Some"));
@@ -2985,7 +3001,7 @@ mod tests {
 
     #[test]
     fn module_braceless() {
-        let decls = p("module Foo def f(x) = x def g(y) = y");
+        let decls = p("module Foo\ndef f(x) = x\ndef g(y) = y");
         match &decls[0] {
             Decl::Module { name, decls, .. } => {
                 assert_eq!(name, "Foo");
@@ -3023,7 +3039,7 @@ mod tests {
 
     #[test]
     fn record_pattern() {
-        let e = body("let x = match x with { | Adam { lr, eps } => lr }");
+        let e = body("x = match x with { | Adam { lr, eps } => lr }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);
@@ -3047,7 +3063,7 @@ mod tests {
 
     #[test]
     fn as_pattern() {
-        let e = body("let x = match x with { | y @ Some z => y }");
+        let e = body("x = match x with { | y @ Some z => y }");
         match e {
             Expr::Match(_, arms, _) => {
                 assert_eq!(arms.len(), 1);

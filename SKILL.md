@@ -254,7 +254,7 @@ If you are unsure, write Deep instead.
 Current Surf keywords:
 
 ```text
-def sig let in type dim match with fn module import export if then else
+def sig type dim match with fn module import export if then else
 grad vmap jit cast realize copy par true false
 ```
 
@@ -263,11 +263,10 @@ grad vmap jit cast realize copy par true false
 Prefer idiomatic Surf when you are generating `.ch` source for humans:
 
 - use `def ... -> T = ...` for typed function definitions
-- put input types on parameters, not on top-level load-style `let` bindings
+- put input types on parameters, not on top-level load-style bindings
 - use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
 - do not annotate intermediate expressions when the checker can infer them
-- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
-  valid, but it is not the default idiom for sequential block code
+- use block bindings such as `x = expr` for sequential Surf code
 - prefer pipe-first composition for linear flows, including first-argument insertion
   stages such as `|> add(expand(b, 0, batch))`
 - break long or many-stage pipes after `=` and before every `|>` so the data flow stays
@@ -295,7 +294,6 @@ From lowest to highest:
 | Surf | Deep |
 |---|---|
 | `def f(x: T) -> U = body` | `defsig` + `def` with typed `params` |
-| `let x = e in body` | `(let {} (bind {} x e') body')` |
 | `{ x = e; body }` | same `let` shape after block desugaring |
 | `match x with { | P => b }` | `(match {} x' (arm {} P' () b'))` |
 | `fn (x) -> body` | `(fn {} (params {} x) body')` |

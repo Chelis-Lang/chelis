@@ -2,15 +2,15 @@ use chelis_tide::mcp::handle_message;
 use serde_json::json;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-const MATMUL_PROGRAM: &str = r#"let a = (a : tensor[2, 3, f32])
-let b = (b : tensor[3, 4, f32])
-let out = (matmul(a, b) : tensor[2, 4, f32])
+const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
+b = (b : tensor[3, 4, f32])
+out = (matmul(a, b) : tensor[2, 4, f32])
 "#;
-const LOSS_PROGRAM: &str = r#"let x = (x : tensor[4, f32])
-let loss = (mean(x, 0) : tensor[f32])
+const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+loss = (mean(x, 0) : tensor[f32])
 "#;
-const NON_SCALAR_PROGRAM: &str = r#"let x = (x : tensor[4, f32])
-let out = (add(x, x) : tensor[4, f32])
+const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+out = (add(x, x) : tensor[4, f32])
 "#;
 const SIMPLE_DEEP: &str = r#"(def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
 "#;

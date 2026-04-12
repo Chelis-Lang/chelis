@@ -451,7 +451,7 @@ For common error patterns, the compiler produces structured repair suggestions:
 | Missing match arm | `"Missing variant: None. Add (arm {} (pat-ctor {} None) () ...)"` |
 | Unknown variable | `"Did you mean: [relu, reshape, reduce]"` (Levenshtein) |
 | Wrong arity | `"f expects 3 args, got 2"` |
-| Non-exhaustive let | `"Unbound variable x in body. Missing bind?"` |
+| Malformed binding form | `"Unbound variable x in body. Missing bind?"` |
 
 Suggestions are structured data in the fitness report JSON, not just strings.
 

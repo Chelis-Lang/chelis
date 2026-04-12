@@ -11,8 +11,6 @@ pub enum TokenKind {
     // Keywords
     Def,
     Sig,
-    Let,
-    In,
     Type,
     Dim,
     Macro,

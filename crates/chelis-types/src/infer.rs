@@ -2674,6 +2674,26 @@ fn infer_app(
                     "print" => {
                         return Type::Unit;
                     }
+                    "fail" => {
+                        if let Some(first_arg) = arg_tys.first() {
+                            match subst.apply(first_arg) {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                    return Type::Var(vg.fresh_tvar());
+                                }
+                                other => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("fail expects string input, got {other}"),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                            }
+                        }
+                    }
                     "debug" => {
                         if let Some(first_arg) = arg_tys.first() {
                             return subst.apply(first_arg);
@@ -5337,7 +5357,8 @@ fn infer_fn(
 }
 
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
-/// Each param can be a bare symbol or `(name {type: T})` for a typed param.
+/// Each param can be a bare symbol, a metadata-annotated symbol, or a legacy
+/// `(name {type: T})` helper pair.
 fn extract_params(
     expr: &deep::Expr,
     vg: &mut VarGen,
@@ -5355,6 +5376,18 @@ fn extract_params(
                 .iter()
                 .filter_map(|e| match e {
                     deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.to_string(), None)),
+                    deep::Expr::MetaExpr(meta, _) => {
+                        let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref()
+                        else {
+                            return None;
+                        };
+                        let ty_ann = meta.entries.iter().find_map(|(key, val)| {
+                            (key == "type").then(|| {
+                                deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new())
+                            })
+                        });
+                        Some((name.to_string(), ty_ann))
+                    }
                     deep::Expr::List(plist, _) => {
                         // Typed param: (name {type: T}) — elements[0] is the name symbol,
                         // elements[1] is the metadata map with type annotation
@@ -7483,7 +7516,7 @@ mod tests {
         );
     }
 
-    // Fix 2: unsound generalization — fn x -> let y = x in (y 1, y true) should fail
+    // Fix 2: unsound generalization — fn x -> { y = x; (y 1, y true) } should fail
     #[test]
     fn fix2_unsound_generalization_rejected() {
         // x is a monomorphic param, y = x so y is also monomorphic.
@@ -7807,10 +7840,10 @@ def transpose(x: tensor[seq, hidden, f32]) -> tensor[hidden, seq, f32] =
     fn surf_list_builtins_type_check() {
         let checked = checked_surf(
             r#"
-let xs: List[f32] = [1.0, 2.0]
-let ys = append(xs, 3.0)
-let total = tensor_to_scalar(sum(to_tensor(ys), 0))
-let roundtrip = to_list(to_tensor(ys))
+xs: List[f32] = [1.0, 2.0]
+ys = append(xs, 3.0)
+total = tensor_to_scalar(sum(to_tensor(ys), 0))
+roundtrip = to_list(to_tensor(ys))
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 4);
@@ -7820,8 +7853,8 @@ let roundtrip = to_list(to_tensor(ys))
     fn surf_pad_sequences_type_checks() {
         let checked = checked_surf(
             r#"
-let tokens: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
-let padded = pad_sequences(tokens, cast(0, int64))
+tokens: List[List[int64]] = [[cast(1, int64), cast(2, int64)], [cast(3, int64)]]
+padded = pad_sequences(tokens, cast(0, int64))
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 2);
@@ -7831,15 +7864,15 @@ let padded = pad_sequences(tokens, cast(0, int64))
     fn surf_3g_io_and_exact_padding_builtins_type_check() {
         let checked = checked_surf(
             r#"
-let contents = read_file("dataset.txt")
-let lines = read_lines("dataset.txt")
-let bytes = read_bytes("dataset.txt")
-let exists = file_exists("dataset.txt")
-let names = list_dir(".")
-let mapped = mmap_file("dataset.txt")
-let mapped_len = mmap_len(mapped)
-let prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
-let padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], cast(4, int64), cast(0, int64))
+contents = read_file("dataset.txt")
+lines = read_lines("dataset.txt")
+bytes = read_bytes("dataset.txt")
+exists = file_exists("dataset.txt")
+names = list_dir(".")
+mapped = mmap_file("dataset.txt")
+mapped_len = mmap_len(mapped)
+prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)]], cast(4, int64), cast(0, int64))
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 9);
@@ -7849,16 +7882,16 @@ let padded = pad_sequences_to([[cast(1, int64)], [cast(2, int64), cast(3, int64)
     fn surf_dict_and_iteration_builtins_type_check() {
         let checked = checked_surf(
             r#"
-let keys: List[string] = ["alpha", "beta"]
-let ids: List[int64] = [cast(1, int64), cast(2, int64)]
-let pairs = zip(keys, ids)
-let indexed = enumerate(keys)
-let vocab: Dict[string, int64] = dict_of(pairs)
-let found = dict_contains(vocab, "alpha")
-let id = dict_get(vocab, "beta")
-let only_keys = dict_keys(vocab)
-let only_values = dict_values(vocab)
-let roundtrip = dict_entries(vocab)
+keys: List[string] = ["alpha", "beta"]
+ids: List[int64] = [cast(1, int64), cast(2, int64)]
+pairs = zip(keys, ids)
+indexed = enumerate(keys)
+vocab: Dict[string, int64] = dict_of(pairs)
+found = dict_contains(vocab, "alpha")
+id = dict_get(vocab, "beta")
+only_keys = dict_keys(vocab)
+only_values = dict_values(vocab)
+roundtrip = dict_entries(vocab)
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 9);
@@ -8002,9 +8035,9 @@ def bad(
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
-let b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
-let out = einsum("ij,jk->ik", a, b)
+a = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)
+b = pad_sequences([[5.0, 6.0], [7.0, 8.0], [9.0, 10.0]], 0.0)
+out = einsum("ij,jk->ik", a, b)
 "#,
             )
             .expect("surf parse"),
@@ -8024,11 +8057,11 @@ let out = einsum("ij,jk->ik", a, b)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
-let ids: List[int64] = [cast(1, int64), cast(1, int64)]
-let idx = to_tensor(ids)
-let updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
-let out = scatter(base, idx, updates, 0, "replace")
+base = pad_sequences([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0)
+ids: List[int64] = [cast(1, int64), cast(1, int64)]
+idx = to_tensor(ids)
+updates = pad_sequences([[5.0, 5.0], [6.0, 6.0]], 0.0)
+out = scatter(base, idx, updates, 0, "replace")
 "#,
             )
             .expect("surf parse"),
@@ -8049,10 +8082,10 @@ let out = scatter(base, idx, updates, 0, "replace")
         let checked = checked_surf(
             r#"
 def inc(x: int64) -> int64 = add(x, cast(1, int64))
-let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
-let mapped = map(inc, xs)
-let filtered = filter(fn (x: int64) -> eq(mod(x, cast(2, int64)), cast(0, int64)), mapped)
-let total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
+xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+mapped = map(inc, xs)
+filtered = filter(fn (x: int64) -> eq(mod(x, cast(2, int64)), cast(0, int64)), mapped)
+total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filtered)
 "#,
         );
         assert!(checked.annotated_exprs().len() >= 5);
@@ -8063,8 +8096,8 @@ let total = fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), filte
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = append(xs, "oops")
+xs: List[int64] = [cast(1, int64)]
+bad = append(xs, "oops")
 "#,
             )
             .expect("surf parse"),
@@ -8084,8 +8117,8 @@ let bad = append(xs, "oops")
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[int64] = [cast(1, int64)]
+bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
 "#,
             )
             .expect("surf parse"),
@@ -8107,8 +8140,8 @@ let bad = filter(fn (x: int64) -> add(x, cast(1, int64)), xs)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = dict_entries(xs)
+xs: List[int64] = [cast(1, int64)]
+bad = dict_entries(xs)
 "#,
             )
             .expect("surf parse"),
@@ -8149,8 +8182,8 @@ def bad(x: tensor[2, 2, f32]) -> List[f32] = to_list(x)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[int64] = [cast(1, int64)]
+bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
 "#,
             )
             .expect("surf parse"),
@@ -8171,18 +8204,18 @@ let bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), c
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
-let prefix = take(xs, cast(2, int64))
-let suffix = drop(xs, cast(1, int64))
-let groups = chunk(xs, cast(2, int64))
-let scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
-let buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
-let exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], xs)
-let flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
-let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-let extended = dict_insert(base, "beta", cast(2, int64))
-let merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
-let trimmed = dict_remove(merged, "gamma")
+xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+prefix = take(xs, cast(2, int64))
+suffix = drop(xs, cast(1, int64))
+groups = chunk(xs, cast(2, int64))
+scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
+buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
+exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], xs)
+flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
+base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+extended = dict_insert(base, "beta", cast(2, int64))
+merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+trimmed = dict_remove(merged, "gamma")
 "#,
             )
             .expect("surf parse"),
@@ -8195,8 +8228,8 @@ let trimmed = dict_remove(merged, "gamma")
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64)]
-let bad = take(xs, "two")
+xs: List[int64] = [cast(1, int64), cast(2, int64)]
+bad = take(xs, "two")
 "#,
             )
             .expect("surf parse"),
@@ -8216,8 +8249,8 @@ let bad = take(xs, "two")
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-let bad = dict_insert(base, "beta", "two")
+base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+bad = dict_insert(base, "beta", "two")
 "#,
             )
             .expect("surf parse"),
@@ -8239,9 +8272,9 @@ let bad = dict_insert(base, "beta", "two")
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let lhs: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-let rhs: Dict[string, string] = dict_of([("beta", "two")])
-let bad = dict_merge(lhs, rhs)
+lhs: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+rhs: Dict[string, string] = dict_of([("beta", "two")])
+bad = dict_merge(lhs, rhs)
 "#,
             )
             .expect("surf parse"),
@@ -8264,8 +8297,8 @@ let bad = dict_merge(lhs, rhs)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
+xs: List[int64] = [cast(1, int64)]
+bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(0, int64), xs)
 "#,
             )
             .expect("surf parse"),
@@ -8286,8 +8319,8 @@ let bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), c
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[int64] = [cast(1, int64)]
+bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
 "#,
             )
             .expect("surf parse"),
@@ -8309,8 +8342,8 @@ let bad = partition(fn (x: int64) -> add(x, cast(1, int64)), xs)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
+xs: List[int64] = [cast(1, int64)]
+bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
 "#,
             )
             .expect("surf parse"),
@@ -8330,8 +8363,8 @@ let bad = flat_map(fn (x: int64) -> add(x, cast(1, int64)), xs)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = flatten(xs)
+xs: List[int64] = [cast(1, int64)]
+bad = flatten(xs)
 "#,
             )
             .expect("surf parse"),
@@ -8351,8 +8384,8 @@ let bad = flatten(xs)
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-let bad = dict_remove(base, cast(7, int64))
+base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+bad = dict_remove(base, cast(7, int64))
 "#,
             )
             .expect("surf parse"),
@@ -8373,8 +8406,8 @@ let bad = dict_remove(base, cast(7, int64))
         let result = check_phase0e_program(&chelis_surf::desugar::desugar_program(
             &chelis_surf::parser::parse_str(
                 r#"
-let xs: List[int64] = [cast(1, int64)]
-let bad = chunk(xs, "two")
+xs: List[int64] = [cast(1, int64)]
+bad = chunk(xs, "two")
 "#,
             )
             .expect("surf parse"),

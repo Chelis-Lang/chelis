@@ -26,11 +26,10 @@ dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
 params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
 param = { ident ~ (":" ~ type_expr)? }
 return_type = { (":" | ARROW) ~ type_expr }
-let_decl = { LET ~ ident ~ (":" ~ type_expr)? ~ "=" ~ expr }
+let_decl = { ident ~ (":" ~ type_expr)? ~ "=" ~ expr }
 
-expr = _{ let_expr | match_expr | if_expr | fn_expr | with_expr | pipe_expr }
+expr = _{ match_expr | if_expr | fn_expr | with_expr | pipe_expr }
 
-let_expr = { LET ~ let_binding ~ (LET ~ let_binding)* ~ IN ~ expr }
 let_binding = { let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
 let_pattern = { "(" ~ let_pattern ~ ("," ~ let_pattern)+ ~ ","? ~ ")" | ident | "_" }
 
@@ -44,7 +43,7 @@ with_expr = { WITH ~ with_handler ~ "(" ~ expr ~ ")" ~ block_expr }
 with_handler = { "seed" | "device" }
 
 pipe_expr = { or_expr ~ (PIPE ~ pipe_stage)* }
-pipe_stage = { let_expr | match_expr | if_expr | fn_expr | or_expr }
+pipe_stage = { match_expr | if_expr | fn_expr | or_expr }
 or_expr = { and_expr ~ (OROR ~ and_expr)* }
 and_expr = { cmp_expr ~ (ANDAND ~ cmp_expr)* }
 cmp_expr = { add_expr ~ (cmp_op ~ add_expr)? }
@@ -87,7 +86,7 @@ tuple_or_paren_expr = { "(" ~ expr ~ ("," ~ expr)+ ~ ","? ~ ")" | "(" ~ expr ~ "
 
 block_expr = { "{" ~ block_body ~ "}" }
 block_body = { (block_let ~ semicolons?)* ~ expr }
-block_let = { (LET ~ let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr) | (let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr) }
+block_let = { let_pattern ~ (":" ~ type_expr)? ~ "=" ~ expr }
 
 transform_expr = _{ grad_expr | vmap_expr | jit_expr | cast_expr | realize_expr | copy_expr | par_expr }
 grad_expr = { GRAD ~ "(" ~ expr ~ ")" }
@@ -157,8 +156,6 @@ type_ident = @{ !keyword ~ ASCII_ALPHA_UPPER ~ ASCII_ALPHANUMERIC* }
 keyword = _{
     "def" ~ !ident_continue
   | "sig" ~ !ident_continue
-  | "let" ~ !ident_continue
-  | "in" ~ !ident_continue
   | "type" ~ !ident_continue
   | "dim" ~ !ident_continue
   | "match" ~ !ident_continue
@@ -191,8 +188,6 @@ DIM = _{ "dim" }
 TYPE = _{ "type" }
 SIG = _{ "sig" }
 DEF = _{ "def" }
-LET = _{ "let" }
-IN = _{ "in" }
 MATCH = _{ "match" }
 WITH = _{ "with" }
 IF = _{ "if" }

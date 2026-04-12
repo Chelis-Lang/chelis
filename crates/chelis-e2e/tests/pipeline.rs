@@ -51,13 +51,15 @@ def forward(
   gamma: tensor[16, f32],
   beta: tensor[16, f32]
 ) -> tensor[seq, 16, f32] =
-  let q = matmul(&x, wq)
-  let k = matmul(&x, wk)
-  let v = matmul(&x, wv)
-  let scores = matmul(q, permute(k, 1, 0))
-  let probs = softmax(scores, 1)
-  let attn = matmul(matmul(probs, v), wo)
-  in layer_norm(add(&x, attn), gamma, beta)
+  {
+    q = matmul(&x, wq)
+    k = matmul(&x, wk)
+    v = matmul(&x, wv)
+    scores = matmul(q, permute(k, 1, 0))
+    probs = softmax(scores, 1)
+    attn = matmul(matmul(probs, v), wo)
+    layer_norm(add(&x, attn), gamma, beta)
+  }
 "#;
     let result = compile_surf(src).expect("transformer structural smoke should compile");
     assert!(

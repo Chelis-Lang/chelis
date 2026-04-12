@@ -282,14 +282,14 @@ mod tests {
     use super::{validate_deep, validate_desugared, validate_surf};
 
     #[test]
-    fn surf_accepts_top_level_let_program() {
-        let source = "let x = (x : tensor[32, 784, f32])\nlet y = relu(x)\n";
-        validate_surf(source).expect("validator should accept executable script-style lets");
+    fn surf_accepts_top_level_binding_program() {
+        let source = "x = (x : tensor[32, 784, f32])\ny = relu(x)\n";
+        validate_surf(source).expect("validator should accept executable script-style bindings");
     }
 
     #[test]
     fn surf_accepts_semicolon_block_and_axis_identifier() {
-        let source = "def f(axis) = { let y = axis; y }\ndef g() = par { a; b }\n";
+        let source = "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n";
         validate_surf(source)
             .expect("validator should accept semicolon block/par and axis identifiers");
     }

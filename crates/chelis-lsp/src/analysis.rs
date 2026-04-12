@@ -430,8 +430,8 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
                     range: range_for_span(text, *span),
                     hover: ty
                         .as_ref()
-                        .map(|ty| format!("let {}: {}", name, format_type_expr(ty)))
-                        .unwrap_or_else(|| format!("let {name}")),
+                        .map(|ty| format!("{name}: {}", format_type_expr(ty)))
+                        .unwrap_or_else(|| name.clone()),
                     kind: CompletionItemKind::VARIABLE,
                 },
             );
@@ -559,8 +559,8 @@ fn collect_decl_symbols(
             let range = range_for_span(text, *span);
             let hover = ty
                 .as_ref()
-                .map(|ty| format!("let {}: {}", name, format_type_expr(ty)))
-                .unwrap_or_else(|| format!("let {name}"));
+                .map(|ty| format!("{name}: {}", format_type_expr(ty)))
+                .unwrap_or_else(|| name.clone());
             definitions.push(Definition {
                 name: name.clone(),
                 range,
@@ -793,7 +793,7 @@ fn collect_expr_symbols(
                 );
             }
         }
-        Expr::Let(bindings, body, _) | Expr::Block(bindings, body, _) => {
+        Expr::Block(bindings, body, _) => {
             let start_len = locals.len();
             for binding in bindings {
                 collect_expr_symbols(
@@ -810,8 +810,8 @@ fn collect_expr_symbols(
                     let hover = binding
                         .ty
                         .as_ref()
-                        .map(|ty| format!("let {}: {}", name, format_type_expr(ty)))
-                        .unwrap_or_else(|| format!("let {name}"));
+                        .map(|ty| format!("{name}: {}", format_type_expr(ty)))
+                        .unwrap_or_else(|| name.clone());
                     locals.push(LocalBinding {
                         name: name.clone(),
                         definition: def_range,
@@ -1156,7 +1156,6 @@ fn builtin_completions(visible_in: Range) -> Vec<VisibleName> {
         .collect::<Vec<_>>();
     items.extend([
         keyword_completion("def", visible_in),
-        keyword_completion("let", visible_in),
         keyword_completion("type", visible_in),
         keyword_completion("match", visible_in),
         keyword_completion("fn", visible_in),
@@ -1235,7 +1234,6 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Pipe(_, _, span)
         | Expr::If(_, _, _, span)
         | Expr::Match(_, _, span)
-        | Expr::Let(_, _, span)
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
         | Expr::Cast(_, _, span)
@@ -1422,7 +1420,7 @@ mod tests {
 
     #[test]
     fn completions_include_builtins_and_locals() {
-        let text = "def f(x: f32): f32 = {\n  let y = x\n  add(y, x)\n}\n";
+        let text = "def f(x: f32): f32 = {\n  y = x\n  add(y, x)\n}\n";
         let state = DocumentState {
             uri: surf_uri(),
             text: text.to_string(),

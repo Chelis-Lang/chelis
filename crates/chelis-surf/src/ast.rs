@@ -107,8 +107,7 @@ pub enum Expr {
     Pipe(Box<Expr>, Vec<Expr>, Span), // x |> f |> g
     If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
-    Let(Vec<LetBinding>, Box<Expr>, Span), // let ... in ...
-    Lambda(Vec<Param>, Box<Expr>, Span),   // fn (x, y) -> body
+    Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
     Cast(Box<Expr>, String, Span), // cast(x, f64)
     Grad(Box<Expr>, Option<Vec<String>>, Span),
@@ -121,21 +120,14 @@ pub enum Expr {
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
     Annotate(Box<Expr>, TypeExpr, Span),     // expr : Type
-    Block(Vec<LetBinding>, Box<Expr>, Span), // { let ...; expr }
+    Block(Vec<LetBinding>, Box<Expr>, Span), // { x = ...; expr }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetBinding {
-    pub style: BindingStyle,
     pub pattern: LetPattern,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingStyle {
-    ExplicitLet,
-    Short,
 }
 
 #[derive(Debug, Clone, PartialEq)]

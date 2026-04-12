@@ -1,48 +1,42 @@
 ---
 name: redteam-exec
-description: Use when asked to red team, validate phase progress, or do adversarial review of Chelis code. Executes tests and commands, checks docs/examples/CLI behavior, and reports concrete findings instead of summaries.
+description: Run a compliant Chelis red-team pass. Requires stale-agent cleanup and a fresh local subagent; anything else is blocked, not a valid red team.
 ---
 
-# Red Team Execution
+# Red Team Exec
 
-Use this skill when the task is to validate work, challenge a phase-completion claim, or
-find issues in an implementation.
+Use this skill when the user asks for a red team, adversarial review, or a fresh-context
+validation pass.
 
-## Workflow
+## Repository Contract
 
-1. Read the owning active spec and the code under review.
-2. Run the relevant test targets before making claims.
-3. Check the CLI or binary behavior directly when the phase exposes user-facing commands.
-4. Probe examples, fixtures, and docs for false-green situations.
-5. Add and run adversarial tests when existing coverage is not enough to prove the claim.
+1. Close any known stale or failed subagents from the current session first.
+2. Spawn a new local subagent with fresh context for the validation pass.
+3. If the built-in subagent path routes to remote infrastructure, errors, or is otherwise
+   broken, retry with another fresh local subagent path.
+4. Do not substitute CLI fallback or main-thread validation and call it a red team.
+5. If every fresh-local subagent path is unavailable, state that red-team validation is
+   blocked.
 
-## Fresh-Context Agent Rule
+## Preferred Execution Order
 
-When the user asks to "spawn a red team agent" for this repository, interpret that as a
-fresh local subagent in the shared workspace, not a remote deployment.
+1. `functions.close_agent` on stale or failed agents from the current session.
+2. Fresh local subagent via the platform tool when it is actually local and working.
+3. If that path is broken, close the failed handle and retry with another fresh local
+   subagent.
+4. Only count the review as a red team when the fresh-context subagent actually ran the
+   commands and reported findings.
 
-- prefer a newly spawned local subagent with fresh context when that surface is available
-- if stale agents block spawning, close them first rather than silently skipping the
-  request
-- if the available subagent path routes to a remote deployment, is unavailable, or errors
-  before work begins, do not keep retrying remote infrastructure; run the red-team pass
-  locally in the main thread and say that you did so
-- do not present a remote-agent failure as if the requested validation itself failed
+## Minimum Deliverable
 
-## Chelis-Specific Checks
+- findings ordered by severity
+- exact commands run
+- coverage against the active spec and acceptance oracle
+- explicit note of anything unvalidated
 
-- Treat `cargo test --workspace` as necessary but not sufficient.
-- Check whether phase claims depend on ignored tests or manual runners.
-- Verify `chelis check` semantics, formatter/decompiler round-trips, and executable examples.
-- Cross-check active docs against actual shipped behavior.
-- Identify the authoritative phase oracle and verify it directly.
-- Look for machine-facing invariant violations, not just test failures.
-- On the current repo workstation, do not assume HIP gates are unavailable:
-  `rocminfo` reports a local AMD Radeon 8060S / `gfx1100` GPU and `hipcc` is on PATH.
-  Treat ignored HIP suites as executable evidence unless some other prerequisite is missing.
+## Validation Discipline
 
-## Output Standard
-
-- Findings first.
-- Include exact file/test/command evidence.
-- Treat "no findings" as suspicious unless you exercised multiple surfaces.
+- run code and commands, not just source inspection
+- add adversarial probes where coverage is thin
+- verify positive and negative cases
+- check examples, docs, and CLI behavior against shipped behavior

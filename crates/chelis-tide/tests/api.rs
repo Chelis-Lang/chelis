@@ -9,15 +9,15 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-const MATMUL_PROGRAM: &str = r#"let a = (a : tensor[2, 3, f32])
-let b = (b : tensor[3, 4, f32])
-let out = (matmul(a, b) : tensor[2, 4, f32])
+const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
+b = (b : tensor[3, 4, f32])
+out = (matmul(a, b) : tensor[2, 4, f32])
 "#;
-const LOSS_PROGRAM: &str = r#"let x = (x : tensor[4, f32])
-let loss = (mean(x, 0) : tensor[f32])
+const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+loss = (mean(x, 0) : tensor[f32])
 "#;
-const NON_SCALAR_PROGRAM: &str = r#"let x = (x : tensor[4, f32])
-let out = (add(x, x) : tensor[4, f32])
+const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+out = (add(x, x) : tensor[4, f32])
 "#;
 
 async fn post_json(app: Router, path: &str, value: Value) -> (u16, Value) {
@@ -235,7 +235,7 @@ async fn eval_endpoint_returns_host_values_and_transcript() {
         "/eval",
         json!({
             "source_kind":"surf",
-            "source":"let value = debug(string_concat(\"ok-\", to_string(string_len(\"hé\"))))\n",
+            "source":"value = debug(string_concat(\"ok-\", to_string(string_len(\"hé\"))))\n",
             "bindings":{}
         }),
     )
@@ -255,12 +255,12 @@ async fn eval_endpoint_returns_host_values_and_transcript() {
 #[tokio::test]
 async fn eval_endpoint_returns_dict_and_tuple_collection_values() {
     let source = r#"
-let keys: List[string] = ["alpha", "beta"]
-let ids: List[int64] = [cast(1, int64), cast(2, int64)]
-let pairs = zip(keys, ids)
-let enumerated = enumerate(keys)
-let vocab: Dict[string, int64] = dict_of(pairs)
-let entries = dict_entries(vocab)
+keys: List[string] = ["alpha", "beta"]
+ids: List[int64] = [cast(1, int64), cast(2, int64)]
+pairs = zip(keys, ids)
+enumerated = enumerate(keys)
+vocab: Dict[string, int64] = dict_of(pairs)
+entries = dict_entries(vocab)
 "#;
     let (_, ok) = post_json(
         router(),
@@ -302,8 +302,8 @@ let entries = dict_entries(vocab)
 #[tokio::test]
 async fn eval_endpoint_returns_list_from_tensor_bridge() {
     let source = r#"
-let x = (x : tensor[4, f32])
-let items = to_list(x)
+x = (x : tensor[4, f32])
+items = to_list(x)
 "#;
     let (_, ok) = post_json(
         router(),
@@ -330,19 +330,19 @@ let items = to_list(x)
 #[tokio::test]
 async fn eval_endpoint_returns_sequence_and_dict_helper_values() {
     let source = r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
-let prefix = take(xs, cast(2, int64))
-let suffix = drop(xs, cast(1, int64))
-let groups = chunk(xs, cast(2, int64))
-let scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
-let buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
-let exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], take(xs, cast(2, int64)))
-let flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
-let base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
-let key_count = len(base)
-let extended = dict_insert(base, "beta", cast(2, int64))
-let merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
-let trimmed = dict_remove(merged, "gamma")
+xs: List[int64] = [cast(1, int64), cast(2, int64), cast(3, int64)]
+prefix = take(xs, cast(2, int64))
+suffix = drop(xs, cast(1, int64))
+groups = chunk(xs, cast(2, int64))
+scanned = scan(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), xs)
+buckets = partition(fn (x: int64) -> gt(x, cast(1, int64)), xs)
+exploded = flat_map(fn (x: int64) -> [x, add(x, cast(10, int64))], take(xs, cast(2, int64)))
+flattened = flatten([[cast(1, int64)], [cast(2, int64), cast(3, int64)]])
+base: Dict[string, int64] = dict_of([("alpha", cast(1, int64))])
+key_count = len(base)
+extended = dict_insert(base, "beta", cast(2, int64))
+merged = dict_merge(extended, dict_of([("beta", cast(20, int64)), ("gamma", cast(3, int64))]))
+trimmed = dict_remove(merged, "gamma")
 "#;
     let (_, ok) = post_json(
         router(),
@@ -424,6 +424,39 @@ let trimmed = dict_remove(merged, "gamma")
         .find(|root| root["name"] == "key_count")
         .expect("key_count root");
     assert_eq!(key_count["value"]["value"], 1);
+}
+
+#[tokio::test]
+async fn eval_endpoint_rejects_mapped_file_roots_on_machine_surface() {
+    let dir = tempdir().expect("tempdir");
+    let data = dir.path().join("dataset.txt");
+    fs::write(&data, "alpha\nbeta\n").expect("write dataset");
+    let source = format!(
+        "mapped = mmap_file(\"{}\")\n",
+        data.to_str()
+            .expect("utf8 path")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    );
+
+    let (_, bad) = post_json(
+        router(),
+        "/eval",
+        json!({"source_kind":"surf","source":source,"bindings":{}}),
+    )
+    .await;
+    assert!(!bad["ok"].as_bool().unwrap());
+    assert_eq!(bad["stage"], "eval");
+    assert!(
+        bad["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["message"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("MappedFile values are not serializable"))),
+        "expected mapped-file serialization diagnostic, got {bad}"
+    );
 }
 
 #[tokio::test]

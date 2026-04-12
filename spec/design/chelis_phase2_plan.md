@@ -236,12 +236,12 @@ Concrete Phase 2a effect-surface manual check:
 ```sh
 tmpdir="$(mktemp -d)"
 cat > "$tmpdir/unhandled_random.ch" <<'EOF'
-let x: tensor[32, f32] = x
-let y: tensor[32, f32] = dropout(x, 0.5)
+x: tensor[32, f32] = x
+y: tensor[32, f32] = dropout(x, 0.5)
 EOF
 cat > "$tmpdir/handled_random.ch" <<'EOF'
-let x: tensor[32, f32] = x
-let y: tensor[32, f32] = with seed(42) { dropout(x, 0.5) }
+x: tensor[32, f32] = x
+y: tensor[32, f32] = with seed(42) { dropout(x, 0.5) }
 EOF
 cargo run -q -p chelis-cli -- check "$tmpdir/unhandled_random.ch"
 cargo run -q -p chelis-cli -- check "$tmpdir/handled_random.ch"
@@ -275,12 +275,12 @@ Consumption is static - the compiler tracks which variables have been consumed a
 rejects programs that use a consumed variable.
 
 ```text
-let a = matmul(x, w)
-let b = relu(a)
-let c = add(a, b)        -- ERROR: a was consumed by relu on the previous line
+a = matmul(x, w)
+b = relu(a)
+c = add(a, b)        -- ERROR: a was consumed by relu on the previous line
 ```
 
-Fix: `let c = add(copy(a), b)` - explicit copy makes the cost visible.
+Fix: `c = add(copy(a), b)` - explicit copy makes the cost visible.
 
 **Borrowing:** `&tensor` for read-only access. A borrow does not consume the tensor.
 Borrows cannot be stored in data structures, returned from functions, or captured by
@@ -288,9 +288,9 @@ closures. This is deliberately restrictive - the simple rule is "borrows are tem
 views that exist for one function call."
 
 ```text
-let a = matmul(x, w)
-let shape = dims(&a)
-let b = relu(a)
+a = matmul(x, w)
+shape = dims(&a)
+b = relu(a)
 ```
 
 **Which values are tracked linearly?** Tensors, plus tuple/composite values that carry

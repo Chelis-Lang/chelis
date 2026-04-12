@@ -31,7 +31,7 @@ chelis validate --desugar file.ch   # parse Surf → desugar → validate Deep o
 
 - `crates/chelis-validate` owns the standalone `pest` grammars and validation entrypoints
 - `chelis validate --surf file.ch` validates the shipped Surf surface, including script-style
-  top-level `let` declarations used by the executable examples, semicolon-separated block/par
+  top-level bindings used by the executable examples, semicolon-separated block/par
   forms, and ordinary identifiers such as `axis` outside `vmap(..., axis=...)`
 - `chelis validate --deep file.dp` validates Deep PEG structure plus the closed tag
   vocabulary, metadata-map requirement, arity/helper-form invariants, and dotted module/import

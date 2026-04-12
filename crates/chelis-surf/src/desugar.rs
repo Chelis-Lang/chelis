@@ -119,6 +119,13 @@ fn desugar_param(param: &Param) -> deep::Expr {
 
 fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
     match &param.ty {
+        Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                entries: vec![("type".to_string(), desugar_type_with_dims(ty, dim_vars))],
+                expr: Box::new(sym(&param.name)),
+            },
+            sp(),
+        ),
         Some(ty) => deep::Expr::List(
             deep::List {
                 elements: vec![
@@ -130,6 +137,73 @@ fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::E
         ),
         None => sym(&param.name),
     }
+}
+
+fn typed_param_needs_meta_wrapper(name: &str) -> bool {
+    matches!(
+        name,
+        "module"
+            | "import"
+            | "import-all"
+            | "export"
+            | "def"
+            | "defsig"
+            | "deftype"
+            | "typealias"
+            | "variant"
+            | "field"
+            | "defdim"
+            | "fn"
+            | "app"
+            | "let"
+            | "match"
+            | "arm"
+            | "if"
+            | "var"
+            | "lit"
+            | "record"
+            | "access"
+            | "pipe"
+            | "block"
+            | "tuple"
+            | "tuple-get"
+            | "record-update"
+            | "par"
+            | "pat-var"
+            | "pat-lit"
+            | "pat-ctor"
+            | "pat-tuple"
+            | "pat-record"
+            | "pat-wild"
+            | "pat-as"
+            | "t-prim"
+            | "t-fn"
+            | "t-tensor"
+            | "t-adt"
+            | "t-var"
+            | "t-unit"
+            | "t-tuple"
+            | "d-name"
+            | "d-var"
+            | "d-lit"
+            | "grad"
+            | "vmap"
+            | "jit"
+            | "realize"
+            | "cast"
+            | "copy"
+            | "quote"
+            | "unquote"
+            | "splice"
+            | "params"
+            | "bind"
+            | "kv"
+            | "defmacro"
+            | "expand"
+            | "effects"
+            | "resource"
+            | "handle-effect"
+    )
 }
 
 /// Inject a type annotation into the metadata of a desugared expression.
@@ -234,7 +308,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
                         || expr_mentions_name(&arm.body, name)
                 })
         }
-        Expr::Let(bindings, body, _) | Expr::Block(bindings, body, _) => {
+        Expr::Block(bindings, body, _) => {
             bindings.iter().any(|binding| {
                 let_pattern_mentions_name(&binding.pattern, name)
                     || binding
@@ -767,11 +841,6 @@ impl DesugarCtx {
                 }
                 node("match", children)
             }
-
-            Expr::Let(bindings, body, _) => self.desugar_let_bindings(
-                bindings,
-                self.desugar_expr_with_scope(body, local_fn_params),
-            ),
 
             Expr::Lambda(params, body, _) => {
                 let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
@@ -1380,13 +1449,12 @@ mod tests {
         );
     }
 
-    // --- Let ---
+    // --- Block bindings ---
 
     #[test]
-    fn test_let() {
-        let expr = Expr::Let(
+    fn test_block_binding() {
+        let expr = Expr::Block(
             vec![LetBinding {
-                style: BindingStyle::ExplicitLet,
                 pattern: LetPattern::Var("x".to_string(), s()),
                 ty: None,
                 value: int_lit(1),
@@ -1402,10 +1470,9 @@ mod tests {
     }
 
     #[test]
-    fn test_let_tuple_destructuring() {
-        let expr = Expr::Let(
+    fn test_block_tuple_destructuring() {
+        let expr = Expr::Block(
             vec![LetBinding {
-                style: BindingStyle::ExplicitLet,
                 pattern: LetPattern::Tuple(
                     vec![
                         LetPattern::Var("a".to_string(), s()),

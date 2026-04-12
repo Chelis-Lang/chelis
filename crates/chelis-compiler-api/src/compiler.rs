@@ -206,6 +206,25 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_compiled(compiled, request.bindings, None)
+}
+
+pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
+    let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_compiled(compiled, request.bindings, Some(selected_root_names))
+}
+
+fn eval_compiled(
+    compiled: CompiledSource,
+    bindings: BTreeMap<String, crate::schema::TensorValue>,
+    selected_root_names: Option<&[String]>,
+) -> Result<EvalResult> {
+    let selected = selected_root_names.map(|roots| {
+        roots
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<String>>()
+    });
     if compiled.dag.roots().is_empty() && compiled.all_root_names.is_empty() {
         return Err(stage_error(
             "eval",
@@ -214,8 +233,7 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
         ));
     }
 
-    let bindings = request
-        .bindings
+    let bindings = bindings
         .into_iter()
         .map(|(name, value)| {
             (
@@ -228,7 +246,17 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
         })
         .collect::<HashMap<_, _>>();
 
-    let roots = compiled.dag.roots().to_vec();
+    let roots = compiled
+        .tensor_root_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+                return None;
+            }
+            compiled.dag.roots().get(index).copied()
+        })
+        .collect::<Vec<_>>();
     let tensor_values = if roots.is_empty() {
         HashMap::new()
     } else {
@@ -239,7 +267,13 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
-    for (name, node_id) in &compiled.named_roots {
+    for name in &compiled.tensor_root_names {
+        if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+            continue;
+        }
+        let Some(node_id) = compiled.named_roots.get(name) else {
+            continue;
+        };
         let value = tensor_values.get(node_id).ok_or_else(|| {
             stage_error(
                 "eval",
@@ -270,6 +304,7 @@ pub fn eval(request: EvalRequest) -> Result<EvalResult> {
         .all_root_names
         .iter()
         .enumerate()
+        .filter(|(_, name)| selected.as_ref().is_none_or(|set| set.contains(*name)))
         .filter_map(|(index, name)| {
             let value = lookup_runtime_value_for_root(
                 name,
@@ -413,6 +448,7 @@ struct CompiledSource {
     checked: CheckedProgram,
     dag: Dag,
     all_root_names: Vec<String>,
+    tensor_root_names: Vec<String>,
     named_roots: BTreeMap<String, NodeId>,
     forward_nodes_by_name: BTreeMap<String, NodeId>,
 }
@@ -490,6 +526,7 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
         checked,
         dag,
         all_root_names,
+        tensor_root_names,
         named_roots,
         forward_nodes_by_name,
     })
@@ -1131,11 +1168,6 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
             arms: arms.iter().map(wire_match_arm).collect(),
             span: span(*s),
         },
-        Expr::Let(bindings, body, s) => WireSurfExpr::Let {
-            bindings: bindings.iter().map(wire_let_binding).collect(),
-            body: Box::new(wire_expr(body)),
-            span: span(*s),
-        },
         Expr::Lambda(params, body, s) => WireSurfExpr::Lambda {
             params: params.iter().map(wire_param).collect(),
             body: Box::new(wire_expr(body)),
@@ -1534,7 +1566,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     #[test]
     fn compile_source_excludes_host_only_roots_from_lowered_root_map() {
         let source = r#"
-let label = "mnist"
+label = "mnist"
 
 def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
   matmul(x, w)
@@ -1571,6 +1603,17 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
                 .iter()
                 .any(|name| name == "should_stop")
         );
+    }
+
+    #[test]
+    fn compile_source_accepts_typed_param_named_let() {
+        let source = r#"
+def id(let: int64) -> int64 = let
+"#;
+
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+        let deep = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+        assert!(deep.contains("^{:type (t-prim {} int64)} let"));
     }
 
     #[test]
@@ -1612,8 +1655,8 @@ def describe(value: Json) -> string =
     | JsonArray(items) => to_string(len(items))
   }
 
-let sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
-let result = describe(sample)
+sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+result = describe(sample)
 "#;
 
         let result = compile(CompileRequest {
@@ -1651,8 +1694,8 @@ let result = describe(sample)
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-let x: tensor[2, 3, f32] = x
-let dims = (rank(x), shape(x, 1), numel(x))
+x: tensor[2, 3, f32] = x
+dims = (rank(x), shape(x, 1), numel(x))
 "#
             .to_string(),
             bindings: BTreeMap::from([(
@@ -1694,18 +1737,18 @@ let dims = (rank(x), shape(x, 1), numel(x))
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-let parsed = match to_int(" 42 ") with {
+parsed = match to_int(" 42 ") with {
   | Some n => n
   | None => cast(0, int64)
 }
 
-let cleaned = string_trim("  ckpt-42.safetensors  ")
-let progress = print(cleaned)
-let matches_path = and(
+cleaned = string_trim("  ckpt-42.safetensors  ")
+progress = print(cleaned)
+matches_path = and(
   string_starts_with(cleaned, "ckpt-"),
   string_contains(cleaned, "42")
 )
-let result = if matches_path then parsed else cast(0, int64)
+result = if matches_path then parsed else cast(0, int64)
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -1727,9 +1770,9 @@ let result = if matches_path then parsed else cast(0, int64)
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-let bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
-let rem = mod(cast(17, int64), cast(5, int64))
-let shifted = shr(cast(8, int64), cast(1, int64))
+bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
+rem = mod(cast(17, int64), cast(5, int64))
+shifted = shr(cast(8, int64), cast(1, int64))
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -1760,12 +1803,149 @@ let shifted = shr(cast(8, int64), cast(1, int64))
     }
 
     #[test]
+    fn eval_supports_recursive_top_level_defs() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+def sum_to(n: int64) -> int64 =
+  if lte(n, cast(0, int64)) then cast(0, int64) else add(n, sum_to(sub(n, cast(1, int64))))
+
+value = sum_to(cast(3, int64))
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("value")
+                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
+        );
+    }
+
+    #[test]
+    fn eval_supports_module_wrapped_host_defs() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+module Demo.Main
+
+parsed = match to_int("7") with {
+  | Some(value) => value
+  | None => cast(0, int64)
+}
+label = if gt(parsed, cast(0, int64)) then "ready" else "waiting"
+view = print(label)
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("label")
+                    && matches!(&root.value, ExecutionValue::String { value } if value == "ready"))
+        );
+        assert_eq!(result.transcript, vec!["ready".to_string()]);
+    }
+
+    #[test]
+    fn host_lowering_preserves_rich_host_function_types() {
+        let compiled = compile_source(
+            SourceKind::Surf,
+            r#"
+module Std.Test
+
+type Json =
+  | JsonNull
+  | JsonString(string)
+  | JsonArray(List[Json])
+  | JsonObject(Dict[string, Json])
+
+type Tokenizer =
+  | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
+
+def parse_line(line: string) -> Option[List[string]] =
+  Some([])
+
+def json_string(value: Option[Json]) -> Option[string] =
+  match value with {
+    | Some(inner) =>
+        match inner with {
+          | JsonString(text) => Some(text)
+          | _ => None
+        }
+    | None => None
+  }
+
+def load_tokenizer(path: string) -> Option[Tokenizer] =
+  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, int64)))
+"#,
+        )
+        .expect("compile");
+
+        let host = chelis_ir::host::lower_compiled_program(&compiled.checked)
+            .host
+            .expect("host lowering");
+        let lowered = chelis_ir::lower::top_level_lowering_map(
+            compiled.checked.exprs(),
+            compiled.checked.type_env(),
+        );
+        let checked_text = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+
+        let find_ret = |suffix: &str| {
+            host.functions
+                .iter()
+                .find(|function| function.name == suffix || function.name.ends_with(suffix))
+                .map(|function| function.ret_ty.clone())
+        };
+
+        let available = host
+            .functions
+            .iter()
+            .map(|function| format!("{} -> {:?}", function.name, function.ret_ty))
+            .collect::<Vec<_>>();
+        let lowered_debug = lowered
+            .iter()
+            .map(|(name, lowered)| format!("{name}={lowered}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            find_ret("parse_line"),
+            Some(chelis_ir::host::HostType::Option(Box::new(
+                chelis_ir::host::HostType::List(Box::new(chelis_ir::host::HostType::String))
+            ))),
+            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+        );
+        assert_eq!(
+            find_ret("json_string"),
+            Some(chelis_ir::host::HostType::Option(Box::new(
+                chelis_ir::host::HostType::String
+            ))),
+            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+        );
+        assert_eq!(
+            find_ret("load_tokenizer"),
+            Some(chelis_ir::host::HostType::Option(Box::new(
+                chelis_ir::host::HostType::Adt("Tokenizer".to_string())
+            ))),
+            "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
+        );
+    }
+
+    #[test]
     fn eval_rejects_negative_shape_axis_with_signed_diagnostic() {
         let error = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-let axis = tensor_to_scalar(scalar_to_tensor(cast(-1, int32)))
-let bad = shape(scalar_to_tensor(cast(3, int64)), axis)
+axis = tensor_to_scalar(scalar_to_tensor(cast(-1, int32)))
+bad = shape(scalar_to_tensor(cast(3, int64)), axis)
 "#
             .to_string(),
             bindings: BTreeMap::new(),

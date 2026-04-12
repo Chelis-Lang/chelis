@@ -17,41 +17,27 @@ use crate::vmap;
 pub fn lower_program(program: &CheckedProgram) -> Dag {
     let program_type_env = program.type_env();
     let lowered_names = top_level_lowering_map(program.exprs(), program_type_env);
-    for expr in program.exprs() {
+    for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered(expr, program.exprs(), program_type_env) {
             assert_phase0e_lowerable(expr);
             assert_phase0e_typed(expr);
         }
-    }
+    });
     let program_types = program
         .type_env()
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
-    let program_defs = program
-        .exprs()
-        .iter()
-        .filter_map(|expr| match expr {
-            Expr::List(list, _) if matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(tag), _)) if tag == "def") => {
-                match (list.elements.get(2), list.elements.get(3)) {
-                    (Some(Expr::Atom(Atom::Symbol(name), _)), Some(body)) => {
-                        Some((name.clone(), body.clone()))
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .collect();
+    let program_defs = collect_top_level_defs(program.exprs());
     let mut ctx = LowerCtx::new(program_types, program_defs, program.linearity().clone());
-    for expr in program.exprs() {
+    for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
                 && top_level_expr_is_lowered(expr, program.exprs(), program_type_env))
         {
             ctx.lower_top_level(expr);
         }
-    }
+    });
     crate::optimize::dead_code_eliminate(&ctx.dag)
 }
 
@@ -93,10 +79,18 @@ pub fn top_level_lowering_map(
     type_env: &HashMap<String, Expr>,
 ) -> HashMap<String, bool> {
     let top_level_defs = collect_top_level_defs(exprs);
+    let top_level_sigs = collect_top_level_sigs(exprs);
     let mut cache = HashMap::new();
     let mut visiting = HashSet::new();
     for name in top_level_defs.keys() {
-        let lowered = def_is_lowered(name, &top_level_defs, type_env, &mut cache, &mut visiting);
+        let lowered = def_is_lowered(
+            name,
+            &top_level_defs,
+            &top_level_sigs,
+            type_env,
+            &mut cache,
+            &mut visiting,
+        );
         cache.insert(name.clone(), lowered);
     }
     cache
@@ -107,19 +101,27 @@ fn top_level_expr_is_lowered_with_names(
     type_env: &HashMap<String, Expr>,
     lowered_names: &HashMap<String, bool>,
 ) -> bool {
+    let top_level_sigs = HashMap::new();
     let Expr::List(list, _) = expr else {
         return true;
     };
+    if get_tag(list) == Some("module") {
+        return list
+            .elements
+            .iter()
+            .skip(3)
+            .all(|child| top_level_expr_is_lowered_with_names(child, type_env, lowered_names));
+    }
     if get_tag(list) != Some("def") {
         return true;
     }
     let Some(name) = top_level_expr_name(expr) else {
         return true;
     };
-    lowered_names
-        .get(name)
-        .copied()
-        .unwrap_or_else(|| !type_env.get(name).is_some_and(type_is_never_lowerable))
+    lowered_names.get(name).copied().unwrap_or_else(|| {
+        !lookup_declared_type_expr(&top_level_sigs, type_env, name)
+            .is_some_and(type_is_never_lowerable)
+    })
 }
 
 fn type_is_never_lowerable(expr: &Expr) -> bool {
@@ -230,6 +232,15 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "dict_keys"
                         | "dict_values"
                         | "dict_entries"
+                        | "read_file"
+                        | "write_file"
+                        | "read_lines"
+                        | "read_bytes"
+                        | "file_exists"
+                        | "list_dir"
+                        | "mmap_file"
+                        | "mmap_read"
+                        | "mmap_len"
                         | "to_tensor"
                         | "to_list"
                         | "pad_sequences"
@@ -290,6 +301,34 @@ fn collect_top_level_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
     defs
 }
 
+fn collect_top_level_sigs(exprs: &[Expr]) -> HashMap<String, Expr> {
+    let mut sigs = HashMap::new();
+    for expr in exprs {
+        collect_top_level_sigs_from_expr(expr, &mut sigs);
+    }
+    sigs
+}
+
+fn for_each_top_level_item(exprs: &[Expr], f: &mut impl FnMut(&Expr)) {
+    for expr in exprs {
+        for_each_top_level_item_from_expr(expr, f);
+    }
+}
+
+fn for_each_top_level_item_from_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("module") => {
+            for child in list.elements.iter().skip(3) {
+                for_each_top_level_item_from_expr(child, f);
+            }
+        }
+        _ => f(expr),
+    }
+}
+
 fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut HashMap<String, Expr>) {
     let Expr::List(list, _) = expr else {
         return;
@@ -312,9 +351,32 @@ fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut HashMap<String, Expr
     }
 }
 
+fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut HashMap<String, Expr>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some("module") => {
+            for child in list.elements.iter().skip(3) {
+                collect_top_level_sigs_from_expr(child, sigs);
+            }
+        }
+        Some("defsig") => {
+            let kids = children(list);
+            if let (Some(name), Some(ty)) =
+                (kids.first().and_then(symbol_name), kids.get(1).cloned())
+            {
+                sigs.insert(name.to_string(), ty);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn def_is_lowered(
     name: &str,
     top_level_defs: &HashMap<String, Expr>,
+    top_level_sigs: &HashMap<String, Expr>,
     type_env: &HashMap<String, Expr>,
     cache: &mut HashMap<String, bool>,
     visiting: &mut HashSet<String>,
@@ -323,7 +385,8 @@ fn def_is_lowered(
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !type_env.get(name).is_some_and(type_is_never_lowerable);
+        return !lookup_declared_type_expr(top_level_sigs, type_env, name)
+            .is_some_and(type_is_never_lowerable);
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
@@ -331,12 +394,14 @@ fn def_is_lowered(
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
+                top_level_sigs,
                 type_env,
                 cache,
                 visiting,
                 &HashSet::new(),
             )
-            && !type_env.get(name).is_some_and(type_is_never_lowerable)
+            && !lookup_declared_type_expr(top_level_sigs, type_env, name)
+                .is_some_and(type_is_never_lowerable)
     });
 
     visiting.remove(name);
@@ -344,9 +409,46 @@ fn def_is_lowered(
     lowered
 }
 
+fn lookup_declared_type_expr<'a>(
+    top_level_sigs: &'a HashMap<String, Expr>,
+    type_env: &'a HashMap<String, Expr>,
+    name: &str,
+) -> Option<&'a Expr> {
+    top_level_sigs
+        .get(name)
+        .or_else(|| unique_terminal_match(top_level_sigs, name))
+        .or_else(|| type_env.get(name))
+        .or_else(|| {
+            let mut matches = type_env
+                .iter()
+                .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
+}
+
+fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    full_name == short_name
+        || full_name
+            .rsplit_once("__")
+            .is_some_and(|(_, tail)| tail == short_name)
+        || full_name
+            .rsplit_once('.')
+            .is_some_and(|(_, tail)| tail == short_name)
+}
+
+fn unique_terminal_match<'a>(map: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+    let mut matches = map
+        .iter()
+        .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &HashMap<String, Expr>,
+    top_level_sigs: &HashMap<String, Expr>,
     type_env: &HashMap<String, Expr>,
     cache: &mut HashMap<String, bool>,
     visiting: &mut HashSet<String>,
@@ -358,6 +460,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
+                top_level_sigs,
                 type_env,
                 cache,
                 visiting,
@@ -368,6 +471,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
+                top_level_sigs,
                 type_env,
                 cache,
                 visiting,
@@ -376,6 +480,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
+                    top_level_sigs,
                     type_env,
                     cache,
                     visiting,
@@ -389,7 +494,14 @@ fn expr_depends_on_nonlowerable_name(
                 && !bound_names.contains(name)
                 && top_level_defs.contains_key(name)
             {
-                return !def_is_lowered(name, top_level_defs, type_env, cache, visiting);
+                return !def_is_lowered(
+                    name,
+                    top_level_defs,
+                    top_level_sigs,
+                    type_env,
+                    cache,
+                    visiting,
+                );
             }
             if get_tag(list) == Some("fn") {
                 let kids = children(list);
@@ -403,6 +515,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
+                        top_level_sigs,
                         type_env,
                         cache,
                         visiting,
@@ -422,6 +535,7 @@ fn expr_depends_on_nonlowerable_name(
                         if expr_depends_on_nonlowerable_name(
                             &binding_children[index + 1],
                             top_level_defs,
+                            top_level_sigs,
                             type_env,
                             cache,
                             visiting,
@@ -439,6 +553,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
+                        top_level_sigs,
                         type_env,
                         cache,
                         visiting,
@@ -452,6 +567,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         scrutinee,
                         top_level_defs,
+                        top_level_sigs,
                         type_env,
                         cache,
                         visiting,
@@ -476,6 +592,7 @@ fn expr_depends_on_nonlowerable_name(
                         expr_depends_on_nonlowerable_name(
                             guard,
                             top_level_defs,
+                            top_level_sigs,
                             type_env,
                             cache,
                             visiting,
@@ -485,6 +602,7 @@ fn expr_depends_on_nonlowerable_name(
                         expr_depends_on_nonlowerable_name(
                             body,
                             top_level_defs,
+                            top_level_sigs,
                             type_env,
                             cache,
                             visiting,
@@ -500,6 +618,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
+                    top_level_sigs,
                     type_env,
                     cache,
                     visiting,
@@ -754,15 +873,50 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
         return None;
     };
     let param = children(params_list).get(index)?;
-    let Expr::List(param_list, _) = param else {
-        return None;
-    };
-    match param_list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => meta
+    match param {
+        Expr::MetaExpr(meta, _) => meta
             .entries
             .iter()
             .find(|(key, _)| key == "type")
             .map(|(_, value)| value),
+        Expr::List(param_list, _) => match param_list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn param_name_and_type(param: &Expr) -> Option<(String, TensorType)> {
+    match param {
+        Expr::Atom(Atom::Symbol(name), _) => Some((name.clone(), LowerCtx::default_type())),
+        Expr::MetaExpr(meta, _) => {
+            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                return None;
+            };
+            let ty = meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| LowerCtx::type_from_type_expr(value))
+                .unwrap_or_else(LowerCtx::default_type);
+            Some((name.clone(), ty))
+        }
+        Expr::List(param_list, _) => {
+            let Expr::Atom(Atom::Symbol(name), _) = param_list.elements.first()? else {
+                return None;
+            };
+            let ty = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
+                LowerCtx::type_from_meta(&meta.entries)
+            } else {
+                LowerCtx::default_type()
+            };
+            Some((name.clone(), ty))
+        }
         _ => None,
     }
 }
@@ -2589,30 +2743,11 @@ impl LowerCtx {
         // Register params as Load nodes.
         if let Expr::List(params_list, _) = &elems[2] {
             for param in &params_list.elements[2..] {
-                if let Expr::Atom(Atom::Symbol(name), _) = param {
-                    let load_id = self.dag.add_node(
-                        RiscOp::Load { name: name.clone() },
-                        vec![],
-                        Self::default_type(),
-                    );
-                    self.bindings
-                        .insert(name.clone(), LoweredValue::Node(load_id));
-                }
-                // Handle (param {} name) form.
-                if let Expr::List(param_list, _) = param
-                    && !param_list.elements.is_empty()
-                    && let Expr::Atom(Atom::Symbol(name), _) = &param_list.elements[0]
-                {
-                    let ty = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                        Self::type_from_meta(&meta.entries)
-                    } else {
-                        Self::default_type()
-                    };
+                if let Some((name, ty)) = param_name_and_type(param) {
                     let load_id =
                         self.dag
                             .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
-                    self.bindings
-                        .insert(name.clone(), LoweredValue::Node(load_id));
+                    self.bindings.insert(name, LoweredValue::Node(load_id));
                 }
             }
         }

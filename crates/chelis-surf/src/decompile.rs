@@ -3,7 +3,7 @@
 //! Walks the Deep AST and produces syntactically valid Surf source
 //! that should re-parse without errors.
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 
 const SURF_WIDTH: usize = 80;
 
@@ -277,7 +277,7 @@ impl<'a> IdiomaticDecompiler<'a> {
 
         if let Some(load) = match_load_binding(name, body) {
             return format!(
-                "let {}: {} = {}",
+                "{}: {} = {}",
                 load.name,
                 decompile_type_expr(&load.ty),
                 load.name
@@ -291,7 +291,7 @@ impl<'a> IdiomaticDecompiler<'a> {
         }
 
         let body_text = self.decompile_expr(body);
-        format!("let {name} = {body_text}")
+        format!("{name} = {body_text}")
     }
 
     fn render_fn_def(&self, name: &str, fn_list: &List, sig_expr: Option<&Expr>) -> String {
@@ -417,9 +417,9 @@ impl<'a> IdiomaticDecompiler<'a> {
     fn render_let_chain(&self, bindings: &[(String, &Expr)], final_expr: &Expr) -> String {
         let mut lines = Vec::new();
         for (name, value) in bindings {
-            lines.push(format!("let {name} = {}", self.decompile_expr(value)));
+            lines.push(format!("{name} = {}", self.decompile_expr(value)));
         }
-        lines.push(format!("in {}", self.decompile_expr(final_expr)));
+        lines.push(self.decompile_expr(final_expr));
         lines.join("\n")
     }
 
@@ -1037,6 +1037,7 @@ fn extract_single_param_name(expr: &Expr) -> Option<&str> {
     };
     match only {
         Expr::Atom(_, _) => sym_str(only),
+        Expr::MetaExpr(meta, _) => sym_str(&meta.expr),
         Expr::List(helper, _) => helper.elements.first().and_then(sym_str),
         _ => None,
     }
@@ -1208,7 +1209,7 @@ fn decompile_def(list: &List) -> String {
     }
 
     let val = decompile_expr(body);
-    format!("let {name} = {val}")
+    format!("{name} = {val}")
 }
 
 fn decompile_defsig(list: &List) -> String {
@@ -1443,15 +1444,7 @@ fn decompile_list_expr(list: &List) -> String {
             let body = decompile_expr(&kids[1]);
             format!("fn ({params}) -> {body}")
         }
-        Some("let") => {
-            let kids = children(list);
-            if kids.len() < 2 {
-                return "()".to_string();
-            }
-            let bind = decompile_bind(&kids[0]);
-            let body = decompile_expr(&kids[1]);
-            format!("let {bind}\n  in {body}")
-        }
+        Some("let") => decompile_let_list_as_block(list),
         Some("if") => {
             let kids = children(list);
             if kids.len() < 3 {
@@ -1647,6 +1640,15 @@ fn decompile_params(expr: &Expr) -> String {
             .iter()
             .map(|p| match p {
                 Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+                Expr::MetaExpr(meta, _) => {
+                    let pname = sym_str(&meta.expr).unwrap_or("_");
+                    if let Some(ty) = extract_type_meta(p) {
+                        let tstr = decompile_type_expr(&ty);
+                        format!("{pname}: {tstr}")
+                    } else {
+                        pname.to_string()
+                    }
+                }
                 Expr::List(plist, _) => {
                     if plist.elements.len() >= 2 {
                         let pname = sym_str(&plist.elements[0]).unwrap_or("_");
@@ -1872,11 +1874,39 @@ fn collect_block_bindings<'a>(expr: &'a Expr, bindings: &mut Vec<String>) -> &'a
     {
         let kids = children(list);
         if kids.len() >= 2 {
-            bindings.push(format!("let {}", decompile_bind(&kids[0])));
+            bindings.push(decompile_bind(&kids[0]));
             return collect_block_bindings(&kids[1], bindings);
         }
     }
     expr
+}
+
+fn decompile_let_list_as_block(list: &List) -> String {
+    let mut bindings = Vec::new();
+    let final_expr = collect_block_bindings_from_let_list(list, &mut bindings);
+    let mut lines: Vec<String> = bindings
+        .into_iter()
+        .map(|binding| format!("  {binding}"))
+        .collect();
+    lines.push(format!("  {}", decompile_expr(final_expr)));
+    format!("{{\n{}\n}}", lines.join("\n"))
+}
+
+fn collect_block_bindings_from_let_list<'a>(
+    list: &'a List,
+    bindings: &mut Vec<String>,
+) -> &'a Expr {
+    let kids = children(list);
+    if kids.len() < 2 {
+        return kids.first().unwrap_or(&list.elements[0]);
+    }
+    bindings.push(decompile_bind(&kids[0]));
+    if let Expr::List(next, _) = &kids[1]
+        && tag(next) == Some("let")
+    {
+        return collect_block_bindings_from_let_list(next, bindings);
+    }
+    &kids[1]
 }
 
 fn decompile_effect_suffix_from_type_expr(expr: &Expr) -> String {
@@ -1942,14 +1972,17 @@ fn decompile_effect_expr(expr: &Expr) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn extract_type_meta(expr: &Expr) -> Option<Expr> {
-    if let Expr::Map(MetaMap { entries, .. }, _) = expr {
-        for (key, val) in entries {
-            if key == "type" {
-                return Some(val.clone());
+    match expr {
+        Expr::Map(MetaMap { entries, .. }, _) | Expr::MetaExpr(MetaExpr { entries, .. }, _) => {
+            for (key, val) in entries {
+                if key == "type" {
+                    return Some(val.clone());
+                }
             }
+            None
         }
+        _ => None,
     }
-    None
 }
 
 fn extract_type_meta_from_list(list: &List) -> Option<Expr> {
@@ -2079,8 +2112,8 @@ mod tests {
     fn decompile_block_bindings_use_short_form() {
         let rendered = surf_to_surf(
             "def f() = {
-                let x = relu(y)
-                let z = add(x, y)
+                x = relu(y)
+                z = add(x, y)
                 z
             }",
         );

@@ -91,9 +91,9 @@ fn format_decl(decl: &Decl) -> String {
             name, ty, value, ..
         } => {
             if let Some(ty) = ty {
-                format!("let {name}: {} = {}", format_type(ty), format_expr(value))
+                format!("{name}: {} = {}", format_type(ty), format_expr(value))
             } else {
-                format!("let {name} = {}", format_expr(value))
+                format!("{name} = {}", format_expr(value))
             }
         }
         Decl::MacroDef {
@@ -258,14 +258,6 @@ fn format_expr(expr: &Expr) -> String {
             let arms = arms.iter().map(format_arm).collect::<Vec<_>>().join("\n  ");
             format!("match {} with {{\n  {}\n}}", format_expr(scrutinee), arms)
         }
-        Expr::Let(bindings, body, _) => {
-            let bindings = bindings
-                .iter()
-                .map(format_let_expr_binding)
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!("{bindings} in {}", format_expr(body))
-        }
         Expr::Lambda(params, body, _) => format!(
             "fn ({}) -> {}",
             params
@@ -402,20 +394,8 @@ fn format_let_pattern(pattern: &LetPattern) -> String {
     }
 }
 
-fn format_let_expr_binding(binding: &LetBinding) -> String {
-    let mut out = format!("let {}", format_let_pattern(&binding.pattern));
-    if let Some(ty) = &binding.ty {
-        out.push_str(&format!(": {}", format_type(ty)));
-    }
-    out.push_str(&format!(" = {}", format_expr(&binding.value)));
-    out
-}
-
 fn format_binding_line(binding: &LetBinding) -> String {
-    let mut head = match binding.style {
-        BindingStyle::ExplicitLet => format!("let {}", format_let_pattern(&binding.pattern)),
-        BindingStyle::Short => format_let_pattern(&binding.pattern),
-    };
+    let mut head = format_let_pattern(&binding.pattern);
     if let Some(ty) = &binding.ty {
         head.push_str(&format!(": {}", format_type(ty)));
     }
@@ -587,6 +567,6 @@ mod tests {
             span,
         }];
 
-        assert_eq!(format_program(&program), "let x = 1\n");
+        assert_eq!(format_program(&program), "x = 1\n");
     }
 }

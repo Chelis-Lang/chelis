@@ -234,6 +234,10 @@ fn validate_tag_shape(
         "params" => {
             if !list.elements.iter().skip(2).all(|child| match child {
                 Expr::Atom(crate::ast::Atom::Symbol(_), _) => true,
+                Expr::MetaExpr(meta, _) => matches!(
+                    meta.expr.as_ref(),
+                    Expr::Atom(crate::ast::Atom::Symbol(_), _)
+                ),
                 Expr::List(inner, _) => {
                     inner.elements.len() == 2
                         && matches!(
@@ -247,7 +251,7 @@ fn validate_tag_shape(
                 warnings.push(ValidationWarning {
                     kind: WarningKind::Structural,
                     offset,
-                    message: "`params` must contain bare names or typed-name helper pairs"
+                    message: "`params` must contain bare names or typed-name metadata helpers"
                         .to_string(),
                 });
             }
@@ -382,6 +386,36 @@ mod tests {
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::MissingMetadata));
+    }
+
+    #[test]
+    fn typed_param_meta_expr_is_valid() {
+        let node = make_list(vec![
+            sym("def"),
+            empty_map(),
+            sym("f"),
+            make_list(vec![
+                sym("fn"),
+                empty_map(),
+                make_list(vec![
+                    sym("params"),
+                    empty_map(),
+                    Expr::MetaExpr(
+                        crate::ast::MetaExpr {
+                            entries: vec![("type".to_string(), sym("int64"))],
+                            expr: Box::new(sym("let")),
+                        },
+                        ZERO,
+                    ),
+                ]),
+                make_list(vec![sym("var"), empty_map(), sym("let")]),
+            ]),
+        ]);
+        let warnings = validate(&[node]);
+        assert!(
+            warnings.is_empty(),
+            "typed parameter metadata helper should validate cleanly, got {warnings:?}"
+        );
     }
 
     #[test]

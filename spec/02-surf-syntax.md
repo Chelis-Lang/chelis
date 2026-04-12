@@ -33,12 +33,12 @@ that are not yet the full self-sufficient AI-programming story.
 Reserved. Cannot be used as identifiers.
 
 ```
-def  sig  let  in  type  dim  match  with  fn  module
+def  sig  type  dim  match  with  fn  module
 import  export  if  then  else  grad  vmap  jit  cast  macro
 realize  copy  par  true  false
 ```
 
-**Total: 25.**
+**Total: 23.**
 
 Reserved for Phase 2 (parse as keywords, emit "reserved for future use" error):
 ```
@@ -200,8 +200,8 @@ Style rules for human-facing Surf:
 
 Planned Phase 3 public-style target:
 
-- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
-  valid
+- use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
+  bindings such as `result = expr`
 - prefer pipe-first composition for eligible linear flows
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
@@ -215,25 +215,18 @@ Planned remaining Phase 3 language-completeness additions:
 
 ### P5: Blocks and Sequencing
 
-Braces define blocks. Inside blocks, `let` bindings are sequential — no `in` required. Newlines and semicolons are both valid separators. The final expression is the block's value.
-
-**Two `let` forms:**
-
-| Form | Context | Example |
-|------|---------|---------|
-| `let x = e in body` | Anywhere | `let x = 1 in x + 1` |
-| `let x = e` (no `in`) | Inside braces only | `{ let x = 1; x + 1 }` |
+Braces define blocks. Inside blocks, bindings are sequential. Newlines and semicolons are both valid separators. The final expression is the block's value.
 
 ```
 {
-  let x = f(a)
-  let y = g(x)
-  let z = h(y)
+  x = f(a)
+  y = g(x)
+  z = h(y)
   combine(x, y, z)
 }
 ```
 
-**⟹** All sequential `let` bindings collapse into a single Deep node:
+**⟹** All sequential Surf bindings collapse into a single Deep `let` node:
 ```
 (let {} (bind x (app {} (var {} f) (var {} a))
               y (app {} (var {} g) (var {} x))
@@ -241,15 +234,14 @@ Braces define blocks. Inside blocks, `let` bindings are sequential — no `in` r
   (app {} (var {} combine) (var {} x) (var {} y) (var {} z)))
 ```
 
-Blocks are expressions: `let result = { let temp = f(x); g(temp) }` is valid.
+Blocks are expressions: `result = { temp = f(x); g(temp) }` is valid.
 
-A separator (newline or semicolon) is required between a `let` binding and the next statement. Multiple separators (blank lines) are fine. Trailing semicolon after the final expression is tolerated.
+A separator (newline or semicolon) is required between a binding and the next statement. Multiple separators (blank lines) are fine. Trailing semicolon after the final expression is tolerated.
 
-Planned Phase 3 extension: block-level sequential bindings may also use the short form
-`name = expr` or pattern forms such as `(a, b) = pair`, while `let ... in`
-expressions continue to require `let`.
+There is no Surf `let ... in` expression form. Sequential bindings use blocks, and
+top-level script-style bindings use bare `name = expr`.
 
-No `where` clauses. Use `let...in` or blocks.
+No `where` clauses. Use blocks.
 
 ### P5a: Effect Handlers
 
@@ -292,7 +284,7 @@ Current shipped macro rules:
   the standard macro prelude, then ordinary function call resolution
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
-- hygiene renames only binders introduced by the macro expansion (`let` names, `fn`
+- hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`
   params, pattern binders); free references in the macro body remain free and resolve
   in the caller's scope
 - macro expansion runs before type checking, effect inference, linearity checking, and
@@ -310,10 +302,10 @@ Current shipped prelude macros:
 Braces for construction. Punning allowed. Dot-chaining for access. Functional update with `with` is reserved for Phase 1 and not part of the Phase 0 parser/desugarer.
 
 ```
-let lr = 0.01
-let opt = Adam { lr, eps: 1.0e-8 }      -- punning: lr: lr
-let rate = opt.lr                         -- field access
-let chain = model.layer1.weight           -- chained access
+lr = 0.01
+opt = Adam { lr, eps: 1.0e-8 }      -- punning: lr: lr
+rate = opt.lr                         -- field access
+chain = model.layer1.weight           -- chained access
 ```
 
 **⟹**
@@ -374,9 +366,9 @@ Unit: `()` is both the unit value and unit type.
 Access: dot-integer syntax.
 
 ```
-let pair = (w_new, b_new)
-let w = pair.0
-let b = pair.1
+pair = (w_new, b_new)
+w = pair.0
+b = pair.1
 ```
 
 **⟹**
@@ -386,9 +378,9 @@ pair.0   ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))
 ()       ⟹  (lit {type: (t-unit {})} ())
 ```
 
-Destructuring via `let`:
+Destructuring via bindings:
 ```
-let (w, b) = train_step(w, b, x, y, lr)
+(w, b) = train_step(w, b, x, y, lr)
 ```
 
 ### P9: Transforms
@@ -417,7 +409,7 @@ Transforms can be called after construction when they produce a function value.
 Example: `vmap(process)(xs)` parses as an ordinary application whose callee is the
 transform node `vmap(process)`.
 
-Transforms must always be applied — `let g = grad` bare is a parse error.
+Transforms must always be applied — `g = grad` bare is a parse error.
 
 The second argument to `cast` is a precision type literal (`f32`, `bf16`, etc.) in expression position. This is the one special form where a type appears as an argument.
 
@@ -578,12 +570,8 @@ DimExpr       <- IntLit / Ident
 #  EXPRESSIONS (Pratt parser)
 # ═══════════════════════════════════════════════════
 
-Expr          <- LetExpr / MatchExpr / IfExpr / FnExpr
+Expr          <- MatchExpr / IfExpr / FnExpr
                / PipeExpr
-
-LetExpr       <- 'let' S LetPattern S '=' S Expr S LetCont
-LetCont       <- 'in' S Expr
-               / &(Sep LetOrExpr)
 
 LetPattern    <- '(' S Ident (S ',' S Ident)+ (S ',')? S ')'
                / Ident (S ':' S TypeExpr)?
@@ -625,8 +613,8 @@ AtomExpr      <- '(' S ')'
                / TypeIdent
 
 BlockExpr     <- '{' S BlockBody S '}'
-BlockBody     <- (LetBinding Sep)* Expr
-LetBinding    <- 'let' S LetPattern S '=' S Expr
+BlockBody     <- (BlockBinding Sep)* Expr
+BlockBinding  <- LetPattern S '=' S Expr
 Sep           <- (S ';' S) / (S Newline S)
 
 TransformExpr <- TransformKw S '(' S Expr
@@ -687,7 +675,7 @@ StringChar    <- '\\' [nrt0"\\] / !'"' .
 Ident         <- !Keyword [a-z_] [a-zA-Z0-9_]*
 TypeIdent     <- !Keyword [A-Z] [a-zA-Z0-9]*
 
-Keyword       <- ('def' / 'sig' / 'let' / 'in' / 'type' / 'dim'
+Keyword       <- ('def' / 'sig' / 'type' / 'dim'
                / 'match' / 'with' / 'fn' / 'module' / 'import'
                / 'export' / 'if' / 'then' / 'else' / 'grad'
                / 'vmap' / 'jit' / 'cast' / 'realize' / 'copy'
@@ -790,13 +778,12 @@ x |> f |> g                       ⟹  (pipe {} x' (var {} f) (var {} g))
 
 -- Control flow
 if c then a else b                ⟹  (if {} c' a' b')
-let x = e in body                 ⟹  (let {} (bind x e') body')
 fn (x, y) -> body                 ⟹  (fn {} (params {} x y) body')
 
--- Block (sequential let)
+-- Block (sequential bindings)
 {                                 ⟹  (let {} (bind x e1' y e2') body')
-  let x = e1
-  let y = e2
+  x = e1
+  y = e2
   body
 }
 
@@ -861,14 +848,14 @@ x @ Some(_)                       ⟹  (pat-as {} x (pat-ctor {} Some (pat-wild 
 
 `AppExpr` uses `!InfixOp` lookahead to stop juxtaposition when an infix operator follows. `f x + y` parses as `(f x) + y` because application (BP 9) binds tighter than `+` (BP 6).
 
-### 6.2 `let` Context Sensitivity
+### 6.2 Bindings
 
-The `let` keyword has two parsing modes:
+Surf has one binding surface:
 
-1. **Expression level:** Parse `let P = E in body` — `in` is required.
-2. **Inside a block `{ ... }`:** Parse `let P = E` — no `in`. Sequential with next statement.
+1. **Top level:** bare declarations such as `result = expr`.
+2. **Inside a block `{ ... }`:** sequential bindings such as `x = expr` and `(a, b) = pair`.
 
-The parser tracks a boolean flag for "inside block." This is the one context-sensitive rule in Surf.
+There is no Surf `let ... in` expression form. `let` and `in` are ordinary identifiers.
 
 ### 6.3 Negative Literals vs Unary Minus
 
@@ -876,7 +863,7 @@ The parser tracks a boolean flag for "inside block." This is the one context-sen
 
 ### 6.4 Transform Recognition
 
-`grad`, `vmap`, `jit`, `cast`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`let g = grad`) is a parse error — transforms must always be applied.
+`grad`, `vmap`, `jit`, `cast`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
 
 ### 6.5 TypeIdent in Expression Position
 
@@ -933,16 +920,16 @@ def mse_loss(
   y_pred: tensor[samples, 1, f32],
   y_true: tensor[samples, 1, f32]
 ) -> tensor[f32] = {
-  let diff = sub(y_pred, y_true)
-  let sq = mul(diff, diff)
+  diff = sub(y_pred, y_true)
+  sq = mul(diff, diff)
   mean(mean(sq, 1), 0)
 }
 
 def train_step(w, b, x, y, lr) = {
-  let loss_fn = fn (w_, b_) -> mse_loss(predict(x, w_, b_), y)
-  let (dw, db) = grad(loss_fn)(w, b)
-  let w_new = sub(w, mul(lr, dw))
-  let b_new = sub(b, mul(lr, db))
+  loss_fn = fn (w_, b_) -> mse_loss(predict(x, w_, b_), y)
+  (dw, db) = grad(loss_fn)(w, b)
+  w_new = sub(w, mul(lr, dw))
+  b_new = sub(b, mul(lr, db))
   (w_new, b_new)
 }
 ```
@@ -963,7 +950,7 @@ def activate(act: Activation, x: tensor[batch, hidden_dim, f32]) -> tensor[batch
   }
 
 def forward(w1, b1, w2, b2, act, x) = {
-  let h = matmul(x, w1)
+  h = matmul(x, w1)
     |> fn (z) -> add(z, b1)
     |> fn (z) -> activate(act, z)
   add(matmul(h, w2), b2)
@@ -979,7 +966,7 @@ type Optimizer =
   | Sgd { lr: f32 }
   | Adam { lr: f32, beta1: f32, beta2: f32, eps: f32 }
 
-def default_adam =
+default_adam =
   Adam { lr: 0.001, beta1: 0.9, beta2: 0.999, eps: 1.0e-8 }
 
 def learning_rate(opt) =
@@ -1009,7 +996,7 @@ def dot[n](x: tensor[n, f32], y: tensor[n, f32]) -> f32 =
   sum(mul(x, y))
 
 def normalize[d](x: tensor[d, f32]) -> tensor[d, f32] = {
-  let norm = sqrt(sum(mul(x, x)))
+  norm = sqrt(sum(mul(x, x)))
   div(x, expand(norm, 0))
 }
 ```
@@ -1023,10 +1010,10 @@ import Std.Io (println)
 import Std.Iter (fold, range)   -- stdlib helpers, not built-ins
 
 def train(model_w, model_b, data_x, data_y, lr, epochs) = {
-  let step = fn (wb, i) -> {
-    let (w, b) = wb
-    let loss_fn = fn (w_, b_) -> mse_loss(predict(data_x, w_, b_), data_y)
-    let (dw, db) = grad(loss_fn)(w, b)
+  step = fn (wb, i) -> {
+    (w, b) = wb
+    loss_fn = fn (w_, b_) -> mse_loss(predict(data_x, w_, b_), data_y)
+    (dw, db) = grad(loss_fn)(w, b)
     (sub(w, mul(lr, dw)), sub(b, mul(lr, db)))
   }
   fold(step, (model_w, model_b), range(0, epochs))

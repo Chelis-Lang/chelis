@@ -187,7 +187,7 @@ escape hatch.
 Project-facing Surf should read like human-written model code, not typed Deep debug output.
 
 - prefer `def ... -> T = ...` for typed function definitions
-- put input types on parameters instead of top-level load-style `let` bindings
+- put input types on parameters instead of top-level load-style bindings
 - use symbolic dimensions for runtime-varying axes such as `batch` and `seq`
 - keep fixed architecture dimensions concrete
 - avoid redundant intermediate type ascriptions when inference already determines the type
@@ -195,8 +195,7 @@ Project-facing Surf should read like human-written model code, not typed Deep de
 
 Planned public-style target for Phase 3:
 
-- prefer short-form block bindings such as `x = expr`; explicit `let x = expr` remains
-  valid
+- use block bindings such as `x = expr`; Surf no longer has a separate `let` surface
 - prefer pipe-first composition for eligible linear flows
 - use multiline pipes for long or many-stage chains, breaking after `=` and before every
   `|>` when the flat form exceeds the width budget or the chain becomes visually dense

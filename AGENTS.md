@@ -48,6 +48,8 @@ not drift.
 - Fresh review context is preferred when practical.
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
+- For this repository, a requested "red team agent" means a fresh local subagent in a
+  new context. A main-thread validation pass does **not** satisfy that request.
 
 ### Required Red-Team Behaviors
 
@@ -55,6 +57,20 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
+
+### Fresh-Context Enforcement
+
+- When asked to run a red team or "spawn a red team agent", first close any known stale
+  or failed subagents from the current session and then spawn a new local subagent with
+  fresh context.
+- If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
+  broken state, close that handle and retry until you have either:
+  1. a working fresh local subagent, or
+  2. an explicit statement that red-team validation is blocked because fresh local
+     subagent execution is unavailable.
+- Do not substitute main-thread validation and call it a red team.
+- Do not mark a phase as red-teamed unless the fresh-context subagent actually ran the
+  validation work.
 
 ## Documentation And Spec Sync
 
@@ -173,7 +189,7 @@ be treated as runnable unless they require a separate missing prerequisite.
 When writing or rewriting Surf in this repository:
 
 - prefer `def ... -> T = ...` over `def ... : T = ...`
-- put types on function parameters, not on load-style top-level `let` bindings
+- put types on function parameters, not on load-style top-level bindings
 - use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
 - keep fixed architecture dimensions concrete
 - do not annotate intermediate expressions when inference already determines the type
@@ -212,8 +228,10 @@ Project-local skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory so both tool
 surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
-should point at the same underlying skill files so slash-command access does not drift
-between tool surfaces. Keep a `red-team` alias wired to `redteam-exec`.
+should stay behaviorally aligned so slash-command access does not drift between tool
+surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
+stale-agent cleanup plus a fresh local subagent before any validation is counted as a
+red team.
 
 Current shared skill set:
 

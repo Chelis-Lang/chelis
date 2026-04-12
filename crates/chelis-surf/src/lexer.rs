@@ -371,8 +371,6 @@ fn classify_ident(text: &str) -> TokenKind {
     match text {
         "def" => TokenKind::Def,
         "sig" => TokenKind::Sig,
-        "let" => TokenKind::Let,
-        "in" => TokenKind::In,
         "type" => TokenKind::Type,
         "dim" => TokenKind::Dim,
         "macro" => TokenKind::Macro,
@@ -566,12 +564,11 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def let in type dim macro match with fn module import if then else grad vmap jit tensor cast export"
+                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast export par"
             ),
             vec![
                 TokenKind::Def,
-                TokenKind::Let,
-                TokenKind::In,
+                TokenKind::Sig,
                 TokenKind::Type,
                 TokenKind::Dim,
                 TokenKind::Macro,
@@ -586,9 +583,12 @@ mod tests {
                 TokenKind::Grad,
                 TokenKind::Vmap,
                 TokenKind::Jit,
+                TokenKind::Realize,
+                TokenKind::Copy,
                 TokenKind::Tensor,
                 TokenKind::Cast,
                 TokenKind::Export,
+                TokenKind::Par,
             ]
         );
     }
@@ -686,20 +686,17 @@ mod tests {
     #[test]
     fn newline_tokens_preserved() {
         assert_eq!(
-            lex_kinds("let x = 1\nlet y = 2\r\nlet z = 3"),
+            lex_kinds("x = 1\nlet = 2\r\nin = 3"),
             vec![
-                TokenKind::Let,
                 TokenKind::Ident("x".into()),
                 TokenKind::Eq,
                 TokenKind::Int(1),
                 TokenKind::Newline,
-                TokenKind::Let,
-                TokenKind::Ident("y".into()),
+                TokenKind::Ident("let".into()),
                 TokenKind::Eq,
                 TokenKind::Int(2),
                 TokenKind::Newline,
-                TokenKind::Let,
-                TokenKind::Ident("z".into()),
+                TokenKind::Ident("in".into()),
                 TokenKind::Eq,
                 TokenKind::Int(3),
             ]

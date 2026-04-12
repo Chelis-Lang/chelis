@@ -90,9 +90,9 @@ cargo test -p chelis-surf
 - [ ] Operator precedence: `a + b * c` parses as `a + (b * c)`, not `(a + b) * c`
 - [ ] Pipe precedence: `x |> f |> g` parses as `(pipe x f g)`
 - [ ] Match arms use `=>` (not `->`)
-- [ ] `let` in blocks works without `in`: `{ let x = 1; x + 1 }`
-- [ ] `let x = e in body` works outside blocks
-- [ ] All 24 keywords are reserved (try using `def` as a variable name — should error)
+- [ ] Short block bindings work: `{ x = 1; x + 1 }`
+- [ ] `let` and `in` are valid identifiers after keyword removal: `{ let = 1; in = 2; add(let, in) }`
+- [ ] Reserved keywords exclude `let` and `in`; using `def` as a variable name still errors
 - [ ] Trailing commas accepted in parameter lists, arguments, record fields, imports
 
 Test: write 5 intentionally malformed Surf programs and verify each produces a parse error (not a panic or silent success).

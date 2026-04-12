@@ -41,7 +41,7 @@ def f(residual, x: tensor[4, f32]): tensor[4, f32] = residual(x)
 fn hygiene_renames_macro_introduced_binders_only() {
     let decls = parse_str(
         r#"
-macro capture(y) = { let x = 1.0; add(x, y) }
+macro capture(y) = { x = 1.0; add(x, y) }
 def f(x: f32): f32 = capture(x)
 "#,
     )

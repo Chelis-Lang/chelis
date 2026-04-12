@@ -15,8 +15,10 @@ fn detects_use_after_consume() {
     let errors = check_surf(
         r#"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
-  let y: tensor[4, f32] = relu(x)
-  in add(x, y)
+  {
+    y: tensor[4, f32] = relu(x)
+    add(x, y)
+  }
 "#,
     )
     .expect_err("linearity should reject reusing a consumed tensor");
@@ -33,8 +35,10 @@ fn copy_allows_reuse() {
     check_surf(
         r#"
 def ok(x: tensor[4, f32]): tensor[4, f32] =
-  let y: tensor[4, f32] = relu(copy(x))
-  in add(x, y)
+  {
+    y: tensor[4, f32] = relu(copy(x))
+    add(x, y)
+  }
 "#,
     )
     .expect("copy should preserve a later consuming use");
@@ -47,8 +51,10 @@ fn borrow_preserves_tensor_for_later_consumption() {
 def keep(x: tensor[4, f32]): int32 = 1
 
 def ok(x: tensor[4, f32]): tensor[4, f32] =
-  let n: int32 = keep(&x)
-  in relu(x)
+  {
+    n: int32 = keep(&x)
+    relu(x)
+  }
 "#,
     )
     .expect("borrowed call should not consume x");
@@ -59,8 +65,10 @@ fn borrow_cannot_be_stored() {
     let errors = check_surf(
         r#"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
-  let y = &x
-  in x
+  {
+    y = &x
+    x
+  }
 "#,
     )
     .expect_err("borrow binding should be rejected");
@@ -77,8 +85,10 @@ fn closure_capture_consumes_outer_tensor() {
     let errors = check_surf(
         r#"
 def bad(x: tensor[4, f32]): tensor[4, f32] =
-  let f = fn () -> x
-  in relu(x)
+  {
+    f = fn () -> x
+    relu(x)
+  }
 "#,
     )
     .expect_err("capturing a tensor should consume it");
@@ -94,11 +104,13 @@ fn match_consumes_tuple_scrutinee() {
     let errors = check_surf(
         r#"
 def bad(pair: (tensor[4, f32], int32)): int32 =
-  let n: int32 = match pair with {
-    | (x, _) => 1
+  {
+    n: int32 = match pair with {
+      | (x, _) => 1
+    }
+    again: (tensor[4, f32], int32) = pair
+    n
   }
-  let again: (tensor[4, f32], int32) = pair
-  in n
 "#,
     )
     .expect_err("reusing a tuple carrying a tensor after match should fail");
@@ -115,10 +127,12 @@ fn tensor_shape_queries_do_not_consume_tensor_inputs() {
     check_surf(
         r#"
 def ok(x: tensor[2, 3, f32]): int32 =
-  let r: int32 = rank(x)
-  let c: int32 = shape(x, 1)
-  let n: int64 = numel(x)
-  in c
+  {
+    r: int32 = rank(x)
+    c: int32 = shape(x, 1)
+    n: int64 = numel(x)
+    c
+  }
 "#,
     )
     .expect("shape queries should be observational, not consuming");

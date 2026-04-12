@@ -121,11 +121,11 @@ fn phase1f_surf_examples_and_specs_agree_with_parser() {
     ));
     surf_inputs.push((
         "spec-semicolon-block-fixture".to_string(),
-        "def f(axis) = { let y = axis; y }\ndef g() = par { a; b }\n".to_string(),
+        "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n".to_string(),
     ));
     surf_inputs.push((
         "spec-script-fixture".to_string(),
-        "let x = (x : tensor[32, 784, f32])\nlet y = relu(x)\n".to_string(),
+        "x = (x : tensor[32, 784, f32])\ny = relu(x)\n".to_string(),
     ));
 
     for (label, source) in surf_inputs {
