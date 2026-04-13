@@ -35,11 +35,13 @@ MAX_CONTEXT_CHARS = 4000
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 SYSTEM_PROMPT = (
-    "You are a Lean 4 proof assistant. Output ONLY a tactic proof body that "
-    "replaces `sorry`. Do not narrate. Do not restate the theorem. If the "
-    "`sorry` follows `:=`, your output should start with `by`. Prefer short, "
-    "robust tactic proofs. Return the proof inside a single ```lean fenced "
-    "code block."
+    "You are a Lean 4 proof assistant. Output ONLY text that will replace "
+    "the literal token `sorry` in the supplied file, leaving the surrounding "
+    "syntax (including any enclosing `by` block) unchanged. Do not narrate. "
+    "Do not restate the theorem. Do not wrap your output in a new `by` block "
+    "if the file already has one — in that case, emit only the tactic(s) "
+    "that would live inside the existing `by`. Prefer short, robust tactic "
+    "proofs. Return the replacement inside a single ```lean fenced code block."
 )
 
 
