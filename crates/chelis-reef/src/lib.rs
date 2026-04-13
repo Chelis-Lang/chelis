@@ -1190,8 +1190,11 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             Decl::FunDef {
                 name: internal_name(package, module, name),
                 dim_params: dim_params.clone(),
-                params: params.iter().map(rewrite_param).collect(),
-                ret_ty: ret_ty.as_ref().map(rewrite_type),
+                params: params
+                    .iter()
+                    .map(|param| rewrite_param(param, resolver))
+                    .collect(),
+                ret_ty: ret_ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
                 effects: effects.clone(),
                 body,
                 span: *span,
@@ -1204,7 +1207,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             span,
         } => Decl::LetDef {
             name: internal_name(package, module, name),
-            ty: ty.as_ref().map(rewrite_type),
+            ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
             value: rewrite_expr(value, resolver, &mut HashSet::new()),
             span: *span,
         },
@@ -1215,7 +1218,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             span,
         } => Decl::Sig {
             name: internal_name(package, module, name),
-            ty: rewrite_type(ty),
+            ty: rewrite_type(ty, resolver),
             effects: effects.clone(),
             span: *span,
         },
@@ -1227,7 +1230,10 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         } => Decl::TypeDef {
             name: internal_name(package, module, name),
             params: params.clone(),
-            variants: variants.iter().map(rewrite_variant).collect(),
+            variants: variants
+                .iter()
+                .map(|variant| rewrite_variant(variant, resolver))
+                .collect(),
             span: *span,
         },
         Decl::TypeAlias {
@@ -1238,7 +1244,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         } => Decl::TypeAlias {
             name: internal_name(package, module, name),
             params: params.clone(),
-            ty: rewrite_type(ty),
+            ty: rewrite_type(ty, resolver),
             span: *span,
         },
         Decl::MacroDef {
@@ -1263,17 +1269,20 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
     }
 }
 
-fn rewrite_variant(variant: &Variant) -> Variant {
+fn rewrite_variant(variant: &Variant, resolver: &NameResolver) -> Variant {
     Variant {
         name: variant.name.clone(),
         fields: match &variant.fields {
-            VariantFields::Positional(fields) => {
-                VariantFields::Positional(fields.iter().map(rewrite_type).collect())
-            }
+            VariantFields::Positional(fields) => VariantFields::Positional(
+                fields
+                    .iter()
+                    .map(|field| rewrite_type(field, resolver))
+                    .collect(),
+            ),
             VariantFields::Record(fields) => VariantFields::Record(
                 fields
                     .iter()
-                    .map(|(name, ty)| (name.clone(), rewrite_type(ty)))
+                    .map(|(name, ty)| (name.clone(), rewrite_type(ty, resolver)))
                     .collect(),
             ),
         },
@@ -1281,33 +1290,55 @@ fn rewrite_variant(variant: &Variant) -> Variant {
     }
 }
 
-fn rewrite_param(param: &Param) -> Param {
+fn rewrite_param(param: &Param, resolver: &NameResolver) -> Param {
     Param {
         name: param.name.clone(),
-        ty: param.ty.as_ref().map(rewrite_type),
+        ty: param.ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
         span: param.span,
     }
 }
 
-fn rewrite_type(ty: &TypeExpr) -> TypeExpr {
+fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
     match ty {
-        TypeExpr::Named(name, span) => TypeExpr::Named(name.clone(), *span),
+        TypeExpr::Named(name, span) => TypeExpr::Named(
+            resolver
+                .own_names
+                .get(name)
+                .cloned()
+                .or_else(|| resolver.imported_names.get(name).cloned())
+                .unwrap_or_else(|| name.clone()),
+            *span,
+        ),
         TypeExpr::Tensor(parts, precision, span) => TypeExpr::Tensor(
-            parts.iter().map(rewrite_type).collect(),
+            parts
+                .iter()
+                .map(|part| rewrite_type(part, resolver))
+                .collect(),
             precision.clone(),
             *span,
         ),
         TypeExpr::Arrow(args, ret, span) => TypeExpr::Arrow(
-            args.iter().map(rewrite_type).collect(),
-            Box::new(rewrite_type(ret)),
+            args.iter().map(|arg| rewrite_type(arg, resolver)).collect(),
+            Box::new(rewrite_type(ret, resolver)),
             *span,
         ),
-        TypeExpr::App(name, args, span) => {
-            TypeExpr::App(name.clone(), args.iter().map(rewrite_type).collect(), *span)
-        }
-        TypeExpr::Tuple(parts, span) => {
-            TypeExpr::Tuple(parts.iter().map(rewrite_type).collect(), *span)
-        }
+        TypeExpr::App(name, args, span) => TypeExpr::App(
+            resolver
+                .own_names
+                .get(name)
+                .cloned()
+                .or_else(|| resolver.imported_names.get(name).cloned())
+                .unwrap_or_else(|| name.clone()),
+            args.iter().map(|arg| rewrite_type(arg, resolver)).collect(),
+            *span,
+        ),
+        TypeExpr::Tuple(parts, span) => TypeExpr::Tuple(
+            parts
+                .iter()
+                .map(|part| rewrite_type(part, resolver))
+                .collect(),
+            *span,
+        ),
         TypeExpr::Infer(span) => TypeExpr::Infer(*span),
     }
 }
@@ -1384,22 +1415,16 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
                 .collect(),
             *span,
         ),
-        Expr::Let(bindings, body, span) => {
-            let mut scoped = locals.clone();
-            let bindings = bindings
-                .iter()
-                .map(|binding| rewrite_let_binding(binding, resolver, &mut scoped))
-                .collect();
-            let body = rewrite_expr(body, resolver, &mut scoped);
-            Expr::Let(bindings, Box::new(body), *span)
-        }
         Expr::Lambda(params, body, span) => {
             let mut scoped = locals.clone();
             for param in params {
                 scoped.insert(param.name.clone());
             }
             Expr::Lambda(
-                params.iter().map(rewrite_param).collect(),
+                params
+                    .iter()
+                    .map(|param| rewrite_param(param, resolver))
+                    .collect(),
                 Box::new(rewrite_expr(body, resolver, &mut scoped)),
                 *span,
             )
@@ -1455,7 +1480,7 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
         ),
         Expr::Annotate(inner, ty, span) => Expr::Annotate(
             Box::new(rewrite_expr(inner, resolver, locals)),
-            rewrite_type(ty),
+            rewrite_type(ty, resolver),
             *span,
         ),
         Expr::Block(bindings, body, span) => {
@@ -1532,9 +1557,8 @@ fn rewrite_let_binding(
     let value = rewrite_expr(&binding.value, resolver, locals);
     collect_let_pattern_binders(&binding.pattern, locals);
     LetBinding {
-        style: binding.style,
         pattern: binding.pattern.clone(),
-        ty: binding.ty.as_ref().map(rewrite_type),
+        ty: binding.ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
         value,
     }
 }
