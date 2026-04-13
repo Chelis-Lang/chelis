@@ -493,15 +493,20 @@ Shipped.
 - add text file I/O as the minimum host-data ingress surface with IO effect
   (`read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`)
 - add memory-mapped I/O (`mmap_file`, `mmap_read`, `mmap_len`) backed by Rust runtime's
-  memmap2 for large datasets — IO effect on open, pure reads after that
-- add CSV loading returning `List[Dict[String, String]]` for tabular data
-- add JSON loading returning a recursive `Json` ADT for configs and metadata
+  memmap2 for large datasets — IO effect on open, pure reads after that, byte-range
+  access returned as `List[Int]`
+- add CSV loading returning `List[Dict[String, String]]` for tabular data, with
+  `try_read_csv` as the recovery API
+- add JSON loading returning `Json` for configs and metadata, with `try_load_json` and
+  `try_parse_json` for recovery paths
 - add a BPE tokenizer that loads HuggingFace `tokenizer.json` format and can
-  encode/decode text
+  encode/decode text; tokenizer loading returns `Tokenizer`, with
+  `try_load_tokenizer` for recovery paths
 - add batch encode + padding flows that bridge `List[List[Int]]` into tensor model
   inputs
 - make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
   sidecar
+- acceptance oracle: `cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --nocapture`
 
 ### 3i: Standard Library Expansion
 
@@ -512,12 +517,17 @@ Standard library modules for real model training and inference:
 - **`Std.Decimal`:** Fixed-point exact arithmetic. Configurable precision, banker's
   rounding. Host-value type, not tensor dtype.
 - **`Std.Nn.Generate`:** Autoregressive generation with KV cache management. Greedy and
-  sampled generation (temperature, top-k, top-p). The core inference pattern for
+  sampled generation (temperature, top-k, top-p) via record-config APIs. `KVCache` is
+  precision-polymorphic so mixed-precision inference does not force an `f32` cache
+  boundary. The shipped pure greedy entrypoint is `generate`; sampled `generate_with`
+  currently runs under `with seed(...)`. This is the core inference pattern for
   generative models — eliminates the need for manual fold-based generation loops.
 - **`Std.Optim` (expansion):** AdamW (decoupled weight decay, the standard transformer
   optimizer), LAMB (large-batch training).
 - **`Std.Schedule`:** Learning rate scheduling — cosine annealing with warmup, linear
-  warmup, step decay. Pure functions from step number to learning rate.
+  warmup, step decay. Pure `(step, config)` functions using record configs rather than
+  positional constructor calls.
+- acceptance oracle: `cargo test -p chelis-cli --test phase3i_std -- --nocapture`
 
 ### 3j: School — Numerical Methods, Statistics, and Optimization
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
@@ -22,6 +22,7 @@ pub struct HostProgram {
 #[derive(Debug, Clone)]
 pub struct HostBinding {
     pub name: String,
+    pub display_name: Option<String>,
     pub ty: HostType,
     pub value: HostExpr,
 }
@@ -76,6 +77,12 @@ pub struct HostPatternBinding {
 }
 
 #[derive(Debug, Clone)]
+pub struct HostAdtField {
+    pub name: Option<String>,
+    pub ty: HostType,
+}
+
+#[derive(Debug, Clone)]
 pub enum HostCallbackKind {
     Named {
         function: String,
@@ -93,6 +100,7 @@ pub enum HostType {
     Float64,
     Bool,
     String,
+    Fn(Vec<HostType>, Box<HostType>),
     Adt(String),
     List(Box<HostType>),
     Dict(Box<HostType>, Box<HostType>),
@@ -116,6 +124,7 @@ pub enum HostExpr {
     Call {
         function: String,
         args: Vec<HostExpr>,
+        arg_tys: Vec<HostType>,
         ty: HostType,
     },
     Builtin {
@@ -126,6 +135,11 @@ pub enum HostExpr {
     AdtConstruct {
         ctor: String,
         fields: Vec<HostExpr>,
+        ty: HostType,
+    },
+    AdtFieldAccess {
+        base: Box<HostExpr>,
+        field_index: usize,
         ty: HostType,
     },
     If {
@@ -144,6 +158,12 @@ pub enum HostExpr {
     MatchAdt {
         scrutinee: Box<HostExpr>,
         arms: Vec<HostMatchArm>,
+        default_expr: Option<Box<HostExpr>>,
+        ty: HostType,
+    },
+    Let {
+        bindings: Vec<HostBinding>,
+        body: Box<HostExpr>,
         ty: HostType,
     },
     Map {
@@ -207,7 +227,7 @@ fn lower_host_program(
 ) -> HostProgram {
     let mut host = HostProgram::default();
     let mut global_scope = HashMap::new();
-    for expr in program.exprs() {
+    for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
         };
@@ -224,7 +244,7 @@ fn lower_host_program(
         let Some(body) = kids.get(1) else {
             continue;
         };
-        let ty_expr = program.type_env().get(name);
+        let ty_expr = lookup_declared_type_expr(program, name);
         if let Some(function) = lower_host_function(name, body, ty_expr, program) {
             host.functions.push(function);
         } else {
@@ -237,12 +257,15 @@ fn lower_host_program(
             let ty = host_expr_type(&value);
             host.globals.push(HostBinding {
                 name: name.to_string(),
+                display_name: None,
                 ty,
                 value: value.clone(),
             });
             global_scope.insert(name.to_string(), host_expr_type(&value));
         }
     }
+    refine_host_function_signatures(&mut host.functions);
+    refine_host_globals(&mut host.globals, &host.functions);
     host
 }
 
@@ -265,6 +288,7 @@ fn lower_host_function(
     }
     let (param_tys, ret_ty) = ty_expr
         .and_then(parse_fn_type_expr)
+        .or_else(|| expr_fn_type(body))
         .unwrap_or((Vec::new(), HostType::Unknown));
 
     let mut scope = HashMap::new();
@@ -273,7 +297,15 @@ fn lower_host_function(
         let Some(pname) = param_name(param) else {
             continue;
         };
-        let pty = param_tys.get(index).cloned().unwrap_or(HostType::Unknown);
+        let pty = param_host_type(param)
+            .filter(|ty| *ty != HostType::Unknown)
+            .or_else(|| {
+                param_tys
+                    .get(index)
+                    .cloned()
+                    .filter(|ty| *ty != HostType::Unknown)
+            })
+            .unwrap_or(HostType::Unknown);
         scope.insert(pname.clone(), pty.clone());
         params.push(HostParam {
             name: pname,
@@ -283,6 +315,7 @@ fn lower_host_function(
 
     let mut tensor_helpers = Vec::new();
     let host_body = lower_host_expr(kids.get(1)?, program, &scope, &mut tensor_helpers);
+    refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty == HostType::Unknown {
         host_expr_type(&host_body)
     } else {
@@ -368,6 +401,9 @@ fn lower_host_expr(
             };
             HostExpr::Tuple(items, ty)
         }
+        Expr::List(list, _) if tag(list) == Some("record") => {
+            lower_record_host_expr(list, program, scope, tensor_helpers)
+        }
         Expr::List(list, _) if tag(list) == Some("lit") => lower_host_expr(
             children(list).first().unwrap_or(expr),
             program,
@@ -381,36 +417,124 @@ fn lower_host_expr(
                 .unwrap_or("_")
                 .to_string();
             let ty = expr_type(expr)
+                .filter(|ty| *ty != HostType::Unknown)
                 .or_else(|| scope.get(&name).cloned())
-                .or_else(|| program.type_env().get(&name).map(parse_host_type))
+                .or_else(|| lookup_declared_host_type(program, &name))
                 .unwrap_or(HostType::Unknown);
-            if name == "Nil" && matches!(ty, HostType::List(_)) {
-                return HostExpr::List(Vec::new(), ty);
+            if name == "Nil" {
+                return HostExpr::List(
+                    Vec::new(),
+                    match ty {
+                        HostType::List(_) => ty,
+                        _ => HostType::List(Box::new(HostType::Unknown)),
+                    },
+                );
+            }
+            if let Some((adt_name, fields)) = lookup_adt_ctor(program, &name)
+                && fields.is_empty()
+            {
+                return HostExpr::AdtConstruct {
+                    ctor: name,
+                    fields: Vec::new(),
+                    ty: HostType::Adt(adt_name),
+                };
             }
             HostExpr::Var(name, ty)
         }
         Expr::List(list, _) if tag(list) == Some("if") => {
             let kids = children(list);
-            let ty = expr_host_type(expr, program, scope);
+            let then_expr = lower_host_expr(&kids[1], program, scope, tensor_helpers);
+            let else_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
+            let explicit_ty = expr_host_type(expr, program, scope);
+            let ty = if explicit_ty == HostType::Unknown {
+                let then_ty = host_expr_type(&then_expr);
+                if then_ty == HostType::Unknown {
+                    host_expr_type(&else_expr)
+                } else {
+                    then_ty
+                }
+            } else {
+                explicit_ty
+            };
             HostExpr::If {
                 cond: Box::new(lower_host_expr(&kids[0], program, scope, tensor_helpers)),
-                then_expr: Box::new(lower_host_expr(&kids[1], program, scope, tensor_helpers)),
-                else_expr: Box::new(lower_host_expr(&kids[2], program, scope, tensor_helpers)),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
                 ty,
             }
         }
         Expr::List(list, _) if tag(list) == Some("match") => {
             lower_match_host_expr(list, program, scope, tensor_helpers)
         }
+        Expr::List(list, _) if tag(list) == Some("let") => {
+            let kids = children(list);
+            let mut scoped = scope.clone();
+            let mut bindings = Vec::new();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some("bind")
+            {
+                let bind_children = children(bind_list);
+                let mut index = 0;
+                while index + 1 < bind_children.len() {
+                    if let Some(name) = symbol_name(&bind_children[index]) {
+                        let value = lower_host_expr(
+                            &bind_children[index + 1],
+                            program,
+                            &scoped,
+                            tensor_helpers,
+                        );
+                        let bind_ty = host_expr_type(&value);
+                        bindings.push(HostBinding {
+                            name: name.to_string(),
+                            display_name: None,
+                            ty: bind_ty.clone(),
+                            value,
+                        });
+                        scoped.insert(name.to_string(), bind_ty);
+                    }
+                    index += 2;
+                }
+            }
+            let body = kids
+                .get(1)
+                .map(|child| lower_host_expr(child, program, &scoped, tensor_helpers))
+                .unwrap_or(HostExpr::Unit);
+            let explicit_ty = expr_host_type(expr, program, scope);
+            HostExpr::Let {
+                bindings,
+                body: Box::new(body.clone()),
+                ty: if explicit_ty == HostType::Unknown {
+                    host_expr_type(&body)
+                } else {
+                    explicit_ty
+                },
+            }
+        }
         Expr::List(list, _) if tag(list) == Some("tuple-get") => {
             lower_tuple_get_host_expr(list, program, scope, tensor_helpers)
         }
-        Expr::List(list, _) if tag(list) == Some("cast") => lower_host_expr(
-            children(list).first().unwrap_or(expr),
-            program,
-            scope,
-            tensor_helpers,
-        ),
+        Expr::List(list, _) if tag(list) == Some("access") => {
+            lower_access_host_expr(list, program, scope, tensor_helpers)
+        }
+        Expr::List(list, _) if tag(list) == Some("cast") => {
+            let value = lower_host_expr(
+                children(list).first().unwrap_or(expr),
+                program,
+                scope,
+                tensor_helpers,
+            );
+            let inferred_ty = host_expr_type(&value);
+            let ty = expr_host_type(expr, program, scope);
+            HostExpr::Builtin {
+                name: "cast".to_string(),
+                args: vec![value],
+                ty: if ty == HostType::Unknown {
+                    inferred_ty
+                } else {
+                    ty
+                },
+            }
+        }
         Expr::List(list, _) if tag(list) == Some("app") => {
             lower_app_host_expr(list, program, scope, tensor_helpers)
         }
@@ -419,11 +543,563 @@ fn lower_host_expr(
     }
 }
 
+fn refine_function_params_from_body(params: &mut [HostParam], body: &HostExpr) {
+    let HostExpr::Call { args, arg_tys, .. } = body else {
+        return;
+    };
+    for (index, param) in params.iter_mut().enumerate() {
+        if param.ty != HostType::Unknown {
+            continue;
+        }
+        let Some(HostExpr::Var(name, _)) = args.get(index) else {
+            continue;
+        };
+        if name != &param.name {
+            continue;
+        }
+        let Some(inferred) = arg_tys.get(index) else {
+            continue;
+        };
+        if *inferred != HostType::Unknown {
+            param.ty = inferred.clone();
+        }
+    }
+}
+
+fn refine_host_function_signatures(functions: &mut [HostFunction]) {
+    loop {
+        let mut changed = false;
+        let signatures = functions
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    (
+                        function
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect::<Vec<_>>(),
+                        function.ret_ty.clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        for function in functions.iter_mut() {
+            let inferred_param_fns = infer_callable_param_types(&function.params, &function.body);
+            for param in function.params.iter_mut() {
+                if param.ty == HostType::Unknown
+                    && let Some(inferred) = inferred_param_fns.get(&param.name)
+                {
+                    param.ty = inferred.clone();
+                    changed = true;
+                }
+            }
+
+            let mut scope = function
+                .params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty.clone()))
+                .collect::<HashMap<_, _>>();
+            if refine_host_expr_types(&mut function.body, &mut scope, &signatures) {
+                changed = true;
+            }
+            if function.ret_ty == HostType::Unknown {
+                let body_ty = host_expr_type(&function.body);
+                if body_ty != HostType::Unknown {
+                    function.ret_ty = body_ty;
+                    changed = true;
+                }
+            }
+
+            let HostExpr::Call {
+                function: callee,
+                args,
+                arg_tys,
+                ty,
+            } = &mut function.body
+            else {
+                continue;
+            };
+            let Some((callee_params, callee_ret)) = signatures.get(callee) else {
+                continue;
+            };
+
+            if function.ret_ty == HostType::Unknown && *callee_ret != HostType::Unknown {
+                function.ret_ty = callee_ret.clone();
+                if *ty == HostType::Unknown {
+                    *ty = callee_ret.clone();
+                }
+                changed = true;
+            }
+
+            for (index, param) in function.params.iter_mut().enumerate() {
+                if param.ty != HostType::Unknown {
+                    continue;
+                }
+                let Some(HostExpr::Var(name, arg_ty)) = args.get_mut(index) else {
+                    continue;
+                };
+                if name != &param.name {
+                    continue;
+                }
+                let Some(inferred) = callee_params.get(index) else {
+                    continue;
+                };
+                if *inferred == HostType::Unknown {
+                    continue;
+                }
+                param.ty = inferred.clone();
+                *arg_ty = inferred.clone();
+                if let Some(call_arg_ty) = arg_tys.get_mut(index) {
+                    *call_arg_ty = inferred.clone();
+                }
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) {
+    loop {
+        let signatures = functions
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    (
+                        function
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect::<Vec<_>>(),
+                        function.ret_ty.clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut changed = false;
+        let mut scope = HashMap::new();
+        for binding in globals.iter_mut() {
+            if refine_host_expr_types(&mut binding.value, &mut scope, &signatures) {
+                changed = true;
+            }
+            let inferred = host_expr_type(&binding.value);
+            if binding.ty != inferred && inferred != HostType::Unknown {
+                binding.ty = inferred.clone();
+                changed = true;
+            }
+            scope.insert(binding.name.clone(), binding.ty.clone());
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn infer_callable_param_types(params: &[HostParam], body: &HostExpr) -> HashMap<String, HostType> {
+    let unknown = params
+        .iter()
+        .filter(|param| param.ty == HostType::Unknown)
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    let mut out = HashMap::new();
+    infer_callable_param_types_in_expr(body, &unknown, &mut out);
+    out
+}
+
+fn infer_callable_param_types_in_expr(
+    expr: &HostExpr,
+    unknown: &HashSet<String>,
+    out: &mut HashMap<String, HostType>,
+) {
+    match expr {
+        HostExpr::Call {
+            function,
+            args,
+            arg_tys,
+            ..
+        } => {
+            if unknown.contains(function) {
+                out.entry(function.clone()).or_insert_with(|| {
+                    HostType::Fn(arg_tys.clone(), Box::new(HostType::Tuple(Vec::new())))
+                });
+            }
+            for arg in args {
+                infer_callable_param_types_in_expr(arg, unknown, out);
+            }
+        }
+        HostExpr::List(items, _) | HostExpr::Tuple(items, _) => {
+            for item in items {
+                infer_callable_param_types_in_expr(item, unknown, out);
+            }
+        }
+        HostExpr::Builtin { args, .. } => {
+            for arg in args {
+                infer_callable_param_types_in_expr(arg, unknown, out);
+            }
+        }
+        HostExpr::AdtConstruct { fields, .. } => {
+            for field in fields {
+                infer_callable_param_types_in_expr(field, unknown, out);
+            }
+        }
+        HostExpr::AdtFieldAccess { base, .. } => {
+            infer_callable_param_types_in_expr(base, unknown, out);
+        }
+        HostExpr::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            infer_callable_param_types_in_expr(cond, unknown, out);
+            infer_callable_param_types_in_expr(then_expr, unknown, out);
+            infer_callable_param_types_in_expr(else_expr, unknown, out);
+        }
+        HostExpr::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            infer_callable_param_types_in_expr(scrutinee, unknown, out);
+            infer_callable_param_types_in_expr(some_expr, unknown, out);
+            infer_callable_param_types_in_expr(none_expr, unknown, out);
+        }
+        HostExpr::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            infer_callable_param_types_in_expr(scrutinee, unknown, out);
+            for arm in arms {
+                infer_callable_param_types_in_expr(&arm.expr, unknown, out);
+            }
+            if let Some(default_expr) = default_expr {
+                infer_callable_param_types_in_expr(default_expr, unknown, out);
+            }
+        }
+        HostExpr::Let { bindings, body, .. } => {
+            for binding in bindings {
+                infer_callable_param_types_in_expr(&binding.value, unknown, out);
+            }
+            infer_callable_param_types_in_expr(body, unknown, out);
+        }
+        HostExpr::Map { callback, list, .. }
+        | HostExpr::Filter { callback, list, .. }
+        | HostExpr::Partition { callback, list, .. }
+        | HostExpr::FlatMap { callback, list, .. } => {
+            infer_callable_param_types_in_callback(callback, unknown, out);
+            infer_callable_param_types_in_expr(list, unknown, out);
+        }
+        HostExpr::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExpr::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            infer_callable_param_types_in_callback(callback, unknown, out);
+            infer_callable_param_types_in_expr(init, unknown, out);
+            infer_callable_param_types_in_expr(list, unknown, out);
+        }
+        HostExpr::TensorCall { args, .. } => {
+            for arg in args {
+                infer_callable_param_types_in_expr(arg, unknown, out);
+            }
+        }
+        HostExpr::Var(_, _)
+        | HostExpr::Int(_)
+        | HostExpr::Float(_)
+        | HostExpr::Bool(_)
+        | HostExpr::String(_)
+        | HostExpr::Unit => {}
+    }
+}
+
+fn infer_callable_param_types_in_callback(
+    callback: &HostCallback,
+    unknown: &HashSet<String>,
+    out: &mut HashMap<String, HostType>,
+) {
+    if let HostCallbackKind::Inline { body, .. } = &callback.kind {
+        infer_callable_param_types_in_expr(body, unknown, out);
+    }
+}
+
+fn refine_host_expr_types(
+    expr: &mut HostExpr,
+    scope: &mut HashMap<String, HostType>,
+    signatures: &HashMap<String, (Vec<HostType>, HostType)>,
+) -> bool {
+    let mut changed = false;
+    match expr {
+        HostExpr::Var(name, ty) => {
+            if *ty == HostType::Unknown
+                && let Some(inferred) = scope.get(name)
+                && *inferred != HostType::Unknown
+            {
+                *ty = inferred.clone();
+                changed = true;
+            }
+        }
+        HostExpr::Call {
+            function,
+            args,
+            arg_tys,
+            ty,
+        } => {
+            for arg in args.iter_mut() {
+                changed |= refine_host_expr_types(arg, scope, signatures);
+            }
+            let inferred_sig = scope.get(function).and_then(|ty| match ty {
+                HostType::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
+                _ => None,
+            });
+            let declared_sig = signatures.get(function).cloned();
+            let sig = inferred_sig.or(declared_sig);
+            if let Some((params, ret)) = sig {
+                for (index, arg_ty) in arg_tys.iter_mut().enumerate() {
+                    if let Some(inferred) = params.get(index)
+                        && *inferred != HostType::Unknown
+                        && *arg_ty != *inferred
+                    {
+                        *arg_ty = inferred.clone();
+                        changed = true;
+                    }
+                }
+                if *ty == HostType::Unknown && ret != HostType::Unknown {
+                    *ty = ret;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::Builtin { args, .. } => {
+            for arg in args.iter_mut() {
+                changed |= refine_host_expr_types(arg, scope, signatures);
+            }
+        }
+        HostExpr::List(items, _) | HostExpr::Tuple(items, _) => {
+            for item in items.iter_mut() {
+                changed |= refine_host_expr_types(item, scope, signatures);
+            }
+        }
+        HostExpr::AdtConstruct { fields, .. } => {
+            for field in fields.iter_mut() {
+                changed |= refine_host_expr_types(field, scope, signatures);
+            }
+        }
+        HostExpr::AdtFieldAccess { base, .. } => {
+            changed |= refine_host_expr_types(base, scope, signatures);
+        }
+        HostExpr::If {
+            cond,
+            then_expr,
+            else_expr,
+            ty,
+        } => {
+            changed |= refine_host_expr_types(cond, scope, signatures);
+            changed |= refine_host_expr_types(then_expr, scope, signatures);
+            changed |= refine_host_expr_types(else_expr, scope, signatures);
+            if *ty == HostType::Unknown {
+                let then_ty = host_expr_type(then_expr);
+                let else_ty = host_expr_type(else_expr);
+                let inferred = if then_ty != HostType::Unknown {
+                    then_ty
+                } else {
+                    else_ty
+                };
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ty,
+        } => {
+            changed |= refine_host_expr_types(scrutinee, scope, signatures);
+            let mut some_scope = scope.clone();
+            let inner_ty = option_inner_type(scrutinee);
+            if inner_ty != HostType::Unknown {
+                some_scope.insert(bind_name.clone(), inner_ty);
+            }
+            changed |= refine_host_expr_types(some_expr, &mut some_scope, signatures);
+            changed |= refine_host_expr_types(none_expr, scope, signatures);
+            if *ty == HostType::Unknown {
+                let some_ty = host_expr_type(some_expr);
+                let none_ty = host_expr_type(none_expr);
+                let inferred = if some_ty != HostType::Unknown {
+                    some_ty
+                } else {
+                    none_ty
+                };
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ty,
+        } => {
+            changed |= refine_host_expr_types(scrutinee, scope, signatures);
+            for arm in arms.iter_mut() {
+                let mut arm_scope = scope.clone();
+                for binding in &arm.bindings {
+                    arm_scope.insert(binding.name.clone(), binding.ty.clone());
+                }
+                changed |= refine_host_expr_types(&mut arm.expr, &mut arm_scope, signatures);
+            }
+            if let Some(default_expr) = default_expr {
+                changed |= refine_host_expr_types(default_expr, scope, signatures);
+            }
+            if *ty == HostType::Unknown {
+                let inferred = arms
+                    .iter()
+                    .map(|arm| host_expr_type(&arm.expr))
+                    .find(|ty| *ty != HostType::Unknown)
+                    .or_else(|| default_expr.as_ref().map(|expr| host_expr_type(expr)));
+                if let Some(inferred) = inferred
+                    && inferred != HostType::Unknown
+                {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::Let { bindings, body, ty } => {
+            let mut local_scope = scope.clone();
+            for binding in bindings.iter_mut() {
+                changed |= refine_host_expr_types(&mut binding.value, &mut local_scope, signatures);
+                if binding.ty == HostType::Unknown {
+                    let inferred = host_expr_type(&binding.value);
+                    if inferred != HostType::Unknown {
+                        binding.ty = inferred.clone();
+                        changed = true;
+                    }
+                }
+                local_scope.insert(binding.name.clone(), binding.ty.clone());
+            }
+            changed |= refine_host_expr_types(body, &mut local_scope, signatures);
+            if *ty == HostType::Unknown {
+                let inferred = host_expr_type(body);
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::Map {
+            callback, list, ty, ..
+        }
+        | HostExpr::Filter {
+            callback, list, ty, ..
+        }
+        | HostExpr::Partition {
+            callback, list, ty, ..
+        }
+        | HostExpr::FlatMap {
+            callback, list, ty, ..
+        } => {
+            changed |= refine_host_callback_types(callback, scope, signatures);
+            changed |= refine_host_expr_types(list, scope, signatures);
+            if *ty == HostType::Unknown {
+                let inferred = host_expr_type(list);
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::Fold {
+            callback,
+            init,
+            list,
+            ty,
+        }
+        | HostExpr::Scan {
+            callback,
+            init,
+            list,
+            ty,
+        } => {
+            changed |= refine_host_callback_types(callback, scope, signatures);
+            changed |= refine_host_expr_types(init, scope, signatures);
+            changed |= refine_host_expr_types(list, scope, signatures);
+            if *ty == HostType::Unknown {
+                let inferred = host_expr_type(init);
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
+            }
+        }
+        HostExpr::TensorCall { args, .. } => {
+            for arg in args.iter_mut() {
+                changed |= refine_host_expr_types(arg, scope, signatures);
+            }
+        }
+        HostExpr::Int(_)
+        | HostExpr::Float(_)
+        | HostExpr::Bool(_)
+        | HostExpr::String(_)
+        | HostExpr::Unit => {}
+    }
+    changed
+}
+
+fn refine_host_callback_types(
+    callback: &mut HostCallback,
+    scope: &mut HashMap<String, HostType>,
+    signatures: &HashMap<String, (Vec<HostType>, HostType)>,
+) -> bool {
+    match &mut callback.kind {
+        HostCallbackKind::Inline { params, body } => {
+            let mut callback_scope = scope.clone();
+            for param in params.iter() {
+                callback_scope.insert(param.name.clone(), param.ty.clone());
+            }
+            let changed = refine_host_expr_types(body, &mut callback_scope, signatures);
+            if callback.ret_ty == HostType::Unknown {
+                let inferred = host_expr_type(body);
+                if inferred != HostType::Unknown {
+                    callback.ret_ty = inferred;
+                    return true;
+                }
+            }
+            changed
+        }
+        HostCallbackKind::Named { .. } => false,
+    }
+}
+
 fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    if tag(list) == Some("tuple-get") {
+    if matches!(tag(list), Some("tuple-get" | "if" | "let" | "match")) {
         return true;
     }
     if tag(list) != Some("app") {
@@ -435,10 +1111,24 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     if tag(callee) != Some("var") {
         return false;
     }
+    let name = children(callee).first().and_then(symbol_name);
+    if let Some(name) = name
+        && !BUILTIN_NAMES.contains(&name)
+        && name != "Some"
+        && name != "None"
+    {
+        return true;
+    }
     matches!(
-        children(callee).first().and_then(symbol_name),
+        name,
         Some(
-            "concat"
+            "copy"
+                | "reshape"
+                | "to_tensor"
+                | "scalar_to_tensor"
+                | "pad_sequences"
+                | "pad_sequences_to"
+                | "concat"
                 | "split"
                 | "gather"
                 | "scatter"
@@ -462,10 +1152,24 @@ fn lower_match_host_expr(
     let kids = children(list);
     let scrutinee = lower_host_expr(&kids[0], program, scope, tensor_helpers);
     let scrutinee_ty = host_expr_type(&scrutinee);
+    if matches!(
+        scrutinee_ty,
+        HostType::Int64 | HostType::Float64 | HostType::Bool | HostType::String
+    ) {
+        return lower_literal_match_host_expr(
+            list,
+            program,
+            scope,
+            tensor_helpers,
+            scrutinee,
+            scrutinee_ty,
+        );
+    }
     let mut bind_name = "value".to_string();
     let mut some_expr = HostExpr::Unit;
     let mut none_expr = HostExpr::Unit;
     let mut generic_arms = Vec::new();
+    let mut generic_default = None;
 
     for arm in kids.iter().skip(1) {
         let Some(arm_list) = as_list(arm) else {
@@ -478,7 +1182,16 @@ fn lower_match_host_expr(
         let Some(pattern) = arm_kids.first().and_then(as_list) else {
             continue;
         };
-        if let Some("pat-ctor") = tag(pattern) {
+        if tag(pattern) == Some("pat-wild") {
+            generic_default = Some(Box::new(lower_host_expr(
+                &arm_kids[2],
+                program,
+                scope,
+                tensor_helpers,
+            )));
+            continue;
+        }
+        if let Some("pat-ctor" | "pat-record") = tag(pattern) {
             let ctor = children(pattern).first().and_then(symbol_name);
             match ctor {
                 Some("Some") => {
@@ -496,19 +1209,25 @@ fn lower_match_host_expr(
                     none_expr = lower_host_expr(&arm_kids[2], program, scope, tensor_helpers);
                 }
                 Some(ctor_name) => {
-                    let ctor_field_tys = lookup_adt_ctor(program, ctor_name)
+                    let ctor_fields = lookup_adt_ctor_details(program, ctor_name)
                         .map(|(_, fields)| fields)
                         .or_else(|| {
                             program
                                 .type_env()
                                 .get(ctor_name)
                                 .and_then(parse_fn_type_expr)
-                                .map(|(args, _)| args)
+                                .map(|(args, _)| {
+                                    args.into_iter()
+                                        .map(|ty| HostAdtField { name: None, ty })
+                                        .collect::<Vec<_>>()
+                                })
                         })
                         .unwrap_or_default();
                     let mut scoped = scope.clone();
                     let mut bindings = Vec::new();
-                    for (field_index, subpat) in children(pattern).iter().skip(1).enumerate() {
+                    for (field_index, subpat, field_ty) in
+                        pattern_field_bindings(pattern, &ctor_fields)
+                    {
                         let Some(subpat_list) = as_list(subpat) else {
                             continue;
                         };
@@ -518,9 +1237,7 @@ fn lower_match_host_expr(
                         let Some(name) = children(subpat_list).first().and_then(symbol_name) else {
                             continue;
                         };
-                        let ty = ctor_field_tys
-                            .get(field_index)
-                            .cloned()
+                        let ty = field_ty
                             .or_else(|| expr_type(subpat))
                             .unwrap_or(HostType::Unknown);
                         scoped.insert(name.to_string(), ty.clone());
@@ -563,6 +1280,7 @@ fn lower_match_host_expr(
         return HostExpr::MatchAdt {
             scrutinee: Box::new(scrutinee),
             arms: generic_arms,
+            default_expr: generic_default,
             ty,
         };
     }
@@ -573,6 +1291,224 @@ fn lower_match_host_expr(
         some_expr: Box::new(some_expr),
         none_expr: Box::new(none_expr),
         ty,
+    }
+}
+
+fn lower_literal_match_host_expr(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    scrutinee: HostExpr,
+    scrutinee_ty: HostType,
+) -> HostExpr {
+    let kids = children(list);
+    let mut literal_arms = Vec::new();
+    let mut default_expr = HostExpr::Unit;
+    for arm in kids.iter().skip(1) {
+        let Some(arm_list) = as_list(arm) else {
+            continue;
+        };
+        if tag(arm_list) != Some("arm") {
+            continue;
+        }
+        let arm_kids = children(arm_list);
+        let Some(pattern) = arm_kids.first().and_then(as_list) else {
+            continue;
+        };
+        let body = lower_host_expr(&arm_kids[2], program, scope, tensor_helpers);
+        match tag(pattern) {
+            Some("pat-wild") => default_expr = body,
+            Some("pat-lit") => {
+                if let Some(lit) = children(pattern)
+                    .first()
+                    .and_then(|expr| host_literal_expr(expr, &scrutinee_ty))
+                {
+                    literal_arms.push((lit, body));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let explicit = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    let mut body = default_expr;
+    let result_ty = if explicit == HostType::Unknown {
+        host_expr_type(&body)
+    } else {
+        explicit
+    };
+    for (lit, arm_expr) in literal_arms.into_iter().rev() {
+        body = HostExpr::If {
+            cond: Box::new(HostExpr::Builtin {
+                name: "eq".to_string(),
+                args: vec![scrutinee.clone(), lit],
+                ty: HostType::Bool,
+            }),
+            then_expr: Box::new(arm_expr),
+            else_expr: Box::new(body),
+            ty: result_ty.clone(),
+        };
+    }
+    body
+}
+
+fn host_literal_expr(expr: &Expr, expected_ty: &HostType) -> Option<HostExpr> {
+    match (expr, expected_ty) {
+        (Expr::Atom(Atom::Int(value), _), HostType::Int64) => Some(HostExpr::Int(*value)),
+        (Expr::Atom(Atom::Float(value), _), HostType::Float64) => Some(HostExpr::Float(*value)),
+        (Expr::Atom(Atom::Bool(value), _), HostType::Bool) => Some(HostExpr::Bool(*value)),
+        (Expr::Atom(Atom::Str(value), _), HostType::String) => {
+            Some(HostExpr::String(value.clone()))
+        }
+        (Expr::Atom(Atom::Int(value), _), _) => Some(HostExpr::Int(*value)),
+        (Expr::Atom(Atom::Float(value), _), _) => Some(HostExpr::Float(*value)),
+        (Expr::Atom(Atom::Bool(value), _), _) => Some(HostExpr::Bool(*value)),
+        (Expr::Atom(Atom::Str(value), _), _) => Some(HostExpr::String(value.clone())),
+        _ => None,
+    }
+}
+
+fn lower_record_host_expr(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> HostExpr {
+    let kids = children(list);
+    let ctor = kids
+        .first()
+        .and_then(symbol_name)
+        .unwrap_or("_")
+        .to_string();
+    let ctor_info = lookup_adt_ctor_details(program, &ctor);
+    let mut supplied = HashMap::new();
+    for field in kids.iter().skip(1) {
+        let Some(kv_list) = as_list(field) else {
+            continue;
+        };
+        if tag(kv_list) != Some("kv") {
+            continue;
+        }
+        let kv_kids = children(kv_list);
+        let Some(name) = kv_kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let value = kv_kids
+            .get(1)
+            .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers))
+            .unwrap_or(HostExpr::Unit);
+        supplied.insert(name.to_string(), value);
+    }
+    let fields = ctor_info
+        .as_ref()
+        .map(|(_, declared)| {
+            declared
+                .iter()
+                .map(|field| {
+                    let value = field
+                        .name
+                        .as_ref()
+                        .and_then(|name| supplied.remove(name))
+                        .unwrap_or(HostExpr::Unit);
+                    if host_expr_type(&value) == HostType::Unknown {
+                        force_host_expr_type(value, field.ty.clone())
+                    } else {
+                        value
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let explicit_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    HostExpr::AdtConstruct {
+        ctor,
+        fields,
+        ty: if explicit_ty != HostType::Unknown {
+            explicit_ty
+        } else {
+            ctor_info
+                .map(|(adt_name, _)| HostType::Adt(adt_name))
+                .unwrap_or(HostType::Unknown)
+        },
+    }
+}
+
+fn lower_access_host_expr(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> HostExpr {
+    let kids = children(list);
+    let base = kids
+        .first()
+        .map(|expr| lower_host_expr(expr, program, scope, tensor_helpers))
+        .unwrap_or(HostExpr::Unit);
+    let field_name = kids.get(1).and_then(symbol_name).unwrap_or("");
+    let (field_index, field_ty) =
+        lookup_access_field(program, &base, field_name).unwrap_or((0, HostType::Unknown));
+    let explicit_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    HostExpr::AdtFieldAccess {
+        base: Box::new(base),
+        field_index,
+        ty: if explicit_ty != HostType::Unknown {
+            explicit_ty
+        } else {
+            field_ty
+        },
+    }
+}
+
+fn pattern_field_bindings<'a>(
+    pattern: &'a List,
+    ctor_fields: &'a [HostAdtField],
+) -> Vec<(usize, &'a Expr, Option<HostType>)> {
+    match tag(pattern) {
+        Some("pat-record") => children(pattern)
+            .iter()
+            .skip(1)
+            .filter_map(|kv_expr| {
+                let kv_list = as_list(kv_expr)?;
+                if tag(kv_list) != Some("kv") {
+                    return None;
+                }
+                let kv_kids = children(kv_list);
+                let field_name = kv_kids.first().and_then(symbol_name)?;
+                let field_index = ctor_fields
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(field_name))?;
+                Some((
+                    field_index,
+                    kv_kids.get(1)?,
+                    ctor_fields.get(field_index).map(|field| field.ty.clone()),
+                ))
+            })
+            .collect(),
+        _ => children(pattern)
+            .iter()
+            .skip(1)
+            .enumerate()
+            .map(|(field_index, subpat)| {
+                (
+                    field_index,
+                    subpat,
+                    ctor_fields.get(field_index).map(|field| field.ty.clone()),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -626,7 +1562,8 @@ fn lower_app_host_expr(
         })
         .unwrap_or("call")
         .to_string();
-    let fn_sig = program.type_env().get(&name).and_then(parse_fn_type_expr);
+    let fn_sig =
+        lookup_declared_fn_type(program, &name).or_else(|| kids.first().and_then(expr_fn_type));
     let ctor_info = lookup_adt_ctor(program, &name);
     let explicit_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
@@ -653,6 +1590,18 @@ fn lower_app_host_expr(
             };
             return HostExpr::List(items, ty);
         }
+    }
+    if name == "Some" && kids.len() == 2 {
+        let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers);
+        return HostExpr::Builtin {
+            name,
+            args: vec![arg.clone()],
+            ty: if explicit_ty != HostType::Unknown {
+                explicit_ty
+            } else {
+                HostType::Option(Box::new(host_expr_type(&arg)))
+            },
+        };
     }
     if name == "map"
         && kids.len() == 3
@@ -792,14 +1741,16 @@ fn lower_app_host_expr(
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Vec<_>>();
-    let construct_ty = if matches!(explicit_ty, HostType::Adt(_)) {
-        explicit_ty.clone()
-    } else if let Some((adt_name, _)) = &ctor_info {
-        HostType::Adt(adt_name.clone())
+    let construct_ty = if let Some((adt_name, _)) = &ctor_info {
+        if matches!(explicit_ty, HostType::Adt(_)) {
+            explicit_ty.clone()
+        } else {
+            HostType::Adt(adt_name.clone())
+        }
     } else {
         inferred_ret_ty.clone()
     };
-    if matches!(construct_ty, HostType::Adt(_)) && !matches!(name.as_str(), "Some" | "None") {
+    if ctor_info.is_some() && !matches!(name.as_str(), "Some" | "None") {
         return HostExpr::AdtConstruct {
             ctor: name,
             fields: args,
@@ -814,6 +1765,10 @@ fn lower_app_host_expr(
         return HostExpr::Call {
             function: name,
             args,
+            arg_tys: fn_sig
+                .as_ref()
+                .map(|(param_tys, _)| param_tys.clone())
+                .unwrap_or_default(),
             ty: if explicit_ty != HostType::Unknown {
                 explicit_ty
             } else {
@@ -848,7 +1803,12 @@ fn lower_host_callback(
             let mut params = Vec::new();
             for (index, param) in children(params_list).iter().enumerate() {
                 let name = param_name(param)?;
-                let ty = param_tys.get(index).cloned().unwrap_or(HostType::Unknown);
+                let ty = param_tys
+                    .get(index)
+                    .cloned()
+                    .filter(|ty| *ty != HostType::Unknown)
+                    .or_else(|| param_host_type(param))
+                    .unwrap_or(HostType::Unknown);
                 callback_scope.insert(name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
             }
@@ -868,7 +1828,10 @@ fn lower_host_callback(
         }
         Expr::List(list, _) if tag(list) == Some("var") => {
             let name = children(list).first().and_then(symbol_name)?;
-            let (param_tys, ret_ty) = program.type_env().get(name).and_then(parse_fn_type_expr)?;
+            let (param_tys, ret_ty) = lookup_declared_fn_type(program, name).or_else(|| {
+                lookup_program_def(&collect_program_defs(program.exprs()), name)
+                    .and_then(expr_fn_type)
+            })?;
             let params = param_tys
                 .into_iter()
                 .enumerate()
@@ -948,7 +1911,7 @@ fn collect_tensor_arg_exprs(
                 && scope
                     .get(name)
                     .cloned()
-                    .or_else(|| program.type_env().get(name).map(parse_host_type))
+                    .or_else(|| lookup_declared_host_type(program, name))
                     .is_some_and(|ty| matches!(ty, HostType::Tensor(_)))
             {
                 out.push(lower_host_expr(expr, program, scope, tensor_helpers));
@@ -968,7 +1931,7 @@ fn collect_tensor_arg_exprs(
 
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
-    for expr in exprs {
+    for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
         };
@@ -982,6 +1945,27 @@ fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
         }
     }
     defs
+}
+
+fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    for expr in exprs {
+        collect_top_level_items(expr, &mut out);
+    }
+    out
+}
+
+fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    if tag(list) == Some("module") {
+        for child in list.elements.iter().skip(3) {
+            collect_top_level_items(child, out);
+        }
+        return;
+    }
+    out.push(expr);
 }
 
 fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, TensorType> {
@@ -1008,16 +1992,83 @@ fn expr_host_type(
             .first()
             .and_then(symbol_name)
             .and_then(|name| {
-                expr_type(expr).or_else(|| {
-                    scope
-                        .get(name)
-                        .cloned()
-                        .or_else(|| program.type_env().get(name).map(parse_host_type))
-                })
+                expr_type(expr)
+                    .filter(|ty| *ty != HostType::Unknown)
+                    .or_else(|| {
+                        scope
+                            .get(name)
+                            .cloned()
+                            .or_else(|| lookup_declared_host_type(program, name))
+                    })
             })
             .unwrap_or(HostType::Unknown),
         _ => expr_type(expr).unwrap_or(HostType::Unknown),
     }
+}
+
+fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+    type_env.get(name).or_else(|| {
+        let mut matches = type_env
+            .iter()
+            .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    })
+}
+
+fn lookup_declared_type_expr<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a Expr> {
+    find_top_level_sig_expr(program.exprs(), name)
+        .or_else(|| lookup_type_expr(program.type_env(), name))
+}
+
+fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostType> {
+    lookup_declared_type_expr(program, name).map(parse_host_type)
+}
+
+fn lookup_declared_fn_type(
+    program: &CheckedProgram,
+    name: &str,
+) -> Option<(Vec<HostType>, HostType)> {
+    lookup_declared_type_expr(program, name).and_then(parse_fn_type_expr)
+}
+
+fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+    defs.get(name).or_else(|| {
+        let mut matches = defs
+            .iter()
+            .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    })
+}
+
+fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    full_name == short_name
+        || full_name
+            .rsplit_once("__")
+            .is_some_and(|(_, tail)| tail == short_name)
+        || full_name
+            .rsplit_once('.')
+            .is_some_and(|(_, tail)| tail == short_name)
+}
+
+fn find_top_level_sig_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("defsig") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(sig_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if terminal_name_matches(sig_name, name) {
+            return kids.get(1);
+        }
+    }
+    None
 }
 
 fn expr_tensor_type(
@@ -1109,18 +2160,24 @@ fn parse_host_type(expr: &Expr) -> HostType {
             }
         }
         Some("t-tuple") => HostType::Tuple(children(list).iter().map(parse_host_type).collect()),
+        Some("t-fn") => {
+            let kids = children(list);
+            match kids.split_last() {
+                Some((ret, args)) => HostType::Fn(
+                    args.iter().map(parse_host_type).collect(),
+                    Box::new(parse_host_type(ret)),
+                ),
+                None => HostType::Unknown,
+            }
+        }
         Some("t-unit") => HostType::Unit,
         _ => HostType::Unknown,
     }
 }
 
 fn option_inner_type(expr: &HostExpr) -> HostType {
-    match expr {
-        HostExpr::Var(_, HostType::Option(inner))
-        | HostExpr::Builtin {
-            ty: HostType::Option(inner),
-            ..
-        } => (**inner).clone(),
+    match host_expr_type(expr) {
+        HostType::Option(inner) => (*inner).clone(),
         _ => HostType::Unknown,
     }
 }
@@ -1137,9 +2194,11 @@ fn host_expr_type(expr: &HostExpr) -> HostType {
         | HostExpr::Call { ty, .. }
         | HostExpr::Builtin { ty, .. }
         | HostExpr::AdtConstruct { ty, .. }
+        | HostExpr::AdtFieldAccess { ty, .. }
         | HostExpr::If { ty, .. }
         | HostExpr::MatchOption { ty, .. }
         | HostExpr::MatchAdt { ty, .. }
+        | HostExpr::Let { ty, .. }
         | HostExpr::Map { ty, .. }
         | HostExpr::Filter { ty, .. }
         | HostExpr::Fold { ty, .. }
@@ -1148,6 +2207,96 @@ fn host_expr_type(expr: &HostExpr) -> HostType {
         | HostExpr::FlatMap { ty, .. }
         | HostExpr::TensorCall { ty, .. } => ty.clone(),
         HostExpr::Unit => HostType::Unit,
+    }
+}
+
+fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
+    match expr {
+        HostExpr::Var(name, _) => HostExpr::Var(name, ty),
+        HostExpr::Call {
+            function,
+            args,
+            arg_tys,
+            ..
+        } => HostExpr::Call {
+            function,
+            args,
+            arg_tys,
+            ty,
+        },
+        HostExpr::Builtin { name, args, .. } => HostExpr::Builtin { name, args, ty },
+        HostExpr::AdtConstruct { ctor, fields, .. } => HostExpr::AdtConstruct { ctor, fields, ty },
+        HostExpr::AdtFieldAccess {
+            base, field_index, ..
+        } => HostExpr::AdtFieldAccess {
+            base,
+            field_index,
+            ty,
+        },
+        HostExpr::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => HostExpr::If {
+            cond,
+            then_expr,
+            else_expr,
+            ty,
+        },
+        HostExpr::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ..
+        } => HostExpr::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ty,
+        },
+        HostExpr::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => HostExpr::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ty,
+        },
+        HostExpr::Let { bindings, body, .. } => HostExpr::Let { bindings, body, ty },
+        HostExpr::Map { callback, list, .. } => HostExpr::Map { callback, list, ty },
+        HostExpr::Filter { callback, list, .. } => HostExpr::Filter { callback, list, ty },
+        HostExpr::Fold {
+            callback,
+            init,
+            list,
+            ..
+        } => HostExpr::Fold {
+            callback,
+            init,
+            list,
+            ty,
+        },
+        HostExpr::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => HostExpr::Scan {
+            callback,
+            init,
+            list,
+            ty,
+        },
+        HostExpr::Partition { callback, list, .. } => HostExpr::Partition { callback, list, ty },
+        HostExpr::FlatMap { callback, list, .. } => HostExpr::FlatMap { callback, list, ty },
+        HostExpr::TensorCall { helper, args, .. } => HostExpr::TensorCall { helper, args, ty },
+        other => other,
     }
 }
 
@@ -1170,7 +2319,11 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
             })),
             _ => Some(HostType::Bool),
         },
-        "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
+        "reshape" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
+            _ => Some(HostType::Unknown),
+        },
+        "lt" | "gt" | "gte" | "lte" | "eq" | "neq" | "and" | "or" | "not" | "string_contains"
         | "string_starts_with" | "string_ends_with" => Some(HostType::Bool),
         "string_concat" | "string_trim" | "string_slice" | "to_string" => Some(HostType::String),
         "to_int" => Some(HostType::Option(Box::new(HostType::Int64))),
@@ -1338,6 +2491,7 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
             _ => Some(HostType::Unknown),
         },
         "print" => Some(HostType::Unit),
+        "fail" => Some(HostType::Unknown),
         "debug" => arg_tys.first().cloned(),
         "tensor_to_scalar" => match arg_tys.first() {
             Some(HostType::Tensor(tensor)) => Some(match tensor.precision {
@@ -1457,7 +2611,19 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
 }
 
 fn lookup_adt_ctor(program: &CheckedProgram, ctor_name: &str) -> Option<(String, Vec<HostType>)> {
-    for expr in program.exprs() {
+    lookup_adt_ctor_details(program, ctor_name).map(|(adt_name, fields)| {
+        (
+            adt_name,
+            fields.into_iter().map(|field| field.ty).collect::<Vec<_>>(),
+        )
+    })
+}
+
+fn lookup_adt_ctor_details(
+    program: &CheckedProgram,
+    ctor_name: &str,
+) -> Option<(String, Vec<HostAdtField>)> {
+    for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
         };
@@ -1479,7 +2645,7 @@ fn lookup_adt_ctor(program: &CheckedProgram, ctor_name: &str) -> Option<(String,
             let Some(name) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
-            if name != ctor_name {
+            if !terminal_name_matches(name, ctor_name) {
                 continue;
             }
             let mut fields = Vec::new();
@@ -1487,17 +2653,93 @@ fn lookup_adt_ctor(program: &CheckedProgram, ctor_name: &str) -> Option<(String,
                 if let Some(field_list) = as_list(field)
                     && tag(field_list) == Some("field")
                 {
-                    if let Some(ty_expr) = children(field_list).get(1) {
-                        fields.push(parse_host_type(ty_expr));
+                    let field_kids = children(field_list);
+                    if let Some(ty_expr) = field_kids.get(1) {
+                        fields.push(HostAdtField {
+                            name: field_kids.first().and_then(symbol_name).map(str::to_string),
+                            ty: parse_host_type(ty_expr),
+                        });
                     }
                 } else {
-                    fields.push(parse_host_type(field));
+                    fields.push(HostAdtField {
+                        name: None,
+                        ty: parse_host_type(field),
+                    });
                 }
             }
             return Some((adt_name.to_string(), fields));
         }
     }
     None
+}
+
+fn lookup_access_field(
+    program: &CheckedProgram,
+    base: &HostExpr,
+    field_name: &str,
+) -> Option<(usize, HostType)> {
+    match base {
+        HostExpr::AdtConstruct { ctor, .. } => {
+            lookup_adt_ctor_details(program, ctor).and_then(|(_, fields)| {
+                fields.iter().enumerate().find_map(|(index, field)| {
+                    (field.name.as_deref() == Some(field_name)).then_some((index, field.ty.clone()))
+                })
+            })
+        }
+        _ => match host_expr_type(base) {
+            HostType::Adt(adt_name) => lookup_adt_field_on_type(program, &adt_name, field_name),
+            _ => None,
+        },
+    }
+}
+
+fn lookup_adt_field_on_type(
+    program: &CheckedProgram,
+    adt_name: &str,
+    field_name: &str,
+) -> Option<(usize, HostType)> {
+    let mut found = None;
+    for expr in top_level_items(program.exprs()) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("deftype") {
+            continue;
+        }
+        let kids = children(list);
+        if kids.first().and_then(symbol_name) != Some(adt_name) {
+            continue;
+        }
+        for variant in kids.iter().skip(2) {
+            let Some(variant_list) = as_list(variant) else {
+                continue;
+            };
+            if tag(variant_list) != Some("variant") {
+                continue;
+            }
+            for (index, field) in children(variant_list).iter().skip(1).enumerate() {
+                let Some(field_list) = as_list(field) else {
+                    continue;
+                };
+                if tag(field_list) != Some("field") {
+                    continue;
+                }
+                if children(field_list).first().and_then(symbol_name) == Some(field_name) {
+                    let ty = children(field_list)
+                        .get(1)
+                        .map(parse_host_type)
+                        .unwrap_or(HostType::Unknown);
+                    if let Some(existing) = &found
+                        && existing != &(index, ty.clone())
+                    {
+                        return None;
+                    }
+                    found = Some((index, ty));
+                }
+            }
+        }
+    }
+    found
 }
 
 fn tag(list: &List) -> Option<&str> {
@@ -1532,12 +2774,23 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn param_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+        Expr::MetaExpr(meta, _) => param_name(&meta.expr),
         Expr::List(list, _) => list
             .elements
             .first()
             .and_then(symbol_name)
             .or_else(|| children(list).first().and_then(symbol_name))
             .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn param_host_type(expr: &Expr) -> Option<HostType> {
+    match expr {
+        Expr::MetaExpr(meta, _) => expr_type(expr)
+            .filter(|ty| *ty != HostType::Unknown)
+            .or_else(|| param_host_type(&meta.expr)),
+        Expr::List(_, _) => expr_type(expr).filter(|ty| *ty != HostType::Unknown),
         _ => None,
     }
 }

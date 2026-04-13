@@ -327,15 +327,27 @@ fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let source = match (file, expr) {
-        (Some(path), _) => fs::read_to_string(path)?,
-        (None, Some(e)) => format!("let __eval_result = {e}"),
+    let (source_kind, source, selected_roots) = match (file, expr) {
+        (Some(path), _) => {
+            let (decls, entry_decls) = load_check_build_decls(path)?;
+            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+            let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
+            (
+                SourceKind::Deep,
+                chelis_deep::printer::print_canonical(&deep_exprs),
+                Some(root_names_from_decls(&entry_decls, checked.type_env())),
+            )
+        }
+        (None, Some(e)) => (SourceKind::Surf, format!("__eval_result = {e}"), None),
         (None, None) => {
             return Err("provide --file or an expression".into());
         }
     };
-    match try_eval(&source) {
+    match try_eval(source_kind, &source, selected_roots.as_deref()) {
         Ok(result) => {
+            if result.is_empty() {
+                return Ok(());
+            }
             println!("{result}");
             Ok(())
         }
@@ -444,29 +456,53 @@ fn cmd_build(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (decls, entry_decls) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+    let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
+    let deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
     let checked =
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    let compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
     let mut dag = chelis_ir::lower::lower_program(&checked);
     let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
-    let entry_root_names = lowered_root_names_from_decls(&entry_decls, checked.type_env());
-    if !entry_root_names.is_empty() && entry_root_names.len() != all_root_names.len() {
-        let selected = all_root_names
+    let entry_root_names =
+        lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
+    let entry_display_root_names = root_names_from_decls(&entry_decls, checked.type_env())
+        .into_iter()
+        .map(|name| {
+            name.rsplit_once("__")
+                .map(|(_, tail)| tail.to_string())
+                .unwrap_or(name)
+        })
+        .collect::<Vec<_>>();
+    if let Some(host_program) = compiled_program.host.as_mut() {
+        host_program.globals = host_program
+            .globals
             .iter()
-            .enumerate()
-            .filter_map(|(index, name)| {
-                if entry_root_names.iter().any(|entry| entry == name) {
-                    dag.roots().get(index).copied()
-                } else {
-                    None
-                }
+            .filter_map(|binding| {
+                host_display_root_name(&binding.name, &entry_display_root_names).map(
+                    |display_name| {
+                        let mut binding = binding.clone();
+                        binding.display_name = Some(display_name);
+                        binding
+                    },
+                )
             })
-            .collect::<Vec<_>>();
-        dag.set_roots(selected);
+            .collect();
     }
+    let selected = all_root_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            if entry_root_names.iter().any(|entry| entry == name) {
+                dag.roots().get(index).copied()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    dag.set_roots(selected);
     dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
@@ -891,14 +927,14 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
         if trimmed.starts_with("def ")
             || trimmed.starts_with("macro ")
             || trimmed.starts_with("type ")
-            || trimmed.starts_with("let ")
+            || trimmed.contains('=')
         {
             accumulated_source.push_str(trimmed);
             accumulated_source.push('\n');
             println!("  defined.");
         } else {
-            let eval_source = format!("{}\nlet __tide_result = {}", accumulated_source, trimmed);
-            match try_eval(&eval_source) {
+            let eval_source = format!("{}\n__tide_result = {}", accumulated_source, trimmed);
+            match try_eval(SourceKind::Surf, &eval_source, None) {
                 Ok(result) => println!("= {result}"),
                 Err(e) => eprintln!("error: {e}"),
             }
@@ -907,12 +943,21 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn try_eval(source: &str) -> Result<String, String> {
-    let result = chelis_compiler_api::compiler::eval(EvalRequest {
-        source_kind: SourceKind::Surf,
+fn try_eval(
+    source_kind: SourceKind,
+    source: &str,
+    selected_roots: Option<&[String]>,
+) -> Result<String, String> {
+    let request = EvalRequest {
+        source_kind,
         source: source.to_string(),
         bindings: BTreeMap::new(),
-    })
+    };
+    let result = if let Some(roots) = selected_roots {
+        chelis_compiler_api::compiler::eval_selected(request, roots)
+    } else {
+        chelis_compiler_api::compiler::eval(request)
+    }
     .map_err(|err| {
         err.errors
             .iter()
@@ -931,7 +976,11 @@ fn try_eval(source: &str) -> Result<String, String> {
 
     lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
         let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
-        format!("{name} = {}", format_execution_value(&root.value))
+        format!(
+            "{} = {}",
+            display_root_name(&name),
+            format_execution_value(&root.value)
+        )
     }));
     Ok(lines.join("\n"))
 }
@@ -1047,19 +1096,41 @@ fn fallback_symbolic_dims(
 
 fn lowered_root_names_from_decls(
     decls: &[Decl],
+    program_exprs: &[DeepExpr],
     type_env: &HashMap<String, DeepExpr>,
 ) -> Vec<String> {
     let deep_exprs = chelis_surf::desugar::desugar_program(decls);
-    lowered_root_names_from_exprs(&deep_exprs, type_env)
+    lowered_root_names_from_selected_exprs(&deep_exprs, program_exprs, type_env)
+}
+
+fn root_names_from_decls(decls: &[Decl], type_env: &HashMap<String, DeepExpr>) -> Vec<String> {
+    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
+    root_names_from_exprs(&deep_exprs, type_env)
 }
 
 fn lowered_root_names_from_exprs(
     exprs: &[DeepExpr],
     type_env: &HashMap<String, DeepExpr>,
 ) -> Vec<String> {
+    lowered_root_names_from_selected_exprs(exprs, exprs, type_env)
+}
+
+fn lowered_root_names_from_selected_exprs(
+    selected_exprs: &[DeepExpr],
+    program_exprs: &[DeepExpr],
+    type_env: &HashMap<String, DeepExpr>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for expr in selected_exprs {
+        collect_lowered_root_names_from_expr(expr, program_exprs, type_env, &mut out);
+    }
+    out
+}
+
+fn root_names_from_exprs(exprs: &[DeepExpr], type_env: &HashMap<String, DeepExpr>) -> Vec<String> {
     let mut out = Vec::new();
     for expr in exprs {
-        collect_lowered_root_names_from_expr(expr, exprs, type_env, &mut out);
+        collect_root_names_from_expr(expr, type_env, &mut out);
     }
     out
 }
@@ -1083,9 +1154,38 @@ fn collect_lowered_root_names_from_expr(
             let Some(name) = deep_top_level_expr_name(expr) else {
                 return;
             };
+            if type_env.get(name).is_some_and(type_expr_is_function) {
+                return;
+            }
             if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
                 extend_root_names(name, type_env.get(name), out);
             }
+        }
+    }
+}
+
+fn collect_root_names_from_expr(
+    expr: &DeepExpr,
+    type_env: &HashMap<String, DeepExpr>,
+    out: &mut Vec<String>,
+) {
+    let DeepExpr::List(list, _) = expr else {
+        return;
+    };
+    match list.elements.first() {
+        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "module" => {
+            for child in list.elements.iter().skip(3) {
+                collect_root_names_from_expr(child, type_env, out);
+            }
+        }
+        _ => {
+            let Some(name) = deep_top_level_expr_name(expr) else {
+                return;
+            };
+            if type_env.get(name).is_some_and(type_expr_is_function) {
+                return;
+            }
+            extend_root_names(name, type_env.get(name), out);
         }
     }
 }
@@ -1101,6 +1201,105 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
         ) if tag == "def" => Some(name.as_str()),
         _ => None,
     }
+}
+
+fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    match (list.elements.first(), list.elements.get(2)) {
+        (
+            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
+            Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
+        ) if tag == "def" || tag == "defsig" => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn prune_build_program_to_reachable_defs(
+    exprs: &[DeepExpr],
+    entry_exprs: &[DeepExpr],
+) -> Vec<DeepExpr> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let def_map = exprs
+        .iter()
+        .filter_map(|expr| deep_top_level_expr_name(expr).map(|name| (name.to_string(), expr)))
+        .collect::<HashMap<_, _>>();
+    let reachable_seed = entry_exprs
+        .iter()
+        .filter_map(deep_top_level_expr_name)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    let mut reachable = HashSet::<String>::new();
+    let mut queue = VecDeque::from(reachable_seed);
+    while let Some(name) = queue.pop_front() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        if let Some(expr) = def_map.get(&name) {
+            for reference in deep_referenced_vars(expr) {
+                if def_map.contains_key(reference) && !reachable.contains(reference) {
+                    queue.push_back(reference.to_string());
+                }
+            }
+        }
+    }
+
+    exprs
+        .iter()
+        .filter(|expr| {
+            deep_named_decl_name(expr)
+                .map(|name| reachable.contains(name))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
+    let mut out = Vec::new();
+    collect_deep_referenced_vars(expr, &mut out);
+    out
+}
+
+fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) {
+    match expr {
+        DeepExpr::Atom(_, _) => {}
+        DeepExpr::MetaExpr(meta, _) => collect_deep_referenced_vars(&meta.expr, out),
+        DeepExpr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_deep_referenced_vars(value, out);
+            }
+        }
+        DeepExpr::List(list, _) => {
+            if let (
+                Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
+                Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
+            ) = (list.elements.first(), list.elements.get(2))
+                && tag == "var"
+            {
+                out.push(name.as_str());
+            }
+            for child in &list.elements {
+                collect_deep_referenced_vars(child, out);
+            }
+        }
+    }
+}
+
+fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Option<String> {
+    entry_root_names.iter().find_map(|entry| {
+        (full_name == entry
+            || full_name
+                .rsplit_once("__")
+                .is_some_and(|(_, tail)| tail == entry)
+            || full_name
+                .rsplit_once('.')
+                .is_some_and(|(_, tail)| tail == entry))
+        .then(|| entry.clone())
+    })
 }
 
 fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
@@ -1119,6 +1318,29 @@ fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
         }
     }
     out.push(name.to_string());
+}
+
+fn display_root_name(name: &str) -> String {
+    let (base, suffix) = if let Some((base, suffix)) = name.rsplit_once('.')
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        (base, Some(suffix))
+    } else {
+        (name, None)
+    };
+    let short = base
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| base.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(base);
+    match suffix {
+        Some(suffix) => format!("{short}.{suffix}"),
+        None => short.to_string(),
+    }
+}
+
+fn type_expr_is_function(expr: &DeepExpr) -> bool {
+    matches!(expr, DeepExpr::List(list, _) if matches!(list.elements.first(), Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "t-fn"))
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {

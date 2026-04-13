@@ -1,5 +1,5 @@
 module Std.Time
-export (DayOfWeek, Date, Duration, date, try_date, duration, is_leap_year, add_days, sub_days, days_between, date_to_string, parse_date, day_of_week, day_of_week_name, day_of_year)
+export (DayOfWeek, Date, Duration, date, try_date, duration, is_leap_year, add_days, sub_days, days_between, date_lt, date_lte, date_gt, date_gte, date_to_string, parse_date, day_of_week, day_of_week_name, day_of_year)
 type DayOfWeek =
   | Monday
   | Tuesday
@@ -22,6 +22,10 @@ def is_leap_year(year: int64) -> bool = or(and(eq(mod(year, cast(4, int64)), cas
 def add_days(value: Date, delta: int64) -> Date = date_from_ordinal(add(date_to_ordinal(value), delta))
 def sub_days(value: Date, delta: int64) -> Date = add_days(value, sub(cast(0, int64), delta))
 def days_between(lhs: Date, rhs: Date) -> int64 = sub(date_to_ordinal(rhs), date_to_ordinal(lhs))
+def date_lt(lhs: Date, rhs: Date) -> bool = lt(date_to_ordinal(lhs), date_to_ordinal(rhs))
+def date_lte(lhs: Date, rhs: Date) -> bool = lte(date_to_ordinal(lhs), date_to_ordinal(rhs))
+def date_gt(lhs: Date, rhs: Date) -> bool = gt(date_to_ordinal(lhs), date_to_ordinal(rhs))
+def date_gte(lhs: Date, rhs: Date) -> bool = gte(date_to_ordinal(lhs), date_to_ordinal(rhs))
 def date_to_string(value: Date) -> string = string_concat(pad_left(value.year, cast(4, int64)), string_concat("-", string_concat(pad_left(value.month, cast(2, int64)), string_concat("-", pad_left(value.day, cast(2, int64))))))
 def parse_date(text: string) -> Option[Date] = { if neq(string_len(text), cast(10, int64)) then None else if neq(char_at(text, cast(4, int64)), "-") then None else if neq(char_at(text, cast(7, int64)), "-") then None else match to_int(string_slice(text, cast(0, int64), cast(4, int64))) with {
   | Some(year) => match to_int(string_slice(text, cast(5, int64), cast(2, int64))) with {

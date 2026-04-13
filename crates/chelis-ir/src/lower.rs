@@ -177,7 +177,21 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                     .any(|(_, value)| expr_requires_host_runtime(value))
         }
         Expr::List(list, _) => {
-            if matches!(get_tag(list), Some("if" | "match")) {
+            if matches!(get_tag(list), Some("if" | "match" | "record" | "access")) {
+                return true;
+            }
+            if get_tag(list) == Some("var")
+                && let Some(name) = children(list).first().and_then(symbol_name)
+                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            {
+                return true;
+            }
+            if get_tag(list) == Some("app")
+                && let Some(Expr::List(callee, _)) = children(list).first()
+                && get_tag(callee) == Some("var")
+                && let Some(name) = children(callee).first().and_then(symbol_name)
+                && name.chars().next().is_some_and(|ch| ch.is_uppercase())
+            {
                 return true;
             }
             if let Some(name) = builtin_name(list) {
@@ -244,6 +258,7 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "to_tensor"
                         | "to_list"
                         | "pad_sequences"
+                        | "pad_sequences_to"
                         | "einsum"
                         | "split"
                         | "gather"
@@ -891,31 +906,33 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
     }
 }
 
-fn param_name_and_type(param: &Expr) -> Option<(String, TensorType)> {
+fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => Some((name.clone(), LowerCtx::default_type())),
+        Expr::Atom(Atom::Symbol(name), _) => Some((name.clone(), None)),
         Expr::MetaExpr(meta, _) => {
             let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
                 return None;
             };
-            let ty = meta
+            let ty_expr = meta
                 .entries
                 .iter()
                 .find(|(key, _)| key == "type")
-                .map(|(_, value)| LowerCtx::type_from_type_expr(value))
-                .unwrap_or_else(LowerCtx::default_type);
-            Some((name.clone(), ty))
+                .map(|(_, value)| value);
+            Some((name.clone(), ty_expr))
         }
         Expr::List(param_list, _) => {
             let Expr::Atom(Atom::Symbol(name), _) = param_list.elements.first()? else {
                 return None;
             };
-            let ty = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                LowerCtx::type_from_meta(&meta.entries)
+            let ty_expr = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
             } else {
-                LowerCtx::default_type()
+                None
             };
-            Some((name.clone(), ty))
+            Some((name.clone(), ty_expr))
         }
         _ => None,
     }
@@ -2179,6 +2196,18 @@ impl LowerCtx {
                 let node = self.lower_transcendental(RiscOp::Sqrt, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
+            "uniform_like" if args.len() == 3 => {
+                let template = self.lower_expr_node(&args[0], "uniform_like template");
+                let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
+                let high = self.extract_f64_value(&args[2]).unwrap_or(1.0);
+                let seed = self.random_seed.unwrap_or(0);
+                let node = self.dag.add_node(
+                    RiscOp::UniformLike { low, high, seed },
+                    vec![template],
+                    ty.clone(),
+                );
+                self.attach_reuse_hint(node, app_span, &[template])
+            }
             "dropout" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "dropout input");
                 let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
@@ -2743,11 +2772,9 @@ impl LowerCtx {
         // Register params as Load nodes.
         if let Expr::List(params_list, _) = &elems[2] {
             for param in &params_list.elements[2..] {
-                if let Some((name, ty)) = param_name_and_type(param) {
-                    let load_id =
-                        self.dag
-                            .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
-                    self.bindings.insert(name, LoweredValue::Node(load_id));
+                if let Some((name, ty_expr)) = param_name_and_type_expr(param) {
+                    let lowered = self.lower_fn_param_binding(&name, ty_expr);
+                    self.bindings.insert(name, lowered);
                 }
             }
         }
@@ -2755,6 +2782,32 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
         result
+    }
+
+    fn lower_fn_param_binding(&mut self, name: &str, ty_expr: Option<&Expr>) -> LoweredValue {
+        if let Some(Expr::List(list, _)) = ty_expr
+            && get_tag(list) == Some("t-tuple")
+        {
+            let items = children(list)
+                .iter()
+                .enumerate()
+                .map(|(index, item_ty)| {
+                    self.lower_fn_param_binding(&format!("{name}__{index}"), Some(item_ty))
+                })
+                .collect::<Vec<_>>();
+            return LoweredValue::Tuple(items);
+        }
+
+        let ty = ty_expr
+            .map(Self::type_from_type_expr)
+            .unwrap_or_else(Self::default_type);
+        LoweredValue::Node(self.dag.add_node(
+            RiscOp::Load {
+                name: name.to_string(),
+            },
+            vec![],
+            ty,
+        ))
     }
 
     /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.

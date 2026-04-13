@@ -1491,6 +1491,20 @@ fn children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
+fn is_numeric_literal_expr(expr: &deep::Expr) -> bool {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _) => true,
+        deep::Expr::List(list, _) if get_tag(list) == Some("lit") => matches!(
+            list.elements.get(2),
+            Some(deep::Expr::Atom(
+                deep::Atom::Float(_) | deep::Atom::Int(_),
+                _
+            ))
+        ),
+        _ => false,
+    }
+}
+
 /// Get metadata map from element[1] of a list.
 fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
     if list.elements.len() > 1
@@ -2251,6 +2265,47 @@ fn infer_app(
         );
     }
 
+    if matches!(func_name.as_deref(), Some("reshape")) {
+        return infer_reshape_app(
+            list,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            typed_nodes,
+            total_nodes,
+        );
+    }
+
+    let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
+        adt_reg
+            .lookup_variant(fname)
+            .map(|_| fname.clone())
+            .or_else(|| {
+                fname
+                    .rsplit("__")
+                    .next()
+                    .and_then(|suffix| adt_reg.lookup_variant(suffix).map(|_| suffix.to_string()))
+            })
+    });
+
+    if let Some(ref fname) = ctor_lookup_name
+        && let Some((_adt_name, variant)) = adt_reg.lookup_variant(fname)
+        && !variant.fields.is_empty()
+        && variant
+            .fields
+            .iter()
+            .all(|(field_name, _)| field_name.is_some())
+    {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("{fname} is a record constructor and must use named fields: {fname} {{ ... }}"),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
     let func_ty = infer_expr(
         &kids[0],
         env,
@@ -2313,6 +2368,7 @@ fn infer_app(
         "cmplt",
         "eq",
         "neq",
+        "lt",
         "gt",
         "lte",
         "gte",
@@ -2347,7 +2403,7 @@ fn infer_app(
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
-                        "cmplt" | "gt" | "lte" | "gte" => {
+                        "cmplt" | "lt" | "gt" | "lte" | "gte" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
@@ -2416,6 +2472,82 @@ fn infer_app(
                             ));
                             return Type::Error;
                         }
+                    }
+                }
+            }
+
+            if let Some(ref fname) = func_name
+                && fname == "uniform_like"
+            {
+                if let Some(first_arg) = arg_tys.first() {
+                    let resolved = subst.apply(first_arg);
+                    match &resolved {
+                        Type::Tensor(_, prim) if prim.is_float() => {}
+                        Type::Tensor(_, _) => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "uniform_like expects a float tensor template, got {}",
+                                        resolved
+                                    ),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                        Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "uniform_like expects tensor template input, got {}",
+                                        resolved
+                                    ),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+                }
+
+                for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
+                    let resolved = subst.apply(arg_ty);
+                    match &resolved {
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        _ => {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "uniform_like expects f32 bounds for args 2-3, got {}",
+                                        resolved
+                                    ),
+                                ),
+                                vec![],
+                            ));
+                            return Type::Error;
+                        }
+                    }
+
+                    if let Some(expr) = kids.get(index + 1)
+                        && !is_numeric_literal_expr(expr)
+                    {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                "uniform_like currently requires literal low/high bounds"
+                                    .to_string(),
+                            ),
+                            vec![],
+                        ));
+                        return Type::Error;
                     }
                 }
             }
@@ -4750,6 +4882,138 @@ fn infer_permute_app(
     }
 
     Type::Tensor(reordered, prec)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_reshape_app(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut Vec<CheckError>,
+    typed_nodes: &mut usize,
+    total_nodes: &mut usize,
+) -> Type {
+    let kids = children(list);
+    if kids.len() < 2 || kids.len() > 3 {
+        errors.push(CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            "reshape expects a tensor and an optional shape list".to_string(),
+            vec![],
+        ));
+        return Type::Error;
+    }
+
+    let _func_ty = infer_expr(
+        &kids[0],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    let input_ty = infer_expr(
+        &kids[1],
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        typed_nodes,
+        total_nodes,
+    );
+    match subst.apply(&input_ty) {
+        Type::Prim(precision) => {
+            if let Some(shape_expr) = kids.get(2) {
+                let shape_ty = infer_expr(
+                    shape_expr,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+                let expected_shape_ty =
+                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    errors.push(te.into());
+                    return Type::Error;
+                }
+                let rank = list_literal_len(shape_expr).unwrap_or(1);
+                return Type::Tensor(vec![Dim::Wildcard; rank], precision);
+            }
+
+            Type::Tensor(vec![Dim::Wildcard], precision)
+        }
+        Type::Tensor(_, precision) => {
+            if let Some(shape_expr) = kids.get(2) {
+                let shape_ty = infer_expr(
+                    shape_expr,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+                let expected_shape_ty =
+                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    errors.push(te.into());
+                    return Type::Error;
+                }
+                let rank = list_literal_len(shape_expr).unwrap_or(1);
+                return Type::Tensor(vec![Dim::Wildcard; rank], precision);
+            }
+
+            Type::Tensor(vec![Dim::Wildcard], precision)
+        }
+        Type::Var(_) | Type::Error => {
+            if let Some(shape_expr) = kids.get(2) {
+                let shape_ty = infer_expr(
+                    shape_expr,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    typed_nodes,
+                    total_nodes,
+                );
+                let expected_shape_ty =
+                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    errors.push(te.into());
+                    return Type::Error;
+                }
+            }
+            input_ty
+        }
+        _ => {
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                "reshape expects tensor input".to_string(),
+                vec![],
+            ));
+            Type::Error
+        }
+    }
+}
+
+fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("list") {
+        return None;
+    }
+    Some(children(list).len())
 }
 
 fn check_layer_norm_signature(
@@ -7476,7 +7740,11 @@ mod tests {
                (variant {} MkPair
                  (field {} fst (t-prim {} int32))
                  (field {} snd (t-prim {} f32))))
-             (def {} p (app {} (var {} MkPair) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))",
+             (def {} p
+               (record {}
+                 (var {} MkPair)
+                 (kv {} fst (lit {type: (t-prim {} int32)} 1))
+                 (kv {} snd (lit {type: (t-prim {} f32)} 2.0))))",
         );
     }
 
