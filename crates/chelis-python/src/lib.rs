@@ -1340,10 +1340,12 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};
+    use std::fs;
+    use tempfile::tempdir;
 
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
-    const LOSS_PROGRAM: &str = r#"let x = (x : tensor[4, f32])
-let loss = (mean(x, 0) : tensor[f32])
+    const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
+loss = (mean(x, 0) : tensor[f32])
 "#;
 
     #[test]
@@ -1402,6 +1404,36 @@ let loss = (mean(x, 0) : tensor[f32])
                 )
                 .expect_err("expected failure");
             assert!(err.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn eval_json_rejects_mapped_file_results() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dataset.txt");
+        fs::write(&path, "alpha\nbeta\n").expect("write dataset");
+
+        Python::with_gil(|py| {
+            let module = PyModule::new(py, "_native").expect("module");
+            register_module(&module).expect("register");
+            let source = format!(
+                "mapped = mmap_file(\"{}\")\n",
+                path.to_str()
+                    .expect("utf8 path")
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            );
+            let err = module
+                .getattr("eval_json")
+                .expect("eval_json")
+                .call1((source.as_str(), "{}"))
+                .expect_err("expected mapped-file serialization failure");
+            assert!(err.is_instance_of::<ChelisError>(py));
+            assert!(
+                err.to_string()
+                    .contains("MappedFile values are not serializable"),
+                "unexpected error: {err}"
+            );
         });
     }
 }
