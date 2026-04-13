@@ -46,8 +46,8 @@ partial def subst (target : Term) (v : Term) (x : String) : Term :=
   | Term.sum e i => Term.sum (subst e v x) i
   | Term.expand e i k => Term.expand (subst e v x) i k
   | Term.uniformLike e lo hi => Term.uniformLike (subst e v x) lo hi
-  | Term.grad y t body =>
-      if y = x then target else Term.grad y t (subst body v x)
+  | Term.grad y t tOut body =>
+      if y = x then target else Term.grad y t tOut (subst body v x)
   | Term.vmap y t body =>
       if y = x then target else Term.vmap y t (subst body v x)
   | Term.handle epsH body clauses =>
@@ -226,12 +226,13 @@ inductive Step : Config → Config → Prop
   -- E-Grad reduction is a typed operational rule — `tOut` is implicit in
   -- the typing context — but in Lean we need the type concretely or
   -- preservation for this rule cannot close.
-  -- Round-3 fix (H3): the seed parameter type is `tOut`, not `Typ.unit`.
+  -- Round-3 fix (H3): the seed parameter type is `tOut`, read from
+  -- the `Term.grad` constructor's new `tOut` field (Phase 2 Wave 0 P4).
   -- The handler clause body `app (var k) (var p)` is still a round-3
   -- skeleton placeholder for the real `update_origin_buffer(p)` routing.
   | tgrad
       (sigma : Store) (x : String) (t tOut : Typ) (e : Term) :
-      Step ⟨sigma, Term.grad x t e⟩
+      Step ⟨sigma, Term.grad x t tOut e⟩
            ⟨sigma,
             Term.abs x t
               (Term.abs "gs" tOut
@@ -241,12 +242,11 @@ inductive Step : Config → Config → Prop
                     Term.app (Term.var "k") (Term.var "p"))]))⟩
 
   -- E-Vmap: vmap(λx:t.e)  ↦  λx:addDim(d, t). addDimTerm(d, e)
-  -- where `addDimTerm` is the term-level lift (Phase 2).
+  -- Wave 0 P6: body is now lifted via `addDimTerm` (defined in
+  -- `Syntax.lean`) rather than passing `e` through unchanged.
   | tvmap
       (sigma : Store) (x : String) (t : Typ) (e : Term) (d : Dim) :
       Step ⟨sigma, Term.vmap x t e⟩
-           ⟨sigma, Term.abs x (addDim d t) e⟩
-           -- Phase 1 skeleton: body `e` passes through unchanged. Phase 2
-           -- will add `addDimTerm(d, e)` in place of `e`.
+           ⟨sigma, Term.abs x (addDim d t) (addDimTerm d e)⟩
 
 end LaCaDiLE

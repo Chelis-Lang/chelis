@@ -56,9 +56,32 @@ inductive EffectLabel where
 abbrev EffectRow := List EffectLabel
 
 /-- Check whether every label in `eps1` appears in `eps2`.
-    Paper notation: `ε₁ ⊆ ε₂`. -/
+    Paper notation: `ε₁ ⊆ ε₂`. List-based but set-semantic: duplicates
+    in `eps1` or `eps2` don't affect the result. -/
 def subsetEffRow (eps1 eps2 : EffectRow) : Bool :=
   eps1.all (fun op => eps2.contains op)
+
+/-- Union of two effect rows. Wave 0 P2: set semantics — duplicates
+    from the right operand are dropped if already present in the left.
+    `List.union` is not in Lean 4 core, so we spell it out: append
+    `eps1` with the `eps2` elements that `eps1` does not contain. -/
+def EffectRow.union (eps1 eps2 : EffectRow) : EffectRow :=
+  eps1 ++ eps2.filter (fun op => !eps1.contains op)
+
+/-- Remove every occurrence of `op` from an effect row. Wave 0 P2:
+    unlike `List.erase` (which removes only the first occurrence),
+    this removes all occurrences, so handling an effect leaves the
+    residual effect row free of that operation regardless of
+    accidental duplicates. -/
+def EffectRow.removeOp (eps : EffectRow) (op : EffectLabel) : EffectRow :=
+  eps.filter (fun o => o ≠ op)
+
+/-- Remove every occurrence of every operation in `ops` from `eps`.
+    Used by the multi-clause `T-Handle` rule (Wave 0 P5) to compute
+    the residual effect row after a handle removes a set of
+    operations. -/
+def EffectRow.removeOps (eps : EffectRow) (ops : EffectRow) : EffectRow :=
+  ops.foldr (fun op r => EffectRow.removeOp r op) eps
 
 /-- The set of effects compatible with differentiation.
     Per decisions.md: `DiffCompat = {Resource, Accum}`. -/
@@ -101,6 +124,16 @@ def addDim (d : Dim) : Typ → Typ
   | Typ.pair t1 t2      => Typ.pair (addDim d t1) (addDim d t2)
   | Typ.unit            => Typ.unit
   | Typ.tyVar a         => Typ.tyVar a
+
+/-- Per-operation signature lookup for effect operations (Wave 0 P7).
+    `T-Perform op e` requires `e` to have type `(opSignature op).1` and
+    produces a term of type `(opSignature op).2`. Phase 1 skeleton uses
+    a uniform `(unit, unit)` signature for every op; Phase 2 WS2.7 will
+    refine this per-operation (e.g., `fail : unit → α` once type
+    variables are in play, `accum : (Loc × TensorVal) → unit` via a
+    location-tagged pair type). -/
+def opSignature (_op : EffectLabel) : Typ × Typ :=
+  (Typ.unit, Typ.unit)
 
 /-! ## Locations and tensor values -/
 
@@ -147,7 +180,7 @@ inductive Term where
   | expand      (e : Term) (i : Nat) (k : Nat)
   | uniformLike (e : Term) (lo : Float) (hi : Float)
   -- AD / vectorization transforms (restricted to literal abstractions per T-Grad)
-  | grad    (x : String) (t : Typ) (body : Term)
+  | grad    (x : String) (t : Typ) (tOut : Typ) (body : Term)
   | vmap    (x : String) (t : Typ) (body : Term)
   -- effects: clauses are (op, arg-var, cont-var, body) tuples
   | handle  (epsH : EffectRow) (body : Term)
@@ -156,6 +189,57 @@ inductive Term where
   -- runtime location (introduced by reduction, not in source programs)
   | loc     (ell : Loc)
   deriving Repr
+
+/-! ## Term-level dimension lifting (Wave 0 P6) -/
+
+-- The term-level `vmap` lifting. `addDimTerm d e` structurally walks
+-- `e` and rewrites every tensor-producing subterm to operate over a
+-- new fresh batch dimension `d`. Companion to `addDim : Dim → Typ → Typ`
+-- and referenced by `E-Vmap` in `Operational.lean`. The handler-clause
+-- case is delegated to `addDimClauses` in a `mutual` block so the
+-- structural recursion checker sees each recursive call lands on a
+-- strictly-smaller sub-term. Phase 2 WS2.3 proves `addDim_preserves_typing`.
+mutual
+
+/-- Term-level vmap lifting; see the comment above the `mutual` block. -/
+def addDimTerm (d : Dim) : Term → Term
+  | Term.var x => Term.var x
+  | Term.abs x t body => Term.abs x (addDim d t) (addDimTerm d body)
+  | Term.app e1 e2 => Term.app (addDimTerm d e1) (addDimTerm d e2)
+  | Term.letBind x e1 e2 => Term.letBind x (addDimTerm d e1) (addDimTerm d e2)
+  | Term.copy e => Term.copy (addDimTerm d e)
+  | Term.letpair x y e1 e2 =>
+      Term.letpair x y (addDimTerm d e1) (addDimTerm d e2)
+  | Term.pair e1 e2 => Term.pair (addDimTerm d e1) (addDimTerm d e2)
+  | Term.fst e => Term.fst (addDimTerm d e)
+  | Term.snd e => Term.snd (addDimTerm d e)
+  | Term.unit => Term.unit
+  | Term.const v ds => Term.const v (d :: ds)
+  | Term.add e1 e2 => Term.add (addDimTerm d e1) (addDimTerm d e2)
+  | Term.mul e1 e2 => Term.mul (addDimTerm d e1) (addDimTerm d e2)
+  -- shift axis indices for reductions / expansions: the new batch
+  -- dimension is prepended at index 0, so every existing axis shifts
+  -- up by 1. `sum` and `expand` operate on the shifted axis.
+  | Term.sum e i => Term.sum (addDimTerm d e) (i + 1)
+  | Term.expand e i k => Term.expand (addDimTerm d e) (i + 1) k
+  | Term.uniformLike e lo hi => Term.uniformLike (addDimTerm d e) lo hi
+  | Term.grad x t tOut body =>
+      Term.grad x (addDim d t) (addDim d tOut) (addDimTerm d body)
+  | Term.vmap x t body => Term.vmap x (addDim d t) (addDimTerm d body)
+  | Term.handle epsH body clauses =>
+      Term.handle epsH (addDimTerm d body) (addDimClauses d clauses)
+  | Term.perform op e => Term.perform op (addDimTerm d e)
+  | Term.loc ell => Term.loc ell
+
+/-- Companion to `addDimTerm`: lift a handler-clause list through
+    `addDimTerm`, preserving clause structure and recursing on bodies. -/
+def addDimClauses (d : Dim) :
+    List (EffectLabel × String × String × Term) →
+    List (EffectLabel × String × String × Term)
+  | [] => []
+  | (op, x, k, hb) :: rest => (op, x, k, addDimTerm d hb) :: addDimClauses d rest
+
+end
 
 /-! ## Values -/
 

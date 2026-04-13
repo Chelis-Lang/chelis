@@ -5,6 +5,7 @@
 -- preservation. Phase 1 skeleton: stub.
 
 import LaCaDiLE.Syntax
+import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
 
@@ -13,10 +14,12 @@ namespace LaCaDiLE
 /-- Dimension safety: a well-typed program never reduces to a state
     where a RISC primitive is applied to operands of mismatching
     shapes. Phase 2 will refine against a concrete notion of
-    "stuck because of shape mismatch." -/
+    "stuck because of shape mismatch." Wave 0 P3: the typing judgment
+    now carries `Sigma`. -/
 theorem dimension_safety
-    (_sigma : Store) (_e : Term) (_t : Typ) (_eps : EffectRow)
-    (_h : HasType [] [] _e _t _eps []) :
+    (_sigma : Store) (_Sigma : StoreTyp)
+    (_e : Term) (_t : Typ) (_eps : EffectRow)
+    (_h : HasType [] _Sigma [] _e _t _eps []) :
     True := trivial
 
 end LaCaDiLE

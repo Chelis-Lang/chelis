@@ -5,16 +5,18 @@
 -- Phase 1 skeleton: stub.
 
 import LaCaDiLE.Syntax
+import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
 
 namespace LaCaDiLE
 
 /-- Effect correctness: a term with empty effect row does not perform
-    an unhandled operation under reduction. -/
+    an unhandled operation under reduction. Wave 0 P3: the typing
+    judgment now carries `Sigma`. -/
 theorem effect_correctness
-    (_sigma : Store) (_e : Term) (_t : Typ)
-    (_h : HasType [] [] _e _t [] []) :
+    (_sigma : Store) (_Sigma : StoreTyp) (_e : Term) (_t : Typ)
+    (_h : HasType [] _Sigma [] _e _t [] []) :
     True := trivial
 
 end LaCaDiLE

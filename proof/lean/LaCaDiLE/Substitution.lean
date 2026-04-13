@@ -10,19 +10,22 @@
 -- representation.
 
 import LaCaDiLE.Syntax
+import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
 
 namespace LaCaDiLE
 
-/-- Substitution preserves typing. -/
+/-- Substitution preserves typing. Phase 2 Wave 0 P3: the typing
+    judgment now carries a store typing `Sigma`. Substitution does not
+    touch the store, so `Sigma` passes through unchanged. -/
 theorem subst_preserves_typing
-    (Delta : CapCtx) (Gamma1 Gamma2 : LinearCtx)
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
-    (_h_e : HasType Delta (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2)
-    (_h_v : HasType Delta Gamma1 v t1 [] Gamma1) :
-    HasType Delta Gamma1 (subst e v x) t2 eps
+    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2)
+    (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1) :
+    HasType Delta Sigma Gamma1 (subst e v x) t2 eps
             (Gamma2.filter (fun p => p.1 ≠ x)) := by
   sorry
 
