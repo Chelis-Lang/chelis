@@ -538,6 +538,7 @@ impl HipEmitter {
             RiscOp::Log => Some("kernel_log".into()),
             RiscOp::Sin => Some("kernel_sin".into()),
             RiscOp::Sqrt => Some("kernel_sqrt".into()),
+            RiscOp::UniformLike { .. } => Some("kernel_uniform_like".into()),
             RiscOp::Dropout { .. } => None,
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
@@ -588,6 +589,7 @@ impl HipEmitter {
             RiscOp::Log => kernels::unary_func(name, "logf"),
             RiscOp::Sin => kernels::unary_func(name, "sinf"),
             RiscOp::Sqrt => kernels::unary_func(name, "sqrtf"),
+            RiscOp::UniformLike { .. } => kernels::uniform_like(name),
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -689,6 +691,9 @@ impl HipEmitter {
             }
             RiscOp::Sqrt => {
                 self.emit_unary_launch(id, "kernel_sqrt", &node.inputs, &node.output_type)
+            }
+            RiscOp::UniformLike { low, high, seed } => {
+                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before HIP code generation")
@@ -977,6 +982,38 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_uniform_like_launch(
+        &mut self,
+        id: usize,
+        low: f64,
+        high: f64,
+        seed: u64,
+        ty: &TensorType,
+    ) {
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("float t{id}_low = {:.8}f;", low as f32));
+        self.line(&format!("float t{id}_high = {:.8}f;", high as f32));
+        self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            "mod_kernel_uniform_like",
+            "kernel_uniform_like",
             &format!("(t{id}_size + 255) / 256"),
             "256",
             "args",
@@ -1505,6 +1542,7 @@ impl HipEmitter {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }

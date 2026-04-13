@@ -20,12 +20,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "log",
     "sin",
     "sqrt",
+    "uniform_like",
     "cmplt",
     "sub",
     "div",
     "mod",
     "eq",
     "neq",
+    "lt",
     "gt",
     "lte",
     "gte",
@@ -55,6 +57,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "shrink",
     "stride",
     "print",
+    "fail",
     "debug",
     "string_len",
     "string_concat",
@@ -292,6 +295,23 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn tensor_with_bounds(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Var(input),
+                    Type::Prim(Prim::F32),
+                    Type::Prim(Prim::F32),
+                ],
+                Box::new(Type::Var(input)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let kernel = vg.fresh_tvar();
@@ -413,6 +433,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("log", &mut env, &mut vg);
     tensor_unop("sin", &mut env, &mut vg);
     tensor_unop("sqrt", &mut env, &mut vg);
+    tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
     cmplt_sig("cmplt", &mut env, &mut vg);
 
@@ -422,6 +443,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
+    cmplt_sig("lt", &mut env, &mut vg);
     cmplt_sig("gt", &mut env, &mut vg);
     cmplt_sig("lte", &mut env, &mut vg);
     cmplt_sig("gte", &mut env, &mut vg);
@@ -455,6 +477,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("stride", &mut env, &mut vg);
     tensor_with_rate("dropout", &mut env, &mut vg);
     generic_unop("print", &mut env, &mut vg);
+    generic_unop("fail", &mut env, &mut vg);
     generic_unop_same("debug", &mut env, &mut vg);
     generic_unop("string_len", &mut env, &mut vg);
     generic_binop("string_concat", &mut env, &mut vg);
@@ -679,9 +702,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
 }
 
 /// Names that the inference engine should special-case for return type.
-/// cmplt, eq, neq, lte, gte return tensor[D, bool] instead of tensor[D, p].
+/// cmplt, eq, neq, lt, lte, gte return tensor[D, bool] instead of tensor[D, p].
 #[allow(dead_code)] // Used by inference engine (Step 6)
-pub const COMPARISON_OPS: &[&str] = &["cmplt", "eq", "neq", "gt", "lte", "gte"];
+pub const COMPARISON_OPS: &[&str] = &["cmplt", "eq", "neq", "lt", "gt", "lte", "gte"];
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
@@ -27,6 +27,7 @@ pub(crate) enum RuntimeValue {
     Adt {
         ctor: String,
         fields: Vec<RuntimeValue>,
+        field_names: Option<Vec<String>>,
     },
     MappedFile(Vec<u8>),
     Closure {
@@ -48,26 +49,14 @@ pub(crate) fn evaluate_host_program(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
-    let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        tensor_bindings,
-        transcript: Vec::new(),
-    };
-
-    for expr in program.exprs() {
+    let mut top_level_defs = HashMap::new();
+    let mut top_level_order = Vec::new();
+    let adt_fields = collect_adt_ctor_fields(program.exprs());
+    for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
         };
         if tag(list) != Some("def") {
-            continue;
-        }
-        if children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(|name| lowered_names.get(name))
-            .copied()
-            .unwrap_or(false)
-        {
             continue;
         }
         let kids = children(list);
@@ -77,14 +66,53 @@ pub(crate) fn evaluate_host_program(
         let Some(body) = kids.get(1) else {
             continue;
         };
-        let value = ctx.eval_expr(body)?;
-        ctx.bindings.insert(name.to_string(), value);
+        top_level_defs.insert(name.to_string(), body.clone());
+        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
+        if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
+            top_level_order.push(name.to_string());
+        }
+    }
+
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        top_level_defs,
+        adt_fields,
+        tensor_bindings,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+    };
+
+    for name in top_level_order {
+        let _ = ctx.resolve_top_level(&name)?;
     }
 
     Ok(RuntimeOutcome {
         host_bindings: ctx.bindings,
         transcript: ctx.transcript,
     })
+}
+
+fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    for expr in exprs {
+        collect_top_level_items(expr, &mut out);
+    }
+    out
+}
+
+fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    let Expr::List(list, _) = expr else {
+        return;
+    };
+    if tag(list) == Some("module") {
+        for child in list.elements.iter().skip(3) {
+            collect_top_level_items(child, out);
+        }
+        return;
+    }
+    out.push(expr);
 }
 
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
@@ -124,7 +152,7 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                 .map(runtime_value_to_schema)
                 .collect::<Result<Vec<_>, _>>()?,
         },
-        RuntimeValue::Adt { ctor, fields } => ExecutionValue::Adt {
+        RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
             ctor: ctor.clone(),
             fields: fields
                 .iter()
@@ -167,11 +195,57 @@ pub(crate) fn lookup_runtime_value_for_root(
 
 struct EvalContext<'a> {
     bindings: HashMap<String, RuntimeValue>,
+    top_level_defs: HashMap<String, Expr>,
+    adt_fields: HashMap<String, Vec<String>>,
     tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
     transcript: Vec<String>,
+    resolving_top_levels: Vec<String>,
+    random_seed: Option<u64>,
+    random_counter: u64,
 }
 
 impl<'a> EvalContext<'a> {
+    fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
+        if let Some(value) = self.bindings.get(name) {
+            return Ok(value.clone());
+        }
+        let Some((resolved_name, expr)) = self.lookup_top_level_def(name) else {
+            return Err(format!("unknown runtime name `{name}`"));
+        };
+        if self
+            .resolving_top_levels
+            .iter()
+            .any(|existing| existing == &resolved_name)
+        {
+            return Err(format!("cyclic top-level runtime definition `{name}`"));
+        }
+        self.resolving_top_levels.push(resolved_name.clone());
+        let value = self.eval_expr(&expr)?;
+        self.resolving_top_levels.pop();
+        self.bindings.insert(resolved_name.clone(), value.clone());
+        if resolved_name != name {
+            self.bindings.insert(name.to_string(), value.clone());
+        }
+        Ok(value)
+    }
+
+    fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
+        self.top_level_defs
+            .get(name)
+            .cloned()
+            .map(|expr| (name.to_string(), expr))
+            .or_else(|| {
+                let mut matches = self.top_level_defs.iter().filter_map(|(key, value)| {
+                    terminal_name_matches(key, name).then_some((key, value))
+                });
+                let (key, value) = matches.next()?;
+                matches
+                    .next()
+                    .is_none()
+                    .then_some((key.clone(), value.clone()))
+            })
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
         match expr {
             Expr::Atom(_, _) => Err("bare atom is not a runtime expression".to_string()),
@@ -194,6 +268,19 @@ impl<'a> EvalContext<'a> {
                     .map(|child| self.eval_expr(child))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
+            Some("copy") => {
+                let value = self.eval_expr(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| "copy missing value".to_string())?,
+                )?;
+                match value {
+                    RuntimeValue::Tensor(tensor) => Ok(RuntimeValue::Tensor(tensor)),
+                    other => Err(format!("copy expects tensor input, got {other:?}")),
+                }
+            }
+            Some("record") => self.eval_record(list),
+            Some("access") => self.eval_access(list),
             Some("tuple-get") => self.eval_tuple_get(list),
             Some("match") => self.eval_match(list),
             Some("fn") => self.eval_fn(list),
@@ -201,15 +288,132 @@ impl<'a> EvalContext<'a> {
             Some("cast") => self.eval_cast(list),
             Some("handle-effect") => {
                 let kids = children(list);
-                self.eval_expr(
-                    kids.get(2)
-                        .ok_or_else(|| "handle-effect missing body".to_string())?,
-                )
+                let effect = get_meta(list)
+                    .and_then(|meta| {
+                        meta.entries
+                            .iter()
+                            .find(|(key, _)| key == "effect")
+                            .and_then(|(_, value)| symbol_name(value))
+                    })
+                    .unwrap_or_default();
+                if effect == "random" {
+                    let seed = self.eval_expr(
+                        kids.first()
+                            .ok_or_else(|| "handle-effect missing seed".to_string())?,
+                    )?;
+                    let seed = match seed {
+                        RuntimeValue::Int(value) => value as u64,
+                        other => {
+                            return Err(format!("with seed expects int seed, got {other:?}"));
+                        }
+                    };
+                    let saved_seed = self.random_seed;
+                    let saved_counter = self.random_counter;
+                    self.random_seed = Some(seed);
+                    self.random_counter = 0;
+                    let value = self.eval_expr(
+                        kids.get(1)
+                            .ok_or_else(|| "handle-effect missing body".to_string())?,
+                    );
+                    self.random_seed = saved_seed;
+                    self.random_counter = saved_counter;
+                    value
+                } else {
+                    self.eval_expr(
+                        kids.get(1)
+                            .ok_or_else(|| "handle-effect missing body".to_string())?,
+                    )
+                }
             }
             other => Err(format!(
                 "host runtime does not support `{}`",
                 other.unwrap_or("?")
             )),
+        }
+    }
+
+    fn eval_record(&mut self, list: &List) -> Result<RuntimeValue, String> {
+        let kids = children(list);
+        let ctor = kids
+            .first()
+            .and_then(symbol_name)
+            .ok_or_else(|| "record missing constructor name".to_string())?;
+        let mut fields_by_name = HashMap::new();
+        let mut source_order = Vec::new();
+        for field in kids.iter().skip(1) {
+            let Some(field_list) = as_list(field) else {
+                continue;
+            };
+            if tag(field_list) != Some("kv") {
+                continue;
+            }
+            let field_kids = children(field_list);
+            let Some(name) = field_kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let value = self.eval_expr(
+                field_kids
+                    .get(1)
+                    .ok_or_else(|| "record field missing value".to_string())?,
+            )?;
+            source_order.push(name.to_string());
+            fields_by_name.insert(name.to_string(), value);
+        }
+        let declared = self
+            .adt_fields
+            .get(ctor)
+            .cloned()
+            .unwrap_or_else(|| source_order.clone());
+        let mut ordered = Vec::with_capacity(declared.len());
+        for field_name in declared {
+            let value = fields_by_name.remove(&field_name).ok_or_else(|| {
+                format!("record `{ctor}` missing field `{field_name}` at runtime")
+            })?;
+            ordered.push(value);
+        }
+        if let Some(extra) = fields_by_name.keys().next() {
+            return Err(format!(
+                "record `{ctor}` has unknown field `{extra}` at runtime"
+            ));
+        }
+        Ok(RuntimeValue::Adt {
+            ctor: ctor.to_string(),
+            fields: ordered,
+            field_names: Some(source_order),
+        })
+    }
+
+    fn eval_access(&mut self, list: &List) -> Result<RuntimeValue, String> {
+        let kids = children(list);
+        let target = self.eval_expr(
+            kids.first()
+                .ok_or_else(|| "access missing target".to_string())?,
+        )?;
+        let field = kids
+            .get(1)
+            .and_then(symbol_name)
+            .ok_or_else(|| "access missing field".to_string())?;
+        match target {
+            RuntimeValue::Adt {
+                ctor,
+                fields,
+                field_names,
+            } => {
+                let declared = self
+                    .adt_fields
+                    .get(&ctor)
+                    .cloned()
+                    .or(field_names)
+                    .ok_or_else(|| format!("unknown record constructor `{ctor}`"))?;
+                let Some(index) = declared.iter().position(|name| name == field) else {
+                    return Err(format!("record `{ctor}` has no field `{field}`"));
+                };
+                fields
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("record `{ctor}` missing field `{field}`"))
+            }
+            other => Err(format!("field access expects record value, got {other:?}")),
         }
     }
 
@@ -237,6 +441,9 @@ impl<'a> EvalContext<'a> {
         if let Some(value) = self.tensor_bindings.get(name) {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
+        if self.lookup_top_level_def(name).is_some() {
+            return self.resolve_top_level(name);
+        }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new()));
         }
@@ -244,6 +451,7 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
                 fields: Vec::new(),
+                field_names: None,
             });
         }
         Err(format!("unknown runtime name `{name}`"))
@@ -270,7 +478,12 @@ impl<'a> EvalContext<'a> {
         Ok(RuntimeValue::Closure {
             params,
             body,
-            env: self.bindings.clone(),
+            env: self
+                .bindings
+                .iter()
+                .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
         })
     }
 
@@ -303,6 +516,7 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
                 fields: args,
+                field_names: None,
             });
         }
 
@@ -362,7 +576,7 @@ impl<'a> EvalContext<'a> {
         let mut index = 0;
         while index + 1 < bind_kids.len() {
             let name = symbol_name(&bind_kids[index])
-                .ok_or_else(|| "let binding must bind a name in 3c".to_string())?;
+                .ok_or_else(|| "let binding must bind a name".to_string())?;
             let value = self.eval_expr(&bind_kids[index + 1])?;
             self.bindings.insert(name.to_string(), value);
             index += 2;
@@ -417,7 +631,12 @@ impl<'a> EvalContext<'a> {
                 continue;
             }
             let saved = self.bindings.clone();
-            if pattern_matches(&scrutinee, &arm_kids[0], &mut self.bindings)? {
+            if pattern_matches(
+                &scrutinee,
+                &arm_kids[0],
+                &mut self.bindings,
+                &self.adt_fields,
+            )? {
                 let value = self.eval_expr(&arm_kids[2]);
                 self.bindings = saved;
                 return value;
@@ -531,9 +750,24 @@ impl<'a> EvalContext<'a> {
                     ordered_compare(args, |lhs, rhs| lhs < rhs)
                 }
             }
+            "lt" => ordered_compare(args, |lhs, rhs| lhs < rhs),
             "gt" => ordered_compare(args, |lhs, rhs| lhs > rhs),
             "gte" => ordered_compare(args, |lhs, rhs| lhs >= rhs),
             "lte" => ordered_compare(args, |lhs, rhs| lhs <= rhs),
+            "uniform_like" => {
+                let template = expect_tensor_arg(args, 0)?;
+                let low = expect_float_arg(args, 1)?;
+                let high = expect_float_arg(args, 2)?;
+                let seed = self.random_seed.unwrap_or(0);
+                let counter = self.random_counter;
+                self.random_counter = self.random_counter.saturating_add(1);
+                Ok(RuntimeValue::Tensor(uniform_like_value(
+                    &template,
+                    low,
+                    high,
+                    seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                )))
+            }
             "and" => bool_binop(args, |lhs, rhs| lhs && rhs),
             "or" => bool_binop(args, |lhs, rhs| lhs || rhs),
             "not" => bool_unop(args, |value| !value),
@@ -589,10 +823,12 @@ impl<'a> EvalContext<'a> {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
                         fields: vec![RuntimeValue::Int(parsed)],
+                        field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
                         fields: Vec::new(),
+                        field_names: None,
                     },
                 })
             }
@@ -602,10 +838,12 @@ impl<'a> EvalContext<'a> {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
                         fields: vec![RuntimeValue::Float(parsed)],
+                        field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
                         fields: Vec::new(),
+                        field_names: None,
                     },
                 })
             }
@@ -854,10 +1092,12 @@ impl<'a> EvalContext<'a> {
                     Some(value) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
                         fields: vec![value.clone()],
+                        field_names: None,
                     },
                     None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
                         fields: Vec::new(),
+                        field_names: None,
                     },
                 })
             }
@@ -923,6 +1163,15 @@ impl<'a> EvalContext<'a> {
                         .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
                         .collect(),
                 ))
+            }
+            "copy" => match args.first() {
+                Some(RuntimeValue::Tensor(tensor)) => Ok(RuntimeValue::Tensor(tensor.clone())),
+                other => Err(format!("copy expects tensor input, got {other:?}")),
+            },
+            "reshape" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let shape = expect_list_arg(args, 1)?;
+                tensor_reshape_value(&tensor, &shape).map(RuntimeValue::Tensor)
             }
             "to_tensor" => {
                 let values = expect_list_arg(args, 0)?;
@@ -1170,6 +1419,10 @@ impl<'a> EvalContext<'a> {
                 self.transcript.push(render_value(value));
                 Ok(RuntimeValue::Unit)
             }
+            "fail" => {
+                let message = expect_string_arg(args, 0)?;
+                Err(message)
+            }
             "debug" => {
                 let value = args
                     .first()
@@ -1186,6 +1439,7 @@ fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
     bindings: &mut HashMap<String, RuntimeValue>,
+    adt_fields: &HashMap<String, Vec<String>>,
 ) -> Result<bool, String> {
     let Some(list) = as_list(pattern) else {
         return Ok(false);
@@ -1216,14 +1470,66 @@ fn pattern_matches(
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
-            let RuntimeValue::Adt { ctor: got, fields } = value else {
+            let RuntimeValue::Adt {
+                ctor: got, fields, ..
+            } = value
+            else {
                 return Ok(false);
             };
             if ctor != got || kids.len().saturating_sub(1) != fields.len() {
                 return Ok(false);
             }
             for (subpat, field) in kids.iter().skip(1).zip(fields) {
-                if !pattern_matches(field, subpat, bindings)? {
+                if !pattern_matches(field, subpat, bindings, adt_fields)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Some("pat-record") => {
+            let kids = children(list);
+            let Some(ctor) = kids.first().and_then(symbol_name) else {
+                return Ok(false);
+            };
+            let RuntimeValue::Adt {
+                ctor: got,
+                fields,
+                field_names,
+            } = value
+            else {
+                return Ok(false);
+            };
+            if ctor != got {
+                return Ok(false);
+            }
+            let Some(declared_fields) = adt_fields.get(ctor).cloned().or(field_names.clone())
+            else {
+                return Ok(false);
+            };
+            for kv_expr in kids.iter().skip(1) {
+                let Some(kv_list) = as_list(kv_expr) else {
+                    continue;
+                };
+                if tag(kv_list) != Some("kv") {
+                    continue;
+                }
+                let kv_kids = children(kv_list);
+                let Some(field_name) = kv_kids.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let Some(pattern_expr) = kv_kids.get(1) else {
+                    continue;
+                };
+                let Some(index) = declared_fields
+                    .iter()
+                    .position(|declared| declared == field_name)
+                else {
+                    return Ok(false);
+                };
+                let Some(field_value) = fields.get(index) else {
+                    return Ok(false);
+                };
+                if !pattern_matches(field_value, pattern_expr, bindings, adt_fields)? {
                     return Ok(false);
                 }
             }
@@ -1237,7 +1543,7 @@ fn pattern_matches(
                 return Ok(false);
             }
             for (subpat, item) in children(list).iter().zip(items) {
-                if !pattern_matches(item, subpat, bindings)? {
+                if !pattern_matches(item, subpat, bindings, adt_fields)? {
                     return Ok(false);
                 }
             }
@@ -1247,11 +1553,68 @@ fn pattern_matches(
     }
 }
 
+fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("deftype") {
+            continue;
+        }
+        let kids = children(list);
+        for variant in kids.iter().skip(2) {
+            let Some(variant_list) = as_list(variant) else {
+                continue;
+            };
+            if tag(variant_list) != Some("variant") {
+                continue;
+            }
+            let variant_kids = children(variant_list);
+            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let mut fields = Vec::new();
+            for field in variant_kids.iter().skip(1) {
+                let Some(field_list) = as_list(field) else {
+                    continue;
+                };
+                if tag(field_list) != Some("field") {
+                    continue;
+                }
+                if let Some(name) = children(field_list).first().and_then(symbol_name) {
+                    fields.push(name.to_string());
+                }
+            }
+            if !fields.is_empty() {
+                out.insert(ctor.to_string(), fields);
+            }
+        }
+    }
+    out
+}
+
+fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
+}
+
+fn terminal_name(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
+}
+
 fn numeric_binop(
     args: &[RuntimeValue],
     op: impl Fn(f64, f64) -> f64,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            tensor_numeric_binop(lhs, rhs, &op)
+        }
+        (Some(RuntimeValue::Tensor(lhs)), Some(rhs)) => tensor_scalar_binop(lhs, rhs, &op),
+        (Some(lhs), Some(RuntimeValue::Tensor(rhs))) => scalar_tensor_binop(lhs, rhs, &op),
         (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
             Ok(RuntimeValue::Int(op(*lhs as f64, *rhs as f64) as i64))
         }
@@ -1266,11 +1629,101 @@ fn numeric_binop(
 
 fn numeric_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
     match args.first() {
+        Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
         Some(RuntimeValue::Int(value)) => Ok(RuntimeValue::Int(op(*value as f64) as i64)),
         Some(RuntimeValue::Float(value)) => Ok(RuntimeValue::Float(op(*value))),
         other => Err(format!(
             "numeric op expects int or float arg, got {other:?}"
         )),
+    }
+}
+
+fn tensor_numeric_binop(
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+    op: &impl Fn(f64, f64) -> f64,
+) -> Result<RuntimeValue, String> {
+    if lhs.value.shape != rhs.value.shape {
+        return Err(format!(
+            "tensor shapes must match for elementwise op, got {:?} vs {:?}",
+            lhs.value.shape, rhs.value.shape
+        ));
+    }
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            lhs.value.shape.clone(),
+            lhs.value
+                .data
+                .iter()
+                .zip(&rhs.value.data)
+                .map(|(l, r)| op(*l, *r))
+                .collect(),
+        ),
+        precision: lhs.precision,
+    }))
+}
+
+fn tensor_scalar_binop(
+    tensor: &RuntimeTensorValue,
+    scalar: &RuntimeValue,
+    op: &impl Fn(f64, f64) -> f64,
+) -> Result<RuntimeValue, String> {
+    let scalar = runtime_scalar_as_f64(scalar)
+        .ok_or_else(|| format!("numeric op expects scalar rhs, got {scalar:?}"))?;
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            tensor.value.shape.clone(),
+            tensor
+                .value
+                .data
+                .iter()
+                .map(|value| op(*value, scalar))
+                .collect(),
+        ),
+        precision: tensor.precision,
+    }))
+}
+
+fn scalar_tensor_binop(
+    scalar: &RuntimeValue,
+    tensor: &RuntimeTensorValue,
+    op: &impl Fn(f64, f64) -> f64,
+) -> Result<RuntimeValue, String> {
+    let scalar = runtime_scalar_as_f64(scalar)
+        .ok_or_else(|| format!("numeric op expects scalar lhs, got {scalar:?}"))?;
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            tensor.value.shape.clone(),
+            tensor
+                .value
+                .data
+                .iter()
+                .map(|value| op(scalar, *value))
+                .collect(),
+        ),
+        precision: tensor.precision,
+    }))
+}
+
+fn tensor_numeric_unop(
+    tensor: &RuntimeTensorValue,
+    op: &impl Fn(f64) -> f64,
+) -> Result<RuntimeValue, String> {
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            tensor.value.shape.clone(),
+            tensor.value.data.iter().map(|value| op(*value)).collect(),
+        ),
+        precision: tensor.precision,
+    }))
+}
+
+fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
+    match value {
+        RuntimeValue::Int(value) => Some(*value as f64),
+        RuntimeValue::Float(value) => Some(*value),
+        RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
     }
 }
 
@@ -1422,6 +1875,16 @@ fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64, String> {
     match args.get(index) {
         Some(RuntimeValue::Int(value)) => Ok(*value),
         other => Err(format!("expected int arg at index {index}, got {other:?}")),
+    }
+}
+
+fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f64, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Float(value)) => Ok(*value),
+        Some(RuntimeValue::Int(value)) => Ok(*value as f64),
+        other => Err(format!(
+            "expected float arg at index {index}, got {other:?}"
+        )),
     }
 }
 
@@ -1715,6 +2178,28 @@ fn tensor_concat_value(parts: &[RuntimeValue], axis: i64) -> Result<RuntimeValue
         value: IrTensorValue::from_vec(out_shape, out),
         precision: first.precision,
     }))
+}
+
+fn tensor_reshape_value(
+    tensor: &RuntimeTensorValue,
+    shape: &[RuntimeValue],
+) -> Result<RuntimeTensorValue, String> {
+    let new_shape = expect_int_list(shape, "reshape")?;
+    let expected = new_shape
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+        .ok_or_else(|| "reshape target shape overflows usize".to_string())?;
+    if expected != tensor.value.data.len() {
+        return Err(format!(
+            "reshape expects {} elements but tensor has {}",
+            expected,
+            tensor.value.data.len()
+        ));
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(new_shape, tensor.value.data.clone()),
+        precision: tensor.precision,
+    })
 }
 
 fn tensor_split_value(
@@ -2188,8 +2673,8 @@ fn render_value(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        RuntimeValue::Adt { ctor, fields } if fields.is_empty() => ctor.clone(),
-        RuntimeValue::Adt { ctor, fields } => format!(
+        RuntimeValue::Adt { ctor, fields, .. } if fields.is_empty() => ctor.clone(),
+        RuntimeValue::Adt { ctor, fields, .. } => format!(
             "{}({})",
             ctor,
             fields
@@ -2209,6 +2694,36 @@ fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
+fn dropout_sample(seed: u64, index: u64) -> f64 {
+    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+fn uniform_like_value(
+    template: &RuntimeTensorValue,
+    low: f64,
+    high: f64,
+    seed: u64,
+) -> RuntimeTensorValue {
+    let span = high - low;
+    let data = template
+        .value
+        .data
+        .iter()
+        .enumerate()
+        .map(|(index, _)| low + span * dropout_sample(seed, index as u64))
+        .collect::<Vec<_>>();
+    RuntimeTensorValue {
+        value: IrTensorValue::from_vec(template.value.shape.clone(), data),
+        precision: template.precision,
+    }
+}
+
 fn var_name(expr: &Expr) -> Option<&str> {
     let list = as_list(expr)?;
     if tag(list) != Some("var") {
@@ -2220,6 +2735,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
 fn runtime_param_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::MetaExpr(meta, _) => runtime_param_name(&meta.expr),
         Expr::List(list, _) => list
             .elements
             .first()
@@ -2243,6 +2759,13 @@ fn tag(list: &List) -> Option<&str> {
     }
 }
 
+fn get_meta(list: &List) -> Option<&MetaMap> {
+    match list.elements.get(1) {
+        Some(Expr::Map(map, _)) => Some(map),
+        _ => None,
+    }
+}
+
 fn children(list: &List) -> &[Expr] {
     if list.elements.len() > 2 {
         &list.elements[2..]
@@ -2262,5 +2785,41 @@ fn int_value(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked_surf(source: &str) -> CheckedProgram {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        chelis_types::check_phase0e_program(&exprs).expect("phase0e check")
+    }
+
+    #[test]
+    fn with_seed_uniform_like_evaluates_body() {
+        let checked = checked_surf(
+            r#"
+x = with seed(7) {
+  tensor_to_scalar(
+    uniform_like(
+      trace(pad_sequences_to([[0.0]], cast(1, int64), cast(0.0, f32)), cast(0, int32), cast(1, int32)),
+      0.0,
+      1.0
+    )
+  )
+}
+"#,
+        );
+
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("seeded host program should evaluate");
+        let value = outcome.host_bindings.get("x").expect("x binding");
+        match value {
+            RuntimeValue::Float(v) => assert!((*v >= 0.0) && (*v <= 1.0), "got {v}"),
+            other => panic!("expected float result, got {other:?}"),
+        }
     }
 }

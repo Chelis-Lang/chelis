@@ -49,6 +49,18 @@ impl CEmitter {
         if e.use_blas {
             e.line("#include <cblas.h>");
         }
+        e.line(
+            "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {",
+        );
+        e.line("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);");
+        e.line("    x ^= x >> 30;");
+        e.line("    x *= 0xBF58476D1CE4E5B9ULL;");
+        e.line("    x ^= x >> 27;");
+        e.line("    x *= 0x94D049BB133111EBULL;");
+        e.line("    x ^= x >> 31;");
+        e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
+        e.line("    return low + (high - low) * (float)unit;");
+        e.line("}");
         e.line("");
 
         e.line(&format!(
@@ -174,6 +186,9 @@ impl CEmitter {
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
             RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
+            RiscOp::UniformLike { low, high, seed } => {
+                self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
+            }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
             }
@@ -649,6 +664,24 @@ impl CEmitter {
             "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
         ));
         self.line(&format!("t{id}->data[i] = {func}(t{a}->data[idx]);"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_uniform_like(&mut self, id: usize, low: f64, high: f64, seed: u64, ty: &TensorType) {
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "t{id}->data[i] = chelis_uniform_sample_f32({seed}ULL, (uint64_t)i, {:.8}f, {:.8}f);",
+            low as f32, high as f32
+        ));
         self.indent -= 1;
         self.line("}");
     }

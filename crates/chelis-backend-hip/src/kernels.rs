@@ -44,6 +44,16 @@ __device__ int chelis_indices_to_flat(const int *indices, const int *strides, in
     }
     return flat;
 }
+__device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned long long index, float low, float high) {
+    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    double unit = (double)(x >> 11) / (double)(1ULL << 53);
+    return low + (high - low) * (float)unit;
+}
 ";
 
 /// Maximum tensor dimensions (must match CHELIS_MAX_DIM in runtime).
@@ -204,6 +214,24 @@ extern \"C\" __global__ void {kernel_name}(
         a_strides = stride_params("a"),
         out_shape = shape_params("out"),
         build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate kernel source for uniform_like random fill.
+pub fn uniform_like(kernel_name: &str) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    float low, float high, unsigned long long seed,
+    float *out, {out_shape}, int out_ndim, int out_size) {{
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  out[i] = chelis_uniform_sample_f32(seed, (unsigned long long)i, low, high);
+}}
+",
+        out_shape = shape_params("out"),
         build_out_sh = build_array("out_sh", "out", "sh"),
     )
 }

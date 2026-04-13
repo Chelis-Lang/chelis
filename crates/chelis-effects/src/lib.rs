@@ -211,7 +211,7 @@ fn infer_app_effects(
     }
 
     let builtin_name = kids.first().and_then(var_name);
-    if builtin_name == Some("dropout") {
+    if matches!(builtin_name, Some("dropout" | "uniform_like")) {
         effects.insert(Effect::Random);
     }
     if matches!(
@@ -819,8 +819,8 @@ mod tests {
         let program = surf_checked(
             r#"
 def emit(x: int64) -> int64 = debug(add(x, cast(1, int64)))
-let xs: List[int64] = [cast(1, int64), cast(2, int64)]
-let ys = map(emit, xs)
+xs: List[int64] = [cast(1, int64), cast(2, int64)]
+ys = map(emit, xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -837,8 +837,8 @@ let ys = map(emit, xs)
     fn fold_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64)]
-let total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[int64] = [cast(1, int64), cast(2, int64)]
+total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -855,8 +855,8 @@ let total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64)
     fn scan_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64)]
-let totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[int64] = [cast(1, int64), cast(2, int64)]
+totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -874,8 +874,8 @@ let totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64
         let decls = parse_surf(
             r#"
 def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
-let xs: List[tensor[f32]] = [(x1 : tensor[f32]), (x2 : tensor[f32])]
-let buckets = partition(keep, xs)
+xs: List[tensor[f32]] = [(x1 : tensor[f32]), (x2 : tensor[f32])]
+buckets = partition(keep, xs)
 "#,
         )
         .expect("surf parse");
@@ -896,8 +896,8 @@ let buckets = partition(keep, xs)
     fn flat_map_propagates_io_effect_from_callback() {
         let program = surf_checked(
             r#"
-let xs: List[int64] = [cast(1, int64), cast(2, int64)]
-let ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
+xs: List[int64] = [cast(1, int64), cast(2, int64)]
+ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -915,8 +915,8 @@ let ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
         let decls = parse_surf(
             r#"
 def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-let xs: List[tensor[8, f32]] = [(x1 : tensor[8, f32]), (x2 : tensor[8, f32])]
-let ys = map(step, xs)
+xs: List[tensor[8, f32]] = [(x1 : tensor[8, f32]), (x2 : tensor[8, f32])]
+ys = map(step, xs)
 "#,
         )
         .expect("surf parse");
@@ -937,10 +937,10 @@ let ys = map(step, xs)
     fn file_io_builtins_infer_io_but_mmap_reads_stay_pure() {
         let program = surf_checked(
             r#"
-let mapped = mmap_file("dataset.txt")
-let prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
-let width = mmap_len(mapped)
-let contents = read_file("dataset.txt")
+mapped = mmap_file("dataset.txt")
+prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+width = mmap_len(mapped)
+contents = read_file("dataset.txt")
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());

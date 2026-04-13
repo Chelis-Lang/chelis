@@ -214,6 +214,11 @@ pub enum RiscOp {
     Log,
     Sin,
     Sqrt,
+    UniformLike {
+        low: f64,
+        high: f64,
+        seed: u64,
+    },
     Dropout {
         rate: f64,
         seed: u64,
