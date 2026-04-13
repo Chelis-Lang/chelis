@@ -129,25 +129,35 @@ All project-level naming follows the turtle/ocean metaphor.
 | Interactive mode | **Tide** (`chelis tide`) | Comes and goes; interactive |
 | TUI coding environment | **Cove** (`chelis cove`) | Sheltered workspace where Surf meets shore |
 | Project manifest | `reef.toml` | A project's place in the reef |
-| Stats/optimization shell | **School** | A school of fish — numerical methods swim together |
+| Numerical methods shell | **Nautilus** | Mathematical precision — the chambered nautilus is nature's logarithmic spiral |
 | Dataframe shell | **Coral** | Structured colonies built from the reef |
 | Finance shell | **Shoals** | Where the currents of capital run shallow |
+| Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
+| Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
 
 ### Shell Ecosystem
 
-Four tiers of packages, each built on the one below:
+Packages layered on `chelis-std`. `nautilus` and `coral` are independent and can land in
+parallel; `shoals` depends on both. `school` (classical ML) and `darwin` (evolutionary
+algorithms) are post-Phase-3 stubs.
 
-| Shell | Depends On | Contents |
-|---|---|---|
-| `chelis-std` | (core) | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss`, `Std.Init`, `Std.Schedule` (cosine warmup, linear warmup, step decay), `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
-| `school` | `chelis-std` | Statistics, distributions, optimization solvers (+ differentiable optimization), interpolation, SVD/PCA, hypothesis testing, ODE/SDE solvers, numerical integration, root finding, signal processing (blocked by complex numbers until Phase 5f) |
-| `coral` | `chelis-std` | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, DataFrame-aware CSV/JSON I/O. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
-| `shoals` | `chelis-std` + `school` + `coral` | Options pricing, risk measures, yield curves, stochastic processes, order books |
+| Shell | Depends On | Status | Contents |
+|---|---|---|---|
+| `chelis-std` | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
+| `nautilus` | `chelis-std` | Phase 3j | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
+| `coral` | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
+| `shoals` | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
+| `school` | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
+| `darwin` | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 
-Design rule: if a non-domain-specialist would use it, it goes in `chelis-std`, `school`, or `coral`. If only a finance practitioner needs it, it goes in `shoals`. Time and decimal are `chelis-std` because every domain needs dates and exact arithmetic. Distributions and optimization are `school` because they're general numerical methods. Dataframes are `coral` because any data scientist uses them. Black-Scholes and VaR are `shoals` because they're finance-specific.
+Design rule: `chelis-std` covers what every Chelis program may need (tensors, neural
+primitives, time, decimal). `nautilus` owns general numerical methods. `coral` owns
+tabular data. `shoals` is finance-only. `school` is classical ML only. `darwin` is
+evolutionary search only. Time and decimal stay in `chelis-std` because every domain
+needs dates and exact arithmetic.
 
 ---
 

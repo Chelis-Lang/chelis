@@ -337,11 +337,14 @@ The detailed implementation plan lives in `spec/design/chelis_phase3_plan.md`.
 `3b-ii` direct Python execution + NumPy guarantee, `3c` scalar/string foundation,
 `3d` collections/iteration, and `3e` pipe-first style pass.
 
-**Recommended execution order for remaining work:** `3h` → `3m` → `3g` → `3i` → `3j` ∥
-`3k` → `3l` → `3f`. `3j` and `3k` can overlap (no mutual dependency). `3l` depends on
-both. `3f` (SKILL.md v2) is intentionally last in Phase 3: it needs a real rewrite
-after the runtime, numeric, tokenization, standard-library, and domain-shell surfaces
-stabilize.
+**Recommended execution order for remaining work:** `3h` → `3m` → `3g` → `3i` →
+`3j-pre` → `3j` ∥ `3k` → `3l` → `3f`. `3j-pre` reserves the `chelis-lang` GitHub
+organization, ships a compiler release binary, and expands the standard library surface
+(`Std.Nn` attention/GELU/SiLU/RMSNorm/Conv, `Std.Loss`, `Std.Init`) that both `nautilus`
+and `coral` depend on. `3j` (nautilus) and `3k` (coral) can then overlap — no mutual
+dependency. `3l` (shoals) depends on both. `3f` (SKILL.md v2) is intentionally last in
+Phase 3: it needs a real rewrite after the runtime, numeric, tokenization,
+standard-library, and domain-shell surfaces stabilize.
 
 ### 3e: Style Foundation
 
@@ -529,25 +532,64 @@ Standard library modules for real model training and inference:
   positional constructor calls.
 - acceptance oracle: `cargo test -p chelis-cli --test phase3i_std -- --nocapture`
 
-### 3j: School — Numerical Methods, Statistics, and Optimization
+### 3j-pre: Release Infrastructure + Std Surface Expansion
 
-A reef package. A school of fish — marine naming alongside shells, reef, tide, cove.
-Depends on `chelis-std` + 3h primitives. All modules are pure Chelis programs, no C FFI.
-`School.Signal` ships as a typed stub (blocked by complex numbers, Phase 5f).
+Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
+
+- confirm and build out the `chelis-lang` GitHub organization at
+  <https://github.com/Chelis-Lang> (org already reserved)
+- ship a compiler release binary through CI so downstream shell repos can pin a
+  toolchain version
+- expand `chelis-std` with the additions both domain shells will assume:
+  - tensor construction and reductions: `linspace`, `arange`, `stack`, `squeeze`,
+    `unsqueeze`, `min`, `prod`, `argmax`, `argmin`
+  - `Std.Nn`: `GELU`, `SiLU`, `RMSNorm`, `Conv1d`, `Conv2d`,
+    `scaled_dot_product_attention`, multi-head attention, grouped-query attention
+  - `Std.Loss`: `KLDivergence`, `BCEWithLogits`, `accuracy`, `perplexity`
+  - `Std.Init`: `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
+    `trunc_normal`
+- acceptance oracle: `cargo test -p chelis-cli phase3j_pre_std_oracle -- --exact`
+
+### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
+
+A reef package. The scipy competitor for Chelis. The name references the chambered
+nautilus — nature's logarithmic spiral, mathematical precision. Depends on `chelis-std`
++ 3h primitives + `3j-pre`. Pure Chelis where natural; **nalgebra** as the linear
+algebra backend (pure Rust, BLAS/LAPACK when available, no Fortran dependency). Because
+nalgebra calls are opaque to the Chelis AD system, `Nautilus.LinAlg` ships with
+hand-written adjoint rules for SVD, Cholesky, solve, QR, and eig (same pattern
+`torch.linalg` uses). `Nautilus.Signal` ships as a typed stub (blocked by complex
+numbers, Phase 5f).
+
+Modules ship in three priority tiers.
+
+**P0 — ship first:**
 
 | Module | Contents |
 |---|---|
-| `School.Stats` | Descriptive statistics, correlation, covariance, shrinkage estimators |
-| `School.Distributions` | Normal, LogNormal, Uniform, Student-t — PDF, CDF, inverse CDF, sampling (`Random` effect) |
-| `School.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via KKT. NOT `Std.Optim` (neural network optimizers). |
-| `School.Interpolation` | Linear, cubic, spline interpolation |
-| `School.LinAlg` | SVD, PCA, eigendecomposition, Cholesky — wrappers over tensor primitives + einsum |
-| `School.Testing` | Hypothesis testing, confidence intervals, p-values |
-| `School.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. |
-| `School.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. |
-| `School.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) |
-| `School.Roots` | Root finding (Newton-Raphson, bisection, Brent) |
-| `School.Signal` | Signal processing (FFT, STFT, filtering). **Stub — blocked by complex numbers (Phase 5f).** |
+| `Nautilus.Special` | `erf`, `erfinv`, `log_gamma`, `digamma`, `beta` — required by Distributions |
+| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling (`Random` effect). `normal_like` is Box-Muller here. |
+| `Nautilus.LinAlg` | SVD, PCA, eigendecomposition, Cholesky, QR, LU, solve, inverse, determinant — nalgebra-backed with hand-written AD adjoints |
+
+**P1:**
+
+| Module | Contents |
+|---|---|
+| `Nautilus.Stats` | Descriptive statistics, correlation, covariance, shrinkage estimators |
+| `Nautilus.Optim` | Convex optimization solvers (QP, SOCP, LP). Differentiable optimization via KKT. NOT `Std.Optim` (neural network optimizers). |
+| `Nautilus.Roots` | Root finding (Newton-Raphson, bisection, Brent) |
+| `Nautilus.ODE` | ODE solvers (Euler, RK4, adaptive step). Composes with `grad` for neural ODE support. |
+
+**P2:**
+
+| Module | Contents |
+|---|---|
+| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. |
+| `Nautilus.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) |
+| `Nautilus.Interpolation` | Linear, cubic, spline interpolation |
+| `Nautilus.Testing` | Hypothesis testing, confidence intervals, p-values |
+| `Nautilus.Distance` | Euclidean, cosine, Mahalanobis, Manhattan distances over tensor rows |
+| `Nautilus.Signal` | Signal processing (FFT, STFT, filtering). **Stub — blocked by complex numbers (Phase 5f).** |
 
 ### 3k: Coral — Typed Dataframes
 
@@ -561,18 +603,19 @@ planning or Spark distributed processing.
 
 | Module | Contents |
 |---|---|
-| `Coral.Frame` | Core DataFrame type, column selection, row filtering, sorting by column, mutation |
+| `Coral.Frame` | Core DataFrame type, column selection, row filtering, sorting by column, mutation, `rename`, vertical `concat`, `describe` (via `Nautilus.Stats`), `value_counts`. **NaN handling is built into `Coral.Frame`, not a separate module:** `is_nan`, `fill_nan`, `drop_nan`, `any_nan`, `count_nan`. Float columns use IEEE 754 NaN; integer columns use a companion boolean mask. |
 | `Coral.GroupBy` | Group-by via argsort + segmented scatter, aggregation per group |
 | `Coral.Join` | Sort-merge and hash joins on typed key columns |
 | `Coral.Reshape` | Pivot, melt, stack/unstack |
-| `Coral.IO` | DataFrame-aware CSV/JSON loading, typed column auto-detection |
+| `Coral.Window` | Rolling operations over numeric columns: `rolling_mean`, `rolling_sum`, `rolling_std`, `ewm` |
+| `Coral.IO` | DataFrame-aware CSV/JSON loading, typed column auto-detection, **Parquet I/O via the Rust `parquet2` crate in the runtime** |
 
 ### 3l: Shoals — Finance
 
-A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `school` + `coral`.
-Contains only finance-specific logic — nothing a non-finance programmer would need.
-Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed market
-data via named tensor dimensions.
+A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus` +
+`coral`. Contains only finance-specific logic — nothing a non-finance programmer would
+need. Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed
+market data via named tensor dimensions.
 
 | Module | Contents |
 |---|---|
@@ -582,13 +625,31 @@ data via named tensor dimensions.
 | `Shoals.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
 | `Shoals.Orderbook` | Limit order book representation, matching logic (host-side collections) |
 
+### Post-Phase-3 Shell Stubs
+
+Two further shells are named and reserved but scoped as stubs beyond Phase 3. They are
+listed here so the ecosystem story is explicit, but no Phase 3 sub-phase implements them.
+
+- **`school`** — classical ML (scikit-learn competitor). Regression, decision trees,
+  SVMs, clustering, pipelines, cross-validation. Depends on `chelis-std` + `nautilus` +
+  `coral`.
+- **`darwin`** — evolutionary algorithms. Genetic algorithms, genetic programming over
+  the Deep AST, evolution strategies, population-based training, neural architecture
+  search. Uniquely natural fit because Deep is homoiconic: program mutation and
+  crossover are typed AST operations, and the compiler's 0–1 fitness score is literally
+  the fitness function for evolutionary search. Requires `nautilus`; optionally uses
+  `coral` for evolving feature-engineering pipelines over tabular data.
+
 ### 3f: SKILL.md v2
 
 Full-surface teaching refresh covering Phase 2 + Phase 3 including domain shells:
 effects, linearity, macros, vmap, tuples, pipes, scalars, strings, collections,
 iteration, I/O, tokenization, core numeric primitives, package imports, dataframes
-(`coral`), numerical methods (`school`), finance (`shoals` overview). Goes truly last.
-Validated via `skill_suite.rs`.
+(`coral`, including NaN handling and Parquet), numerical methods (`nautilus`, including
+the nalgebra-backed LinAlg surface), finance (`shoals` overview), and the expanded
+`Std.Nn` surface from `3j-pre` (attention, GELU/SiLU, RMSNorm, Conv1d/2d). Mentions the
+`school` (classical ML) and `darwin` (evolutionary algorithms) shells as post-Phase-3
+stubs. Goes truly last. Validated via `skill_suite.rs`.
 
 Phase 3 success condition:
 
@@ -596,7 +657,7 @@ Phase 3 success condition:
   compute loss and gradients, and print results without dropping to Python
 - the package, Python, and style foundations already shipped in `3a`, `3b`, `3b-ii`,
   and `3e` remain valid while the language grows beyond tensor-kernel scope
-- domain shells (`school`, `coral`, `shoals`) build and import through the Reef
+- domain shells (`nautilus`, `coral`, `shoals`) build and import through the Reef
   pipeline, composing correctly on top of `chelis-std`
 - `SKILL.md` and examples match the fuller language including domain shells rather than
   the earlier tensor-compute-only subset
@@ -606,7 +667,7 @@ Phase 3 success condition:
 ## Phase 4
 
 **Prerequisite:** Phase 2 complete and the remaining Phase 3 language-completeness work
-through `3h`, `3m`, `3g`, `3i`, `3j`, `3k`, `3l`, and `3f` complete.
+through `3h`, `3m`, `3g`, `3i`, `3j-pre`, `3j`, `3k`, `3l`, and `3f` complete.
 **Deliverable:** Chelis ships with a local coding model as standard tooling and a
 reproducible benchmark proving the "designed for LLMs" thesis. The turtle carries its
 home.
