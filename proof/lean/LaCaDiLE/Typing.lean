@@ -21,7 +21,6 @@
 --    matching the paper rules.
 
 import LaCaDiLE.Syntax
-import LaCaDiLE.Store
 
 namespace LaCaDiLE
 

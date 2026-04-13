@@ -922,14 +922,12 @@ answer:
   extending the RISC primitive set. Wave 2 must pin the `T-Grad` rule to
   produce a function type of arity 2 (parameter + seed).
 
-- **`expand` operand count.** §2.3 writes `expand(g, axis, d̄)` with three
-  arguments, but `decisions.md` primitives table says `expand(x, shape)` — two
-  arguments. The `axis` is implicit in the shape difference. Wave 2 picks one form
-  and sticks with it. Leaning toward `expand(x, axis, k)` (three args, explicit)
-  because it makes the adjoint rules easier to write. If T2 keeps the two-arg
-  form, T0's `expand(g, axis, d̄)` calls should be rewritten as
-  `expand(g, [d̄_0, d̄_1, ..., k_axis, ...])` where the axis insertion is
-  encoded in the shape argument. Trivial rewrite.
+- **`expand` operand count** — **RESOLVED.** Wave 2 T2 adopted the three-argument form
+  `expand(e, i, k)`, and `decisions.md` was updated in round 2 to match.
+  `T-Expand` and `E-Expand` both take three arguments, and `Syntax.ins` in Lean
+  implements the insertion semantics. This question is closed; T0 §2.3's use of
+  `expand(g, axis, d̄)` should be read as the three-argument form with the dim
+  list serving as the extent source — consistent with the locked decision.
 
 - **Handler buffer threading in `T-Handle`.** §5 describes the gradient buffer
   as threaded through the continuation `k`. `decisions.md`'s handler-continuation

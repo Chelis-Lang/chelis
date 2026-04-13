@@ -15,7 +15,6 @@
 -- prove a total substitution lemma with capture avoidance.
 
 import LaCaDiLE.Syntax
-import LaCaDiLE.Store
 import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
@@ -63,7 +62,7 @@ partial def subst (target : Term) (v : Term) (x : String) : Term :=
     placeholders for primitive reduction rules; the actual pointwise
     operations (`oplus`, `odot`, etc.) are not exercised by Phase 1
     metatheory. -/
-def uninterpretedBinop (_l1 _l2 : TensorVal) : TensorVal :=
+def tensorOpPlaceholder (_l1 _l2 : TensorVal) : TensorVal :=
   { shape := [], data := 0.0 }
 
 /-- The small-step reduction relation.
@@ -138,7 +137,7 @@ inductive Step : Config → Config → Prop
       ellOut = storeFreshLoc sigma →
       Step ⟨sigma, Term.add (Term.loc ell1) (Term.loc ell2)⟩
            ⟨storeExtend (storeRemove (storeRemove sigma ell1) ell2)
-                        ellOut (uninterpretedBinop w1 w2),
+                        ellOut (tensorOpPlaceholder w1 w2),
             Term.loc ellOut⟩
 
   -- E-Mul: like E-Add.
@@ -149,7 +148,7 @@ inductive Step : Config → Config → Prop
       ellOut = storeFreshLoc sigma →
       Step ⟨sigma, Term.mul (Term.loc ell1) (Term.loc ell2)⟩
            ⟨storeExtend (storeRemove (storeRemove sigma ell1) ell2)
-                        ellOut (uninterpretedBinop w1 w2),
+                        ellOut (tensorOpPlaceholder w1 w2),
             Term.loc ellOut⟩
 
   -- E-Sum: sum(ℓ, i)  ↦  fresh ℓ' with the reduced tensor; operand freed

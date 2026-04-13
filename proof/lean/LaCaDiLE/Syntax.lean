@@ -202,18 +202,36 @@ structure Config where
     by successful derivations and removed from the output context. -/
 abbrev LinearCtx := List (String × Typ)
 
+/-! ### Phase 2 scaffolding: context splitting
+
+The definitions below implement the paper's `Γ = Γ₁ + Γ₂` splitting
+relation. They are NOT used by any Phase 1 `HasType` constructor — every
+multi-premise rule in `Typing.lean` instead threads linear contexts
+left-to-right (`Γ₁ → Γ₂ → Γ₃`), which is equivalent to a chain of
+splits but avoids a standalone predicate. Phase 2 WS2.1 (the
+substitution lemma) will need a permutation-aware split relation, and
+these stubs are the starting point for that work.
+
+The current `contextSplit` is a length-and-disjointness weakening of
+the full permutation invariant; Phase 2 will either strengthen this
+definition or derive it as a corollary of the threading form. Flagged
+in the Phase 1 → Phase 2 gate audit (H-A1) as latent scaffolding;
+kept in place rather than deleted because the Phase 2 substitution
+proof will need something in this shape. -/
+
 /-- Domain of a linear context (the names of the bindings). -/
 def linearCtxDom (G : LinearCtx) : List String :=
   G.map Prod.fst
 
-/-- Disjointness of two linear contexts' domains. -/
+/-- Disjointness of two linear contexts' domains. Phase 2 scaffolding. -/
 def linearCtxDisjoint (G1 G2 : LinearCtx) : Prop :=
   ∀ x, x ∈ linearCtxDom G1 → x ∉ linearCtxDom G2
 
 /-- Context splitting: `G = G1 + G2` when every binding of `G` appears in
     exactly one of `G1` or `G2`, with no shared bindings. Paper notation:
     `Γ = Γ₁ + Γ₂`. The full permutation invariant (that the union is a
-    reordering of `G`) is deferred to Phase 2 substitution-lemma work. -/
+    reordering of `G`) is deferred to Phase 2 substitution-lemma work.
+    Phase 2 scaffolding — not referenced by any Phase 1 typing rule. -/
 def contextSplit (G G1 G2 : LinearCtx) : Prop :=
   linearCtxDisjoint G1 G2 ∧ (G1 ++ G2).length = G.length
 
