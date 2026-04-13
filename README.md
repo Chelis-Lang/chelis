@@ -6,6 +6,10 @@ the supervisor.
 Surf is the readable syntax for humans.
 Deep is the canonical s-expression syntax for machines and the compiler.
 
+<p align="center">
+  <img src="assets/mascot/chev.svg" alt="Chev Chelis, the project mascot — a turtle on a mountain bike climbing a hill" width="320"/>
+</p>
+
 **Status:** Phase 0 is complete.
 Phases 0a-0i are complete.
 Phases 1a-1f are implemented.
