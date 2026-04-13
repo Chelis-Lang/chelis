@@ -1,1 +1,75 @@
-% placeholder — filled in Phase 1 T1
+%% figures/syntax.tex — LaCaDiLE syntax (Phase 1 T1)
+%% Input from main.tex via \input{figures/syntax.tex}
+
+%% Notation macros — must be defined before the figures below.
+\providecommand{\tensor}[1]{\mathsf{tensor}[#1]}
+\providecommand{\letin}[2]{\mathsf{let}\,#1\,\mathsf{in}\,#2}
+\providecommand{\letpair}[4]{\mathsf{let}\,(#1, #2) = #3\,\mathsf{in}\,#4}
+\providecommand{\handlewith}[3]{\mathsf{handle}[#1]\,#2\,\mathsf{with}\,#3}
+\providecommand{\performop}[1]{\mathsf{perform}\,#1}
+
+\begin{figure}[t]
+\small
+\[
+\begin{array}{r@{\;}c@{\;}l@{\quad}l}
+\multicolumn{4}{l}{\textbf{Dimensions and dimension lists}} \\[2pt]
+d & ::= & n \mid \delta \mid k & \text{named dim, dim variable, literal size} \\
+\bar{d} & ::= & \epsilon \mid d, \bar{d} & \text{dimension list} \\[4pt]
+\multicolumn{4}{l}{\textbf{Types}} \\[2pt]
+\tau & ::= & \tensor{\bar{d}} & \text{tensor with named dimension list} \\
+     & \mid & \tau_1 \to \tau_2 \mathbin{!} \varepsilon & \text{function with effect row} \\
+     & \mid & \tau_1 \otimes \tau_2 & \text{linear pair} \\
+     & \mid & \mathsf{unit} & \\
+     & \mid & \alpha & \text{type variable} \\[4pt]
+\multicolumn{4}{l}{\textbf{Effect rows and capabilities}} \\[2pt]
+\varepsilon & ::= & \emptyset \mid \mathsf{Random}, \varepsilon \mid \mathsf{Resource}, \varepsilon \mid \mathsf{IO}, \varepsilon \mid \mathsf{Fail}, \varepsilon \mid \mathsf{Accum}, \varepsilon \mid \rho \\
+\kappa & ::= & \mathsf{Diff} & \text{capability (tracked in separate context $\Delta$)} \\
+\end{array}
+\]
+\caption{LaCaDiLE types, dimensions, effects, and capabilities.}
+\label{fig:syntax-types}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\[
+\begin{array}{r@{\;}c@{\;}l@{\quad}l}
+\multicolumn{4}{l}{\textbf{Terms}} \\[2pt]
+e & ::= & x \mid \lambda x{:}\tau.\, e \mid e_1\, e_2 \mid \letin{x = e_1}{e_2} & \text{core $\lambda$-calculus} \\
+  & \mid & \mathsf{copy}(e) & \text{physical copy: produces linear pair} \\
+  & \mid & \letpair{x}{x'}{e_1}{e_2} & \text{linear pair destructure} \\
+  & \mid & (e_1, e_2) \mid \mathsf{fst}(e) \mid \mathsf{snd}(e) & \text{pair constructors and projections} \\
+  & \mid & \mathsf{op}(e_1, \dots, e_n) & \text{RISC primitive (see table below)} \\
+  & \mid & \mathsf{grad}(e) & \text{AD transform} \\
+  & \mid & \mathsf{vmap}(e) & \text{vectorization transform} \\
+  & \mid & \handlewith{\varepsilon}{e}{h} & \text{effect handler (one-shot)} \\
+  & \mid & \performop{op}(e) & \text{effect operation} \\[4pt]
+\multicolumn{4}{l}{\textbf{RISC primitive set}} \\[2pt]
+\mathsf{op} & ::= & \mathsf{const}(v, \bar{d}) & \text{tensor literal} \\
+            & \mid & \mathsf{add}(a, b) \mid \mathsf{mul}(a, b) & \text{elementwise binary} \\
+            & \mid & \mathsf{sum}(x, i) & \text{reduction along axis $i$} \\
+            & \mid & \mathsf{expand}(x, i, k) & \text{add dimension of extent $k$ at axis $i$} \\
+            & \mid & \mathsf{uniform\_like}(x, lo, hi) & \text{stochastic ($\mathsf{Random}$ effect)} \\[4pt]
+\multicolumn{4}{l}{\textbf{Handler clause}} \\[2pt]
+h & ::= & \{ \mathsf{op}_i(x_i, k_i) \to e_i \}_{i \in I} & \text{one-shot; $k_i$ is a linear binding} \\[4pt]
+\multicolumn{4}{l}{\textbf{Values}} \\[2pt]
+v & ::= & \ell \mid \lambda x{:}\tau.\, e \mid (v_1, v_2) \mid () & \text{loc, closure, pair, unit} \\[4pt]
+\multicolumn{4}{l}{\textbf{Evaluation contexts}} \\[2pt]
+E & ::= & [\cdot] \mid E\, e \mid v\, E \mid \letin{x = E}{e_2} & \text{call-by-value, left-to-right} \\
+  & \mid & \letpair{x}{x'}{E}{e_2} \\
+  & \mid & \mathsf{op}(v_1, \dots, v_{i-1}, E, e_{i+1}, \dots, e_n) \\
+  & \mid & \mathsf{copy}(E) \mid \mathsf{grad}(E) \mid \mathsf{vmap}(E) \\
+  & \mid & \handlewith{\varepsilon}{E}{h} \mid \performop{op}(E) \\[4pt]
+\multicolumn{4}{l}{\textbf{Store and configurations}} \\[2pt]
+\sigma & : & \mathsf{Loc} \rightharpoonup \mathsf{TensorVal} & \text{finite map from locations to tensor data} \\
+\text{config} & ::= & \langle \sigma, e \rangle & \text{operational state} \\
+\end{array}
+\]
+\caption{LaCaDiLE terms, values, evaluation contexts, and store. $\mathsf{copy}$ has
+type $\tau \to \tau \otimes \tau$: it produces a linear pair whose first component
+is the original value (rebound) and whose second is a fresh physical copy on a new
+location. The canonical use form is $\letpair{x}{x'}{\mathsf{copy}(x)}{\dots}$.
+Continuations in handler clauses are linear bindings, so calling $k$ consumes it,
+enforcing the one-shot restriction.}
+\label{fig:syntax-terms}
+\end{figure}

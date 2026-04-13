@@ -1,1 +1,172 @@
-% placeholder — filled in Phase 1 T3
+%% figures/opsem.tex — LaCaDiLE operational semantics (Phase 1 T3)
+%% Input from main.tex via \input{figures/opsem.tex}
+%%
+%% Small-step reduction relation: ⟨σ, e⟩ ↦ ⟨σ', e'⟩
+%%   σ  — store (Loc → TensorVal)
+%%   e  — term
+%% Call-by-value, left-to-right evaluation; congruence via evaluation contexts E[·].
+
+\providecommand{\step}[2]{#1 \longmapsto #2}
+\providecommand{\config}[2]{\langle #1, #2 \rangle}
+\providecommand{\subst}[3]{#1[#2 / #3]}
+\providecommand{\fresh}[1]{#1 \text{ fresh}}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{E-Ctx}]
+  {\step{\config{\sigma}{e}}{\config{\sigma'}{e'}}}
+  {\step{\config{\sigma}{E[e]}}{\config{\sigma'}{E[e']}}}
+
+\inferrule*[right=\textsc{E-Beta}]
+  { }
+  {\step{\config{\sigma}{(\lambda x{:}\tau.\, e)\, v}}{\config{\sigma}{\subst{e}{v}{x}}}}
+
+\inferrule*[right=\textsc{E-Let}]
+  { }
+  {\step{\config{\sigma}{\letin{x = v}{e}}}{\config{\sigma}{\subst{e}{v}{x}}}}
+
+\inferrule*[right=\textsc{E-LetPair}]
+  { }
+  {\step{\config{\sigma}{\letpair{x}{x'}{(v_1, v_2)}{e}}}{\config{\sigma}{\subst{\subst{e}{v_1}{x}}{v_2}{x'}}}}
+
+\inferrule*[right=\textsc{E-Fst}]
+  { }
+  {\step{\config{\sigma}{\mathsf{fst}((v_1, v_2))}}{\config{\sigma}{v_1}}}
+
+\inferrule*[right=\textsc{E-Snd}]
+  { }
+  {\step{\config{\sigma}{\mathsf{snd}((v_1, v_2))}}{\config{\sigma}{v_2}}}
+\end{mathpar}
+\caption{Core reduction rules. $\textsc{E-Ctx}$ is the congruence rule that
+lifts inner-redex reductions to outer terms via evaluation contexts $E[\cdot]$
+from the syntax figure. Substitution $\subst{e}{v}{x}$ is capture-avoiding.}
+\label{fig:opsem-core}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{E-Const}]
+  {\fresh{\ell}}
+  {\step{\config{\sigma}{\mathsf{const}(v, \bar{d})}}{\config{\sigma[\ell \mapsto (\bar{d}, v)]}{\ell}}}
+
+\inferrule*[right=\textsc{E-Copy}]
+  {\fresh{\ell'}}
+  {\step{\config{\sigma}{\mathsf{copy}(\ell)}}{\config{\sigma[\ell' \mapsto \sigma(\ell)]}{(\ell, \ell')}}}
+
+\inferrule*[right=\textsc{E-Add}]
+  {w = \sigma(\ell_1) \oplus \sigma(\ell_2) \\ \fresh{\ell}}
+  {\step{\config{\sigma}{\mathsf{add}(\ell_1, \ell_2)}}{\config{\sigma \setminus \{\ell_1, \ell_2\}\,[\ell \mapsto w]}{\ell}}}
+
+\inferrule*[right=\textsc{E-Mul}]
+  {w = \sigma(\ell_1) \odot \sigma(\ell_2) \\ \fresh{\ell}}
+  {\step{\config{\sigma}{\mathsf{mul}(\ell_1, \ell_2)}}{\config{\sigma \setminus \{\ell_1, \ell_2\}\,[\ell \mapsto w]}{\ell}}}
+
+\inferrule*[right=\textsc{E-Sum}]
+  {w = \mathsf{sum\_val}(\sigma(\ell), i) \\ \fresh{\ell'}}
+  {\step{\config{\sigma}{\mathsf{sum}(\ell, i)}}{\config{\sigma \setminus \{\ell\}\,[\ell' \mapsto w]}{\ell'}}}
+
+\inferrule*[right=\textsc{E-Expand}]
+  {w = \mathsf{expand\_val}(\sigma(\ell), i, k) \\ \fresh{\ell'}}
+  {\step{\config{\sigma}{\mathsf{expand}(\ell, i, k)}}{\config{\sigma \setminus \{\ell\}\,[\ell' \mapsto w]}{\ell'}}}
+
+\inferrule*[right=\textsc{E-UniformLike}]
+  {w = \mathsf{uniform\_val}(\sigma(\ell), lo, hi) \\ \fresh{\ell'}}
+  {\step{\config{\sigma}{\mathsf{uniform\_like}(\ell, lo, hi)}}{\config{\sigma[\ell' \mapsto w]}{\ell'}}}
+\end{mathpar}
+\caption{RISC primitive reduction rules. Each rule evaluates to a location
+value after reducing its operands to location values via $\textsc{E-Ctx}$.
+$\textsc{E-Const}$ allocates a fresh location for the literal. $\textsc{E-Copy}$
+allocates a fresh location $\ell'$ with a physical copy of $\sigma(\ell)$ and
+returns a linear pair $(\ell, \ell')$ — the original $\ell$ is retained and
+re-bound by the destructuring $\letpair{\cdot}{\cdot}{\cdot}{\cdot}$ in the
+caller, while $\ell'$ owns the new location. $\textsc{E-Add}$ and
+$\textsc{E-Mul}$ consume both operand locations (removed from $\sigma$) and
+allocate a fresh result location. $\textsc{E-Sum}$ and $\textsc{E-Expand}$
+consume the single operand and allocate a fresh result location with the
+shape-transformed data. $\textsc{E-UniformLike}$ reads the template shape from
+$\sigma(\ell)$ to produce a new tensor of random values; the template location
+is \emph{not} consumed (it is read-only for shape) — but see remark below.
+Operations $\oplus$, $\odot$, $\mathsf{sum\_val}$, $\mathsf{expand\_val}$, and
+$\mathsf{uniform\_val}$ are the underlying tensor-data operations, defined
+pointwise on $\mathsf{TensorVal}$ and not exercised by the metatheory.}
+\label{fig:opsem-prims}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{E-Handle-Ret}]
+  { }
+  {\step{\config{\sigma}{\handlewith{\varepsilon_h}{v}{h}}}{\config{\sigma}{v}}}
+
+\inferrule*[right=\textsc{E-Handle-Op}]
+  {\mathsf{op}_i \in \varepsilon_h \\
+   h = \{\mathsf{op}_j(x_j, k_j) \to e_j\}_j}
+  {\step{\config{\sigma}{\handlewith{\varepsilon_h}{E[\performop{op}_i(v)]}{h}}}
+        {\config{\sigma}{\subst{\subst{e_i}{v}{x_i}}{K}{k_i}}}}
+
+\\
+\text{where } K = \lambda y.\, \handlewith{\varepsilon_h}{E[y]}{h}
+\quad\text{(the captured one-shot continuation).}
+\end{mathpar}
+\caption{Effect handler reduction. $\textsc{E-Handle-Ret}$ discards the handler
+when the body has reduced to a value. $\textsc{E-Handle-Op}$ fires when the
+body performs an operation in $\varepsilon_h$: the operation's argument $v$ is
+substituted into the matching clause $e_i$ for $x_i$, and the captured
+continuation $K$ (the evaluation context $E[\cdot]$ around the
+$\mathsf{perform}$, re-wrapped by the same handler so nested operations still
+see the outer clauses) is substituted for $k_i$. Because $k_i$ is a linear
+binding in the handler clause (per \textsc{T-Handle}), every call to $K$
+consumes it — the one-shot restriction is mechanical.}
+\label{fig:opsem-effects}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{E-Grad}]
+  { }
+  {\step{\config{\sigma}{\mathsf{grad}(\lambda x{:}\tau.\, e)}}
+        {\config{\sigma}{\lambda x{:}\tau.\, \lambda g_s{:}\tau_{\mathsf{out}}.\, \handlewith{\{\mathsf{Accum}\}}{\mathsf{adjoint}(e, x, g_s)}{h_{\mathsf{accum}}}}}}
+
+\inferrule*[right=\textsc{E-Vmap}]
+  { }
+  {\step{\config{\sigma}{\mathsf{vmap}(\lambda x{:}\tau.\, e)}}
+        {\config{\sigma}{\lambda x{:}\addDim{d}{\tau}.\, \mathsf{addDimTerm}(d, e)}}}
+\end{mathpar}
+\[
+h_{\mathsf{accum}} \;\triangleq\; \{\mathsf{accum}(p, k) \to k(\mathsf{update\_origin\_buffer}(p))\}
+\quad\text{where } p = (\ell, v)
+\]
+\caption{AD and vectorization transforms. $\textsc{E-Grad}$ wraps the function
+body in a two-argument $\lambda$ (parameter $x$ plus seed gradient $g_s$) and
+an explicit $\mathsf{handle}[\{\mathsf{Accum}\}]$ whose body is the adjoint
+transformation $\mathsf{adjoint}(e, x, g_s)$ of the original function body. The
+handler clause routes every $\performop{accum}$ contribution to
+$\mathsf{update\_origin\_buffer}$, which keys the gradient buffer by
+compile-time origin (tracking $\mathsf{copy}$ chains back to source bindings
+and discarding contributions whose origin is a $\mathsf{const}$ literal). The
+final value returned by the handler is the gradient buffer entry for $x$'s
+origin. $\textsc{E-Vmap}$ uses the meta-function $\mathsf{addDimTerm}(d, e)$,
+which structurally lifts term $e$ to operate over a new batch dimension $d$;
+its full definition is deferred to Phase 2 T8 alongside $\mathsf{adjoint}$.}
+\label{fig:opsem-transforms}
+\end{figure}
+
+\noindent\textbf{Meta-function $\mathsf{adjoint}(e, x, g_s)$.}
+This is the AD transformation defined informally in the T0 design document
+and formalized as a Lean function in Phase 1 T8.
+Intuitively, $\mathsf{adjoint}$ walks $e$ in source order and inserts a tape
+copy $\letpair{a}{a'}{\mathsf{copy}(a)}{\dots}$ before every primitive whose
+adjoint rule requires operand values (notably $\mathsf{mul}$), then walks $e$
+in reverse to produce a backward pass that consumes the tape entries, emits
+$\performop{accum}$ calls to contribute gradients back to each operand's
+origin, and returns the seed gradient $g_s$'s flow through the whole chain as
+the final per-parameter gradient. Restrictions: $\mathsf{adjoint}$ is defined
+only for $e$ composed of RISC primitives, $\mathsf{let}$, $\mathsf{copy}$,
+$\mathsf{letpair}$, pair constructors, $\mathsf{handle}$ with
+$\varepsilon_h \subseteq \DiffCompat$, and $\performop{op}$ for
+$\mathsf{op} \in \DiffCompat$. It is explicitly undefined on $\mathsf{grad}$
+or $\mathsf{vmap}$ subterms inside $e$ — see T0 \S0 for the scope note.

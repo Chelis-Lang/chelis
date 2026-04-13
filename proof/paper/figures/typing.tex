@@ -1,1 +1,207 @@
-% placeholder — filled in Phase 1 T2
+%% figures/typing.tex — LaCaDiLE typing rules (Phase 1 T2)
+%% Input from main.tex via \input{figures/typing.tex}
+%%
+%% Typing judgment: Δ; Γ ⊢ e : τ ! ε ⊣ Γ'
+%%   Δ  — capability context (a set drawn from {Diff})
+%%   Γ  — linear type context (input)
+%%   Γ' — linear type context (output, after consumption)
+%%   τ  — type
+%%   ε  — effect row
+
+\providecommand{\DiffCompat}{\mathsf{DiffCompat}}
+\providecommand{\addDim}[2]{\mathsf{addDim}(#1, #2)}
+\providecommand{\hastypeout}[6]{#1; #2 \vdash #3 : #4 \mathbin{!} #5 \dashv #6}
+
+\begin{figure}[t]
+\small
+\begin{align*}
+\addDim{d}{\tensor{\bar{d}\,}} &= \tensor{d, \bar{d}} \\
+\addDim{d}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon} &= \addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon \\
+\addDim{d}{\tau_1 \otimes \tau_2} &= \addDim{d}{\tau_1} \otimes \addDim{d}{\tau_2} \\
+\addDim{d}{\mathsf{unit}} &= \mathsf{unit}
+\end{align*}
+\[
+\DiffCompat \;\triangleq\; \{\mathsf{Resource}, \mathsf{Accum}\}
+\qquad
+\varepsilon_1 \subseteq \varepsilon_2 \;\triangleq\; \forall \mathsf{op} \in \varepsilon_1.\, \mathsf{op} \in \varepsilon_2
+\]
+\[
+\Gamma = \Gamma_1 + \Gamma_2 \;\triangleq\;
+\Gamma_1 \cap \Gamma_2 = \emptyset \;\land\; \Gamma_1 \cup \Gamma_2 = \Gamma
+\quad \text{(disjoint linear split)}
+\]
+\caption{Meta-functions, effect subsumption, and linear context splitting.
+$\addDim{d}{\cdot}$ traverses types structurally without inspecting effect rows.
+Linear context splitting is used by every multi-premise rule to thread linear
+resources to exactly one sub-derivation.}
+\label{fig:typing-meta}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{T-Var}]
+  { }
+  {\hastypeout{\Delta}{\Gamma, x{:}\tau}{x}{\tau}{\emptyset}{\Gamma}}
+
+\inferrule*[right=\textsc{T-Unit}]
+  { }
+  {\hastypeout{\Delta}{\Gamma}{()}{\mathsf{unit}}{\emptyset}{\Gamma}}
+
+\inferrule*[right=\textsc{T-Abs}]
+  {\hastypeout{\Delta}{\Gamma_1, x{:}\tau_1}{e}{\tau_2}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\lambda x{:}\tau_1.\, e}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon}{\emptyset}{\Gamma_2 \setminus \{x\}}}
+
+\inferrule*[right=\textsc{T-App}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2}{e_2}{\tau_1}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{e_1\, e_2}{\tau_2}{\varepsilon_1 \cup \varepsilon_2 \cup \varepsilon}{\Gamma_3}}
+
+\inferrule*[right=\textsc{T-Let}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tau_1}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2, x{:}\tau_1}{e_2}{\tau_2}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{\letin{x = e_1}{e_2}}{\tau_2}{\varepsilon_1 \cup \varepsilon_2}{\Gamma_3 \setminus \{x\}}}
+
+\inferrule*[right=\textsc{T-Copy}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tau}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{copy}(e)}{\tau \otimes \tau}{\varepsilon}{\Gamma_2}}
+
+\inferrule*[right=\textsc{T-LetPair}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tau_1 \otimes \tau_2}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2, x{:}\tau_1, x'{:}\tau_2}{e_2}{\tau}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{\letpair{x}{x'}{e_1}{e_2}}{\tau}{\varepsilon_1 \cup \varepsilon_2}{\Gamma_3 \setminus \{x, x'\}}}
+
+\inferrule*[right=\textsc{T-Pair}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tau_1}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2}{e_2}{\tau_2}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{(e_1, e_2)}{\tau_1 \otimes \tau_2}{\varepsilon_1 \cup \varepsilon_2}{\Gamma_3}}
+
+\inferrule*[right=\textsc{T-Fst}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tau_1 \otimes \tau_2}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{fst}(e)}{\tau_1}{\varepsilon}{\Gamma_2}}
+
+\inferrule*[right=\textsc{T-Snd}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tau_1 \otimes \tau_2}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{snd}(e)}{\tau_2}{\varepsilon}{\Gamma_2}}
+\end{mathpar}
+\caption{Core typing rules. Linear contexts thread left-to-right through every
+multi-premise rule. $\mathsf{copy}$ is the pair-producing primitive from T0
+\S1.0: its output is a linear pair whose first component is the original
+(rebound) and whose second is a fresh physical copy on a new store location.
+Pair destructuring via $\letpair{x}{x'}{\cdot}{\cdot}$ is the preferred
+consumption form; $\mathsf{fst}$ and $\mathsf{snd}$ remain available but are
+rarely used in the adjoint transformation.}
+\label{fig:typing-core}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{T-Const}]
+  {v : \tensor{\bar{d}}}
+  {\hastypeout{\Delta}{\Gamma}{\mathsf{const}(v, \bar{d})}{\tensor{\bar{d}}}{\emptyset}{\Gamma}}
+
+\inferrule*[right=\textsc{T-Add}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tensor{\bar{d}}}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2}{e_2}{\tensor{\bar{d}}}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{add}(e_1, e_2)}{\tensor{\bar{d}}}{\varepsilon_1 \cup \varepsilon_2}{\Gamma_3}}
+
+\inferrule*[right=\textsc{T-Mul}]
+  {\hastypeout{\Delta}{\Gamma_1}{e_1}{\tensor{\bar{d}}}{\varepsilon_1}{\Gamma_2} \\
+   \hastypeout{\Delta}{\Gamma_2}{e_2}{\tensor{\bar{d}}}{\varepsilon_2}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{mul}(e_1, e_2)}{\tensor{\bar{d}}}{\varepsilon_1 \cup \varepsilon_2}{\Gamma_3}}
+
+\inferrule*[right=\textsc{T-Sum}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2} \\
+   0 \leq i < |\bar{d}|}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{sum}(e, i)}{\tensor{\bar{d} \setminus i}}{\varepsilon}{\Gamma_2}}
+
+\inferrule*[right=\textsc{T-Expand}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2} \\
+   0 \leq i \leq |\bar{d}|}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{expand}(e, i, k)}{\tensor{\bar{d}[i \mapsto k]}}{\varepsilon}{\Gamma_2}}
+
+\inferrule*[right=\textsc{T-UniformLike}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{uniform\_like}(e, lo, hi)}{\tensor{\bar{d}}}{\varepsilon \cup \{\mathsf{Random}\}}{\Gamma_2}}
+\end{mathpar}
+\caption{Typing rules for the six RISC primitives. $\mathsf{add}$ and
+$\mathsf{mul}$ require both operands to have equal dimension lists (enforced by
+the shared $\bar{d}$ metavariable). $\mathsf{sum}$ removes the $i$-th dimension
+from the type; $\mathsf{expand}$ inserts a new dimension of extent $k$ at
+position $i$. $\mathsf{uniform\_like}$ is the sole stochastic primitive and is
+the only way to introduce the $\mathsf{Random}$ effect.}
+\label{fig:typing-prims}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{T-Perform}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tau_{\mathsf{arg}}}{\varepsilon}{\Gamma_2} \\
+   \mathsf{op} : \tau_{\mathsf{arg}} \to \tau_{\mathsf{ret}}}
+  {\hastypeout{\Delta}{\Gamma_1}{\performop{op}(e)}{\tau_{\mathsf{ret}}}{\varepsilon \cup \{\mathsf{op}\}}{\Gamma_2}}
+
+\inferrule*[right=\textsc{T-Handle}]
+  {\hastypeout{\Delta}{\Gamma_1}{e}{\tau}{\varepsilon_h \cup \varepsilon_r}{\Gamma_2} \\\\
+   \forall \mathsf{op}_i \in \varepsilon_h.\; \mathsf{op}_i : \tau_i^{\mathsf{arg}} \to \tau_i^{\mathsf{ret}} \\\\
+   \forall i.\; \hastypeout{\Delta}{\Gamma_2, x_i{:}\tau_i^{\mathsf{arg}}, k_i{:}(\tau_i^{\mathsf{ret}} \to \tau \mathbin{!} \varepsilon_r)}{h_i}{\tau}{\varepsilon_r}{\Gamma_3}}
+  {\hastypeout{\Delta}{\Gamma_1}{\handlewith{\varepsilon_h}{e}{\{\mathsf{op}_i(x_i, k_i) \to h_i\}_i}}{\tau}{\varepsilon_r}{\Gamma_3}}
+\end{mathpar}
+\caption{Effect system rules. $\mathsf{perform}$ introduces an effect by naming
+an operation with a declared signature (e.g.\ $\mathsf{Fail}$ provides
+$\mathsf{fail} : \mathsf{unit} \to \alpha$). The $\mathsf{handle}$ rule removes
+the handled effects $\varepsilon_h$ from the outer effect row, leaving
+$\varepsilon_r$. Each handler clause binds the operation argument $x_i$ and the
+continuation $k_i$ as \emph{linear} bindings, so calling $k_i$ consumes it — the
+one-shot restriction falls out of linearity. Sharing $\Gamma_3$ across all
+handler clauses enforces that every branch produces the same residual context.}
+\label{fig:typing-effects}
+\end{figure}
+
+\begin{figure}[t]
+\small
+\begin{mathpar}
+\inferrule*[right=\textsc{T-Grad}]
+  {\hastypeout{\Delta \cup \{\mathsf{Diff}\}}{\Gamma}{f}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \mathbin{!} \varepsilon}{\emptyset}{\Gamma} \\\\
+   f \text{ uses its argument linearly} \\
+   \varepsilon \subseteq \DiffCompat}
+  {\hastypeout{\Delta}{\Gamma}{\mathsf{grad}(f)}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \to \tensor{\bar{d}} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
+
+\inferrule*[right=\textsc{T-Vmap}]
+  {\hastypeout{\Delta}{\Gamma}{f}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon}{\emptyset}{\Gamma} \\
+   d \text{ fresh}}
+  {\hastypeout{\Delta}{\Gamma}{\mathsf{vmap}(f)}{\addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
+\end{mathpar}
+\caption{AD and vectorization transforms. $\mathsf{grad}$ requires the
+$\mathsf{Diff}$ capability in $\Delta$, requires the differentiated function to
+use its argument linearly (preventing gradient ambiguity from duplicated
+parameters), and requires the function's effect row to be a subset of
+$\DiffCompat = \{\mathsf{Resource}, \mathsf{Accum}\}$ — stochastic or
+side-effectful functions cannot be differentiated. The result type is a
+\emph{two-argument} function: the first argument is the parameter value, the
+second is the output-gradient seed (the cotangent), and the result is the
+gradient with respect to the parameter. The resulting effect row is
+$\varepsilon$ itself: the internal $\mathsf{Accum}$ handler introduced by the
+$\mathsf{grad}$ reduction captures only $\mathsf{Accum}$, which is not present
+in $\varepsilon$ to begin with (user code never emits $\mathsf{Accum}$
+directly). $\mathsf{vmap}$ lifts $f$ over a fresh batch dimension $d$ by
+applying $\addDim{d}{\cdot}$ to both argument and result types; the effect row
+is preserved.}
+\label{fig:typing-transforms}
+\end{figure}
+
+\noindent\textbf{Remarks on the typing rules.}
+The master plan's $\&e$ borrow operator is intentionally absent. T0's tape
+mechanism uses only $\mathsf{copy}$, which is sufficient for every adjoint rule
+because the first component of $\mathsf{copy}$'s output pair retains the
+original's ownership and the second is a fresh physical copy. A separate borrow
+primitive is unnecessary for Phase 1. The $\mathsf{Fail}$ effect uses the
+standard $\performop{fail}$ shape handled by $\textsc{T-Handle}$; there is no
+bespoke $\textsc{T-Fail}$ rule. $\Delta$ is a non-linear set of capabilities and
+threads unchanged through every rule; only $\Gamma$ is consumed. This simplifies
+the substitution lemma (WS2.1) because capability-context splitting is not
+required. The $\mathsf{grad}$ rule's ``$f$ uses its argument linearly'' side
+condition is enforced by the linear context accounting of the premise: if $f$
+is $\lambda x.\, e$ with $x$ used non-linearly in $e$, the premise derivation
+fails at the inner $\textsc{T-Var}$ rule on the second use of $x$.
