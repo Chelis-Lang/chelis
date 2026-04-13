@@ -15,3 +15,12 @@ data/
 bindings/python/chelis/_native.abi3.so
 bindings/python/chelis/__pycache__/
 proof/scripts/__pycache__/
+proof/lean/.lake/
+proof/lean/lake-manifest.json
+proof/paper/main.aux
+proof/paper/main.log
+proof/paper/main.out
+proof/paper/main.pdf
+proof/paper/main.fdb_latexmk
+proof/paper/main.fls
+proof/paper/main.synctex.gz

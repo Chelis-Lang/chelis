@@ -135,5 +135,42 @@ The script is fail-fast and prints the first missing piece. Run it after any fre
 3. Export `MISTRAL_API_KEY` and enable Labs models at https://admin.mistral.ai/plateforme/privacy.
 4. Edit `~/.vibe/config.toml`: set `auto_approve = true`, `installed_agents = ["lean"]`, add the `mcp_servers` entry.
 5. Add this repo to `~/.vibe/trusted_folders.toml`.
-6. Run `python3 proof/scripts/check_toolchain.py` — fix what it complains about.
-7. Smoke test: from a scratch Lake project, run the invocation in the previous section with a trivial `sorry` to fill.
+6. Install the LaTeX stack (see §LaTeX toolchain below).
+7. Run `python3 proof/scripts/check_toolchain.py` — fix what it complains about.
+8. Smoke test: from a scratch Lake project, run the invocation in the previous section with a trivial `sorry` to fill.
+
+## LaTeX toolchain (for `proof/paper/`)
+
+The POPL paper source lives in `proof/paper/` and is built with `pdflatex` (not `latexmk` — that dep is intentionally avoided). The following are required on the build machine:
+
+- `pdflatex` (from TeXLive)
+- The `acmart.cls` class file and `ACM-Reference-Format.bst` BibTeX style — **vendored into `proof/paper/`** from the CTAN `acmart` bundle (not from the upstream `borisveytsman/acmart` GitHub default branch, which is `primary` and does not commit the generated `.cls`). If you re-vendor them, fetch from `https://mirrors.ctan.org/macros/latex/contrib/acmart.zip` and run `latex acmart.ins` to regenerate. Verify by comparing `sha256sum proof/paper/acmart.cls` against a fresh extraction.
+- These TeXLive packages, which `acmart` pulls in transitively:
+  - `texlive-amscls`, `texlive-amsmath`, `texlive-amsfonts`
+  - `texlive-libertine`, `texlive-newtx` (fonts)
+  - `texlive-microtype`, `texlive-caption`, `texlive-booktabs`, `texlive-setspace`
+  - `texlive-upquote`, `texlive-oberdiek`, `texlive-totpages`, `texlive-environ`
+  - `texlive-hyperxmp`, `texlive-float`, `texlive-draftwatermark`, `texlive-fancyhdr`
+  - `texlive-preprint`, `texlive-comment`, `texlive-ncctools`, `texlive-trimspaces`
+  - `texlive-cm-super`, `texlive-ec`
+- On Fedora, the lazy path is `sudo dnf install texlive-scheme-full` (≈2 GB). The surgical path is to install the list above individually. The current workstation was set up surgically during Phase 1 Wave 1 (T9): missing packages were extracted from their `texlive-*.rpm` files into `~/texmf-local/` and symlinked to `~/texmf/` so kpathsea resolves them without root. **That local install is not part of this repo and is not reproducible outside this machine.** A fresh clone needs real TeXLive packages installed system-wide.
+
+Build commands:
+
+```
+cd proof/paper
+pdflatex -interaction=nonstopmode main.tex
+pdflatex -interaction=nonstopmode main.tex   # second pass settles references
+```
+
+The second pass is required because the first pass writes `main.aux`; the second reads it to fix cross-references. Two passes produce `main.pdf`. Warnings about missing citations are expected while the body is skeleton-only.
+
+## Phase 1 invocation commands (Wave 1–4)
+
+For future sessions running the Phase 1 execution plan:
+
+- Lean project build: `cd proof/lean && lake build`
+- Paper PDF build: `cd proof/paper && pdflatex -interaction=nonstopmode main.tex && pdflatex -interaction=nonstopmode main.tex`
+- Toolchain verifier: `python3 proof/scripts/check_toolchain.py`
+- prove.py tests: `python3 -m unittest proof.scripts.test_prove -v`
+- Leanstral smoke (requires API reachability + a Lean file with `sorry`): `python3 proof/scripts/prove.py --file <path-to-lean-file> --theorem <name> --passes N`
