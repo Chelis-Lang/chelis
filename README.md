@@ -15,9 +15,13 @@ Phases 0a-0i are complete.
 Phases 1a-1f are implemented.
 Phase 1 is structurally complete for the shipped fixed-workload deliverable, with known
 backend limitations carried forward explicitly in the design docs.
-Phase 2a has shipped its first bounded subset: effect syntax in Surf/Deep, annotated
-checked Deep as the downstream contract, `Random` via `dropout` + `with seed(...)` in
-the evaluator path, and `Resource(Device)` validation on the build boundary.
+Phase 2 has shipped substantial tooling and language surface (`tide` serve/MCP, LSP,
+`cove`, pretty Deep formatting, and the initial checked effect subset).
+Phase 3 language-completeness work now ships the package system, Python interop, direct
+execution, scalar/string values, collections, the pipe-first Surf idiom, core numeric
+primitives, the Rust runtime rewrite, data loading/tokenization, and the first stdlib
+expansion (`Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, `Std.Nn.Generate`).
+The main remaining Phase 3 item is the full `SKILL.md` v2 refresh.
 
 ## Prerequisites
 
@@ -59,7 +63,7 @@ It does not run the full release-mode real-MNIST milestone by default.
 
 ## Current Focus
 
-Phase 0 is now complete through:
+Phase 0 is complete through:
 
 - Surf -> Deep -> typecheck -> lower -> grad -> eval execution
 - C backend codegen with BLAS and OpenMP validation
@@ -89,8 +93,8 @@ Deep formatting now defaults to canonical pretty-printed `.dp` output:
   file
 
 The current shipped surface includes the Phase 1 HIP backend work,
-`chelis validate` for executable grammar conformance, and the first Phase 2a effect
-surface:
+`chelis validate` for executable grammar conformance, the shipped Phase 2 tooling
+surfaces, and the practical Phase 3 language-completeness foundation:
 
 - optional effect annotations on `sig` and `def`
 - `with seed(...) { ... }` and `with device(...) { ... }` Surf handler syntax
@@ -103,6 +107,13 @@ surface:
 - the Phase 2f Tide LSP/editor package surface in `editors/vscode/`
 - the Phase 2g `chelis cove` terminal UI plus checked-in tree-sitter grammars for Surf
   and Deep
+- Reef package commands and local-first package resolution
+- Python bindings with CPU DLPack interop, safetensors, and direct execution helpers
+- first-class scalars, strings, collections, `Option`, records, and compiled host-value
+  execution through the Rust runtime
+- Phase 3 numeric/data surfaces: `einsum`, `concat`, `split`, `gather`, `scatter`,
+  `where`, `cumsum`, `sort`, `diagonal`, `trace`, `clamp`, `Std.IO`, `Std.Tokenizer`,
+  `Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate`
 The shipped Phase 1 benchmark models compile and run on both backends.
 Known carried-forward limitations are:
 
@@ -121,9 +132,8 @@ These limitations are real debt, but they do not block the Phase 2 language work
 AI assistance planning is split cleanly:
 
 - Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
-- Phase 3: ecosystem foundations, starting with the Surf style pass (pipe-first,
-  short-form block bindings, width-aware multiline pipes), then package/FFI work and
-  the `SKILL.md` v2 refresh
+- Phase 3: language completeness, now mostly shipped apart from the `SKILL.md` v2
+  refresh
 - Phase 4: a local coding model that ships with the toolchain
 
 Phase 2g currently ships as:
@@ -142,6 +152,11 @@ Phase 3 now ships:
 - local-first Reef package resolution for `chelis check` and `chelis build`
 - bundled `packages/chelis-std` dogfooding the package system through `.chb` shell
   metadata plus source archives
+- pipe-first Surf formatting and decompilation defaults
+- Rust runtime linkage through `libchelis_runtime.a`
+- `Std.IO` / `Std.Tokenizer` data-loading and tokenization modules
+- `Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate`
+- executable package-mode coverage for the shipped stdlib surface
 
 ## Phase 0h Validation
 
@@ -205,6 +220,8 @@ examples/illustrative/  Non-executable syntax/design examples
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
 - [Phase 2 Plan](spec/design/chelis_phase2_plan.md)
+- [Phase 3 Plan](spec/design/chelis_phase3_plan.md)
+- [Roadmap](spec/12-roadmap.md)
 - [Project Plan](spec/design/chelis_project_plan.md)
 
 ## Agent Tooling
