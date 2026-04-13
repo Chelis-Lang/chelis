@@ -216,46 +216,49 @@ row tracking is lexical (it sees every effect produced by any subterm of
 
 ---
 
-## Example 3 — vmap outside grad: `vmap(grad(f))` for `f : tensor[d] → tensor[] ! {Resource}`
+## Example 3 — vmap outside grad: `vmap(grad(λx. f x))` for `f : tensor[d] → tensor[] ! {Resource}`
 
 This exercises the interaction between `grad` (AD) and `vmap` (vectorization)
 in the **outer form**: `vmap` wraps a complete `grad` call. The inner form
 (`grad` over a body containing `vmap`) is out of scope per T0 §0.
 
 Assume `Γ_0 ⊢ f : tensor[d] → tensor[] ! {Resource} ⊣ Γ_0` as a top-level
-binding.
+binding. The updated **T-Grad** rule requires its argument to be a literal
+abstraction $\lambda x.\, e$, so we cannot write `grad(f)` directly — we
+must eta-expand to `grad(λx : tensor[d]. f x)`. The master plan's original
+wording `vmap(grad(f))` is therefore rewritten here as
+`vmap(grad(λx : tensor[d]. f x))`, which is the well-typed form under Phase 1
+rules.
 
-### Step 1: type of `grad(f)`
+### Step 1: type of `grad(λx : tensor[d]. f x)`
 
 Apply **T-Grad**:
 
-- Premise: `Δ ∪ {Diff}; Γ_0 ⊢ f : tensor[d] → tensor[] ! {Resource} ⊣ Γ_0`.
-  Holds because `f` is a top-level binding with the stated type, and adding
-  `Diff` to `Δ` doesn't invalidate that.
-- Premise: `f` uses its argument linearly. Assume yes (given).
+- Premise: `Δ ∪ {Diff}; Γ_0, x : tensor[d] ⊢ f x : tensor[] ! {Resource} ⊣ Γ_0`.
+  Derivation: **T-Var** on `f` returns `Γ_0, x : tensor[d] ⊢ f : tensor[d] → tensor[] ! {Resource} ⊣ Γ_0, x : tensor[d]` (`f` is non-linear, or bound at top-level and not consumed from `Γ_0`; assume the standard treatment). Then **T-App** on `f` applied to `x`: the first premise delivers `f` leaving `x` in context, the second premise delivers `x` consuming it. Result: `tensor[] ! {Resource}` with output context `Γ_0`.
 - Premise: `{Resource} ⊆ DiffCompat = {Resource, Accum}`. Holds.
+- `x` is consumed exactly once (by the application to `f`), so the linearity
+  side-condition (enforced by the `⊣ Γ_0` output context) holds.
 
-Conclusion: `Γ_0 ⊢ grad(f) : tensor[d] → tensor[] → tensor[d] ! {Resource} ⊣ Γ_0`.
+Conclusion: `Γ_0 ⊢ grad(λx : tensor[d]. f x) : tensor[d] → tensor[] → tensor[d] ! {Resource} ⊣ Γ_0`.
 
-### Step 2: type of `vmap(grad(f))`
+### Step 2: type of `vmap(grad(λx. f x))`
 
 Apply **T-Vmap**:
 
-- Premise: `grad(f)` has type `(tensor[d] → (tensor[] → tensor[d] ! {Resource}))`.
-  Note this is a *right-associative* function type: it takes one argument and
-  returns a function. **T-Vmap** expects `f : τ₁ → τ₂ ! ε` — and here
-  `τ₁ = tensor[d]`, `τ₂ = tensor[] → tensor[d] ! {Resource}`, and
-  `ε = ∅` (the outer arrow has no effect because it's a pure function
-  returning a function; effects only happen when the inner function is
-  applied).
+- Premise: `grad(λx. f x)` has type
+  `tensor[d] → (tensor[] → tensor[d] ! {Resource})`. This is a
+  right-associative function type: the outer arrow is a pure function that
+  returns another function. The outer arrow carries effect row `∅` because
+  **T-Abs** gives `τ₁ → τ₂ ! ε` where `ε` is the body's effect row, and the
+  body here is itself an abstraction (introduced by the reduced `grad` form
+  `λx. λg_s. ...`). Nested abstractions have `∅` at every outer arrow; the
+  `{Resource}` effect lives at the innermost arrow.
 
-  Actually, re-examining the typing rule for abstractions: **T-Abs** gives
-  `τ_1 → τ_2 ! ε`, where `ε` is the effect row of the body. If the abstraction
-  body is itself another abstraction, the outer `ε` is `∅` (abstractions
-  don't have effects; they delay them). So yes, `grad(f)`'s outer effect row
-  is `∅`.
+  For **T-Vmap**'s premise shape `f : τ₁ → τ₂ ! ε`, we take
+  `τ₁ = tensor[d]`, `τ₂ = tensor[] → tensor[d] ! {Resource}`, and `ε = ∅`.
 
-- Premise: `d'` fresh (pick a new dimension name, say `batch`).
+- Premise: `batch` fresh.
 
 Apply **T-Vmap**:
 
@@ -266,16 +269,20 @@ addDim(batch, tensor[] → tensor[d] ! {Resource}) =
   = tensor[batch] → tensor[batch, d] ! {Resource}
 ```
 
-So: `Γ_0 ⊢ vmap(grad(f)) : tensor[batch, d] → tensor[batch] → tensor[batch, d] ! {Resource} ⊣ Γ_0`.
+So: `Γ_0 ⊢ vmap(grad(λx. f x)) : tensor[batch, d] → tensor[batch] → tensor[batch, d] ! {Resource} ⊣ Γ_0`.
 
-**Reading:** `vmap(grad(f))` takes a batched parameter `tensor[batch, d]` and
-a batched seed `tensor[batch]` (one scalar cotangent per batch element), and
-returns a batched gradient `tensor[batch, d]` (per-example gradients). This
-is the classic JAX `vmap(grad(f))` pattern for per-example gradients.
+**Reading:** takes a batched parameter `tensor[batch, d]` and a batched seed
+`tensor[batch]` (one scalar cotangent per batch element), and returns a
+batched gradient `tensor[batch, d]` (per-example gradients). This is the
+classic JAX `vmap(grad(f))` pattern for per-example gradients, and Phase 1's
+T-Grad restriction forces the explicit eta-expansion.
 
 **Verdict:** well-typed. Dimensions thread through `addDim` correctly at
 every layer of the function type. Effects (`Resource`) are preserved through
-both `grad` and `vmap` applications. ✓
+both `grad` and `vmap` applications. The eta-expansion is a Phase 1 wart
+from restricting `grad` to literal abstractions; a future phase could lift
+the restriction by proving the linear-use property syntactically for
+variables bound to known linear functions. ✓
 
 ---
 
@@ -320,14 +327,19 @@ reintroduced when Phase 2 adds polymorphism.
 
 | # | Example | Verdict | Issue |
 |---|---|---|---|
-| 1 | `grad(λx. let y = mul(x, const(2, [])) in sum(y, 0))` | well-typed with correction | The `const(2, [])` needs to be `const(2, [d₁])` for dimension compatibility in `T-Mul`. Flag as a plan correction. |
+| 1 | `grad(λx. let y = mul(x, const(2, [])) in sum(y, 0))` | well-typed with correction | The `const(2, [])` needs to be `const(2, [d₁])` for dimension compatibility in `T-Mul`. Also uses `expand` in its reduced form, relying on **insertion** semantics for the dimension list (not substitution); T-Expand's notation `ins(\bar d, i, k)` makes this explicit. |
 | 2 | `handle[Random] (let x = uniform_like(t, 0, 1) in add(x, x))` | ill-typed (as expected) | Naïve version fails `T-Var` on second use of `x`. Copy-fixed version type-checks cleanly. |
-| 3 | `vmap(grad(f))` for `f : tensor[d] → tensor[] ! {Resource}` | well-typed | Dimensions thread through `addDim` at every arrow; `Resource` effect preserved. |
+| 3 | `vmap(grad(λx. f x))` for `f : tensor[d] → tensor[] ! {Resource}` | well-typed (after eta-expansion) | Phase 1's T-Grad restriction to literal abstractions forces eta-expansion. Dimensions thread through `addDim` at every arrow; `Resource` effect preserved. |
 | 4 | `vmap(dropout)` (substituted for `map(dropout, xs)`) | well-typed, but weakened | Phase 1 core calculus lacks row variables in function signatures. Full `map` + row polymorphism is Phase 2+. |
 
-**No `T-*` or `E-*` rule needed correction** based on these walks. One plan
-example (#1) needs a dimension fix; one (#4) needs to be explicitly weakened
-in the paper narrative to match Phase 1's monomorphic calculus.
+**Wave 2 red-team found two rule bugs** that led to corrections during Wave 2:
+T-Expand's dimension-list notation was corrected to `\mathsf{ins}(\bar d, i, k)`
+(insertion, required for `sum`/`expand` to be mutual adjoints), and T-Grad was
+restricted to literal abstractions so the linear-use side-condition has real
+force. Both corrections are reflected in the final T2 figures. One plan
+example (#1) needs a dimension fix; example (#3) needs eta-expansion; example
+(#4) needs to be explicitly weakened in the paper narrative to match Phase
+1's monomorphic calculus.
 
 ## Open questions surfaced by the walks
 

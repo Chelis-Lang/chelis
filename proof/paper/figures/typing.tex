@@ -18,7 +18,8 @@
 \addDim{d}{\tensor{\bar{d}\,}} &= \tensor{d, \bar{d}} \\
 \addDim{d}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon} &= \addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon \\
 \addDim{d}{\tau_1 \otimes \tau_2} &= \addDim{d}{\tau_1} \otimes \addDim{d}{\tau_2} \\
-\addDim{d}{\mathsf{unit}} &= \mathsf{unit}
+\addDim{d}{\mathsf{unit}} &= \mathsf{unit} \\
+\addDim{d}{\alpha} &= \alpha && \text{(type variables are unchanged)}
 \end{align*}
 \[
 \DiffCompat \;\triangleq\; \{\mathsf{Resource}, \mathsf{Accum}\}
@@ -29,6 +30,12 @@
 \Gamma = \Gamma_1 + \Gamma_2 \;\triangleq\;
 \Gamma_1 \cap \Gamma_2 = \emptyset \;\land\; \Gamma_1 \cup \Gamma_2 = \Gamma
 \quad \text{(disjoint linear split)}
+\]
+\[
+\mathsf{ins}(\bar{d}, i, k) \;\triangleq\;
+\text{the dimension list obtained from $\bar{d}$ by inserting $k$ at index $i$}
+\qquad
+\mathsf{rem}(\bar{d}, i) \;\triangleq\; \text{the list with index $i$ removed}
 \]
 \caption{Meta-functions, effect subsumption, and linear context splitting.
 $\addDim{d}{\cdot}$ traverses types structurally without inspecting effect rows.
@@ -98,7 +105,7 @@ rarely used in the adjoint transformation.}
 \small
 \begin{mathpar}
 \inferrule*[right=\textsc{T-Const}]
-  {v : \tensor{\bar{d}}}
+  {v \text{ is a scalar literal}}
   {\hastypeout{\Delta}{\Gamma}{\mathsf{const}(v, \bar{d})}{\tensor{\bar{d}}}{\emptyset}{\Gamma}}
 
 \inferrule*[right=\textsc{T-Add}]
@@ -114,12 +121,12 @@ rarely used in the adjoint transformation.}
 \inferrule*[right=\textsc{T-Sum}]
   {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2} \\
    0 \leq i < |\bar{d}|}
-  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{sum}(e, i)}{\tensor{\bar{d} \setminus i}}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{sum}(e, i)}{\tensor{\mathsf{rem}(\bar{d}, i)}}{\varepsilon}{\Gamma_2}}
 
 \inferrule*[right=\textsc{T-Expand}]
   {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2} \\
    0 \leq i \leq |\bar{d}|}
-  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{expand}(e, i, k)}{\tensor{\bar{d}[i \mapsto k]}}{\varepsilon}{\Gamma_2}}
+  {\hastypeout{\Delta}{\Gamma_1}{\mathsf{expand}(e, i, k)}{\tensor{\mathsf{ins}(\bar{d}, i, k)}}{\varepsilon}{\Gamma_2}}
 
 \inferrule*[right=\textsc{T-UniformLike}]
   {\hastypeout{\Delta}{\Gamma_1}{e}{\tensor{\bar{d}}}{\varepsilon}{\Gamma_2}}
@@ -163,31 +170,34 @@ handler clauses enforces that every branch produces the same residual context.}
 \small
 \begin{mathpar}
 \inferrule*[right=\textsc{T-Grad}]
-  {\hastypeout{\Delta \cup \{\mathsf{Diff}\}}{\Gamma}{f}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \mathbin{!} \varepsilon}{\emptyset}{\Gamma} \\\\
-   f \text{ uses its argument linearly} \\
+  {\hastypeout{\Delta \cup \{\mathsf{Diff}\}}{\Gamma, x{:}\tensor{\bar{d}}}{e}{\tensor{\bar{d}'}}{\varepsilon}{\Gamma} \\\\
    \varepsilon \subseteq \DiffCompat}
-  {\hastypeout{\Delta}{\Gamma}{\mathsf{grad}(f)}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \to \tensor{\bar{d}} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
+  {\hastypeout{\Delta}{\Gamma}{\mathsf{grad}(\lambda x{:}\tensor{\bar{d}}.\, e)}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \to \tensor{\bar{d}} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
 
 \inferrule*[right=\textsc{T-Vmap}]
   {\hastypeout{\Delta}{\Gamma}{f}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon}{\emptyset}{\Gamma} \\
    d \text{ fresh}}
   {\hastypeout{\Delta}{\Gamma}{\mathsf{vmap}(f)}{\addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
 \end{mathpar}
-\caption{AD and vectorization transforms. $\mathsf{grad}$ requires the
-$\mathsf{Diff}$ capability in $\Delta$, requires the differentiated function to
-use its argument linearly (preventing gradient ambiguity from duplicated
-parameters), and requires the function's effect row to be a subset of
-$\DiffCompat = \{\mathsf{Resource}, \mathsf{Accum}\}$ — stochastic or
-side-effectful functions cannot be differentiated. The result type is a
-\emph{two-argument} function: the first argument is the parameter value, the
-second is the output-gradient seed (the cotangent), and the result is the
+\caption{AD and vectorization transforms. $\mathsf{grad}$ is defined only on
+\emph{literal abstractions} $\lambda x{:}\tensor{\bar{d}}.\, e$, not on
+arbitrary expressions of function type. This restriction makes the linear-use
+side-condition mechanical: the premise derives $e$ with $x$ added to the
+linear context and requires the output context to be $\Gamma$ unchanged, so
+$x$ must be consumed exactly once by $e$. $\mathsf{grad}$ requires the
+$\mathsf{Diff}$ capability in $\Delta$ and requires the body's effect row to
+be a subset of $\DiffCompat = \{\mathsf{Resource}, \mathsf{Accum}\}$ —
+stochastic or side-effectful bodies cannot be differentiated. The result type
+is a \emph{two-argument} function: the first argument is the parameter value,
+the second is the output-gradient seed (the cotangent), and the result is the
 gradient with respect to the parameter. The resulting effect row is
 $\varepsilon$ itself: the internal $\mathsf{Accum}$ handler introduced by the
 $\mathsf{grad}$ reduction captures only $\mathsf{Accum}$, which is not present
 in $\varepsilon$ to begin with (user code never emits $\mathsf{Accum}$
-directly). $\mathsf{vmap}$ lifts $f$ over a fresh batch dimension $d$ by
-applying $\addDim{d}{\cdot}$ to both argument and result types; the effect row
-is preserved.}
+directly). To differentiate a function reference $f$, eta-expand first:
+$\mathsf{grad}(\lambda x{:}\tensor{\bar{d}}.\, f\, x)$. $\mathsf{vmap}$ lifts
+$f$ over a fresh batch dimension $d$ by applying $\addDim{d}{\cdot}$ to both
+argument and result types; the effect row is preserved.}
 \label{fig:typing-transforms}
 \end{figure}
 

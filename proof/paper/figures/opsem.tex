@@ -73,7 +73,7 @@ from the syntax figure. Substitution $\subst{e}{v}{x}$ is capture-avoiding.}
 
 \inferrule*[right=\textsc{E-UniformLike}]
   {w = \mathsf{uniform\_val}(\sigma(\ell), lo, hi) \\ \fresh{\ell'}}
-  {\step{\config{\sigma}{\mathsf{uniform\_like}(\ell, lo, hi)}}{\config{\sigma[\ell' \mapsto w]}{\ell'}}}
+  {\step{\config{\sigma}{\mathsf{uniform\_like}(\ell, lo, hi)}}{\config{\sigma \setminus \{\ell\}\,[\ell' \mapsto w]}{\ell'}}}
 \end{mathpar}
 \caption{RISC primitive reduction rules. Each rule evaluates to a location
 value after reducing its operands to location values via $\textsc{E-Ctx}$.
@@ -85,12 +85,15 @@ caller, while $\ell'$ owns the new location. $\textsc{E-Add}$ and
 $\textsc{E-Mul}$ consume both operand locations (removed from $\sigma$) and
 allocate a fresh result location. $\textsc{E-Sum}$ and $\textsc{E-Expand}$
 consume the single operand and allocate a fresh result location with the
-shape-transformed data. $\textsc{E-UniformLike}$ reads the template shape from
-$\sigma(\ell)$ to produce a new tensor of random values; the template location
-is \emph{not} consumed (it is read-only for shape) — but see remark below.
-Operations $\oplus$, $\odot$, $\mathsf{sum\_val}$, $\mathsf{expand\_val}$, and
-$\mathsf{uniform\_val}$ are the underlying tensor-data operations, defined
-pointwise on $\mathsf{TensorVal}$ and not exercised by the metatheory.}
+shape-transformed data. $\textsc{E-UniformLike}$ consumes the template location
+$\ell$ (freed from $\sigma$) and allocates a fresh location $\ell'$ holding a
+new tensor of random values whose shape is read from the template before it is
+freed; to retain the template for later use, callers must insert an explicit
+$\letpair{t}{t'}{\mathsf{copy}(t)}{\dots}$ before the $\mathsf{uniform\_like}$
+call (see T0 \S2.6). Operations $\oplus$, $\odot$, $\mathsf{sum\_val}$,
+$\mathsf{expand\_val}$, and $\mathsf{uniform\_val}$ are the underlying
+tensor-data operations, defined pointwise on $\mathsf{TensorVal}$ and not
+exercised by the metatheory.}
 \label{fig:opsem-prims}
 \end{figure}
 
@@ -149,9 +152,10 @@ $\mathsf{update\_origin\_buffer}$, which keys the gradient buffer by
 compile-time origin (tracking $\mathsf{copy}$ chains back to source bindings
 and discarding contributions whose origin is a $\mathsf{const}$ literal). The
 final value returned by the handler is the gradient buffer entry for $x$'s
-origin. $\textsc{E-Vmap}$ uses the meta-function $\mathsf{addDimTerm}(d, e)$,
-which structurally lifts term $e$ to operate over a new batch dimension $d$;
-its full definition is deferred to Phase 2 T8 alongside $\mathsf{adjoint}$.}
+origin. Both $\mathsf{adjoint}(e, x, g_s)$ and $\mathsf{addDimTerm}(d, e)$ are
+meta-functions on syntax, formalized in Lean during Phase 1 T8; Phase 1's
+paper surface treats them as abstract term-to-term transformations whose
+defining equations are tabulated in the T0 design document.}
 \label{fig:opsem-transforms}
 \end{figure}
 
