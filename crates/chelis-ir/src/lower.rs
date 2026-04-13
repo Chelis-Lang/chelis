@@ -792,6 +792,10 @@ fn is_shape_sensitive_builtin_app(list: &List) -> bool {
                 | "conv2d"
                 | "sum"
                 | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
                 | "reshape"
                 | "permute"
                 | "expand"
@@ -2469,6 +2473,38 @@ impl LowerCtx {
                 };
                 self.dag
                     .add_node(RiscOp::MaxReduce { axis }, vec![x], out_ty)
+            }
+            "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
+                if args.len() == 2 =>
+            {
+                let name = func_name;
+                let x = self.lower_expr_node(&args[0], "reduction input");
+                let axis = self.extract_axis(&args[1]);
+                let out_ty = if *ty == Self::default_type() {
+                    let x_ty = self
+                        .dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone());
+                    let mut dims = x_ty.dims.clone();
+                    if axis < dims.len() {
+                        dims.remove(axis);
+                    }
+                    TensorType {
+                        dims,
+                        precision: x_ty.precision,
+                    }
+                } else {
+                    ty.clone()
+                };
+                let op = match name {
+                    "min_reduce" => RiscOp::MinReduce { axis },
+                    "prod_reduce" => RiscOp::ProdReduce { axis },
+                    "argmax_reduce" => RiscOp::Argmax { axis },
+                    "argmin_reduce" => RiscOp::Argmin { axis },
+                    _ => unreachable!(),
+                };
+                self.dag.add_node(op, vec![x], out_ty)
             }
 
             // H3: Movement ops -- extract parameters from Deep AST args where possible.

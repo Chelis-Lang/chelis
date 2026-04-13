@@ -1276,6 +1276,10 @@ fn is_phase0e_shape_sensitive_builtin(name: &str) -> bool {
             | "conv2d"
             | "sum"
             | "max_reduce"
+            | "min_reduce"
+            | "prod_reduce"
+            | "argmax_reduce"
+            | "argmin_reduce"
             | "reshape"
             | "permute"
             | "expand"
@@ -2437,7 +2441,17 @@ fn infer_app(
             }
 
             if let Some(ref fname) = func_name
-                && matches!(fname.as_str(), "softmax" | "mean" | "sum" | "max_reduce")
+                && matches!(
+                    fname.as_str(),
+                    "softmax"
+                        | "mean"
+                        | "sum"
+                        | "max_reduce"
+                        | "min_reduce"
+                        | "prod_reduce"
+                        | "argmax_reduce"
+                        | "argmin_reduce"
+                )
             {
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved = subst.apply(first_arg);
@@ -2719,7 +2733,8 @@ fn infer_app(
                     "matmul" => {
                         result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
                     }
-                    "sum" | "max_reduce" | "mean" => {
+                    "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+                    | "argmin_reduce" | "mean" => {
                         result_ty = check_reduction_signature(
                             fname,
                             &kids[1..],

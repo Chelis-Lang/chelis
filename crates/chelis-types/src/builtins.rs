@@ -50,6 +50,10 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "conv2d",
     "sum",
     "max_reduce",
+    "min_reduce",
+    "prod_reduce",
+    "argmax_reduce",
+    "argmin_reduce",
     "reshape",
     "permute",
     "expand",
@@ -469,6 +473,10 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
     tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
+    tensor_reduce_to_out("min_reduce", &mut env, &mut vg);
+    tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
+    tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
+    tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);

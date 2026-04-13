@@ -813,6 +813,32 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
 - **Reductions:** `min`, `prod`, `argmax`, `argmin`
 - **`Std.Nn`:** `GELU`, `SiLU`, `RMSNorm`, `Conv1d`, `Conv2d`,
   `scaled_dot_product_attention`, multi-head attention, grouped-query attention
+  - **Acknowledged limitations (Batch 3 shipped 3j-pre):**
+    - `GELU` ships as the tanh approximation
+      (`0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`) because `erf` is
+      not a Chelis primitive. This is the OpenAI/BERT/GPT-2 form, not the
+      exact `erf`-based GELU. Switching to exact GELU is deferred until
+      `erf` lands as a primitive.
+    - `SiLU`/`GELU`/`RMSNorm` ship as **rank-1 variants** (`tensor[n, f32]`)
+      because the current `tensor_binop` signature (single tvar shared
+      between both operands) does not permit scalar-tensor broadcast, and
+      the type system does not support rank-polymorphic defs. Callers
+      with transformer-shaped hidden states (`[batch, seq, dim]`) are
+      expected to flatten to rank-1 before applying the activation. The
+      `sigmoid` tensor primitive is also unsupported by the host runtime
+      lowering, so `SiLU` computes sigmoid element-wise via a scalar
+      helper rather than the tensor primitive.
+    - `Conv1d`/`Conv2d` wrappers and the attention modules
+      (`scaled_dot_product_attention`, multi-head, grouped-query) are
+      **not shipped in Batch 3**. The underlying `conv2d` IR primitive
+      works (`cargo test -p chelis-ir conv2d` is green, including the
+      im2col lowering and both numeric eval tests), but its Phase 0e
+      concreteness check rejects symbolic shape parameters: a thin
+      polymorphic `conv2d_forward[batch, in_c, out_c, ...]` wrapper
+      cannot satisfy `Phase 0e builtin conv2d requires concrete output
+      tensor dimensions`. Attention's `/sqrt(d_k)` scale runs into the
+      same scalar-broadcast gap as the activations. Both are tracked
+      as remaining Batch 3 scope — explicit, non-silent deferrals.
 - **`Std.Loss`:** `KLDivergence`, `BCEWithLogits`, `accuracy`, `perplexity`
 - **`Std.Init`:** `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
   `trunc_normal`
