@@ -2474,9 +2474,7 @@ impl LowerCtx {
                 self.dag
                     .add_node(RiscOp::MaxReduce { axis }, vec![x], out_ty)
             }
-            "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
-                if args.len() == 2 =>
-            {
+            "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce" if args.len() == 2 => {
                 let name = func_name;
                 let x = self.lower_expr_node(&args[0], "reduction input");
                 let axis = self.extract_axis(&args[1]);

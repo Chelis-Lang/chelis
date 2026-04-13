@@ -2176,6 +2176,7 @@ fn tensor_reduce_host(
     }
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
+    #[allow(clippy::needless_range_loop)]
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let mut best_value = match op {
