@@ -192,25 +192,31 @@ inductive Step : Config → Config → Prop
       IsValue v →
       Step ⟨sigma, Term.handle epsH v clauses⟩ ⟨sigma, v⟩
 
-  -- E-Handle-Op (single-clause, direct form for Phase 1 skeleton).
-  -- The full E-Handle-Op rule from opsem.tex captures an evaluation
-  -- context E[·] around the `perform` and substitutes it for the
-  -- continuation variable k_i. Phase 1 skeleton encodes only the
-  -- "perform at the top of the body" special case; Phase 2 will add
-  -- the general evaluation-context form via a separate constructor.
+  -- E-Handle-Op (multi-clause direct form, Wave 0 P5 + W0 audit fix).
+  -- When the body is a top-level `perform op v`, the reduction looks
+  -- up the matching clause `(op, x, k, handlerBody)` in the clause
+  -- list and substitutes `v` for `x` and an identity continuation
+  -- `λy:tRet. y` for `k`. Multiple clauses are supported: the
+  -- membership premise picks whichever clause's op matches.
   --
-  -- The continuation substituted for `k` is an identity lambda
-  -- `λy:tRet. y` — the right-typed stand-in for the full captured
-  -- context `λy:tRet. handle[epsH] E[y] with h`. Round-3 fix (M1):
-  -- was previously a unit-constant lambda, which would not typecheck
-  -- under T-Handle's expected continuation type.
+  -- The full E-Handle-Op rule from opsem.tex captures an evaluation
+  -- context E[·] around the `perform` and substitutes it for `k`;
+  -- Phase 1 still encodes only the "perform at the top of the body"
+  -- special case. The identity `λy:tRet. y` is the right-typed
+  -- stand-in for the full captured context `λy:tRet. handle[epsH]
+  -- E[y] with clauses`. Round-3 M1 fix: was previously a unit-constant
+  -- lambda that did not typecheck under T-Handle's continuation type.
+  -- Wave 0 W0-audit M-W0-3 fix: the rule now matches any clause list
+  -- in which the matching clause appears, not just a singleton list.
   | handleOpDirect
       (sigma : Store) (op : EffectLabel) (v : Term)
-      (epsH : EffectRow) (x k : String) (handlerBody : Term) (tRet : Typ) :
+      (epsH : EffectRow)
+      (clauses : List (EffectLabel × String × String × Term))
+      (x k : String) (handlerBody : Term) (tRet : Typ) :
       IsValue v →
+      (op, x, k, handlerBody) ∈ clauses →
       Step ⟨sigma,
-            Term.handle epsH (Term.perform op v)
-                        [(op, x, k, handlerBody)]⟩
+            Term.handle epsH (Term.perform op v) clauses⟩
            ⟨sigma,
             subst (subst handlerBody v x)
                   (Term.abs "y" tRet (Term.var "y")) k⟩

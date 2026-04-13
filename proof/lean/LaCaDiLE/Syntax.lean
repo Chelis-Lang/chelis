@@ -127,11 +127,24 @@ def addDim (d : Dim) : Typ → Typ
 
 /-- Per-operation signature lookup for effect operations (Wave 0 P7).
     `T-Perform op e` requires `e` to have type `(opSignature op).1` and
-    produces a term of type `(opSignature op).2`. Phase 1 skeleton uses
-    a uniform `(unit, unit)` signature for every op; Phase 2 WS2.7 will
-    refine this per-operation (e.g., `fail : unit → α` once type
-    variables are in play, `accum : (Loc × TensorVal) → unit` via a
-    location-tagged pair type). -/
+    produces a term of type `(opSignature op).2`.
+
+    Phase 1 skeleton uses a uniform `(unit, unit)` signature for every
+    op. Phase 2 WS2.7 must refine this per-operation before Phase 2
+    WS2.2 (`adjoint_preserves_typing`) can discharge: the `adjoint`
+    function emits `Term.perform EffectLabel.accum gSeed` where
+    `gSeed : tensor[dsOut]`, but the current `opSignature` claims
+    `accum` takes a `unit` argument. That mismatch will block WS2.2.
+
+    Concrete Phase 2 refinements:
+      * `accum : (Loc × TensorVal) → unit` (via a location-tagged
+        pair or a type variable over tensor shapes)
+      * `fail : unit → α` (via type variables once polymorphism is
+        introduced)
+      * `random` / `resource` / `io` signatures as needed.
+
+    The refinement does not touch any typing rule — Phase 2 WS2.7 just
+    edits this `def` and re-runs `lake build`. -/
 def opSignature (_op : EffectLabel) : Typ × Typ :=
   (Typ.unit, Typ.unit)
 

@@ -1,23 +1,19 @@
 -- LaCaDiLE/AdjointTransform.lean — adjoint : Term → String → Term → Term.
 --
--- Phase 1 T8: structural skeleton of the adjoint transformation from
--- T0 §4. This is a `partial def` for Phase 1; Phase 2 WS2.2 will prove
--- termination and state the adjoint typing lemma.
---
--- The function signature `adjoint body x gSeed` matches the E-Grad
--- reduction in opsem.tex: given the differentiated function's body
--- `body`, the parameter name `x`, and the incoming output-gradient seed
--- `gSeed`, produce the transformed term that:
---   (a) inserts tape copies (let (a, a') = copy(a)) before primitives
+-- `adjoint body x gSeed` is the T0 §4 adjoint transformation: given a
+-- differentiated function's body, the parameter name `x`, and the
+-- incoming output-gradient seed `gSeed`, produce a transformed term
+-- that:
+--   (a) inserts tape copies (`let (a, a') = copy(a)`) before primitives
 --       whose adjoint rule requires operand values (mul),
 --   (b) emits `perform accum(loc, contribution)` for each operand,
---   (c) produces a term whose result is the parameter gradient.
+--   (c) returns a term whose result is the parameter gradient.
 --
--- Wave 0 P1 rewrite: `adjoint` is now **total** (no `partial def`)
--- with explicit structural recursion on every term former. The handler
--- case delegates to `adjointClauses` in a `mutual` block so Lean's
--- structural checker sees each recursive call lands on a strictly
--- smaller sub-term.
+-- The function is **total** (no `partial def`) via explicit structural
+-- recursion on every `Term` former. The handler case delegates to
+-- `adjointClauses` inside a `mutual` block so Lean's structural checker
+-- sees each recursive call lands on a strictly smaller sub-term.
+-- Phase 2 WS2.2 will state and prove the adjoint typing lemma.
 --
 -- Phase 1 semantic caveats that Phase 2 T9 will tighten (these are
 -- Phase 2 prerequisites, not structural bugs):

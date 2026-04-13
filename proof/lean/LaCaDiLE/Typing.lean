@@ -1,21 +1,29 @@
 -- LaCaDiLE/Typing.lean — CapCtx, LinearCtx, HasType inductive relation.
 --
 -- Every typing rule from proof/paper/figures/typing.tex is encoded as a
--- constructor of `HasType`. Phase 1 T7: structural skeleton, no proofs.
+-- constructor of `HasType`. Phase 1 T7 skeleton, no proofs yet.
 --
 -- Judgment shape:
---   HasType Δ Γ e τ ε Γ'
+--   HasType Δ Σ Γ e τ ε Γ'
 -- ↔ paper's
---   Δ; Γ ⊢ e : τ ! ε ⊣ Γ'
+--   Δ; Σ; Γ ⊢ e : τ ! ε ⊣ Γ'
 --
--- Phase 1 skeleton simplifications (all tightened in Phase 2):
---  * effect row union is encoded as list concatenation; proper set union
---    with deduplication is deferred.
---  * context lookup for T-Var requires the variable at the tail of Γ; this
---    matches the paper's "Γ, x:τ" notation exactly and avoids permutation.
---  * T-Handle is encoded for the single-clause case. Multi-clause handlers
---    use a separate `HasTypeHandleMulti` constructor that quantifies over
---    the clause list.
+-- Phase 2 Wave 0 refinements that are now live:
+--  * effect row union uses `EffectRow.union` with set semantics (P2).
+--  * `T-Handle` is the multi-clause form, typed via the `ClausesTyped`
+--    companion inductive in the mutual block below (P5).
+--  * The typing judgment is parameterized by a store typing `Σ`
+--    (threaded unchanged through every Phase 1 rule; Phase 2
+--    preservation will grow it monotonically) (P3).
+--  * `Term.grad` carries an explicit output type annotation `tOut`
+--    so E-Grad can produce a preservation-matching reduced term (P4).
+--  * `T-Perform`'s argument and result types come from `opSignature op`
+--    instead of free constructor parameters (P7).
+--
+-- Phase 1 conventions that remain:
+--  * context lookup for T-Var requires the variable at the tail of Γ;
+--    this matches the paper's "Γ, x:τ" notation exactly and avoids a
+--    permutation lemma.
 --  * context-splitting premises for T-App / T-Let / T-Pair / T-LetPair
 --    thread linear contexts left-to-right through the sub-derivations,
 --    matching the paper rules.
