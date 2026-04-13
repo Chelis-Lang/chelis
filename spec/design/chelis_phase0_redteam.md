@@ -22,7 +22,7 @@ This is adversarial. Assume things are broken until proven otherwise. Run the co
 ```bash
 cargo build --workspace
 cargo clippy --workspace -- -D warnings
-cargo fmt --all --check
+cargo fmt --all -- --check
 ```
 
 - [ ] `cargo build` succeeds with zero errors

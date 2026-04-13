@@ -35,3 +35,4 @@ cargo-husky = { version = "1", default-features = false, features = ["user-hooks
 chelis-shell.workspace = true
 predicates = "3"
 tempfile = "3"
+walkdir = "2"

@@ -72,6 +72,38 @@ fn executable_examples() -> [PathBuf; 10] {
     ]
 }
 
+fn illustrative_examples() -> Vec<PathBuf> {
+    let root = example_path("../../examples/illustrative");
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry.expect("walk illustrative examples");
+        let path = entry.path();
+        if entry.file_type().is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("ch")
+        {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn stdlib_sources() -> Vec<PathBuf> {
+    let root = example_path("../../packages/chelis-std/src");
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry.expect("walk stdlib sources");
+        let path = entry.path();
+        if entry.file_type().is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("ch")
+        {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths.sort();
+    paths
+}
+
 fn illustrative_example(name: &str) -> PathBuf {
     example_path(&format!("../../examples/illustrative/{name}"))
 }
@@ -269,10 +301,36 @@ fn fmt_check_accepts_canonical_executable_examples() {
 }
 
 #[test]
-fn eval_rejects_missing_inputs() {
+fn fmt_check_accepts_canonical_illustrative_examples() {
+    for path in illustrative_examples() {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["fmt", path.to_str().unwrap(), "--check"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn fmt_check_accepts_canonical_stdlib_sources() {
+    for path in stdlib_sources() {
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["fmt", path.to_str().unwrap(), "--check"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn eval_rejects_unbound_runtime_names() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unknown_name.ch");
+    write_file(&path, "result = add(input, 1.0)\n");
+
     Command::cargo_bin("chelis")
         .expect("binary")
-        .args(["eval", "--file", mnist_example().to_str().unwrap()])
+        .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(predicate::str::contains("missing required input"));
@@ -485,7 +543,12 @@ fn eval_supports_phase3h_tensor_structural_ops() {
         ])
         .assert()
         .success()
-        .stdout(predicate::eq(""));
+        .stdout(predicate::str::contains(
+            "contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])",
+        ))
+        .stdout(predicate::str::contains(
+            "sorted_indices = tensor(shape=[2], data=[0.0, 1.0])",
+        ));
 }
 
 #[test]
@@ -1328,6 +1391,34 @@ fn fmt_inplace_preserves_pipeline_parseability() {
         .args(["deep", path.to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn fmt_inplace_preserves_illustrative_example_parseability() {
+    let dir = tempdir().expect("tempdir");
+    let illustrative_root = example_path("../../examples/illustrative");
+    for source in illustrative_examples() {
+        let relative = source
+            .strip_prefix(&illustrative_root)
+            .expect("illustrative example should stay under root");
+        let path = dir.path().join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create illustrative temp parents");
+        }
+        fs::copy(&source, &path).expect("copy illustrative example");
+
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["fmt", path.to_str().unwrap(), "--inplace"])
+            .assert()
+            .success();
+
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["deep", path.to_str().unwrap()])
+            .assert()
+            .success();
+    }
 }
 
 #[test]
