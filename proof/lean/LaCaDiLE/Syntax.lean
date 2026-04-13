@@ -254,6 +254,54 @@ def addDimClauses (d : Dim) :
 
 end
 
+/-! ## Free variables / closedness (Wave 1) -/
+
+-- `freeVars e` is the list of free-variable name occurrences in `e`.
+-- Binder cases filter out the bound name(s); handler clauses delegate
+-- to `freeVarsClauses` in the mutual block so structural recursion
+-- lands on strictly-smaller sub-terms. `Closed e` means `e` has no
+-- free variables. Wave 1 Substitution uses `Closed v` as the side
+-- condition that makes naive capture-unaware `subst` sound: a closed
+-- value has no variables that could be captured by binders in `e`.
+mutual
+
+def freeVars : Term → List String
+  | Term.var x => [x]
+  | Term.abs x _ body => (freeVars body).filter (· != x)
+  | Term.app e1 e2 => freeVars e1 ++ freeVars e2
+  | Term.letBind x e1 e2 =>
+      freeVars e1 ++ (freeVars e2).filter (· != x)
+  | Term.copy e => freeVars e
+  | Term.letpair x y e1 e2 =>
+      freeVars e1 ++ (freeVars e2).filter (fun z => z != x && z != y)
+  | Term.pair e1 e2 => freeVars e1 ++ freeVars e2
+  | Term.fst e => freeVars e
+  | Term.snd e => freeVars e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => freeVars e1 ++ freeVars e2
+  | Term.mul e1 e2 => freeVars e1 ++ freeVars e2
+  | Term.sum e _ => freeVars e
+  | Term.expand e _ _ => freeVars e
+  | Term.uniformLike e _ _ => freeVars e
+  | Term.grad x _ _ body => (freeVars body).filter (· != x)
+  | Term.vmap x _ body => (freeVars body).filter (· != x)
+  | Term.handle _ body clauses => freeVars body ++ freeVarsClauses clauses
+  | Term.perform _ e => freeVars e
+  | Term.loc _ => []
+
+def freeVarsClauses :
+    List (EffectLabel × String × String × Term) → List String
+  | [] => []
+  | (_, x, k, hb) :: rest =>
+      (freeVars hb).filter (fun z => z != x && z != k) ++ freeVarsClauses rest
+
+end
+
+/-- A term is closed iff it has no free variables. Wave 1 Substitution
+    uses `Closed v` as the side condition on the substituted value. -/
+def Closed (e : Term) : Prop := freeVars e = []
+
 /-! ## Values -/
 
 /-- Value predicate on `Term`. A term is a value iff it is a location, a

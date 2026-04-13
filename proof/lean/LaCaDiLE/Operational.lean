@@ -19,16 +19,19 @@ import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
 
-/-- Naive capture-unaware substitution: replace every free occurrence of `x`
-    in `target` with `v`. Stops descending into scopes that shadow `x`.
-    `partial def` because Phase 1 skeleton does not prove termination;
-    the structural decrease on `target` is obvious but Lean's automated
-    checker may stumble on the `List.map` through handler clauses. -/
-partial def subst (target : Term) (v : Term) (x : String) : Term :=
+-- Naive capture-unaware substitution: replace every free occurrence of
+-- `x` in `target` with `v`. Stops descending into scopes that shadow
+-- `x`. Wave 1 makes this a total `def` (no `partial`) via mutual
+-- recursion with `substClauses` so Lean's structural checker accepts
+-- the handler-clause case without `List.map`, and equation lemmas are
+-- available for unfolding in proofs.
+mutual
+
+def subst (target : Term) (v : Term) (x : String) : Term :=
   match target with
-  | Term.var y => if y = x then v else target
+  | Term.var y => if y = x then v else Term.var y
   | Term.abs y t body =>
-      if y = x then target else Term.abs y t (subst body v x)
+      if y = x then Term.abs y t body else Term.abs y t (subst body v x)
   | Term.app e1 e2 => Term.app (subst e1 v x) (subst e2 v x)
   | Term.letBind y e1 e2 =>
       Term.letBind y (subst e1 v x) (if y = x then e2 else subst e2 v x)
@@ -47,16 +50,27 @@ partial def subst (target : Term) (v : Term) (x : String) : Term :=
   | Term.expand e i k => Term.expand (subst e v x) i k
   | Term.uniformLike e lo hi => Term.uniformLike (subst e v x) lo hi
   | Term.grad y t tOut body =>
-      if y = x then target else Term.grad y t tOut (subst body v x)
+      if y = x then Term.grad y t tOut body
+      else Term.grad y t tOut (subst body v x)
   | Term.vmap y t body =>
-      if y = x then target else Term.vmap y t (subst body v x)
+      if y = x then Term.vmap y t body
+      else Term.vmap y t (subst body v x)
   | Term.handle epsH body clauses =>
-      Term.handle epsH (subst body v x)
-        (clauses.map fun cl =>
-          let (op, y, k, body') := cl
-          if y = x ∨ k = x then cl else (op, y, k, subst body' v x))
+      Term.handle epsH (subst body v x) (substClauses clauses v x)
   | Term.perform op e => Term.perform op (subst e v x)
   | Term.loc ell => Term.loc ell
+
+def substClauses
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x : String) :
+    List (EffectLabel × String × String × Term) :=
+  match clauses with
+  | [] => []
+  | (op, y, k, body) :: rest =>
+      let body' := if y = x ∨ k = x then body else subst body v x
+      (op, y, k, body') :: substClauses rest v x
+
+end
 
 /-- Capture a tensor value at location `ell` into a `TensorVal`. Used in
     placeholders for primitive reduction rules; the actual pointwise
