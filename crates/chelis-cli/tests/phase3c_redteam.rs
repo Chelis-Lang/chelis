@@ -35,10 +35,7 @@ fn eval_distinguishes_rank_zero_tensors_from_host_scalars() {
 fn check_rejects_negative_shape_axis_when_rank_is_known() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("negative_shape_axis.ch");
-    write_file(
-        &path,
-        "let bad = shape(scalar_to_tensor(cast(3, int64)), -1)\n",
-    );
+    write_file(&path, "bad = shape(scalar_to_tensor(cast(3, int64)), -1)\n");
 
     let json = run_json_check(&path);
     assert!(
