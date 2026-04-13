@@ -22,12 +22,172 @@ namespace LaCaDiLE
 
 /-! ## Helper lemmas for substitution -/
 
+mutual
+
+/-- Generalised no-op: if `x` is not free in `e`, substituting `v`
+    for `x` is the identity. Proved by structural induction on `e`
+    in a mutual block with `substClauses_notFree`. -/
+theorem subst_notFree
+    (e : Term) (v : Term) (x : String) (h : x ∉ freeVars e) :
+    subst e v x = e := by
+  match e with
+  | Term.var y =>
+      simp only [freeVars, List.mem_singleton] at h
+      have hyx : y ≠ x := fun he => h he.symm
+      simp [subst, hyx]
+  | Term.abs y t body =>
+      simp only [freeVars] at h
+      by_cases hy : y = x
+      · simp [subst, hy]
+      · have hx_body : x ∉ freeVars body := by
+          intro hx
+          apply h
+          rw [List.mem_filter]
+          refine ⟨hx, ?_⟩
+          simp only [bne_iff_ne, ne_eq]
+          exact fun heq => hy heq.symm
+        simp [subst, hy, subst_notFree body v x hx_body]
+  | Term.app e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      simp [subst, subst_notFree e1 v x h1, subst_notFree e2 v x h2]
+  | Term.letBind y e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      have ih1 := subst_notFree e1 v x h1
+      by_cases hy : y = x
+      · simp [subst, hy, ih1]
+      · have hx_e2 : x ∉ freeVars e2 := by
+          intro hx
+          apply h2
+          rw [List.mem_filter]
+          refine ⟨hx, ?_⟩
+          simp only [bne_iff_ne, ne_eq]
+          exact fun heq => hy heq.symm
+        have ih2 := subst_notFree e2 v x hx_e2
+        simp [subst, hy, ih1, ih2]
+  | Term.copy e =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.letpair a b e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      have ih1 := subst_notFree e1 v x h1
+      by_cases ha : a = x
+      · simp [subst, ha, ih1]
+      · by_cases hb : b = x
+        · simp [subst, hb, ih1]
+        · have hx_e2 : x ∉ freeVars e2 := by
+            intro hx
+            apply h2
+            rw [List.mem_filter]
+            refine ⟨hx, ?_⟩
+            simp only [Bool.and_eq_true, bne_iff_ne, ne_eq]
+            exact ⟨fun heq => ha heq.symm, fun heq => hb heq.symm⟩
+          have ih2 := subst_notFree e2 v x hx_e2
+          have hcond : ¬ (a = x ∨ b = x) := fun hd => hd.elim ha hb
+          simp [subst, hcond, ih1, ih2]
+  | Term.pair e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      simp [subst, subst_notFree e1 v x h1, subst_notFree e2 v x h2]
+  | Term.fst e =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.snd e =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.unit => simp [subst]
+  | Term.const _ _ => simp [subst]
+  | Term.add e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      simp [subst, subst_notFree e1 v x h1, subst_notFree e2 v x h2]
+  | Term.mul e1 e2 =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      simp [subst, subst_notFree e1 v x h1, subst_notFree e2 v x h2]
+  | Term.sum e _ =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.expand e _ _ =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.uniformLike e _ _ =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.grad y t tOut body =>
+      simp only [freeVars] at h
+      by_cases hy : y = x
+      · simp [subst, hy]
+      · have hx_body : x ∉ freeVars body := by
+          intro hx
+          apply h
+          rw [List.mem_filter]
+          refine ⟨hx, ?_⟩
+          simp only [bne_iff_ne, ne_eq]
+          exact fun heq => hy heq.symm
+        simp [subst, hy, subst_notFree body v x hx_body]
+  | Term.vmap y t body =>
+      simp only [freeVars] at h
+      by_cases hy : y = x
+      · simp [subst, hy]
+      · have hx_body : x ∉ freeVars body := by
+          intro hx
+          apply h
+          rw [List.mem_filter]
+          refine ⟨hx, ?_⟩
+          simp only [bne_iff_ne, ne_eq]
+          exact fun heq => hy heq.symm
+        simp [subst, hy, subst_notFree body v x hx_body]
+  | Term.handle epsH body clauses =>
+      simp only [freeVars, List.mem_append, not_or] at h
+      obtain ⟨h1, h2⟩ := h
+      simp [subst, subst_notFree body v x h1,
+            substClauses_notFree clauses v x h2]
+  | Term.perform _ e =>
+      simp only [freeVars] at h
+      simp [subst, subst_notFree e v x h]
+  | Term.loc _ => simp [subst]
+
+theorem substClauses_notFree
+    (cls : List (EffectLabel × String × String × Term))
+    (v : Term) (x : String) (h : x ∉ freeVarsClauses cls) :
+    substClauses cls v x = cls := by
+  match cls with
+  | [] => simp [substClauses]
+  | (op, y, k, hb) :: rest =>
+      simp only [substClauses, freeVarsClauses, List.mem_append, not_or]
+        at h ⊢
+      obtain ⟨h_hb, h_rest⟩ := h
+      have ih_rest := substClauses_notFree rest v x h_rest
+      by_cases hy : y = x
+      · rw [ih_rest]; simp [hy]
+      · by_cases hk : k = x
+        · rw [ih_rest]; simp [hk]
+        · have hxne_y : ¬ (x = y) := fun he => hy he.symm
+          have hxne_k : ¬ (x = k) := fun he => hk he.symm
+          have h_notfree_hb : x ∉ freeVars hb := by
+            intro hx
+            apply h_hb
+            rw [List.mem_filter]
+            refine ⟨hx, ?_⟩
+            simp [hxne_y, hxne_k]
+          have hb_eq := subst_notFree hb v x h_notfree_hb
+          have hcond : ¬ (y = x ∨ k = x) := fun hd => hd.elim hy hk
+          simp [hcond, hb_eq, ih_rest]
+
+end
+
 /-- Substitution on a closed term is a no-op: a closed term has no
     free variables, so `subst e v x` equals `e` regardless of `v`/`x`. -/
 theorem subst_closed
     (e v : Term) (x : String) (h : Closed e) :
     subst e v x = e := by
-  sorry
+  apply subst_notFree
+  unfold Closed at h
+  rw [h]
+  simp
 
 /-- Values are closed under substitution: substituting into a value
     produces a value of the same shape. Used in the `E-Beta` case of

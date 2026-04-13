@@ -196,14 +196,28 @@ _LEAN4_FENCE = re.compile(r"```lean4\b[ \t]*\n(.*?)```", re.DOTALL)
 _ANY_FENCE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 
 
+def _strip_theorem_header(text: str) -> str:
+    """If the model returned a full theorem declaration, strip the
+    header down to just the tactic block. Looks for `:= by` and keeps
+    everything after it, with leading blank lines trimmed."""
+    stripped = text.lstrip()
+    if stripped.startswith(("theorem", "lemma", "example", "def")):
+        m = re.search(r":=\s*by\b", text)
+        if m:
+            tail = text[m.end():]
+            return tail.lstrip("\n")
+    return text
+
+
 def extract_proof_from_response(response_text: str) -> str:
     if not response_text or not response_text.strip():
         return ""
     for pat in (_LEAN_FENCE, _LEAN4_FENCE, _ANY_FENCE):
         m = pat.search(response_text)
         if m:
-            return m.group(1).strip("\n").rstrip()
-    return response_text.strip()
+            body = m.group(1).strip("\n").rstrip()
+            return _strip_theorem_header(body)
+    return _strip_theorem_header(response_text.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +448,10 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     failures: list[PassResult] = []
+    log_dir = project_root / ".prove-log"
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / f"{args.theorem}.log"
+    log_lines: list[str] = []
     for i in range(1, args.passes + 1):
         print(f"[pass {i}/{args.passes}] calling Leanstral...", file=sys.stderr)
         result = run_one_pass(args, ctx, project_root)
@@ -441,12 +459,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[pass {i}] SUCCESS", file=sys.stderr)
             print("--- winning proof ---")
             print(result.proof)
+            log_lines.append(f"=== pass {i}: SUCCESS ===\n{result.proof}\n")
+            log_path.write_text("".join(log_lines))
             return 0
         print(f"[pass {i}] FAIL: {result.error}", file=sys.stderr)
         failures.append(result)
+        log_lines.append(
+            f"=== pass {i}: FAIL ({result.error}) ===\n"
+            f"--- attempted proof ---\n{result.proof or '(none)'}\n"
+            f"--- lake output tail ---\n{result.lake_output or ''}\n"
+        )
 
+    log_path.write_text("".join(log_lines))
     all_api = all(f.api_error for f in failures) and failures
     print("\n=== all passes failed ===", file=sys.stderr)
+    print(f"(full attempts logged to {log_path})", file=sys.stderr)
     for i, f in enumerate(failures, 1):
         print(f"  pass {i}: {f.error}", file=sys.stderr)
     return 2 if all_api else 1

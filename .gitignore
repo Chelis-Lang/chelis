@@ -25,3 +25,4 @@ proof/paper/main.fdb_latexmk
 proof/paper/main.fls
 proof/paper/main.synctex.gz
 proof/paper/missfont.log
+.prove-log/
