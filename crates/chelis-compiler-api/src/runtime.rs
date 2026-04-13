@@ -1430,6 +1430,26 @@ impl<'a> EvalContext<'a> {
                 self.transcript.push(render_value(value));
                 Ok(value.clone())
             }
+            "min_reduce" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Min).map(RuntimeValue::Tensor)
+            }
+            "prod_reduce" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Prod).map(RuntimeValue::Tensor)
+            }
+            "argmax_reduce" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Argmax).map(RuntimeValue::Tensor)
+            }
+            "argmin_reduce" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Argmin).map(RuntimeValue::Tensor)
+            }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -2132,6 +2152,87 @@ fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, Stri
             other => Err(format!("{op} expects int64 sizes, got {other:?}")),
         })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+enum ReduceOp {
+    Min,
+    Prod,
+    Argmax,
+    Argmin,
+}
+
+fn tensor_reduce_host(
+    tensor: &RuntimeTensorValue,
+    axis: i64,
+    op: ReduceOp,
+) -> Result<RuntimeTensorValue, String> {
+    let rank = tensor.value.shape.len();
+    let axis = normalize_axis(rank, axis, "reduction")?;
+    let mut out_shape: Vec<usize> = tensor.value.shape.clone();
+    let axis_len = out_shape.remove(axis);
+    if axis_len == 0 {
+        return Err("reduction over empty axis is undefined".to_string());
+    }
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    for out_linear in 0..out_numel {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let mut best_value = match op {
+            ReduceOp::Min => f64::INFINITY,
+            ReduceOp::Prod => 1.0,
+            ReduceOp::Argmax => f64::NEG_INFINITY,
+            ReduceOp::Argmin => f64::INFINITY,
+        };
+        let mut best_index: usize = 0;
+        for k in 0..axis_len {
+            let mut in_indices = Vec::with_capacity(rank);
+            let mut oi = 0;
+            for dim in 0..rank {
+                if dim == axis {
+                    in_indices.push(k);
+                } else {
+                    in_indices.push(out_indices[oi]);
+                    oi += 1;
+                }
+            }
+            let in_linear = indices_to_linear(&in_indices, &tensor.value.shape);
+            let value = tensor.value.data[in_linear];
+            match op {
+                ReduceOp::Min => {
+                    if value < best_value {
+                        best_value = value;
+                    }
+                }
+                ReduceOp::Prod => {
+                    best_value *= value;
+                }
+                ReduceOp::Argmax => {
+                    if value > best_value {
+                        best_value = value;
+                        best_index = k;
+                    }
+                }
+                ReduceOp::Argmin => {
+                    if value < best_value {
+                        best_value = value;
+                        best_index = k;
+                    }
+                }
+            }
+        }
+        out[out_linear] = match op {
+            ReduceOp::Min | ReduceOp::Prod => best_value,
+            // Argmax/Argmin: store integer indices as integer-valued F32 per
+            // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
+            // and adv_argmax_output_stores_integer_valued_floats).
+            ReduceOp::Argmax | ReduceOp::Argmin => best_index as f64,
+        };
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
 }
 
 fn tensor_concat_value(parts: &[RuntimeValue], axis: i64) -> Result<RuntimeValue, String> {
