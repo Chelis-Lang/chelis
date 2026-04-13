@@ -215,6 +215,7 @@ void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
 void chelis_print_dict(const chelis_dict *dict);
 void chelis_print_adt(const chelis_adt *adt);
+_Noreturn void chelis_fail(chelis_string message);
 chelis_string chelis_read_file(chelis_string path);
 void chelis_write_file(chelis_string path, chelis_string contents);
 chelis_list *chelis_read_lines(chelis_string path);

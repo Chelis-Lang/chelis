@@ -429,10 +429,32 @@ pub unsafe extern "C" fn chelis_alloc_view(
     dtype: c_int,
     data: *mut f32,
 ) -> *mut chelis_tensor {
-    let tensor = chelis_alloc(ndim, shape, dtype);
-    (*tensor).data = data;
-    (*tensor).owns_data = 0;
-    tensor
+    let mut tensor = Box::new(chelis_tensor {
+        data,
+        shape: [0; CHELIS_MAX_DIM],
+        strides: [0; CHELIS_MAX_DIM],
+        ndim,
+        dtype,
+        size: 1,
+        owns_data: 0,
+    });
+    if ndim > 0 {
+        for d in 0..ndim as usize {
+            tensor.shape[d] = *shape.add(d);
+            tensor.size *= tensor.shape[d];
+        }
+        for d in (0..ndim as usize).rev() {
+            tensor.strides[d] = if d + 1 == ndim as usize {
+                1
+            } else {
+                tensor.strides[d + 1] * tensor.shape[d + 1]
+            };
+        }
+    }
+    if tensor.size == 0 {
+        tensor.size = 1;
+    }
+    Box::into_raw(tensor)
 }
 
 #[no_mangle]
@@ -2207,6 +2229,11 @@ pub unsafe extern "C" fn chelis_print_adt(adt: *const chelis_adt) {
     write_stdout(&adt_to_string(adt));
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fail(message: chelis_string) -> ! {
+    runtime_fail!("{}", string_value(message).value);
+}
+
 fn bytes_to_value_list(bytes: &[u8]) -> *mut chelis_list {
     let items = bytes
         .iter()
@@ -2414,9 +2441,6 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
         } else {
             out.push_str(&value.to_string());
         }
-    }
-    if (*t).size > 10 {
-        out.push_str(", ...");
     }
     out.push_str("])");
     out
