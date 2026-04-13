@@ -439,10 +439,29 @@ pub fn lower_conv2d(
     let strided_h = ((padded_h - kh_size) / stride) + 1;
     let strided_w = ((padded_w - kw_size) / stride) + 1;
 
-    let h_out = require_dim(output_ty.dims.get(2), "conv2d output height axis");
-    let w_out = require_dim(output_ty.dims.get(3), "conv2d output width axis");
-    let h_out_size = require_dim_extent(&h_out, "conv2d output height axis");
-    let w_out_size = require_dim_extent(&w_out, "conv2d output width axis");
+    // Prefer the inferred `output_ty` spatial extents when concrete, but
+    // fall back to the `(strided_h, strided_w)` arithmetic derived from
+    // the input/kernel/stride/padding above. The fallback exists because
+    // the type-annotation writeback is bottom-up: the inner `conv2d`
+    // app's result-type metadata can remain as fresh non-concrete d-vars
+    // even when the enclosing def's return-type ascription already pins
+    // the spatial dims. See Phase 3j-pre Batch 3b notes in
+    // `spec/design/chelis_phase3_plan.md`. The relaxation is strictly
+    // concrete: we rebind `h_out`/`w_out` as `DimInfo::Lit` values.
+    let raw_h_out = require_dim(output_ty.dims.get(2), "conv2d output height axis");
+    let raw_w_out = require_dim(output_ty.dims.get(3), "conv2d output width axis");
+    let h_out_size = match &raw_h_out {
+        DimInfo::Lit(n) => *n,
+        DimInfo::Named(_, Some(n)) => *n,
+        DimInfo::Named(_, None) => strided_h,
+    };
+    let w_out_size = match &raw_w_out {
+        DimInfo::Lit(n) => *n,
+        DimInfo::Named(_, Some(n)) => *n,
+        DimInfo::Named(_, None) => strided_w,
+    };
+    let h_out = DimInfo::Lit(h_out_size);
+    let w_out = DimInfo::Lit(w_out_size);
     if h_out_size != strided_h || w_out_size != strided_w {
         panic!(
             "Phase 0e conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"

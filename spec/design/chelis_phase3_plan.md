@@ -830,15 +830,59 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
       helper rather than the tensor primitive.
     - `Conv1d`/`Conv2d` wrappers and the attention modules
       (`scaled_dot_product_attention`, multi-head, grouped-query) are
-      **not shipped in Batch 3**. The underlying `conv2d` IR primitive
-      works (`cargo test -p chelis-ir conv2d` is green, including the
-      im2col lowering and both numeric eval tests), but its Phase 0e
-      concreteness check rejects symbolic shape parameters: a thin
-      polymorphic `conv2d_forward[batch, in_c, out_c, ...]` wrapper
-      cannot satisfy `Phase 0e builtin conv2d requires concrete output
-      tensor dimensions`. Attention's `/sqrt(d_k)` scale runs into the
-      same scalar-broadcast gap as the activations. Both are tracked
-      as remaining Batch 3 scope — explicit, non-silent deferrals.
+      shipped in **Batch 3b** (see `crates/chelis-cli/tests/phase3j_pre_std_batch3b.rs`)
+      as **literal concrete-shape** defs — not polymorphic wrappers —
+      for the following reasons, each tracked as a non-silent deferral:
+      - `conv2d` requires concrete d-lit dims at Phase 0e lowering time
+        (`validate_phase0e_builtin_symbolic_requirements` in
+        `crates/chelis-types/src/infer.rs`); a polymorphic
+        `conv2d_forward[batch, in_c, out_c, ...]` wrapper is rejected.
+        Batch 3b therefore ships `Std.Nn.Conv.conv1d` (`tensor[1, 4, 1, 16, f32]
+        → tensor[1, 8, 1, 14, f32]`) and `Std.Nn.Conv.conv2d_small`
+        (`tensor[1, 3, 8, 8, f32] → tensor[1, 8, 6, 6, f32]`). Making
+        these polymorphic remains future work once Phase 0e's concrete-
+        dim requirement is relaxed for builtin conv2d.
+      - Batch 3b additionally relaxed an internal Phase 0e lowering
+        assertion in `crates/chelis-ir/src/tier2.rs::lower_conv2d`. The
+        bottom-up type-annotation writeback leaves the inner `conv2d`
+        app's result-type metadata as non-concrete d-vars even when the
+        enclosing def's return ascription already pins the spatial dims.
+        The lowering now falls back to the `(strided_h, strided_w)`
+        values computed from input/kernel/stride/padding and rebinds
+        `h_out`/`w_out` as `DimInfo::Lit`. The relaxation is strictly
+        concrete — if both the inferred and computed extents disagree
+        the pre-existing shape-mismatch panic still fires.
+      - `scaled_dot_product_attention` ships as concrete rank-2
+        `tensor[4, 4, f32]` (seq=4, d_head=4). The `/sqrt(d_k)` scaling
+        cannot be expressed as a scalar-tensor multiply because
+        `tensor_binop` is still monomorphic `(T,T)→T` with no scalar
+        broadcast primitive in the host runtime (`expand` is
+        type-checkable but unsupported by the runtime). The wrapper
+        therefore takes `scale: tensor[4, 4, f32]` as an explicit
+        pre-built full-shape scaling tensor; callers are expected to
+        fill it with `1/sqrt(d_k)` before the call. `multi_head_attention`
+        is a direct per-head delegation to SDPA (MHA's reshape/permute
+        orchestration is the caller's responsibility until rank-
+        changing reshape is accepted by the package-mode defsig
+        enforcer). `grouped_query_attention` is likewise per-head;
+        the separate `gqa_broadcast_kv` helper wraps
+        `gather(kv_pool, group_map, 0)` on the head axis, and a
+        positive `gather` eval test in `phase3j_pre_std_batch3b` pins
+        the exact broadcasted layout the GQA pattern relies on.
+      - Numeric end-to-end evaluation of the attention/conv wrappers
+        through `chelis eval` is not reachable because the host runtime
+        lowering does not implement `matmul`, `softmax`, `permute`, or
+        `expand`, and rank-changing `reshape` is rejected by the
+        package-mode enforce-defsig pass whenever a `def` is present
+        in the same source unit. The Batch 3b acceptance surface is
+        therefore publish + import-touch + check-level shape negatives
+        (SDPA q/k seqlen, MHA head dim, GQA group-map rank, Conv2d
+        channel, Conv1d kernel length) plus the GQA gather positive,
+        matching the `phase3j_pre_std_batch2` precedent for
+        stack/squeeze/unsqueeze. Full build+gcc numeric coverage for
+        the attention + conv wrappers is deferred to the Phase 3j-pre
+        oracle test once rank-changing reshape / scalar-tensor
+        broadcast / `matmul`+`softmax` host runtime support lands.
 - **`Std.Loss`:** `KLDivergence`, `BCEWithLogits`, `accuracy`, `perplexity`
 - **`Std.Init`:** `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
   `trunc_normal`
