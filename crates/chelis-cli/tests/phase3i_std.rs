@@ -97,13 +97,17 @@ fn reef_std_time_and_decimal_modules_eval() {
 
 import Std.Time (
   Date,
+  Duration,
   add_days,
   date,
   date_gte,
   date_lt,
   date_to_string,
+  day_of_year,
   day_of_week_name,
   days_between,
+  duration,
+  is_leap_year,
   parse_date
 )
 import Std.Decimal (
@@ -119,6 +123,9 @@ import Std.Decimal (
 
 next_day = date_to_string(add_days(date(cast(2024, int64), cast(2, int64), cast(28, int64)), cast(1, int64)))
 weekday = day_of_week_name(date(cast(2024, int64), cast(2, int64), cast(26, int64)))
+ordinal = day_of_year(date(cast(2024, int64), cast(12, int64), cast(31, int64)))
+leap = is_leap_year(cast(2024, int64))
+span = duration(cast(1, int64), cast(2, int64), cast(3, int64), cast(4, int64))
 parsed_ok = match parse_date("2024-12-31") with {
   | Some(value) => date_to_string(value)
   | None => "invalid"
@@ -172,6 +179,9 @@ bad_decimal = match try_decimal("x.y") with {
         .success()
         .stdout(predicate::str::contains("next_day = 2024-02-29"))
         .stdout(predicate::str::contains("weekday = monday"))
+        .stdout(predicate::str::contains("ordinal = 366"))
+        .stdout(predicate::str::contains("leap = true"))
+        .stdout(predicate::str::contains("span = Duration(1, 2, 3, 4)"))
         .stdout(predicate::str::contains("parsed_ok = 2024-12-31"))
         .stdout(predicate::str::contains("parsed = invalid"))
         .stdout(predicate::str::contains("cross_year_days = 2"))
@@ -309,7 +319,9 @@ lamb_params = lamb_pair.0
             "decay_only = tensor(shape=[3], data=[0.999, 1.998, 2.997])",
         ))
         .stdout(predicate::str::contains("adam_params = tensor(shape=[3]"))
-        .stdout(predicate::str::contains("lamb_params = tensor(shape=[3]"));
+        .stdout(predicate::str::contains(
+            "lamb_params = tensor(shape=[3], data=[0.7861008931225082, 1.783982000313614, 2.7818638134364133])",
+        ));
 }
 
 #[test]
