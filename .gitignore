@@ -16,3 +16,10 @@ bindings/python/chelis/_native.abi3.so
 bindings/python/chelis/__pycache__/
 __pycache__/
 *.py[cod]
+
+# chelis build artifacts left in crates/chelis-cli/ by integration tests
+crates/chelis-cli/libchelis_runtime.a
+crates/chelis-cli/chelis_runtime.h
+crates/chelis-cli/chelis_hip_runtime.h
+crates/chelis-cli/pad_hip.cpp
+crates/chelis-cli/pad_hip.h
