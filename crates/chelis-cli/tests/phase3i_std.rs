@@ -696,7 +696,26 @@ greedy = generate(toy_model, context, cast(1, int64))
 
 #[test]
 fn reef_std_generate_is_lowered_through_host_lane() {
-    let (_dir, _reef_home, app_pkg) = make_app("phase3i-generate-lowering");
+    let dir = tempdir().expect("tempdir");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("phase3i-generate-lowering");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+    write_file(
+        &app_pkg.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "phase3i-generate-lowering"
+version = "0.1.0"
+compiler = "=0.1.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = {{ path = "{}" }}
+"#,
+            std_pkg.display()
+        ),
+    );
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
