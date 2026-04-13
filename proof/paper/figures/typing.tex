@@ -175,9 +175,9 @@ handler clauses enforces that every branch produces the same residual context.}
   {\hastypeout{\Delta}{\Gamma}{\mathsf{grad}(\lambda x{:}\tensor{\bar{d}}.\, e)}{\tensor{\bar{d}} \to \tensor{\bar{d}'} \to \tensor{\bar{d}} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
 
 \inferrule*[right=\textsc{T-Vmap}]
-  {\hastypeout{\Delta}{\Gamma}{f}{\tau_1 \to \tau_2 \mathbin{!} \varepsilon}{\emptyset}{\Gamma} \\
+  {\hastypeout{\Delta}{\Gamma, x{:}\tau_1}{e}{\tau_2}{\varepsilon}{\Gamma} \\
    d \text{ fresh}}
-  {\hastypeout{\Delta}{\Gamma}{\mathsf{vmap}(f)}{\addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
+  {\hastypeout{\Delta}{\Gamma}{\mathsf{vmap}(\lambda x{:}\tau_1.\, e)}{\addDim{d}{\tau_1} \to \addDim{d}{\tau_2} \mathbin{!} \varepsilon}{\emptyset}{\Gamma}}
 \end{mathpar}
 \caption{AD and vectorization transforms. $\mathsf{grad}$ is defined only on
 \emph{literal abstractions} $\lambda x{:}\tensor{\bar{d}}.\, e$, not on
@@ -196,8 +196,12 @@ $\mathsf{grad}$ reduction captures only $\mathsf{Accum}$, which is not present
 in $\varepsilon$ to begin with (user code never emits $\mathsf{Accum}$
 directly). To differentiate a function reference $f$, eta-expand first:
 $\mathsf{grad}(\lambda x{:}\tensor{\bar{d}}.\, f\, x)$. $\mathsf{vmap}$ lifts
-$f$ over a fresh batch dimension $d$ by applying $\addDim{d}{\cdot}$ to both
-argument and result types; the effect row is preserved.}
+a literal abstraction $\lambda x{:}\tau_1.\, e$ over a fresh batch dimension
+$d$ by applying $\addDim{d}{\cdot}$ to both argument and result types; the
+effect row is preserved. Like $\mathsf{grad}$, $\mathsf{vmap}$ is restricted
+to literal abstractions in Phase 1 to keep the operational rule (E-Vmap)
+syntactically pattern-matchable. To vmap a function reference $f$, eta-expand:
+$\mathsf{vmap}(\lambda x{:}\tau_1.\, f\, x)$.}
 \label{fig:typing-transforms}
 \end{figure}
 

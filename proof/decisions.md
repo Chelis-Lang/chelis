@@ -58,6 +58,7 @@ Every theorem has something to say about this set. `add`/`mul` exercise dimensio
 | Precision | Dropped from core calculus | Zero metatheoretic content |
 | `Resource` | Unparameterized (no `Device` argument) | No metatheoretic payoff; parameterization noted in §6 |
 | Handler continuations | One-shot, `k` is linear binding | Linearity enforces one-shot; elegant interaction |
+| `grad` and `vmap` scope | Both restricted to literal abstractions `λx:τ.e` in Phase 1 | Enables syntactic pattern matching in the operational rules and enforces `grad`'s linear-use side condition via `T-Var` failure in the premise. Eta-expand variable function references. |
 | Gradient accumulation | `Accum` effect, explicit handler in reduced term | Reuses standard `handle` machinery for preservation proof |
 | AD tape | Explicit borrows saved during forward pass | Resolves linearity/adjoint tension for multi-input primitives |
 | `copy` semantics | Physical copy (fresh location) | Simple store invariant (one owner per location); `Arc` is §6 optimization |

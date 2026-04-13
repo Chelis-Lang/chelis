@@ -199,37 +199,43 @@ inductive Step : Config → Config → Prop
   -- continuation variable k_i. Phase 1 skeleton encodes only the
   -- "perform at the top of the body" special case; Phase 2 will add
   -- the general evaluation-context form via a separate constructor.
+  --
+  -- The continuation substituted for `k` is an identity lambda
+  -- `λy:tRet. y` — the right-typed stand-in for the full captured
+  -- context `λy:tRet. handle[epsH] E[y] with h`. Round-3 fix (M1):
+  -- was previously a unit-constant lambda, which would not typecheck
+  -- under T-Handle's expected continuation type.
   | handleOpDirect
       (sigma : Store) (op : EffectLabel) (v : Term)
-      (epsH : EffectRow) (x k : String) (handlerBody : Term) :
+      (epsH : EffectRow) (x k : String) (handlerBody : Term) (tRet : Typ) :
       IsValue v →
       Step ⟨sigma,
             Term.handle epsH (Term.perform op v)
                         [(op, x, k, handlerBody)]⟩
-           ⟨sigma, subst (subst handlerBody v x) (Term.abs "y" Typ.unit Term.unit) k⟩
-           -- the continuation substituted for k is a placeholder lambda;
-           -- the real captured continuation is assembled by Phase 2.
+           ⟨sigma,
+            subst (subst handlerBody v x)
+                  (Term.abs "y" tRet (Term.var "y")) k⟩
 
   /- ## AD and vectorization transforms -/
 
-  -- E-Grad: grad(λx:t.e)  ↦  λx:t. λgs:unit. handle[{Accum}]
+  -- E-Grad: grad(λx:t.e)  ↦  λx:t. λgs:tOut. handle[{Accum}]
   --                              (adjoint(e, x, gs))
-  --                              with {accum(p, k) → k(...)}
+  --                              with {accum(p, k) → k(p)}
   --
-  -- Phase 1 skeleton: the handler clause body is a placeholder; Phase 2
-  -- will substitute the real `update_origin_buffer` call. The seed
-  -- parameter type is `unit` in the skeleton because we haven't threaded
-  -- the output type `tensor[d̄']` into the reduction rule (the type comes
-  -- from T-Grad and the reduction is untyped in the classic sense).
-  -- The important invariant is that the reduced term uses the SAME
-  -- `adjoint` function from `AdjointTransform.lean` that Phase 2
-  -- reasoning will operate on.
+  -- The constructor takes `tOut` as an extra parameter so preservation can
+  -- pick the output type of `e` from the typing derivation. The paper's
+  -- E-Grad reduction is a typed operational rule — `tOut` is implicit in
+  -- the typing context — but in Lean we need the type concretely or
+  -- preservation for this rule cannot close.
+  -- Round-3 fix (H3): the seed parameter type is `tOut`, not `Typ.unit`.
+  -- The handler clause body `app (var k) (var p)` is still a round-3
+  -- skeleton placeholder for the real `update_origin_buffer(p)` routing.
   | tgrad
-      (sigma : Store) (x : String) (t : Typ) (e : Term) :
+      (sigma : Store) (x : String) (t tOut : Typ) (e : Term) :
       Step ⟨sigma, Term.grad x t e⟩
            ⟨sigma,
             Term.abs x t
-              (Term.abs "gs" Typ.unit
+              (Term.abs "gs" tOut
                 (Term.handle [EffectLabel.accum]
                   (adjoint e x (Term.var "gs"))
                   [(EffectLabel.accum, "p", "k",

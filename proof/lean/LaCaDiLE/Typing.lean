@@ -183,6 +183,13 @@ inductive HasType : CapCtx → LinearCtx → Term → Typ → EffectRow → Line
   -- Paper: Δ; Γ₁ ⊢ e : τ_arg ! ε ⊣ Γ₂   op : τ_arg → τ_ret
   --        ────────────────────────────────────────────────────
   --        Δ; Γ₁ ⊢ perform op(e) : τ_ret ! ε ∪ {op} ⊣ Γ₂
+  --
+  -- Phase 1 skeleton: `tArg` and `tRet` are free parameters rather than
+  -- constrained by a per-operation signature table. Phase 2 will add a
+  -- `def opSignature : EffectLabel → Typ × Typ` (e.g., `fail : unit → α`,
+  -- `random : tensor[ds] → tensor[ds]`, `accum : (Loc × TensorVal) → unit`)
+  -- and a premise requiring `(tArg, tRet) = opSignature op`. Round-3
+  -- review (H1) flagged this weakness; tightening is a Phase 2 task.
   | perform
       (Delta : CapCtx) (Gamma1 Gamma2 : LinearCtx)
       (op : EffectLabel) (e : Term) (tArg tRet : Typ) (eps : EffectRow) :
@@ -190,23 +197,31 @@ inductive HasType : CapCtx → LinearCtx → Term → Typ → EffectRow → Line
       HasType Delta Gamma1 (Term.perform op e) tRet (op :: eps) Gamma2
 
   -- T-Handle (single-clause form).
-  -- Paper: Δ; Γ₁ ⊢ body : τ ! {op, ε_r} ⊣ Γ₂
+  -- Paper: Δ; Γ₁ ⊢ body : τ ! ε_b ⊣ Γ₂       op ∈ ε_b
   --        Δ; Γ₂, x:τ_arg, k:(τ_ret → τ ! ε_r) ⊢ handlerBody : τ ! ε_r ⊣ Γ₃
+  --        where ε_r = ε_b.erase op
   --        ──────────────────────────────────────────────────────────────────
   --        Δ; Γ₁ ⊢ handle[{op}] body with {op(x,k) → handlerBody} : τ ! ε_r ⊣ Γ₃
+  --
+  -- Round-3 fix (M6): the body's effect row `epsB` is passed in
+  -- unrestricted and the residual is computed via `List.erase`. The
+  -- previous shape `op :: epsR` only matched when `op` was literally
+  -- the first element, silently rejecting most well-formed programs.
   --
   -- Multi-clause handlers are deferred to Phase 2 (they quantify over
   -- the clause list).
   | handleSingle
       (Delta : CapCtx) (Gamma1 Gamma2 Gamma3 : LinearCtx)
       (body handlerBody : Term) (op : EffectLabel)
-      (x k : String) (t tArg tRet : Typ) (epsR : EffectRow) :
-      HasType Delta Gamma1 body t (op :: epsR) Gamma2 →
-      HasType Delta (Gamma2 ++ [(x, tArg), (k, Typ.arrow tRet t epsR)])
-              handlerBody t epsR Gamma3 →
+      (x k : String) (t tArg tRet : Typ) (epsB : EffectRow) :
+      HasType Delta Gamma1 body t epsB Gamma2 →
+      op ∈ epsB →
+      HasType Delta
+              (Gamma2 ++ [(x, tArg), (k, Typ.arrow tRet t (epsB.erase op))])
+              handlerBody t (epsB.erase op) Gamma3 →
       HasType Delta Gamma1
               (Term.handle [op] body [(op, x, k, handlerBody)])
-              t epsR
+              t (epsB.erase op)
               (Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ k))
 
   -- T-Grad.
