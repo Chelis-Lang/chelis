@@ -141,6 +141,10 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Dropout { .. }
                 | RiscOp::Sum { .. }
                 | RiscOp::MaxReduce { .. }
+                | RiscOp::MinReduce { .. }
+                | RiscOp::ProdReduce { .. }
+                | RiscOp::Argmax { .. }
+                | RiscOp::Argmin { .. }
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
                 | RiscOp::FusedElem { .. }

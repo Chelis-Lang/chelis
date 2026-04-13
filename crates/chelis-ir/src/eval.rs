@@ -295,6 +295,42 @@ fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f
     }
 }
 
+/// Reduce along `axis`, tracking the index of the element that wins under
+/// `better(current_best, candidate)`. Used for Argmax / Argmin.
+///
+/// Ties are broken by the smallest index (first-seen wins), matching numpy's
+/// default argmax/argmin semantics. The output stores integer indices as f64
+/// in the same TensorValue layout other reductions use; this is deliberate
+/// (see `RiscOp::Argmax` doc comment).
+fn reduce_argcmp(
+    input: &TensorValue,
+    axis: usize,
+    init: f64,
+    better: impl Fn(f64, f64) -> bool,
+) -> TensorValue {
+    assert!(axis < input.shape.len());
+    let mut out_shape = input.shape.clone();
+    out_shape.remove(axis);
+    let out_len = numel(&out_shape);
+    let mut best_val = vec![init; out_len];
+    let mut best_idx = vec![-1i64; out_len];
+    for (flat_idx, &value) in input.data.iter().enumerate() {
+        let full = linear_to_index(flat_idx, &input.shape);
+        let axis_pos = full[axis] as i64;
+        let mut reduced = full.clone();
+        reduced.remove(axis);
+        let out_idx = index_to_linear(&reduced, &out_shape);
+        if best_idx[out_idx] < 0 || better(best_val[out_idx], value) {
+            best_val[out_idx] = value;
+            best_idx[out_idx] = axis_pos;
+        }
+    }
+    TensorValue {
+        data: best_idx.into_iter().map(|i| i as f64).collect(),
+        shape: out_shape,
+    }
+}
+
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
     assert_eq!(input.data.len(), numel(&shape));
     TensorValue {
@@ -528,6 +564,21 @@ where
             RiscOp::Sum { axis } => reduce(&values[&node.inputs[0]], *axis, 0.0, |acc, x| acc + x),
             RiscOp::MaxReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, f64::NEG_INFINITY, f64::max)
+            }
+            RiscOp::MinReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, f64::INFINITY, f64::min)
+            }
+            RiscOp::ProdReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, 1.0, |acc, x| acc * x)
+            }
+            RiscOp::Argmax { axis } => reduce_argcmp(
+                &values[&node.inputs[0]],
+                *axis,
+                f64::NEG_INFINITY,
+                |a, b| b > a,
+            ),
+            RiscOp::Argmin { axis } => {
+                reduce_argcmp(&values[&node.inputs[0]], *axis, f64::INFINITY, |a, b| b < a)
             }
             RiscOp::Reshape { new_shape } => {
                 let shape: Vec<usize> = new_shape
@@ -1029,5 +1080,166 @@ mod tests {
             .remove(&NodeId(dag_b.len() - 1))
             .unwrap();
         assert_ne!(out_a, out_b);
+    }
+
+    // ---- Phase 3j-pre: new reduction ops ----
+
+    fn mat_f32(rows: usize, cols: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn row_f32(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: Prim::F32,
+        }
+    }
+
+    /// 2x3 tensor:
+    ///   [ 1.0,  4.0, -2.0]
+    ///   [ 3.0, -1.0,  5.0]
+    fn build_2x3_with(op: RiscOp) -> (Dag, NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(2, 3));
+        let out_ty = match &op {
+            RiscOp::MinReduce { axis }
+            | RiscOp::ProdReduce { axis }
+            | RiscOp::Argmax { axis }
+            | RiscOp::Argmin { axis } => {
+                if *axis == 0 {
+                    row_f32(3)
+                } else {
+                    row_f32(2)
+                }
+            }
+            _ => panic!("unexpected op"),
+        };
+        let y = dag.add_node(op, vec![x], out_ty);
+        (dag, y)
+    }
+
+    fn inputs_2x3() -> HashMap<String, TensorValue> {
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".into(),
+            TensorValue::from_vec(vec![2, 3], vec![1.0, 4.0, -2.0, 3.0, -1.0, 5.0]),
+        );
+        inputs
+    }
+
+    #[test]
+    fn adv_min_reduce_axis0() {
+        let (dag, y) = build_2x3_with(RiscOp::MinReduce { axis: 0 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // column-wise min: min(1,3)=1, min(4,-1)=-1, min(-2,5)=-2
+        assert_eq!(
+            vals[&y],
+            TensorValue::from_vec(vec![3], vec![1.0, -1.0, -2.0])
+        );
+    }
+
+    #[test]
+    fn adv_min_reduce_axis1() {
+        let (dag, y) = build_2x3_with(RiscOp::MinReduce { axis: 1 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![-2.0, -1.0]));
+    }
+
+    #[test]
+    fn adv_prod_reduce_axis0() {
+        let (dag, y) = build_2x3_with(RiscOp::ProdReduce { axis: 0 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // column-wise product: 1*3=3, 4*-1=-4, -2*5=-10
+        assert_eq!(
+            vals[&y],
+            TensorValue::from_vec(vec![3], vec![3.0, -4.0, -10.0])
+        );
+    }
+
+    #[test]
+    fn adv_prod_reduce_axis1() {
+        let (dag, y) = build_2x3_with(RiscOp::ProdReduce { axis: 1 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // row-wise product: 1*4*-2=-8, 3*-1*5=-15
+        assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![-8.0, -15.0]));
+    }
+
+    #[test]
+    fn adv_argmax_axis0() {
+        let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 0 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // column-wise argmax: max(1,3)@1, max(4,-1)@0, max(-2,5)@1
+        assert_eq!(
+            vals[&y],
+            TensorValue::from_vec(vec![3], vec![1.0, 0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn adv_argmax_axis1() {
+        let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // row 0: max at col 1 (4.0); row 1: max at col 2 (5.0)
+        assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![1.0, 2.0]));
+    }
+
+    #[test]
+    fn adv_argmin_axis0() {
+        let (dag, y) = build_2x3_with(RiscOp::Argmin { axis: 0 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // col-wise argmin: min(1,3)@0, min(4,-1)@1, min(-2,5)@0
+        assert_eq!(
+            vals[&y],
+            TensorValue::from_vec(vec![3], vec![0.0, 1.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn adv_argmin_axis1() {
+        let (dag, y) = build_2x3_with(RiscOp::Argmin { axis: 1 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        // row 0 min at col 2 (-2.0); row 1 min at col 1 (-1.0)
+        assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![2.0, 1.0]));
+    }
+
+    /// Pins the argmax/argmin dtype decision: output shares the caller's
+    /// chosen precision (F32 in the IR/backend today) and stores indices
+    /// as integer-valued floats. See `RiscOp::Argmax` doc comment.
+    #[test]
+    fn adv_argmax_output_stores_integer_valued_floats() {
+        let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
+        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let v = &vals[&y];
+        for x in &v.data {
+            assert!(
+                x.fract() == 0.0,
+                "argmax output {x} should be integer-valued"
+            );
+        }
+    }
+
+    /// Negative test: reduction verify rejects axes that are out of range
+    /// for the new reduction variants. Mirrors the existing c3_sum check.
+    #[test]
+    fn adv_new_reductions_reject_out_of_range_axis() {
+        use crate::verify::verify;
+        for op in [
+            RiscOp::MinReduce { axis: 7 },
+            RiscOp::ProdReduce { axis: 7 },
+            RiscOp::Argmax { axis: 7 },
+            RiscOp::Argmin { axis: 7 },
+        ] {
+            let mut dag = Dag::new();
+            let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], row_f32(3));
+            dag.add_node(op, vec![x], scalar_f32());
+            let errs = verify(&dag);
+            assert!(
+                errs.iter().any(|e| e.contains("axis 7")),
+                "expected axis-out-of-range error, got: {errs:?}"
+            );
+        }
     }
 }

@@ -1482,6 +1482,10 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         },
         RiscOp::Sum { axis } => WireRiscOp::Sum { axis: *axis },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
+        RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
+        RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
+        RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
+        RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
             new_shape: new_shape.iter().map(wire_dim).collect(),
         },

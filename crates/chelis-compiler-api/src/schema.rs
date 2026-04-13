@@ -808,6 +808,18 @@ pub enum WireRiscOp {
     MaxReduce {
         axis: usize,
     },
+    MinReduce {
+        axis: usize,
+    },
+    ProdReduce {
+        axis: usize,
+    },
+    Argmax {
+        axis: usize,
+    },
+    Argmin {
+        axis: usize,
+    },
     Reshape {
         new_shape: Vec<WireDimInfo>,
     },

@@ -20,6 +20,71 @@ pub struct GradResult {
     pub grad_nodes: HashMap<NodeId, NodeId>,
 }
 
+/// Run reverse-mode AD on `forward` and return a diagnostic error if the
+/// gradient cannot be computed for a structural reason (non-differentiable
+/// ops such as `Argmax`/`Argmin` on the live forward graph, or an unsupported
+/// output shape).
+///
+/// Prefer this over [`grad_dag`] in new code — it distinguishes
+/// "differentiation is not meaningful here" from "no gradient requested".
+pub fn grad_dag_checked(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+) -> Result<GradResult, String> {
+    if forward.is_empty() {
+        return Err("cannot differentiate an empty DAG".to_string());
+    }
+    let out_node = forward
+        .get(output)
+        .ok_or_else(|| format!("output node {output:?} does not exist in forward DAG"))?;
+    if !is_scalar_float(&out_node.output_type) {
+        return Err(format!(
+            "grad: output node {} must be a scalar float, got {:?}",
+            output.0, out_node.output_type
+        ));
+    }
+
+    // Walk the subgraph of nodes reachable from `output` and look for ops
+    // whose adjoint is intentionally undefined.
+    let mut live = vec![false; forward.len()];
+    live[output.0] = true;
+    for i in (0..forward.len()).rev() {
+        if live[i] {
+            for input in &forward.nodes()[i].inputs {
+                live[input.0] = true;
+            }
+        }
+    }
+    for node in forward.nodes() {
+        if !live[node.id.0] {
+            continue;
+        }
+        match &node.op {
+            RiscOp::Argmax { .. } => {
+                return Err(format!(
+                    "grad: Argmax at node {} is non-differentiable (integer-index output); \
+                     remove it from the gradient path or wrap it in a stop-gradient",
+                    node.id.0
+                ));
+            }
+            RiscOp::Argmin { .. } => {
+                return Err(format!(
+                    "grad: Argmin at node {} is non-differentiable (integer-index output); \
+                     remove it from the gradient path or wrap it in a stop-gradient",
+                    node.id.0
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    grad_dag(forward, output, wrt).ok_or_else(|| {
+        "grad: failed to construct backward DAG (unsupported op or verification failure)"
+            .to_string()
+    })
+}
+
 /// Run reverse-mode AD on `forward`, differentiating `output` with respect to each node in `wrt`.
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
@@ -334,6 +399,171 @@ fn compute_adjoints(
 
             let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, mask], input_ty);
             Some(vec![(x, dx)])
+        }
+        RiscOp::MinReduce { axis } => {
+            // Subgradient mirrors MaxReduce: gradient flows to elements equal
+            // to the min. This is a first-class rule, NOT composed as
+            // neg(max_reduce(neg(x))) — that would work but obscures the
+            // numerical semantics and makes autodiff graph inspection
+            // harder. Spec §3j-pre: ship the rule explicitly.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+
+            let expanded_min = dag.add_node(
+                RiscOp::Expand {
+                    axis: *axis,
+                    size: original_size.clone(),
+                },
+                vec![node.id],
+                input_ty.clone(),
+            );
+            let expanded_g = dag.add_node(
+                RiscOp::Expand {
+                    axis: *axis,
+                    size: original_size,
+                },
+                vec![g],
+                input_ty.clone(),
+            );
+            let mask_bool = tier2::lower_eq(dag, x, expanded_min, &input_ty);
+            let mask = dag.add_node(
+                RiscOp::Cast {
+                    new_precision: input_ty.precision,
+                },
+                vec![mask_bool],
+                input_ty.clone(),
+            );
+            let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, mask], input_ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::ProdReduce { axis } => {
+            // Safe prefix*suffix product adjoint. The naive form
+            // `g * prod / x` divides by zero whenever any element in the
+            // reduced slice is zero (and the gradient at that element is
+            // precisely `prod_of_everyone_else`, a finite number that the
+            // naive form cannot represent).
+            //
+            // Construction: split the input along `axis` into k 1-wide
+            // slices (via Shrink). For each slice i, build
+            //   prefix_i = prod_{j<i} slice_j  (running product)
+            //   suffix_i = prod_{j>i} slice_j
+            //   ∂prod/∂slice_i = prefix_i * suffix_i
+            // then Pad each contribution back to the full axis width and
+            // sum them (via element-wise Add since each contribution is
+            // zero outside its slice). Finally multiply by the expanded
+            // upstream gradient and return.
+            let x = node.inputs[0];
+            let input_ty = forward.get(x).unwrap().output_type.clone();
+            let axis_size = match &input_ty.dims[*axis] {
+                DimInfo::Lit(n) => *n,
+                DimInfo::Named(_, Some(n)) => *n,
+                DimInfo::Named(name, None) => panic!(
+                    "prod_reduce adjoint requires a concrete axis size; got symbolic `{name}`"
+                ),
+            };
+            let rank = input_ty.dims.len();
+            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+
+            // Build slice types: same as input_ty but with axis dim = 1.
+            let mut slice_dims = input_ty.dims.clone();
+            slice_dims[*axis] = DimInfo::Lit(1);
+            let slice_ty = TensorType {
+                dims: slice_dims,
+                precision: input_ty.precision,
+            };
+
+            // Slice each element along `axis`.
+            let mut slices: Vec<NodeId> = Vec::with_capacity(axis_size);
+            for i in 0..axis_size {
+                let bounds: Vec<(usize, usize)> = (0..rank)
+                    .map(|d| {
+                        if d == *axis {
+                            (i, i + 1)
+                        } else {
+                            (0, dim_size(&input_ty.dims[d]))
+                        }
+                    })
+                    .collect();
+                let s = dag.add_node(RiscOp::Shrink { bounds }, vec![x], slice_ty.clone());
+                slices.push(s);
+            }
+
+            // Prefix products: prefix[i] = prod_{j<i} slices[j], with prefix[0] = 1.
+            let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], slice_ty.clone());
+            let mut prefix: Vec<NodeId> = Vec::with_capacity(axis_size);
+            prefix.push(one);
+            for i in 1..axis_size {
+                let p = dag.add_node(
+                    RiscOp::Mul,
+                    vec![prefix[i - 1], slices[i - 1]],
+                    slice_ty.clone(),
+                );
+                prefix.push(p);
+            }
+
+            // Suffix products: suffix[i] = prod_{j>i} slices[j], with suffix[n-1] = 1.
+            let mut suffix: Vec<NodeId> = vec![one; axis_size];
+            if axis_size >= 2 {
+                for i in (0..axis_size - 1).rev() {
+                    suffix[i] = dag.add_node(
+                        RiscOp::Mul,
+                        vec![suffix[i + 1], slices[i + 1]],
+                        slice_ty.clone(),
+                    );
+                }
+            }
+
+            // Per-slice local gradient = prefix[i] * suffix[i], padded back to
+            // the full axis width. Sum them into a single full-shape tensor.
+            let zero_const = 0.0f64;
+            let mut acc: Option<NodeId> = None;
+            for i in 0..axis_size {
+                let local = dag.add_node(RiscOp::Mul, vec![prefix[i], suffix[i]], slice_ty.clone());
+                let padding: Vec<(usize, usize)> = (0..rank)
+                    .map(|d| {
+                        if d == *axis {
+                            (i, axis_size - i - 1)
+                        } else {
+                            (0, 0)
+                        }
+                    })
+                    .collect();
+                let padded = dag.add_node(
+                    RiscOp::Pad {
+                        padding,
+                        fill: zero_const,
+                    },
+                    vec![local],
+                    input_ty.clone(),
+                );
+                acc = Some(match acc {
+                    None => padded,
+                    Some(prev) => dag.add_node(RiscOp::Add, vec![prev, padded], input_ty.clone()),
+                });
+            }
+
+            let local_grad = acc.expect("prod_reduce adjoint needs axis_size >= 1");
+
+            // Upstream gradient expanded back to input shape, multiplied by local.
+            let expanded_g = dag.add_node(
+                RiscOp::Expand {
+                    axis: *axis,
+                    size: original_size,
+                },
+                vec![g],
+                input_ty.clone(),
+            );
+            let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, local_grad], input_ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => {
+            // Non-differentiable: integer-index outputs have zero gradient
+            // almost everywhere and undefined gradient on ties. Returning
+            // None here means grad_dag propagates a "cannot differentiate"
+            // signal; `grad_dag_checked` below surfaces this as an explicit
+            // error with a helpful message rather than a silent zero.
+            None
         }
 
         // --- Movement ---
@@ -1818,5 +2048,176 @@ mod tests {
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Sqrt, vec![a], ty.clone()));
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.7, 1e-5);
         assert_grad_close(a, n);
+    }
+
+    // ---- Phase 3j-pre: adjoints for new reductions ----
+
+    #[test]
+    fn adv_min_reduce_gradient() {
+        // Mirrors adv_max_reduce_gradient. Input 2x3:
+        //   [[1, 5, 3], [4, 2, 6]]
+        // min_reduce(axis=0) = [1, 2, 3]
+        // sum(min) = 6
+        // Gradient: 1 where element equals min along axis 0, else 0.
+        // Expected: [[1, 0, 1], [0, 1, 0]]
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let mat23 = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let vec3 = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat23.clone());
+        let minr = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], vec3);
+        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![minr], scalar_f32());
+
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![2, 3], vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        let expected = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "min_reduce grad index {i}: expected {want}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn adv_prod_reduce_gradient_nonzero() {
+        // Input: 1D length-4 vector [2, 3, 4, 5]
+        // prod = 120
+        // ∂prod/∂x_i = prod(x) / x_i = [60, 40, 30, 24]
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let vec4 = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec4);
+        let p = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f32());
+        dag.add_root(p);
+
+        let grad_result = grad_dag(&dag, p, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![2.0, 3.0, 4.0, 5.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        let expected = [60.0, 40.0, 30.0, 24.0];
+        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "prod_reduce grad index {i}: expected {want}, got {got}"
+            );
+        }
+    }
+
+    /// The critical safety test: one element of the reduced slice is zero.
+    /// The naive `g * prod(x) / x_i` rule divides by zero; the prefix*suffix
+    /// rule must produce finite, correct gradients.
+    ///
+    /// Input: [2, 0, 4, 5]
+    /// prod = 0
+    /// ∂prod/∂x_0 = 0*4*5 = 0
+    /// ∂prod/∂x_1 = 2*4*5 = 40   (the interesting one — nonzero even though x_1=0)
+    /// ∂prod/∂x_2 = 2*0*5 = 0
+    /// ∂prod/∂x_3 = 2*0*4 = 0
+    #[test]
+    fn adv_prod_reduce_gradient_with_zero_element() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let vec4 = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec4);
+        let p = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f32());
+        dag.add_root(p);
+
+        let grad_result = grad_dag(&dag, p, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![4], vec![2.0, 0.0, 4.0, 5.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        for v in &grad.data {
+            assert!(v.is_finite(), "prod_reduce grad must be finite; got {v}");
+        }
+        let expected = [0.0, 40.0, 0.0, 0.0];
+        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "prod_reduce zero-element grad index {i}: expected {want}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn adv_argmax_on_grad_path_errors_cleanly() {
+        // sum(argmax(x, axis=0)) — non-differentiable. grad_dag_checked must
+        // refuse with a message naming the offending op, not silently zero.
+        let mat23 = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let vec3 = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat23);
+        let am = dag.add_node(RiscOp::Argmax { axis: 0 }, vec![x], vec3);
+        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![am], scalar_f32());
+
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Err(e) => e,
+            Ok(_) => panic!("argmax on the gradient path must error, not succeed"),
+        };
+        assert!(
+            err.contains("Argmax") && err.contains("non-differentiable"),
+            "error message must identify the non-differentiable op; got: {err}"
+        );
+    }
+
+    #[test]
+    fn adv_argmin_on_grad_path_errors_cleanly() {
+        let mat23 = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let vec3 = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat23);
+        let am = dag.add_node(RiscOp::Argmin { axis: 1 }, vec![x], vec3);
+        let out = dag.add_node(RiscOp::Sum { axis: 0 }, vec![am], scalar_f32());
+
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Err(e) => e,
+            Ok(_) => panic!("argmin on the gradient path must error, not succeed"),
+        };
+        assert!(
+            err.contains("Argmin") && err.contains("non-differentiable"),
+            "error message must identify the non-differentiable op; got: {err}"
+        );
     }
 }

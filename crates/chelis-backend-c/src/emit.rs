@@ -226,6 +226,34 @@ impl CEmitter {
                     self.emit_reduce_max(id, *axis, &node.inputs, &node.output_type, dag);
                 }
             }
+            RiscOp::MinReduce { axis } => {
+                self.emit_reduce_simple(
+                    id,
+                    *axis,
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    "INFINITY",
+                    "acc = fminf(acc, t{a}->data[src_idx]);",
+                );
+            }
+            RiscOp::ProdReduce { axis } => {
+                self.emit_reduce_simple(
+                    id,
+                    *axis,
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    "1.0f",
+                    "acc *= t{a}->data[src_idx];",
+                );
+            }
+            RiscOp::Argmax { axis } => {
+                self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, true);
+            }
+            RiscOp::Argmin { axis } => {
+                self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, false);
+            }
             RiscOp::Reshape { .. } => {
                 self.emit_reshape(id, &node.inputs, &node.output_type, dag);
             }
@@ -929,6 +957,145 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!("t{id}->data[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ---- Generic scalar reduction (min / prod) ----
+    //
+    // `init` is the C literal for the accumulator's starting value, and
+    // `update_tmpl` is the body of the inner loop with literal `{a}` tokens
+    // for the input node id. Used by MinReduce and ProdReduce; the structure
+    // mirrors `emit_reduce_max` exactly.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reduce_simple(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+        init: &str,
+        update_tmpl: &str,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("float acc = {init};"));
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = k;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        let update = update_tmpl.replace("{a}", &a.to_string());
+        self.line(&update);
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ---- Argmax / Argmin ----
+    //
+    // Emits an index-tracking reduction. Output is an F32 tensor holding
+    // integer-valued floats (e.g. 0.0, 1.0, 2.0); see the RiscOp::Argmax doc
+    // comment in dag.rs for the rationale — the C runtime does not yet carry
+    // Int64 tensors natively, so the IR carries F32 and downstream casts are
+    // the caller's responsibility.
+    fn emit_reduce_argcmp(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+        is_argmax: bool,
+    ) {
+        let a = inputs[0].0;
+        let input_node = dag.get(inputs[0]).unwrap();
+        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let ndim = Self::ndim(ty);
+        let shape = Self::shape_literal(ty);
+        let dtype = Self::dtype_macro(ty);
+        let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
+        let cmp = if is_argmax { ">" } else { "<" };
+        self.line(&format!(
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
+        ));
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("float best_val = {init};"));
+        self.line("int best_idx = -1;");
+        self.line("int out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+        ));
+        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.indent += 1;
+        self.line("int full_indices[CHELIS_MAX_DIM];");
+        self.line("int out_d = 0;");
+        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.indent += 1;
+        self.line(&format!("if (d == {axis}) {{"));
+        self.indent += 1;
+        self.line("full_indices[d] = k;");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("full_indices[d] = out_indices[out_d];");
+        self.line("out_d++;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!("float v = t{a}->data[src_idx];"));
+        self.line(&format!("if (best_idx < 0 || v {cmp} best_val) {{"));
+        self.indent += 1;
+        self.line("best_val = v;");
+        self.line("best_idx = k;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("t{id}->data[outer] = (float)best_idx;"));
         self.indent -= 1;
         self.line("}");
     }

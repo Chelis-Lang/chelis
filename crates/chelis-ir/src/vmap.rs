@@ -13,6 +13,10 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
         let op = match &node.op {
             RiscOp::Sum { axis } => RiscOp::Sum { axis: axis + 1 },
             RiscOp::MaxReduce { axis } => RiscOp::MaxReduce { axis: axis + 1 },
+            RiscOp::MinReduce { axis } => RiscOp::MinReduce { axis: axis + 1 },
+            RiscOp::ProdReduce { axis } => RiscOp::ProdReduce { axis: axis + 1 },
+            RiscOp::Argmax { axis } => RiscOp::Argmax { axis: axis + 1 },
+            RiscOp::Argmin { axis } => RiscOp::Argmin { axis: axis + 1 },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: prepend_batch_dims(new_shape, &batch_dim),
             },

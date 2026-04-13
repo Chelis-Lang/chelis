@@ -321,6 +321,16 @@ impl HipEmitter {
                     }
                     continue;
                 }
+                RiscOp::MinReduce { .. }
+                | RiscOp::ProdReduce { .. }
+                | RiscOp::Argmax { .. }
+                | RiscOp::Argmin { .. } => {
+                    // Phase 3j-pre: these ops ship in the C backend only.
+                    // HIP backend support is explicitly deferred; calling
+                    // hip codegen on a DAG containing them should be a loud
+                    // failure, not silent miscompilation.
+                    continue;
+                }
                 _ => {}
             }
             let name = self.kernel_name_for_op(&node.op, node, dag);
@@ -562,6 +572,10 @@ impl HipEmitter {
                     Some(Self::reduction_kernel_name(kernels::ReduceKind::Max, *axis))
                 }
             }
+            RiscOp::MinReduce { .. }
+            | RiscOp::ProdReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. } => None,
             RiscOp::Const { .. } => Some("kernel_fill".into()),
             RiscOp::Realize => Some("kernel_cast".into()),
             RiscOp::Cast { .. } => Some("kernel_cast".into()),
@@ -727,6 +741,26 @@ impl HipEmitter {
                         kernels::ReduceKind::Max,
                     );
                 }
+            }
+            RiscOp::MinReduce { .. } => {
+                panic!(
+                    "HIP backend: MinReduce is not yet supported (Phase 3j-pre ships C backend only)"
+                );
+            }
+            RiscOp::ProdReduce { .. } => {
+                panic!(
+                    "HIP backend: ProdReduce is not yet supported (Phase 3j-pre ships C backend only)"
+                );
+            }
+            RiscOp::Argmax { .. } => {
+                panic!(
+                    "HIP backend: Argmax is not yet supported (Phase 3j-pre ships C backend only)"
+                );
+            }
+            RiscOp::Argmin { .. } => {
+                panic!(
+                    "HIP backend: Argmin is not yet supported (Phase 3j-pre ships C backend only)"
+                );
             }
             RiscOp::Reshape { .. } => {
                 self.emit_reshape(id, &node.inputs, &node.output_type);
@@ -1546,6 +1580,10 @@ impl HipEmitter {
             | RiscOp::Dropout { .. }
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::ProdReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
             | RiscOp::FusedElem { .. } => true,

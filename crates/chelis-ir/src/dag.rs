@@ -231,6 +231,26 @@ pub enum RiscOp {
     MaxReduce {
         axis: usize,
     },
+    MinReduce {
+        axis: usize,
+    },
+    ProdReduce {
+        axis: usize,
+    },
+    /// Index of maximum element along `axis`.
+    ///
+    /// Note: per Phase 3j-pre, argmax/argmin logically return integer indices.
+    /// The evaluator stores them as f64 integer-valued floats and the type
+    /// system carries whatever precision the caller assigns (typically F32,
+    /// since the C backend only supports F32/Bool tensors). The Std wrapper
+    /// layer (Batch 2) is responsible for casting/annotating as needed.
+    /// TODO(phase3j): widen backend runtime to carry Int64 tensors natively.
+    Argmax {
+        axis: usize,
+    },
+    Argmin {
+        axis: usize,
+    },
 
     // --- Movement ---
     Reshape {

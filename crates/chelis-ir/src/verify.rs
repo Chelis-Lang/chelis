@@ -102,6 +102,10 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Realize
             | RiscOp::Sum { .. }
             | RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::ProdReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. }
             | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
@@ -141,7 +145,12 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 
         // C3: validate reduction axis bounds.
         match &node.op {
-            RiscOp::Sum { axis } | RiscOp::MaxReduce { axis } => {
+            RiscOp::Sum { axis }
+            | RiscOp::MaxReduce { axis }
+            | RiscOp::MinReduce { axis }
+            | RiscOp::ProdReduce { axis }
+            | RiscOp::Argmax { axis }
+            | RiscOp::Argmin { axis } => {
                 if arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                 {
@@ -248,7 +257,12 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 
         // C9: Reduction output rank check.
         match &node.op {
-            RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
+            RiscOp::Sum { .. }
+            | RiscOp::MaxReduce { .. }
+            | RiscOp::MinReduce { .. }
+            | RiscOp::ProdReduce { .. }
+            | RiscOp::Argmax { .. }
+            | RiscOp::Argmin { .. } => {
                 if arity == 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let expected_rank = input.output_type.dims.len().saturating_sub(1);
