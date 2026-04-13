@@ -1471,6 +1471,11 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Log => WireRiscOp::Log,
         RiscOp::Sin => WireRiscOp::Sin,
         RiscOp::Sqrt => WireRiscOp::Sqrt,
+        RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
+            low: *low,
+            high: *high,
+            seed: *seed,
+        },
         RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
             rate: *rate,
             seed: *seed,
@@ -1853,6 +1858,74 @@ view = print(label)
                     && matches!(&root.value, ExecutionValue::String { value } if value == "ready"))
         );
         assert_eq!(result.transcript, vec!["ready".to_string()]);
+    }
+
+    #[test]
+    fn eval_supports_record_construction_and_field_access() {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+type Date =
+  | Date { year: int64, month: int64, day: int64 }
+
+mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+year = mk_date.year
+label = if eq(year, cast(2024, int64)) then "leap" else "plain"
+"#
+            .to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("year")
+                    && matches!(root.value, ExecutionValue::Int64 { value: 2024 }))
+        );
+        assert!(
+            result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("label")
+                    && matches!(&root.value, ExecutionValue::String { value } if value == "leap"))
+        );
+    }
+
+    #[test]
+    fn compile_host_records_emit_runtime_adt_access() {
+        let artifact = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: r#"
+type Date =
+  | Date { year: int64, month: int64, day: int64 }
+
+mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+year = mk_date.year
+"#
+            .to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("record_demo".to_string()),
+        })
+        .expect("compile");
+
+        let c_file = artifact
+            .files
+            .iter()
+            .find(|file| file.path.ends_with(".c"))
+            .expect("generated c file");
+
+        assert!(
+            c_file.contents.contains("chelis_adt_construct"),
+            "expected record construction through generic ADT runtime, got:\n{}",
+            c_file.contents
+        );
+        assert!(
+            c_file.contents.contains("chelis_adt_get_field"),
+            "expected record field access through generic ADT runtime, got:\n{}",
+            c_file.contents
+        );
     }
 
     #[test]

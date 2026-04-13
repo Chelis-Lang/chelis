@@ -252,6 +252,17 @@ fn dropout_sample(seed: u64, index: u64) -> f64 {
     ((x >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
+fn uniform_like(shape: &[usize], low: f64, high: f64, seed: u64) -> TensorValue {
+    let span = high - low;
+    let data = (0..numel(shape))
+        .map(|index| low + span * dropout_sample(seed, index as u64))
+        .collect();
+    TensorValue {
+        data,
+        shape: shape.to_vec(),
+    }
+}
+
 fn binary_map(lhs: &TensorValue, rhs: &TensorValue, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert_eq!(lhs.shape, rhs.shape);
     TensorValue {
@@ -500,6 +511,9 @@ where
             RiscOp::Log => unary_map(&values[&node.inputs[0]], f64::ln),
             RiscOp::Sin => unary_map(&values[&node.inputs[0]], f64::sin),
             RiscOp::Sqrt => unary_map(&values[&node.inputs[0]], f64::sqrt),
+            RiscOp::UniformLike { low, high, seed } => {
+                uniform_like(&values[&node.inputs[0]].shape, *low, *high, *seed)
+            }
             RiscOp::Dropout { rate, seed } => dropout(&values[&node.inputs[0]], *rate, *seed),
             RiscOp::MaxElem => {
                 binary_map(&values[&node.inputs[0]], &values[&node.inputs[1]], f64::max)

@@ -97,6 +97,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Realize
             | RiscOp::Sum { .. }

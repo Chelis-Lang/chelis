@@ -258,6 +258,12 @@ fn compute_adjoints(
             let dx = tier2::lower_div(dag, g, two_sqrt, &ty);
             Some(vec![(x, dx)])
         }
+        RiscOp::UniformLike { .. } => {
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty);
+            Some(vec![(x, zero)])
+        }
         RiscOp::Dropout { rate, seed } => {
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();

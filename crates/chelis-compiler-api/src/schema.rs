@@ -511,11 +511,6 @@ pub enum WireSurfExpr {
         arms: Vec<WireMatchArm>,
         span: Span,
     },
-    Let {
-        bindings: Vec<WireLetBinding>,
-        body: Box<WireSurfExpr>,
-        span: Span,
-    },
     Lambda {
         params: Vec<WireParam>,
         body: Box<WireSurfExpr>,
@@ -798,6 +793,11 @@ pub enum WireRiscOp {
     Log,
     Sin,
     Sqrt,
+    UniformLike {
+        low: f64,
+        high: f64,
+        seed: u64,
+    },
     Dropout {
         rate: f64,
         seed: u64,
