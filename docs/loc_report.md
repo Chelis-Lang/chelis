@@ -1,6 +1,6 @@
 # Lines of Code Report
 
-Generated: 2026-04-13 14:35 UTC
+Generated: 2026-04-13 17:22 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
@@ -16,5 +16,5 @@ Generated: 2026-04-13 14:35 UTC
 | YAML | 1 | 115 | 0 | 23 | 138 | CI workflows |
 | Tree-sitter Queries (.scm) | 2 | 98 | 0 | 6 | 104 | Syntax highlighting for Surf and Deep |
 | **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
-| Markdown | 65 | 0 | 5,495 | 3,018 | 8,513 | Specs, design docs, plans |
-| **Total** | **289** | **87,549** | **7,190** | **26,772** | **121,511** | |
+| Markdown | 65 | 0 | 5,503 | 3,018 | 8,521 | Specs, design docs, plans |
+| **Total** | **289** | **87,549** | **7,198** | **26,772** | **121,519** | |
