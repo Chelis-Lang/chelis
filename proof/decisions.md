@@ -59,6 +59,10 @@ Every theorem has something to say about this set. `add`/`mul` exercise dimensio
 | `Resource` | Unparameterized (no `Device` argument) | No metatheoretic payoff; parameterization noted in §6 |
 | Handler continuations | One-shot, `k` is linear binding | Linearity enforces one-shot; elegant interaction |
 | `grad` and `vmap` scope | Both restricted to literal abstractions `λx:τ.e` in Phase 1 | Enables syntactic pattern matching in the operational rules and enforces `grad`'s linear-use side condition via `T-Var` failure in the premise. Eta-expand variable function references. |
+| `grad` result type | Curried two-argument `tensor[d̄] → tensor[d̄'] → tensor[d̄] ! ε` | Explicit seed-gradient parameter (the cotangent), matching JAX `grad(f)(x, g_s)` shape. Pinned in T0 §5 after Wave 2 round-2 H3 correction. |
+| `uniform_like` template | Consumed by the primitive | T-UniformLike threads `Γ₁ → Γ₂` through its sub-derivation; E-UniformLike removes `ℓ` from `σ`. Wave 2 round-2 C1 fix. To retain the template, callers insert an explicit `copy(t)` beforehand. |
+| `T-Expand` dimension transform | Insertion, notated `ins(d̄, i, k)` | The paper's earlier `d̄[i ↦ k]` substitution notation was ambiguous (could read as overwrite); explicit `ins` / `rem` meta-functions fix it. Required for `sum`/`expand` to be mutual adjoints so `grad(sum)` closes over the RISC set. Wave 2 round-2 H1 fix. |
+| Handler typing in Phase 1 | Single-clause only (`T-Handle.handleSingle`) | Multi-operation handlers require quantification over the clause list and are a Phase 2 extension. Phase 1's `adjoint` transformation and `E-Grad` only construct single-clause handlers, so the restriction is workable. |
 | Gradient accumulation | `Accum` effect, explicit handler in reduced term | Reuses standard `handle` machinery for preservation proof |
 | AD tape | Explicit borrows saved during forward pass | Resolves linearity/adjoint tension for multi-input primitives |
 | `copy` semantics | Physical copy (fresh location) | Simple store invariant (one owner per location); `Arc` is §6 optimization |

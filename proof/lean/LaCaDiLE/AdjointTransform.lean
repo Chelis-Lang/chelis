@@ -13,9 +13,24 @@
 --   (b) emits `perform accum(loc, contribution)` for each operand,
 --   (c) produces a term whose result is the parameter gradient.
 --
--- The Phase 1 implementation below handles the atomic primitives correctly
--- and uses a conservative catch-all for composition cases. Phase 2 will
--- replace the catch-all with the full T0 §4 recursive pattern.
+-- The Phase 1 implementation below is a **best-effort skeleton**. It
+-- emits syntactically well-formed terms for the atomic primitives and
+-- preserves linearity of `gSeed` on every branch via a `perform accum`
+-- call, but the produced terms do NOT yet match the full backward-pass
+-- structure from T0 §§2–4 — most notably:
+--
+--   * the `sum` adjoint hardcodes extent 0 in the generated `expand`;
+--   * the `var y` case routes to `perform accum` even when `y ≠ x`,
+--     which over-approximates the real rule (non-parameter free
+--     variables should not contribute);
+--   * `letBind` recurses on the tail only and does not invert the
+--     forward/backward order;
+--   * the catch-all emits a single `perform accum` for every remaining
+--     term former.
+--
+-- Phase 2 T9 will replace this function wholesale with the structural
+-- recursion from T0 §4 and discharge the `adjoint_preserves_typing`
+-- lemma (WS2.2) against the new body.
 
 import LaCaDiLE.Syntax
 
