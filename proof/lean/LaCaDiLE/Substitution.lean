@@ -218,7 +218,15 @@ theorem weakening_tail
     (_h_fresh : y ∉ linearCtxDom Gamma) :
     HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
             (Gamma' ++ [(y, t')]) := by
-  sorry
+  sorry -- TODO Wave 2: induction on HasType derivation.
+        -- Requires mutual ClausesTyped weakening helper for the `handle` case.
+        -- Every constructor that binds a variable at the tail (var, abs,
+        -- letBind, letpair, tgrad, tvmap) needs an associativity rewrite
+        -- to re-associate the new tail binding with the existing context
+        -- shape, and the `var` case specifically needs exchange_tail to
+        -- push `(y, t')` past the consumed `(x, t)` binding. This three-way
+        -- mutual dependence (weakening ↔ exchange ↔ ClausesTyped weakening)
+        -- is the hard core of Wave 1; scheduling it as its own Wave 2 task.
 
 /-- Exchange: swapping two adjacent unrelated bindings in the linear
     context preserves typing. Used when a substitution introduces a
@@ -226,13 +234,19 @@ theorem weakening_tail
     thread around it. -/
 theorem exchange_tail
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
-    (x y : String) (t1 t2 : Typ) (eps : EffectRow) (e : Term)
+    (x y : String) (t t1 t2 : Typ) (eps : EffectRow) (e : Term)
     (_h : HasType Delta Sigma (Gamma ++ [(x, t1), (y, t2)]) e
-                  (Typ.tensor []) eps Gamma')
+                  t eps Gamma')
     (_h_ne : x ≠ y) :
     HasType Delta Sigma (Gamma ++ [(y, t2), (x, t1)]) e
-            (Typ.tensor []) eps Gamma' := by
-  sorry
+            t eps Gamma' := by
+  sorry -- TODO Wave 2: induction on HasType + mutual ClausesTyped exchange.
+        -- Symmetric to weakening_tail: each binder case needs to show the
+        -- extended context (Gamma ++ [(y,t2),(x,t1)] ++ [(bound, τ)]) is
+        -- still well-formed, and the var case needs to distinguish which
+        -- of x, y is consumed. The permutation invariant on LinearCtx is
+        -- what actually gets proved here; weakening_tail is the degenerate
+        -- case where the second binding is fresh.
 
 /-! ## Main theorem -/
 
@@ -250,6 +264,25 @@ theorem subst_preserves_typing
     (_h_closed : Closed v) :
     HasType Delta Sigma Gamma1 (subst e v x) t2 eps
             (Gamma2.filter (fun p => p.1 ≠ x)) := by
-  sorry
+  sorry -- TODO Wave 2: main substitution lemma.
+        -- Induction on _h_e (the HasType derivation of `e`).
+        -- Key cases:
+        --   * var: split y = x (return _h_v, using subst_closed on the result
+        --     context manipulation) vs y ≠ x (apply weakening_tail to peel
+        --     the unused (x,t1) binding and rebuild via .var).
+        --   * abs/letBind/letpair/tgrad/tvmap: IH under extended context,
+        --     then push the (x,t1) binding past the new binder via
+        --     exchange_tail, then apply the IH, then rebuild the binder.
+        --   * app/tadd/tmul/tpair: the left-to-right threaded contexts mean
+        --     (x,t1) lives at the tail of Γ₁ going into e₁; the sub-derivation
+        --     for e₁ may or may not consume it. Need a case split on whether
+        --     x survives into Γ₂; each branch applies IH + subst_notFree /
+        --     subst_closed on the other side.
+        --   * handle: companion substClauses_preserves_typing in a mutual
+        --     block; each clause extends Γ₂ with its own (arg, cont) tail so
+        --     the (x,t1) binding is buried under two fresh bindings and
+        --     needs exchange_tail applied twice.
+        -- Blocked on weakening_tail + exchange_tail; scheduled as a single
+        -- Wave 2 mutual-induction push.
 
 end LaCaDiLE
