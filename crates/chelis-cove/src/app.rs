@@ -199,12 +199,12 @@ mod tests {
     fn app_loads_file_contents() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("sample.ch");
-        std::fs::write(&path, "let x = 1\n").expect("write");
+        std::fs::write(&path, "x = 1\n").expect("write");
         let app = App::new(CoveOptions {
             file: Some(path.clone()),
         })
         .expect("app");
-        assert!(app.editor.text().contains("let x"));
+        assert!(app.editor.text().contains("x = 1"));
         assert_eq!(app.editor.path.as_deref(), Some(path.as_path()));
     }
 }

@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn zero_eval_populates_named_loads() {
         let output =
-            eval_output("let x = (x : tensor[2, 3, f32])\nlet y = (relu(x) : tensor[2, 3, f32])\n");
+            eval_output("x = (x : tensor[2, 3, f32])\ny = (relu(x) : tensor[2, 3, f32])\n");
         assert!(output.contains("zero-filled named bindings"));
         assert!(output.contains("shape=[2, 3]"));
     }
