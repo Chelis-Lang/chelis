@@ -21,11 +21,13 @@ Ehrhard and Regnier's differential linear logic established that differentiation
 | [`plan.md`](plan.md) | Workstream dependency graph, critical path, and index of all six workstreams with status. Start here. |
 | [`decisions.md`](decisions.md) | Locked design decisions with rationale. Every workstream cites this. |
 | [`risks.md`](risks.md) | Cross-cutting risk register with mitigations. |
+| [`toolchain.md`](toolchain.md) | Local toolchain required for WS3 (elan/Lean, vibe, Leanstral, lean-lsp-mcp). Run `python3 proof/scripts/check_toolchain.py` to verify. |
 | [`anonymization.md`](anonymization.md) | Submission-time anonymization checklist. |
 | [`post-submission.md`](post-submission.md) | Author response prep, revision plan, artifact evaluation. |
 | [`workstreams/`](workstreams/) | One file per workstream (WS1–WS6). |
+| [`scripts/`](scripts/) | Python helpers (toolchain checker and its tests). |
 | [`paper/`](paper/) | Reserved for LaTeX sources. Empty until WS4 begins. |
-| [`lean/`](lean/) | Reserved for the Lean 4 mechanization (`chelis-metatheory/`). Empty until WS3 begins. |
+| [`lean/`](lean/) | Houses the Lean 4 mechanization. Pinned to `leanprover/lean4:v4.29.0` via [`lean/lean-toolchain`](lean/lean-toolchain). Actual `.lean` sources land here during WS3. |
 
 ## Naming
 

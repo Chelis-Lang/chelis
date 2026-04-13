@@ -14,3 +14,4 @@ data/
 !grammars/**/*.h
 bindings/python/chelis/_native.abi3.so
 bindings/python/chelis/__pycache__/
+proof/scripts/__pycache__/
