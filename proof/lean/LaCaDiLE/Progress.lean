@@ -22,11 +22,29 @@ namespace LaCaDiLE
 
 /-! ## Helper lemmas used by Progress -/
 
+/-- Domain-subset relation on linear contexts. -/
+def DomSub (G1 G2 : LinearCtx) : Prop :=
+  ∀ x, x ∈ linearCtxDom G1 → x ∈ linearCtxDom G2
+
+private theorem DomSub.refl (G : LinearCtx) : DomSub G G := fun _ h => h
+
+private theorem DomSub.trans {G1 G2 G3 : LinearCtx}
+    (h12 : DomSub G1 G2) (h23 : DomSub G2 G3) : DomSub G1 G3 :=
+  fun x h => h23 x (h12 x h)
+
+private theorem DomSub.filter_self (G : LinearCtx) (p : (String × Typ) → Bool) :
+    DomSub (G.filter p) G := by
+  intro x hx
+  simp only [linearCtxDom, List.mem_map] at hx ⊢
+  obtain ⟨q, hq_mem, hq_eq⟩ := hx
+  rw [List.mem_filter] at hq_mem
+  exact ⟨q, hq_mem.1, hq_eq⟩
+
 /-- Linear-context domain shrinks across every HasType derivation.
-    Wave 3 TODO: mechanical HasType.rec with a domain-subset motive.
-    Each of the ~25 cases is short but requires careful handling of
-    filter predicates in the binder cases (abs/letBind/letpair).
-    Stated here so value_preserves_closed_context can cite it. -/
+    Wave 3 TODO: mechanical HasType.rec with motive `DomSub Γ' Γ`.
+    Most cases are trivial (refl, trans-of-IHs); abs/letBind/letpair
+    need careful filter-predicate reasoning to rule out the bound
+    variable surviving the filter. -/
 theorem has_type_linear_shrinks
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
