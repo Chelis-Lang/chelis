@@ -1081,42 +1081,12 @@ theorem weakening_tail
   have hres := weakening_insert Delta Sigma y t' h Gamma [] hsplit h_fresh hfp h_fresh_term
   simpa using hres
 
-/-- Exchange: swapping two adjacent unrelated bindings in the linear
-    context preserves typing. Used when a substitution introduces a
-    fresh binding mid-context and the surrounding derivation needs to
-    thread around it. -/
--- NOTE (Wave 1 proof engineer, 2026-04-13): the originally-advised
--- `exchange_tail` statement below — which FIXES the output context
--- `Γ'` across the swap — is not provable. Counterexample: the `var`
--- case of `HasType` consumes the tail binding of its input context.
--- If `Γin = Γpre ++ [(x,t1),(y,t2)]`, the unswapped derivation of
--- `Term.var y` has output `Γpre ++ [(x,t1)]`. The swapped context
--- `Γpre ++ [(y,t2),(x,t1)]` only has `(x,t1)` at its tail, so the
--- only available var-rule derivation has output `Γpre ++ [(y,t2)]`.
--- These outputs differ, so no derivation with `Γout` rigidly equal
--- to the unswapped output exists.
---
--- The mathematically-correct form swaps BOTH endpoints: "either the
--- swapped bindings are not consumed (Γout factors as Γ'' ++ [(x,t1),
--- (y,t2)] and we return Γ'' ++ [(y,t2),(x,t1)]), or one/both are
--- consumed and Γout is a prefix that already sits below them". This
--- is a disjunction-shaped conclusion that doesn't match the shape
--- `subst_preserves_typing` actually needs.
---
--- Keeping the original statement as `sorry` for Wave 2 restructuring;
--- documenting the obstruction so the next author doesn't re-derive it.
-theorem exchange_tail
-    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
-    (x y : String) (t t1 t2 : Typ) (eps : EffectRow) (e : Term)
-    (_h : HasType Delta Sigma (Gamma ++ [(x, t1), (y, t2)]) e
-                  t eps Gamma')
-    (_h_ne : x ≠ y) :
-    HasType Delta Sigma (Gamma ++ [(y, t2), (x, t1)]) e
-            t eps Gamma' := by
-  sorry -- BLOCKED: statement is not provable as written (see note above).
-        -- Wave 2 must restructure the signature (output-swap disjunction,
-        -- or strengthen to an explicit "neither swapped binding is
-        -- consumed" precondition) before this can be closed.
+-- NOTE: `exchange_tail` removed entirely. Its original statement
+-- (rigid output context across an adjacent swap) is provably false
+-- in this type system: `var` consumes the tail binding and the two
+-- swap orderings produce different output contexts. No caller
+-- relies on `exchange_tail`; substitution is closed via
+-- `weakening_insert` directly.
 
 /-! ## Main theorem -/
 
