@@ -54,16 +54,28 @@ theorem linearity_soundness
   | tmul sigma_in ell1 ell2 ellOut w1 w2 _ _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-remove-extend
-  | tsum sigma_in ell ellOut w i _ _ =>
-      refine ⟨storeTypExtend Sigma ellOut (Typ.tensor (rem w.shape i)), ?_⟩
-      sorry -- TODO Wave 5: StoreWf for remove-extend
-  | texpand sigma_in ell ellOut w i k _ _ =>
-      refine ⟨storeTypExtend Sigma ellOut
+  | tsum sigma_in ell ellOut w i _hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor (rem w.shape i)), ?_⟩
+      -- Wave 2 TODO: prove ell ≠ ellOut from hfresh + h_wf (ell live → ≠ fresh).
+      have hne : ell ≠ ellOut := by sorry
+      exact StoreWf.remove_extend ell ellOut
+        { shape := rem w.shape i, data := w.data }
+        (Typ.tensor (rem w.shape i)) h_wf hfresh hne
+  | texpand sigma_in ell ellOut w i k _hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (ins w.shape i k)), ?_⟩
-      sorry -- TODO Wave 5: StoreWf for remove-extend
-  | tuniformLike sigma_in ell ellOut w lo hi _ _ =>
-      refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w.shape), ?_⟩
-      sorry -- TODO Wave 5: StoreWf for remove-extend
+      have hne : ell ≠ ellOut := by sorry
+      exact StoreWf.remove_extend ell ellOut
+        { shape := ins w.shape i k, data := w.data }
+        (Typ.tensor (ins w.shape i k)) h_wf hfresh hne
+  | tuniformLike sigma_in ell ellOut w lo hi _hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor w.shape), ?_⟩
+      have hne : ell ≠ ellOut := by sorry
+      exact StoreWf.remove_extend ell ellOut
+        { shape := w.shape, data := lo }
+        (Typ.tensor w.shape) h_wf hfresh hne
   | ctx _sig _sig' _E _e _e' _h_inner =>
       -- E-Ctx: cases can't directly dispatch because Step is indexed
       -- on Configs; we lose the induction hypothesis. Wave 5 will
