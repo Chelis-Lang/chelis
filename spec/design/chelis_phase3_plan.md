@@ -901,6 +901,14 @@ Pure compiled additions to `chelis-std`. Nothing here requires a new shell.
 3j-pre surface (RMSNorm + GELU + Kaiming init + SDPA import) through `chelis
 check`/`chelis eval` with hand-computed exact reference values.
 
+Release infrastructure is also in place as of 3j-pre Batch 6: the
+hand-rolled `.github/workflows/release.yml` builds and publishes a
+Linux x86_64 `chelis` tarball to the GitHub Releases page on any `v*`
+tag push, and the first real tag `v0.1.0` ships the Phase 3j-pre
+compiler binary that downstream shells (Nautilus, Coral) can pin via
+`compiler = "=0.1.0"` in their `reef.toml`. See
+`spec/design/phase3j_pre_release.md` for the full release contract.
+
   - **Acknowledged limitations (3j-pre Batch 5 oracle):**
     - The original plan called for "build + gcc + run + verify against
       PyTorch reference within tolerance". On the current compiler the
