@@ -100,64 +100,95 @@ theorem LinearCtxDB.insertAt_append_right
 
 /-! ## Weakening lemma: inserting a fresh linear binding
 
-The theorem statements `weakening_insert_db` and `subst_preserves_typing_db`
-are staged as proof obligations for Wave 4. Rather than leaving them as
-`sorry` stubs (which would increase the repository's sorry count), they
-live here as commented signatures. Wave 4 will uncomment them and fill in
-the proofs.
+The theorem statements for `weakening_insert_db` and
+`subst_preserves_typing_db` are staged here as proof obligations for a
+future wave. They live as documentation rather than `sorry`-stubbed
+declarations so the repository's sorry count stays at its true value.
 
-### weakening_insert_db (Wave 4 target)
+### Wave 4 finding: the naive uniform-output statement is unprovable.
 
+A Wave 4 attempt surfaced a statement-level bug. The naive statement
+```
+weakening_insert_db : HasTypeDB Δ Σ Γ e t eps Γ' →
+  HasTypeDB Δ Σ (Γ.insertAt j t_new) (shiftAt j e) t eps (Γ'.insertAt j t_new)
+```
+is **false** when `j` is past a consumed binding. Concrete counterexample:
+
+- `Γ = [A, B, C, D]`, `e = var 1` (consuming `B`), so `Γ' = [A, C, D]`.
+- Weaken with `j = 2`, `t_new = X`.
+- Input becomes `insertAt 2 X [A,B,C,D] = [A,B,X,C,D]`.
+- `shiftAt 2 (var 1) = var 1` (since `1 < 2`), which consumes position 1
+  of the new input, producing output `[A, X, C, D]`.
+- But the naive theorem demands output `Γ'.insertAt 2 X = [A,C,X,D]`.
+- `[A, X, C, D] ≠ [A, C, X, D]`.
+
+Root cause: consumption between `Γpre.length` and `j` shifts the
+inserted element's position in the output down by the number of
+consumed bindings. The uniform `Γ'.insertAt j t_new` output is wrong
+for `j > Γpre.length`.
+
+### Corrected statement (spec for the next wave)
+
+The fix parameterizes the output position separately. Since
+`HasTypeDB` encodes linear consumption as `eraseIdx`-style list
+shrinking, the correct output insertion position is `j` minus the
+number of bindings consumed at indices `< j`. We can't compute this
+directly from `(Γ, Γ')` without walking the derivation, so the cleanest
+formulations are:
+
+**Option A — relational (existentially-quantified output position):**
 ```lean
-abbrev shiftAt (j : Nat) (e : TermDB) : TermDB := liftAux j 1 e
-
 theorem weakening_insert_db
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
-    {e : TermDB} {t : Typ} {eps : EffectRow} {Gamma' : LinearCtxDB}
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
     (h : HasTypeDB Delta Sigma Gamma e t eps Gamma')
     (j : Nat) (t_new : Typ) :
-    HasTypeDB Delta Sigma (LinearCtxDB.insertAt j t_new Gamma)
-              (shiftAt j e) t eps
-              (LinearCtxDB.insertAt j t_new Gamma')
+    ∃ j', j' ≤ j ∧
+      HasTypeDB Delta Sigma (Gamma.insertAt j t_new) (shiftAt j e) t eps
+                (Gamma'.insertAt j' t_new)
 ```
+The `j'` is determined by the derivation shape. Downstream callers
+must also accept the existential and witness its alignment with
+their context shape.
 
-Proof: mutual induction on `HasTypeDB` / `ClausesTypedDB` with `motive_2`
-threading the same insertion through `ClausesTypedDB`. Non-binder cases
-reassemble the matching constructor after the IH. Binder rules (`abs`,
-`letBind`, `letpair`, `grad`, `vmap`, `handle` + clauses) specialize the IH
-at `j + 1` (or `j + 2` for `letpair` and handler clauses). The rigidity
-`insertAt (j + 1) t (x :: xs) = x :: insertAt j t xs` follows definitionally
-from the `insertAt` shape above.
-
-The `var` case splits on `j ≤ Γpre.length`:
-  * Yes: `shiftAt j (var Γpre.length) = var (Γpre.length + 1)` and
-    `insertAt_append_left` reshapes the context; reapply `HasTypeDB.var`.
-  * No (`j > Γpre.length`): the var index stays at `Γpre.length`;
-    `insertAt_append_right` places the new binding inside `Γpost`.
-
-### subst_preserves_typing_db (Wave 4 target)
-
+**Option B — structural (thread consumption count through the statement):**
 ```lean
-theorem subst_preserves_typing_db
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
-    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {Gamma' : LinearCtxDB}
-    (j : Nat)
-    (h_e : HasTypeDB Delta Sigma (LinearCtxDB.insertAt j t_v Gamma) e t eps
-             (LinearCtxDB.insertAt j t_v Gamma'))
-    (h_v : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
-    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma'
+theorem weakening_insert_db
+    ...
+    (j : Nat) (t_new : Typ)
+    (consumedBefore : Nat)  -- number of bindings of Γ consumed at pos < j
+    (h_consumed : ... relates Γ and Γ' to consumedBefore ...) :
+    HasTypeDB Delta Sigma (Gamma.insertAt j t_new) (shiftAt j e) t eps
+              (Gamma'.insertAt (j - consumedBefore) t_new)
 ```
+The precondition `h_consumed` must be provable from the derivation
+by a secondary induction — effectively the same work twice.
 
-Proof: mutual induction. Non-binder cases straightforward. Binder cases use
-`weakening_insert_db` at `j = 0` to lift `h_v` under the new binder before
-recursing with `j + 1`. The `var` case is a three-way split on `i` vs `j`.
+**Option C — redesign `HasTypeDB.var` to not mutate the context.**
+Use an ambient `Γ` + a liveness vector, or thread an explicit
+"consumed positions" parameter on every rule. This is a Phase 1
+calculus change with broad ripple but eliminates the class of
+position-shift issues entirely. For POPL presentation, the "linearly-
+typed lambda calculus with explicit linear bookkeeping" framing is
+well-supported in the literature and maps onto existing
+formalizations of linear λ-calculi.
 
-### Wave 4 deliverables
+### Recommendation
 
-1. Uncomment the two theorems above, relocating them from this doc block
-   into real declarations.
-2. Close both by mutual induction. Estimated ~800 lines.
-3. Continue to Wave 5 (Translation.lean + named-variable corollaries in
-   `Substitution.lean`). -/
+Option C is the principled fix — positional consumption is the root
+cause and redesigning around it eliminates the class of problems
+rather than patching one instance. It's a Phase 1 change though.
+
+For an interim Phase 2 fix, Option A (relational) is smaller and
+lets the downstream corollary rewrites in Substitution.lean proceed
+with a minor extra step (destructuring the existential).
+
+### Next-wave deliverables
+
+1. Pick Option A, B, or C (user decision).
+2. Rewrite the theorem statements above accordingly.
+3. Close both by mutual induction on HasTypeDB / ClausesTypedDB.
+4. Continue to Wave 5+ (Translation.lean + named-variable corollary
+   rewrites in `Substitution.lean`). -/
 
 end LaCaDiLE
