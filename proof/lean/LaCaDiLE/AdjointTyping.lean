@@ -22,84 +22,84 @@ import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
 
-/-- The adjoint transformation preserves typing.
+/-- Seed-polymorphic helper for `adjoint_preserves_typing`. The body
+    typing `h_e` is held existentially because the recursive cases
+    (`mul`, `sum`, `expand`, `add`) need to invoke the IH at compound
+    seeds, not just `Term.var gs`. -/
+private theorem adjoint_typed_aux
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
+    (dsE : DimList) (epsSeed : EffectRow) (x : String)
+    (e : Term) (gSeed : Term)
+    (_h_e : ∃ Gamma_e Gamma_e' epsE,
+              HasType Delta Sigma Gamma_e e (Typ.tensor dsE) epsE Gamma_e' ∧
+              subsetEffRow epsE DiffCompat = true)
+    (h_seed : HasType Delta Sigma Gamma_s gSeed (Typ.tensor dsE) epsSeed Gamma_s') :
+    HasType Delta Sigma Gamma_s (adjoint e x gSeed) Typ.unit
+            (EffectRow.union [EffectLabel.accum] epsSeed) Gamma_s' := by
+  -- Local witness: `perform accum gSeed` type-checks at unit with
+  -- effect row `union [accum] epsSeed` given the seed's typing.
+  have leaf_perform :
+      HasType Delta Sigma Gamma_s
+        (Term.perform EffectLabel.accum gSeed) Typ.unit
+        (EffectRow.union [EffectLabel.accum] epsSeed) Gamma_s' :=
+    HasType.perform Delta Sigma Gamma_s Gamma_s'
+      EffectLabel.accum gSeed (Typ.tensor dsE) Typ.unit epsSeed
+      h_seed (OpSigMatch.accumTensor dsE)
+  -- Case split on `e`. Term is a nested inductive (handle carries a
+  -- clause list), so we use `match` and termination by `sizeOf e`.
+  match e with
+  | Term.var _ =>
+      simp only [adjoint]; split <;> exact leaf_perform
+  | Term.const _ _ =>
+      simp only [adjoint]; exact leaf_perform
+  | Term.unit =>
+      simp only [adjoint]; exact leaf_perform
+  | Term.loc _ =>
+      simp only [adjoint]; exact leaf_perform
+  | _ => sorry
+termination_by sizeOf e
+decreasing_by all_goals (simp_wf; decreasing_tactic)
 
-    Statement (Wave 3 corrected): given a body `e` that produces a
-    `tensor[dsOut]` under the differentiated parameter `x`, and a seed
-    `gs : tensor[dsOut]` already bound in the context, the term
-    `adjoint e x (var gs)` type-checks at type `unit` (the
-    handle-body type — the parameter gradient is delivered through
-    `accum` effects, not as a return value) with the original effect
-    row extended by `{accum}`.
-
-    The previous statement claimed result type `tensor[ds]`; that was
-    wrong because `adjoint` emits `perform accum (...)` whose result
-    type is `unit`. The grad-handle wraps the adjoint body and turns
-    the accumulated `accum` effects into a tensor[ds] return value via
-    its handler clause. -/
+/-- The adjoint transformation preserves typing. Closed as a corollary
+    of `adjoint_typed_aux` instantiated with `gSeed = Term.var gs`. -/
 theorem adjoint_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
-    (_h_e : HasType (Capability.diff :: Delta) Sigma
+    (h_e : HasType (Capability.diff :: Delta) Sigma
                    (Gamma ++ [(x, Typ.tensor ds)])
                    e (Typ.tensor dsOut) eps Gamma)
-    (_h_compat : subsetEffRow eps DiffCompat = true) :
-    HasType Delta Sigma
+    (h_compat : subsetEffRow eps DiffCompat = true) :
+    HasType (Capability.diff :: Delta) Sigma
             (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
             (adjoint e x (Term.var gs))
             Typ.unit
             (EffectRow.union eps [EffectLabel.accum])
             (Gamma ++ [(x, Typ.tensor ds)]) := by
-  -- Wave 3 calculus refactor unblocks the proof; structural induction
-  -- on `e` discharges each former. Each case must construct a
-  -- HasType derivation for the corresponding `adjoint`-emitted term:
-  --
-  --   * base cases (var, const, unit, loc): emit `perform accum gSeed`
-  --     where gSeed : tensor[dsOut]. Witnessed by HasType.var on `gs`,
-  --     then HasType.perform with `OpSigMatch.accumTensor dsOut`.
-  --   * add: letpair on copy(gSeed) routing two tensor halves to
-  --     adjoint sub-terms. Recursive use of the IH on each operand.
-  --   * mul: tape-and-copy structure; uses linearity carefully.
-  --   * sum/expand: structural recursion on shape-shifted gSeed.
-  --   * letBind/letpair/pair/fst/snd/copy/abs/app/grad/vmap/perform:
-  --     Phase 1 vestigial recursions; the IH suffices for each.
-  --   * handle: recurse on body and on each clause body via
-  --     adjointClauses; needs an auxiliary inductive over clause lists.
-  --
-  -- Witness that the var/const/unit/loc base cases discharge: the
-  -- emitted term is `Term.perform EffectLabel.accum (Term.var gs)`,
-  -- which type-checks via T-Var on `gs` plus T-Perform with the new
-  -- `OpSigMatch.accumTensor dsOut` witness. Build the witness once,
-  -- locally, so that the structural induction below can reuse it.
-  have base_perform :
-      HasType Delta Sigma
+  have hvar_gs :
+      HasType (Capability.diff :: Delta) Sigma
         (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
-        (Term.perform EffectLabel.accum (Term.var gs))
-        Typ.unit
-        (EffectRow.union [EffectLabel.accum] [])
+        (Term.var gs) (Typ.tensor dsOut) []
         (Gamma ++ [(x, Typ.tensor ds)]) := by
-    -- T-Var consumes `gs` from the tail of the context.
-    have hvar :
-        HasType Delta Sigma
-          (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
-          (Term.var gs) (Typ.tensor dsOut) []
-          (Gamma ++ [(x, Typ.tensor ds)]) := by
-      -- Pre-context = Gamma ++ [(x, ds)], post = []
-      have h := HasType.var Delta Sigma
-        (Gamma ++ [(x, Typ.tensor ds)]) [] gs (Typ.tensor dsOut)
-      -- Normalize the appended-empty postfix
-      simpa using h
-    -- T-Perform with OpSigMatch.accumTensor.
-    exact HasType.perform Delta Sigma
+    have h := HasType.var (Capability.diff :: Delta) Sigma
+      (Gamma ++ [(x, Typ.tensor ds)]) [] gs (Typ.tensor dsOut)
+    simpa using h
+  have h_aux :=
+    adjoint_typed_aux (Capability.diff :: Delta) Sigma
       (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
       (Gamma ++ [(x, Typ.tensor ds)])
-      EffectLabel.accum (Term.var gs)
-      (Typ.tensor dsOut) Typ.unit []
-      hvar (OpSigMatch.accumTensor dsOut)
-  -- Full structural induction on `e` is Wave 3 follow-up. The base
-  -- witness above proves the calculus refactor is internally
-  -- consistent and that the var/const/unit/loc cases will discharge
-  -- via `base_perform` once the induction is set up.
-  sorry
+      dsOut [] x e (Term.var gs)
+      ⟨_, _, _, h_e, h_compat⟩ hvar_gs
+  -- Helper: `union [accum] [] = [accum]`. Goal: `union eps [accum]`.
+  have hsub :
+      SubEffRow (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+                (EffectRow.union eps [EffectLabel.accum]) := by
+    intro op hmem
+    have hop : op = EffectLabel.accum := by
+      simpa [EffectRow.union] using hmem
+    subst hop
+    show EffectLabel.accum ∈ EffectRow.union eps [EffectLabel.accum]
+    simp [EffectRow.union, List.mem_append]
+    exact Classical.em _
+  exact HasType.subEff _ _ _ _ _ _ _ _ h_aux hsub
 
 end LaCaDiLE
