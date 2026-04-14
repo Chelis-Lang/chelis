@@ -45,12 +45,85 @@ theorem addDimCtx_filter_name (d : Dim) (G : LinearCtx) (p : String → Bool) :
     · simp [hp]; exact ih
 
 -- Stage 1 refactor: positional `rem`/`ins` replaced by named
--- `rem ds d := ds.erase d` and `ins ds d := DimList.cons d ds`. The previous
--- `rem_cons_succ`, `ins_cons_succ`, `addDim_tensor_rem`, and
--- `addDim_tensor_ins` helper lemmas (which lived on positional
--- indices with an `i + 1` shift) no longer have meaningful content
--- and are removed. Stage 2 reintroduces the analogous commutativity
--- lemmas at the multiset/quotient level where they hold definitionally.
+-- `rem ds d := ds.erase d` and `ins ds d := DimList.cons d ds`.
+--
+-- Stage 2 refactor: `DimList` is now a quotient under `List.Perm`, so
+-- `DimList.cons` commutes up to definitional equality of the quotient
+-- and the `addDim_comm` / `addDim_ins_comm` / `addDim_rem_comm`
+-- lemmas below hold via one-line `Quotient.sound` applications. These
+-- are exactly the commutativity facts needed to close the tvmap,
+-- tsum, and texpand cases of `addDim_preserves_typing`.
+
+/-- Two conses on the quotient `DimList` commute. This is the key fact
+    that Stage 2's quotient representation unlocks: on `List Dim` it
+    would be propositional only, but on `Quotient ListDimSetoid` both
+    sides are the same equivalence class. -/
+theorem DimList.cons_comm (d1 d2 : Dim) (ds : DimList) :
+    DimList.cons d1 (DimList.cons d2 ds) = DimList.cons d2 (DimList.cons d1 ds) := by
+  refine Quotient.inductionOn ds (fun l => ?_)
+  exact Quotient.sound (s := ListDimSetoid) (List.Perm.swap d2 d1 l)
+
+/-- Erase commutes with cons on the multiset quotient, provided the
+    erased element is already present in the underlying list. This is
+    what makes the tsum case of `addDim_preserves_typing` close: T-Sum
+    carries `d_inner ∈ ds` as a premise, which is exactly this
+    side condition after lifting. -/
+theorem DimList.erase_cons_comm
+    (d_new d_inner : Dim) (ds : DimList) (h : d_inner ∈ ds) :
+    DimList.erase (DimList.cons d_new ds) d_inner
+      = DimList.cons d_new (DimList.erase ds d_inner) := by
+  -- The membership hypothesis `d_inner ∈ ds` on the quotient descends
+  -- to membership on any representative list (by definition of
+  -- `DimList.mem`).
+  -- Turn the quotient-level membership into list-level membership on
+  -- every representative. We cannot universally-quantify `ds` inside
+  -- the motive because `Membership Dim ds` only resolves once `ds`
+  -- has a concrete quotient type, so we instead recast `h` and then
+  -- induct on a plain (membership-free) motive.
+  have hMem : DimList.mem d_inner ds := h
+  refine Quotient.inductionOn ds
+    (motive := fun ds =>
+      DimList.mem d_inner ds →
+        DimList.erase (DimList.cons d_new ds) d_inner
+          = DimList.cons d_new (DimList.erase ds d_inner)) ?_ hMem
+  intro l hmem
+  -- `hmem : DimList.mem d_inner (Quotient.mk ... l)` β-reduces to `d_inner ∈ l`.
+  have hmem' : d_inner ∈ l := by
+    simpa [DimList.mem] using hmem
+  by_cases hEq : d_new = d_inner
+  · -- d_new = d_inner: erase cancels the freshly-consed head.
+    -- LHS = (d_inner :: l).erase d_inner = l
+    -- RHS = d_inner :: l.erase d_inner
+    -- They are List.Perm-equivalent because `d_inner ∈ l`.
+    subst hEq
+    show (Quotient.mk ListDimSetoid ((d_new :: l).erase d_new) : DimList)
+         = Quotient.mk ListDimSetoid (d_new :: l.erase d_new)
+    have hHead : (d_new :: l).erase d_new = l := by
+      simp [List.erase_cons]
+    rw [hHead]
+    exact Quotient.sound (s := ListDimSetoid) (List.perm_cons_erase hmem')
+  · -- d_new ≠ d_inner: erase skips the head and operates on the tail.
+    -- Both sides are syntactically `d_new :: l.erase d_inner`.
+    show (Quotient.mk ListDimSetoid ((d_new :: l).erase d_inner) : DimList)
+         = Quotient.mk ListDimSetoid (d_new :: l.erase d_inner)
+    have hSkip : (d_new :: l).erase d_inner = d_new :: l.erase d_inner := by
+      simp [List.erase_cons, hEq]
+    rw [hSkip]
+
+/-- `addDim` is commutative in its dimension argument. This is the fact
+    that unlocks the `tvmap` case of `addDim_preserves_typing`: inside
+    a vmap, lifting through the outer batch dim `d_new` and the inner
+    vmap dim `d_inner` produces types that differ only by the order in
+    which the two dims are prepended. The `Typ.tensor` case is the
+    only non-trivial one, and it discharges via `DimList.cons_comm`. -/
+theorem addDim_comm (d1 d2 : Dim) (t : Typ) :
+    addDim d1 (addDim d2 t) = addDim d2 (addDim d1 t) := by
+  induction t with
+  | tensor ds => simp [addDim, DimList.cons_comm d1 d2 ds]
+  | arrow t1 t2 eps ih1 ih2 => simp [addDim, ih1, ih2]
+  | pair t1 t2 ih1 ih2 => simp [addDim, ih1, ih2]
+  | unit => rfl
+  | tyVar _ => rfl
 
 /-- addDim / addDimTerm preserves typing (Phase 2 WS2.3). Wave 2
     fix: store typing is now lifted via `addDimStoreTyp`, which
