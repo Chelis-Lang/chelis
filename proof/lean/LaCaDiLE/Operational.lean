@@ -136,6 +136,29 @@ def plug : EvalCtx → Term → Term
   | EvalCtx.handle epsH clauses, e => Term.handle epsH e clauses
   | EvalCtx.perform op, e          => Term.perform op e
 
+/-! ### Multi-frame evaluation context chains (Wave 1 P2)
+
+A single `EvalCtx` is a one-hole context of depth one. But the
+handle-op rule needs to reach a `perform` sitting under an arbitrary
+*stack* of frames, e.g.
+`letBind x (letBind y (perform op unit) unit) unit`, whose hole sits
+two `letBind` frames deep. An `EvalCtxChain` is a list of frames,
+composed outside-in, so that
+
+    multiPlug [E1, E2, E3] e = plug E1 (plug E2 (plug E3 e))
+
+`Es.noHandleFor op` holds iff every frame in the chain is not a
+`handle` catching `op`. This lets the new `Step.handleOpCtxs` rule
+match `handle epsH (multiPlug Es (perform op v)) clauses` in full
+generality while still keeping the handler-shadowing condition. -/
+
+abbrev EvalCtxChain := List EvalCtx
+
+/-- Fold `plug` through a chain of evaluation-context frames. -/
+def multiPlug : EvalCtxChain → Term → Term
+  | [],      e => e
+  | E :: Es, e => plug E (multiPlug Es e)
+
 /-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
     context `E` is not itself a `handle` whose effect row catches `op`.
     Because `EvalCtx` is a one-step (non-recursive) context, this is a
@@ -145,6 +168,12 @@ def plug : EvalCtx → Term → Term
 def EvalCtx.noHandleFor (op : EffectLabel) : EvalCtx → Prop
   | EvalCtx.handle epsH _ => op ∉ epsH
   | _                     => True
+
+/-- Every frame in the chain has `noHandleFor op`. Recursively folded
+    over the list; the empty chain trivially satisfies the predicate. -/
+def EvalCtxChain.noHandleFor (op : EffectLabel) : EvalCtxChain → Prop
+  | []      => True
+  | E :: Es => EvalCtx.noHandleFor op E ∧ EvalCtxChain.noHandleFor op Es
 
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
@@ -331,6 +360,47 @@ inductive Step : Config → Config → Prop
                   (Term.abs "_kArg" tRet
                     (Term.handle epsH
                       (plug E (Term.var "_kArg")) clauses)) kVar⟩
+
+  -- E-Handle-Op (multi-frame captured-context form, Wave 1 P2).
+  --
+  -- Generalizes `handleOpCtx` from a one-frame `EvalCtx` to a chain
+  -- of frames `Es : EvalCtxChain`, so `perform op v` can sit at
+  -- arbitrary depth under the handle body. The `Es.noHandleFor op`
+  -- premise demands that no intervening frame is itself a `handle`
+  -- catching `op`, which is required for the reduction to be the
+  -- innermost matching handler.
+  --
+  -- Counterexample this rule unblocks (informal trace):
+  --   handle [op]
+  --     (letBind x (letBind y (perform op unit) unit) unit)
+  --     [(op, p, k, var p)]
+  --
+  -- Take `Es = [EvalCtx.letBind x unit, EvalCtx.letBind y unit]`,
+  -- `v = unit`. Then
+  --   multiPlug Es (perform op unit)
+  --     = plug (letBind x unit) (plug (letBind y unit) (perform op unit))
+  --     = plug (letBind x unit) (letBind y (perform op unit) unit)
+  --     = letBind x (letBind y (perform op unit) unit) unit
+  -- which matches the redex shape, so the handler clause body `var p`
+  -- is reached with `p ↦ unit`. Single-frame `handleOpCtx` cannot
+  -- match this term because its `E` would have to contain another
+  -- compound `letBind` inside the hole.
+  | handleOpCtxs
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (Es : EvalCtxChain)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ) :
+      IsValue v →
+      (op, xVar, kVar, hb) ∈ clauses →
+      op ∈ epsH →
+      EvalCtxChain.noHandleFor op Es →
+      Step ⟨sigma,
+            Term.handle epsH (multiPlug Es (Term.perform op v)) clauses⟩
+           ⟨sigma,
+            subst (subst hb v xVar)
+                  (Term.abs "_kArg" tRet
+                    (Term.handle epsH
+                      (multiPlug Es (Term.var "_kArg")) clauses)) kVar⟩
 
   /- ## AD and vectorization transforms -/
 

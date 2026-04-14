@@ -30,6 +30,7 @@ private theorem linearity_soundness_aux
   | handleRet => exact ⟨Sigma, h_wf⟩
   | handleOpDirect => exact ⟨Sigma, h_wf⟩
   | handleOpCtx => exact ⟨Sigma, h_wf⟩
+  | handleOpCtxs => exact ⟨Sigma, h_wf⟩
   | tgrad => exact ⟨Sigma, h_wf⟩
   | tvmap => exact ⟨Sigma, h_wf⟩
   | tconst s v ds ell hell =>

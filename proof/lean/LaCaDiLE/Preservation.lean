@@ -621,6 +621,13 @@ theorem preservation
       -- lemma for the captured evaluation context `E`. Grouped with
       -- the existing preservation omnibus sorry (header line 392).
       sorry
+  | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hmem hop hEs =>
+      -- TODO Wave 2: multi-frame captured-context handle-op case
+      -- (Wave 1 P2). Needs `subst_preserves_typing` plus a
+      -- `multiPlug`-typing inversion lemma for the chain `Es`,
+      -- which iterates the single-frame `plug` typing inversion.
+      -- Grouped under the existing preservation omnibus sorry.
+      sorry
   | tgrad s x tv tOut body =>
       -- TODO Wave 2: needs adjoint_preserves_typing (AdjointTyping.lean)
       sorry
