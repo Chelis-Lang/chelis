@@ -449,12 +449,91 @@ fn cmd_check(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Recursively walks a Surf `Expr` looking for any `with seed(...) { ... }`
+/// form. The C and HIP backends do not currently plumb the user-provided
+/// seed into the emitted runtime, so any program containing `with seed`
+/// must be rejected with a hard error rather than silently dropped.
+fn expr_contains_with_seed(expr: &chelis_surf::ast::Expr) -> bool {
+    use chelis_surf::ast::Expr;
+    match expr {
+        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Constructor(_, _) => false,
+        Expr::Apply(f, args, _) => {
+            expr_contains_with_seed(f) || args.iter().any(expr_contains_with_seed)
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+            items.iter().any(expr_contains_with_seed)
+        }
+        Expr::Record(_, fields, _) => fields.iter().any(|(_, e)| expr_contains_with_seed(e)),
+        Expr::Access(e, _, _)
+        | Expr::TupleGet(e, _, _)
+        | Expr::Unary(_, e, _)
+        | Expr::Cast(e, _, _)
+        | Expr::Grad(e, _, _)
+        | Expr::Vmap(e, _, _)
+        | Expr::Jit(e, _)
+        | Expr::Realize(e, _)
+        | Expr::Copy(e, _)
+        | Expr::Borrow(e, _)
+        | Expr::Annotate(e, _, _) => expr_contains_with_seed(e),
+        Expr::Binary(_, l, r, _) => expr_contains_with_seed(l) || expr_contains_with_seed(r),
+        Expr::Pipe(head, tail, _) => {
+            expr_contains_with_seed(head) || tail.iter().any(expr_contains_with_seed)
+        }
+        Expr::If(c, t, e, _) => {
+            expr_contains_with_seed(c) || expr_contains_with_seed(t) || expr_contains_with_seed(e)
+        }
+        Expr::Match(scrut, arms, _) => {
+            expr_contains_with_seed(scrut)
+                || arms.iter().any(|arm| expr_contains_with_seed(&arm.body))
+        }
+        Expr::Lambda(_, body, _) => expr_contains_with_seed(body),
+        Expr::WithSeed(_, _, _) => true,
+        Expr::WithDevice(_, body, _) => expr_contains_with_seed(body),
+        Expr::Block(bindings, tail, _) => {
+            bindings.iter().any(|b| expr_contains_with_seed(&b.value))
+                || expr_contains_with_seed(tail)
+        }
+    }
+}
+
+fn decls_contain_with_seed(decls: &[Decl]) -> bool {
+    decls.iter().any(|decl| match decl {
+        Decl::Module { decls, .. } => decls_contain_with_seed(decls),
+        Decl::FunDef { body, .. } => expr_contains_with_seed(body),
+        Decl::LetDef { value, .. } => expr_contains_with_seed(value),
+        Decl::MacroDef { body, .. } => expr_contains_with_seed(body),
+        Decl::Import { .. }
+        | Decl::Sig { .. }
+        | Decl::Dim { .. }
+        | Decl::TypeDef { .. }
+        | Decl::TypeAlias { .. }
+        | Decl::Export { .. } => false,
+    })
+}
+
+fn reject_with_seed_for_build_target(
+    decls: &[Decl],
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if decls_contain_with_seed(decls) {
+        return Err(format!(
+            "`chelis build --target {target}` does not yet plumb `with seed(...)` into the generated runtime; \
+             rejecting rather than silently dropping the seed. Track at \
+             spec/design/chelis_phase3_plan.md §3j-pre Acknowledged Limitations \
+             (Batch 7b: C/HIP backends drop `with seed`). Run the seeded program through `chelis eval` instead."
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (decls, entry_decls) = load_check_build_decls(file)?;
+    reject_with_seed_for_build_target(&decls, target)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);

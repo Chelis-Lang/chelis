@@ -909,46 +909,51 @@ compiler binary that downstream shells (Nautilus, Coral) can pin via
 `compiler = "=0.1.0"` in their `reef.toml`. See
 `spec/design/phase3j_pre_release.md` for the full release contract.
 
-  - **Acknowledged limitations (3j-pre Batch 5 oracle):**
-    - The original plan called for "build + gcc + run + verify against
-      PyTorch reference within tolerance". On the current compiler the
-      `chelis build --target c` path is broken across **every new 3j-pre
-      surface item** that was probed at oracle authoring time:
-      - `Std.Nn.RmsNorm.forward` (rank-1 wrapper): C backend emits an
-        empty dim-variable name (`int * = inputs[0]->shape[0];`) and the
-        generated C does not compile.
-      - `Std.Nn.Gelu.forward` (rank-1 wrapper): the program compiles
-        but the compiled binary prints `-nan` for every output, even for
-        positive inputs whose `eval` value is finite. The
-        `to_tensor(map(scalar_fn, to_list(...)))` lowering for the
-        scalar GELU path is unsound in the C backend.
-      - `Std.Init.Kaiming.kaiming_uniform`: compiles, but the runtime
-        seeded-Random handler returns `()` instead of a tensor in the
-        C backend, so the result is not numerically usable.
-      - `Std.Tensor.Reduce.{min, prod, argmax, argmin}` wrappers:
-        **(fixed in Batch 5b.)** The host-lane lowerer now force-routes
-        pure-tensor wrapper function bodies through the tensor-helper
-        path using the declared return type, so pure-tensor wrapper
-        defs (including the four reduction wrappers plus the previously
-        also-broken `Std.Nn.Linear.forward` pure-tensor path) emit a
-        real C function definition and link successfully.
-      - `Std.Nn.Attention.scaled_dot_product_attention` and friends:
-        importing the module pulls in two duplicated definitions of
-        `chelis_uniform_sample_f32` into the generated `main.c`,
-        which fails to compile. (Independent of the
-        `matmul`/`softmax`/`permute`/`expand` host-runtime gap that
-        already blocks `chelis eval` on the attention path.)
-    - The Batch 5 oracle therefore verifies what *is* reachable from
-      the CLI today: `chelis check` parity + `chelis eval` exact
-      reference values for the rank-1 rms_scale / gelu_scalar /
-      Kaiming init paths, plus an importability touch for SDPA so
-      adding a name to `Std.Nn.Attention` cannot silently break the
-      consumer surface. Each broken `chelis build` path is pinned by
-      a documented `#[ignore]`-marked reproduction test in
-      `crates/chelis-cli/tests/phase3j_pre_std.rs` so the failure
-      modes do not silently bit-rot — when any of them turns green
-      the ignore should be removed and the oracle should be
-      promoted to the build+gcc+run shape.
+  - **Acknowledged limitations (3j-pre, current state after Batch 7b):**
+    - **Fixed in Batches 5b and 7b** (now exercised end-to-end through
+      `chelis build --target c` + gcc-link + run with byte-exact stdout
+      assertions in `crates/chelis-cli/tests/phase3j_pre_std.rs`, none
+      of which are `#[ignore]`d):
+      - `Std.Nn.RmsNorm.forward` (rank-1 wrapper) — Batch 5b restored
+        the dim-variable emission and the host-lane wrapper pathway.
+      - `Std.Nn.Gelu.forward` (rank-1 wrapper) — Batch 5b fixed the
+        scalar-fn lowering through `to_tensor(map(scalar_fn,
+        to_list(...)))`.
+      - `Std.Tensor.Reduce.{min, prod, argmax, argmin}` wrappers — the
+        host-lane lowerer force-routes pure-tensor wrapper function
+        bodies through the tensor-helper path using the declared return
+        type, so the four reduction wrappers (and `Std.Nn.Linear.forward`)
+        emit real C definitions and link cleanly.
+      - `Std.Nn.Attention.scaled_dot_product_attention` import — Batch
+        5b removed the duplicate `chelis_uniform_sample_f32` emission
+        so a downstream package can import the symbol and build a
+        program that touches it through the C backend. The numeric
+        attention math itself is still deferred (see below).
+    - **Hard-errored in Batch 7b** (no silent drop): `chelis build
+      --target c|hip` rejects any program that contains
+      `with seed(...)` with the diagnostic `does not yet plumb
+      \`with seed(...)\` into the generated runtime`. The C and HIP
+      backends do not yet plumb the user-provided seed into the
+      generated runtime, and Batch 7b chose to fail loudly rather than
+      silently honor a default seed. Seeded random programs still run
+      under `chelis eval`, where the host runtime honors the seed.
+      Plumbing the seed through the C/HIP emitters is tracked as a
+      Phase 3j (Nautilus) follow-up.
+    - **Still deferred to Phase 3j (Nautilus):**
+      - Numeric verification of `Std.Nn.Attention.scaled_dot_product_attention`,
+        `multi_head_attention`, `grouped_query_attention`, and
+        `gqa_broadcast_kv` — still blocked by the host-runtime
+        `matmul`/`softmax`/`permute`/`expand` gap on the attention
+        path. The Batch 3b wrappers ship as type-check + importability
+        only at the std layer; consumers cannot yet run them
+        numerically.
+      - Numeric verification of `Std.Nn.Conv.conv1d` and `conv2d_small`.
+        Batch 3b ships these as type-check-only wrappers; the executable
+        numeric oracle is owed to Phase 3j.
+      - `argmax`/`argmin` index precision above 2^24: the F32 index
+        path silently saturates above 2^24 elements per axis. Tracked
+        for a Phase 3j fix; until then, callers should keep reduction
+        axes well below 16M elements.
     - The `grad` non-differentiability negative test is enforced at
       the IR layer (`crates/chelis-ir/src/grad.rs::adv_argmax_on_grad_path_errors_cleanly`,
       `adv_argmin_on_grad_path_errors_cleanly`). The package-mode
