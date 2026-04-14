@@ -157,12 +157,44 @@ reasoning; Wave 2 will discharge it alongside the substitution work. -/
 theorem StoreWf.extend_fresh
     {sigma : Store} {Sigma : StoreTyp}
     (ell : Loc) (w : TensorVal) (t : Typ)
-    (_h_wf : StoreWf sigma Sigma)
+    (h_wf : StoreWf sigma Sigma)
     (_h_fresh : ell = storeFreshLoc sigma) :
     StoreWf (storeExtend sigma ell w) (storeTypExtend Sigma ell t) := by
-  -- TODO Wave 2: `List.find?`/`Option.map` level reasoning over
-  -- `storeFreshLoc`. Two sub-goals symmetric up to Option.isSome bridging.
-  sorry
+  refine ⟨?_, ?_⟩
+  · intro ell' hell'
+    simp only [storeTypDom, storeTypExtend, List.map_cons,
+               List.mem_cons] at hell'
+    rcases hell' with hEq | hOld
+    · -- ell' = ell: the extended store contains (ell, w).
+      rw [hEq]
+      show (storeLookup ((ell, w) :: sigma) ell).isSome
+      simp [storeLookup, List.find?]
+    · -- ell' is in Sigma's existing domain.
+      have hOldLive : (storeLookup sigma ell').isSome := by
+        apply h_wf.1
+        simpa [storeTypDom] using hOld
+      show (storeLookup ((ell, w) :: sigma) ell').isSome
+      by_cases hell'eq : ell' = ell
+      · subst hell'eq
+        simp [storeLookup, List.find?]
+      · have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
+        simp only [storeLookup, storeExtend, List.find?, hne,
+                   decide_false, Bool.false_eq_true, ite_false]
+        exact hOldLive
+  · intro ell' hell'
+    show ell' ∈ storeTypDom (storeTypExtend Sigma ell t)
+    simp only [storeTypDom, storeTypExtend, List.map_cons, List.mem_cons]
+    by_cases hell'eq : ell' = ell
+    · left; exact hell'eq
+    · right
+      have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
+      have hSigmaLive : (storeLookup sigma ell').isSome := by
+        have : (storeLookup ((ell, w) :: sigma) ell').isSome := hell'
+        simp only [storeLookup, storeExtend, List.find?, hne,
+                   decide_false, Bool.false_eq_true, ite_false] at this
+        exact this
+      have := h_wf.2 ell' hSigmaLive
+      simpa [storeTypDom] using this
 
 theorem storeTypLookup_extend_other
     (Sigma : StoreTyp) (ell ellNew : Loc) (t t' : Typ)
@@ -179,6 +211,25 @@ theorem storeTypLookup_extend_self
     (Sigma : StoreTyp) (ell : Loc) (t : Typ) :
     storeTypLookup (storeTypExtend Sigma ell t) ell = some t := by
   simp [storeTypLookup, storeTypExtend]
+
+/-- Remove-then-extend for single-location-consume Steps (tsum,
+    texpand, tuniformLike). Removing a live location and extending with
+    a fresh one produces a new well-formed store/store-typing pair.
+    Like `extend_fresh`, this tracks domain membership only — type
+    matching is tightened by Wave 5 LinearityInvariant work.
+
+    Wave 2 TODO: fill in this proof. The shape is symmetric to
+    `extend_fresh` but needs a `storeLookup_remove` side lemma
+    showing removal of `ellIn ≠ ell'` preserves lookup. -/
+theorem StoreWf.remove_extend
+    {sigma : Store} {Sigma : StoreTyp}
+    (ellIn ellOut : Loc) (w : TensorVal) (tOut : Typ)
+    (_h_wf : StoreWf sigma Sigma)
+    (_h_fresh : ellOut = storeFreshLoc sigma)
+    (_h_ne : ellIn ≠ ellOut) :
+    StoreWf (storeExtend (storeRemove sigma ellIn) ellOut w)
+            (storeTypExtend (storeTypRemove Sigma ellIn) ellOut tOut) := by
+  sorry
 
 theorem HasType.handle_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}

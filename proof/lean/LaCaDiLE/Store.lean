@@ -44,6 +44,12 @@ def LinearityInvariant (_sigma : Store) (_Sigma : StoreTyp)
 def storeTypExtend (Sigma : StoreTyp) (ell : Loc) (t : Typ) : StoreTyp :=
   (ell, t) :: Sigma
 
+/-- Remove a location from a store typing. Companion to `storeRemove`
+    on the runtime side. Used by Preservation on Step rules that
+    consume a location (tadd, tmul, tsum, texpand, tuniformLike). -/
+def storeTypRemove (Sigma : StoreTyp) (ell : Loc) : StoreTyp :=
+  Sigma.filter (fun p => p.1 ≠ ell)
+
 /-- `StoreTyp` sub-typing: `Sigma ⊑ Sigma'` iff every location typed
     in `Sigma` is typed to the same type in `Sigma'`. Used to state
     Preservation's store-monotonicity conclusion. -/
