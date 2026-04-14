@@ -121,10 +121,15 @@ theorem addDim_preserves_typing
             = (addDimCtx d Gamma3).filter (fun p => p.1 ≠ x) :=
       (addDimCtx_filter_name d Gamma3 (fun y => decide (y ≠ x))).symm
     rw [hf]; exact key
-  | copy Delta Sigma Gamma1 Gamma2 e t eps _h ih =>
-    simp [addDimTerm, addDim]
-    exact HasType.copy Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimTerm d e) (addDim d t) eps ih
+  | copy Delta Sigma Gamma1 Gamma2 e ds eps _h ih =>
+    -- Wave 3: T-Copy now takes DimList; addDim prepends `d`.
+    simp only [addDimTerm, addDim]
+    have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1)
+                 (addDimTerm d e) (Typ.tensor (d :: ds)) eps (addDimCtx d Gamma2) := by
+      simpa [addDim] using ih
+    exact HasType.copy Delta (addDimStoreTyp d Sigma)
+      (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+      (addDimTerm d e) (d :: ds) eps ih'
   | letpair Delta Sigma Gamma1 Gamma2 Gamma3 x y e1 e2 t1 t2 t eps1 eps2 _h1 _h2 ih1 ih2 =>
     simp only [addDimTerm]
     have ih1' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e1)

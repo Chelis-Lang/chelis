@@ -103,14 +103,22 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
               (Gamma3.filter (fun p => p.1 ≠ x))
 
   -- T-Copy.
-  -- Paper: Δ; Γ₁ ⊢ e : τ ! ε ⊣ Γ₂
-  --        ────────────────────────────────
-  --        Δ; Γ₁ ⊢ copy(e) : τ ⊗ τ ! ε ⊣ Γ₂
+  -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂
+  --        ───────────────────────────────────────────────────
+  --        Δ; Γ₁ ⊢ copy(e) : tensor[d̄] ⊗ tensor[d̄] ! ε ⊣ Γ₂
+  --
+  -- Wave 3 restriction: T-Copy is now tensor-only (Phase 1 had it
+  -- polymorphic, but the runtime Step.copy rule only fires on loc
+  -- values, and only tensor values are represented as locs. The
+  -- polymorphic form made Progress's copy case unprovable because
+  -- copy of an abs/unit/pair value would be stuck. Restricting to
+  -- tensors aligns the typing rule with the operational semantics.)
   | copy
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
-      (e : Term) (t : Typ) (eps : EffectRow) :
-      HasType Delta Sigma Gamma1 e t eps Gamma2 →
-      HasType Delta Sigma Gamma1 (Term.copy e) (Typ.pair t t) eps Gamma2
+      (e : Term) (ds : DimList) (eps : EffectRow) :
+      HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 →
+      HasType Delta Sigma Gamma1 (Term.copy e)
+              (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) eps Gamma2
 
   -- T-LetPair.
   -- Paper: Δ; Γ₁ ⊢ e₁ : τ₁ ⊗ τ₂ ! ε₁ ⊣ Γ₂

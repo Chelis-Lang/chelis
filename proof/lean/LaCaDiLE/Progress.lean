@@ -420,17 +420,21 @@ theorem progress_aux
           by simpa using
             Step.ctx sigma sigma' (EvalCtx.letBind x e2) e1 e1' hstep⟩
   | copy e1 =>
-      obtain ⟨t0, _hteq, h_inner⟩ := HasType.copy_inv h
-      rcases progress_aux sigma Sigma h_wf h_store_wf e1 t0 Gamma' eps h_inner with
+      -- Wave 3: T-Copy is now tensor-only, so copy_inv gives a ds.
+      -- canonical_forms_tensor applies and gives us a loc for e1.
+      obtain ⟨ds, _hteq, h_inner⟩ := HasType.copy_inv h
+      rcases progress_aux sigma Sigma h_wf h_store_wf e1
+               (Typ.tensor ds) Gamma' eps h_inner with
           hv | ⟨sigma', e1', hstep⟩
-      · -- e1 is a value; copy on a value of pair-of-t0-t0 type. The
-        -- reduction rule E-Copy only fires when the value is a loc,
-        -- so we additionally need t0 to be a tensor — which is not
-        -- guaranteed by T-Copy at this phase (copy is polymorphic in
-        -- the source grammar). Stuck as sorry until copy is restricted
-        -- to tensors or canonical-forms handles arbitrary types.
-        -- TODO Wave 3+.
-        sorry
+      · -- e1 is a value of tensor type, so by canonical_forms_tensor
+        -- it's a loc. Apply Step.copy.
+        obtain ⟨ell, hell_eq⟩ := canonical_forms_tensor h_inner hv
+        subst hell_eq
+        obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
+        obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
+        exact Or.inr ⟨storeExtend sigma (storeFreshLoc sigma) w,
+                      Term.pair (Term.loc ell) (Term.loc (storeFreshLoc sigma)),
+                      Step.copy sigma ell (storeFreshLoc sigma) w hw rfl⟩
       · exact Or.inr ⟨sigma', Term.copy e1',
           by simpa using Step.ctx sigma sigma' EvalCtx.copy e1 e1' hstep⟩
   | letpair x y e1 e2 =>

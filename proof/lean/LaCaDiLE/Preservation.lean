@@ -197,18 +197,18 @@ theorem HasType.copy_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.copy e) t eps Gamma2) :
-    ∃ t0, t = Typ.pair t0 t0 ∧
-          HasType Delta Sigma Gamma1 e t0 eps Gamma2 := by
+    ∃ ds, t = Typ.pair (Typ.tensor ds) (Typ.tensor ds) ∧
+          HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 := by
   generalize heq : Term.copy e = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | copy _ _ _ _ _ t0 _ h' _ =>
+  | copy _ _ _ _ _ ds _ h' _ =>
       cases heq
-      exact ⟨t0, rfl, h'⟩
+      exact ⟨ds, rfl, h'⟩
   | subEff Δ S Γ Γ' _ t' eps0 eps' _h_sub h_sub ih =>
-      obtain ⟨t0, hteq, h_inv⟩ := ih heq
-      refine ⟨t0, hteq, ?_⟩
-      exact HasType.subEff Δ S Γ Γ' e t0 eps0 eps' h_inv h_sub
+      obtain ⟨ds, hteq, h_inv⟩ := ih heq
+      refine ⟨ds, hteq, ?_⟩
+      exact HasType.subEff Δ S Γ Γ' e (Typ.tensor ds) eps0 eps' h_inv h_sub
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -420,41 +420,37 @@ theorem preservation
       · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
   | copy s ell ellNew w hlook hfresh =>
       -- E-Copy: copy(loc ell) ↦ pair (loc ell) (loc ellNew).
-      -- Both locs type at t0 under the extended Sigma. StoreWf as
-      -- defined tracks domain membership only, so we don't need
-      -- ell ≠ ellNew for well-formedness (the lookups remain isSome
-      -- in both directions regardless).
-      obtain ⟨t0, htEq, h_e⟩ := HasType.copy_inv h_typ
+      -- Wave 3 update: T-Copy now requires tensor type, so copy_inv
+      -- gives a DimList ds with the inner at tensor[ds].
+      obtain ⟨ds, htEq, h_e⟩ := HasType.copy_inv h_typ
       obtain ⟨hlookT, hGE⟩ := HasType.loc_inv h_e
-      refine ⟨storeTypExtend Sigma ellNew t0, ?_, ?_⟩
+      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor ds), ?_, ?_⟩
       · subst htEq
         subst hGE
-        -- Build `pair (loc ell) (loc ellNew)` at the empty effect row,
-        -- then widen to the outer eps via subEff.
-        have hlookSelf := storeTypLookup_extend_self Sigma ellNew t0
-        -- For ell ≠ ellNew, lookup falls through. For ell = ellNew,
-        -- lookup hits the new entry which is the same type t0.
+        have hlookSelf := storeTypLookup_extend_self Sigma ellNew (Typ.tensor ds)
         have hlookEll :
-            storeTypLookup (storeTypExtend Sigma ellNew t0) ell = some t0 := by
+            storeTypLookup (storeTypExtend Sigma ellNew (Typ.tensor ds)) ell
+              = some (Typ.tensor ds) := by
           by_cases hne : ell = ellNew
           · rw [hne]; exact hlookSelf
           · have hne' : ¬ (ellNew = ell) := fun he => hne he.symm
             simp only [storeTypLookup, storeTypExtend, List.find?,
                        hne', decide_false, Bool.false_eq_true, ite_false]
             simpa [storeTypLookup] using hlookT
-        have h_l1 : HasType [] (storeTypExtend Sigma ellNew t0) []
-                      (Term.loc ell) t0 [] [] :=
-          HasType.loc _ _ _ ell t0 hlookEll
-        have h_l2 : HasType [] (storeTypExtend Sigma ellNew t0) []
-                      (Term.loc ellNew) t0 [] [] :=
-          HasType.loc _ _ _ ellNew t0 hlookSelf
-        have h_pair : HasType [] (storeTypExtend Sigma ellNew t0) []
+        have h_l1 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
+                      (Term.loc ell) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ell (Typ.tensor ds) hlookEll
+        have h_l2 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
+                      (Term.loc ellNew) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ellNew (Typ.tensor ds) hlookSelf
+        have h_pair : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
                         (Term.pair (Term.loc ell) (Term.loc ellNew))
-                        (Typ.pair t0 t0) [] [] :=
-          HasType.tpair [] _ [] [] [] _ _ t0 t0 [] [] h_l1 h_l2
+                        (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) [] [] :=
+          HasType.tpair [] _ [] [] []
+            _ _ (Typ.tensor ds) (Typ.tensor ds) [] [] h_l1 h_l2
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
-      · exact StoreWf.extend_fresh ellNew w t0 h_wf
+      · exact StoreWf.extend_fresh ellNew w (Typ.tensor ds) h_wf
   | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
       obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
       obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
