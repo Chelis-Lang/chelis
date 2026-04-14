@@ -334,10 +334,10 @@ theorem addDim_preserves_typing
     -- the original SubEffRow proof to widen to eps' post-lifting.
     exact HasType.subEff Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma) (addDimCtx d Gamma')
       (addDimTerm d e) (addDim d t) eps eps' ih hsub
-  | nil Delta Sigma Gamma2 Gamma3 t epsR =>
+  | nil Delta Sigma Gamma2 t epsR =>
     simp [addDimClauses]
-    exact ClausesTyped.nil Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimCtx d Gamma3)
-      (addDim d t) epsR
+    exact ClausesTyped.nil Delta (addDimStoreTyp d Sigma)
+      (addDimCtx d Gamma2) (addDim d t) epsR
   | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest _hhb _hrest ihhb ihrest =>
     simp [addDimClauses]
     have ihhb' : HasType Delta (addDimStoreTyp d Sigma)

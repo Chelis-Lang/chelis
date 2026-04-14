@@ -51,7 +51,10 @@ theorem has_type_linear_shrinks
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
     ∀ x, x ∈ linearCtxDom Gamma' → x ∈ linearCtxDom Gamma := by
   induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+    (motive_2 := fun (_Δ : CapCtx) (_S : StoreTyp)
+                     (Γ2 Γ3 : LinearCtx) (_ : Typ) (_ : EffectRow)
+                     (_ : List (EffectLabel × String × String × Term))
+                     (_ : _) => DomSub Γ3 Γ2) with
   | var _ _ Γpre Γpost y t_v =>
       intro z hz
       -- z ∈ dom (Γpre ++ Γpost) → z ∈ dom (Γpre ++ [(y,t_v)] ++ Γpost)
@@ -127,19 +130,16 @@ theorem has_type_linear_shrinks
   | uniformLike _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
   | perform _De _Si _G1 _G2 _op _e _tA _tR _eps _h _hM ih =>
       intro z hz; exact ih z hz
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
-      -- ClausesTyped does not provide a context-shrinking IH, and
-      -- the empty-clauses case allows Γ3 ≠ Γ2 freely. Closing this
-      -- requires either tightening ClausesTyped.nil to force Γ2=Γ3
-      -- or proving a separate lemma that ClausesTyped's well-formed
-      -- clauses always shrink. Out of scope for this Progress edit.
-      sorry
+  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_body ih_clauses =>
+      -- body: DomSub Γ2 Γ1; clauses (motive_2): DomSub Γ3 Γ2
+      -- handle produces Γ1 → Γ3; compose transitively.
+      intro z hz; exact ih_body z (ih_clauses z hz)
   | tgrad _ _ _ _ _ _ _ _ _ _ _ => intro z hz; exact hz
   | tvmap _ _ _ _ _ _ _ _ _ _ => intro z hz; exact hz
   | loc _ _ _ _ _ _ => intro z hz; exact hz
   | subEff _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | nil _ _ _ _ _ _ => trivial
-  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => trivial
+  | nil _ _ _ _ _ => exact DomSub.refl _
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
 
 /-- Local helper: a well-typed value under a closed input context
     produces a closed output context. Follows directly from

@@ -336,9 +336,14 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
 inductive ClausesTyped :
     CapCtx → StoreTyp → LinearCtx → LinearCtx → Typ → EffectRow →
     List (EffectLabel × String × String × Term) → Prop
-  | nil (Delta : CapCtx) (Sigma : StoreTyp) (Gamma2 Gamma3 : LinearCtx)
+  -- Wave 3 fix: nil case now requires Γ2 = Γ3 so that
+  -- `has_type_linear_shrinks`'s ClausesTyped motive can discharge
+  -- the handle case via an inductive shrinkage argument. An empty
+  -- clause list has no binders, so the outer context threads through
+  -- unchanged.
+  | nil (Delta : CapCtx) (Sigma : StoreTyp) (Gamma2 : LinearCtx)
         (t : Typ) (epsR : EffectRow) :
-        ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR []
+        ClausesTyped Delta Sigma Gamma2 Gamma2 t epsR []
   | cons (Delta : CapCtx) (Sigma : StoreTyp) (Gamma2 Gamma3 : LinearCtx)
          (t tArg tRet : Typ) (epsR : EffectRow)
          (op : EffectLabel) (x k : String) (hb : Term)
