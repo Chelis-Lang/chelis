@@ -323,7 +323,11 @@ theorem union_mem_right (eps1 eps2 : EffectRow) (op : EffectLabel)
   · exact List.mem_append_left _ hmem
   · refine List.mem_append_right _ ?_
     refine List.mem_filter.mpr ⟨h, ?_⟩
-    simp [List.contains, hmem]
+    have hcontains : eps1.contains op = false := by
+      cases hc : eps1.contains op with
+      | false => rfl
+      | true => exact absurd (List.mem_of_elem_eq_true hc) hmem
+    rw [hcontains]; rfl
 
 /-- `op ∈ removeOp eps op'` iff `op ∈ eps` and `op ≠ op'`. -/
 theorem removeOp_mem_iff (eps : EffectRow) (op op' : EffectLabel) :
@@ -349,7 +353,8 @@ theorem removeOps_mem_of_not_in
   | nil => simpa [EffectRow.removeOps] using hmem
   | cons o rest ih =>
       have hne : op ≠ o := by
-        intro heq; subst heq; exact hnot (List.mem_cons_self _ _)
+        intro heq; subst heq
+        exact hnot List.mem_cons_self
       have hnot' : op ∉ rest := fun h => hnot (List.mem_cons_of_mem _ h)
       have hrec : op ∈ EffectRow.removeOps eps rest := ih hnot'
       show op ∈ EffectRow.removeOp (EffectRow.removeOps eps rest) o
@@ -553,13 +558,14 @@ theorem progress_aux
   | unit => exact Or.inl IsValue.unit
   | loc ell => exact Or.inl (IsValue.loc ell)
   | const v ds =>
-      exact Or.inr ⟨storeExtend sigma (storeFreshLoc sigma) ⟨ds, v⟩,
-                    Term.loc (storeFreshLoc sigma),
-                    Step.tconst sigma v ds (storeFreshLoc sigma) rfl⟩
+      exact Or.inr (Or.inl
+        ⟨storeExtend sigma (storeFreshLoc sigma) ⟨ds, v⟩,
+         Term.loc (storeFreshLoc sigma),
+         Step.tconst sigma v ds (storeFreshLoc sigma) rfl⟩)
   | grad x tv tOut body =>
-      exact Or.inr ⟨sigma, _, Step.tgrad sigma x tv tOut body⟩
+      exact Or.inr (Or.inl ⟨sigma, _, Step.tgrad sigma x tv tOut body⟩)
   | vmap x tv body =>
-      exact Or.inr ⟨sigma, _, Step.tvmap sigma x tv body (Dim.lit 0)⟩
+      exact Or.inr (Or.inl ⟨sigma, _, Step.tvmap sigma x tv body (Dim.lit 0)⟩)
   | pair e1 e2 =>
       -- `Term.pair` can only type at `Typ.pair`, so first project `t`
       -- to its pair components via a custom inversion. We then do the
@@ -581,216 +587,374 @@ theorem progress_aux
       subst ht_eq
       obtain ⟨Γmid, eps1, eps2, h1, h2, _⟩ := HasType.pair_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 t1 Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk1⟩
       · have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h1
         subst hΓmid
         rcases progress_aux sigma Sigma h_wf h_store_wf e2 t2 Gamma' eps2 h2 with
-            hv2 | ⟨sigma', e2', hstep⟩
+            hv2 | ⟨sigma', e2', hstep⟩ | ⟨op, stk2⟩
         · exact Or.inl (IsValue.pair e1 e2 hv1 hv2)
-        · exact Or.inr ⟨sigma', Term.pair e1 e2',
+        · exact Or.inr (Or.inl ⟨sigma', Term.pair e1 e2',
             by simpa using
-              Step.ctx sigma sigma' (EvalCtx.pairR e1) e2 e2' hstep⟩
-      · exact Or.inr ⟨sigma', Term.pair e1' e2,
+              Step.ctx sigma sigma' (EvalCtx.pairR e1) e2 e2' hstep⟩)
+        · obtain ⟨Es, v, hv, hEs⟩ := stk2
+          refine Or.inr (Or.inr ⟨op, ?_⟩)
+          have hrw : Term.pair e1 (multiPlug Es (Term.perform op v)) =
+              multiPlug (EvalCtx.pairR e1 :: Es) (Term.perform op v) := by
+            simp [multiPlug, plug]
+          rw [hrw]
+          exact StuckOnPerform.mk (EvalCtx.pairR e1 :: Es) v hv ⟨trivial, hEs⟩
+      · exact Or.inr (Or.inl ⟨sigma', Term.pair e1' e2,
           by simpa using
-            Step.ctx sigma sigma' (EvalCtx.pairL e2) e1 e1' hstep⟩
+            Step.ctx sigma sigma' (EvalCtx.pairL e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk1
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.pair (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.pairL e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.pairL e2 :: Es) v hv ⟨trivial, hEs⟩
   | app e1 e2 =>
       obtain ⟨Γmid, t1, eps1, eps2, eps_inner, h1, h2⟩ := HasType.app_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
           (Typ.arrow t1 t eps_inner) Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk1⟩
       · have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h1
         subst hΓmid
         obtain ⟨x, body, he1_eq⟩ := canonical_forms_arrow h_wf h1 hv1
         subst he1_eq
         rcases progress_aux sigma Sigma h_wf h_store_wf e2 t1 Gamma' eps2 h2 with
-            hv2 | ⟨sigma', e2', hstep⟩
-        · exact Or.inr ⟨sigma, subst body e2 x,
-            Step.beta sigma x t1 body e2 hv2⟩
-        · exact Or.inr ⟨sigma', Term.app (Term.abs x t1 body) e2',
+            hv2 | ⟨sigma', e2', hstep⟩ | ⟨op, stk2⟩
+        · exact Or.inr (Or.inl ⟨sigma, subst body e2 x,
+            Step.beta sigma x t1 body e2 hv2⟩)
+        · exact Or.inr (Or.inl ⟨sigma', Term.app (Term.abs x t1 body) e2',
             by simpa using
               Step.ctx sigma sigma' (EvalCtx.appR (Term.abs x t1 body))
-                e2 e2' hstep⟩
-      · exact Or.inr ⟨sigma', Term.app e1' e2,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.appL e2) e1 e1' hstep⟩
+                e2 e2' hstep⟩)
+        · obtain ⟨Es, v, hv, hEs⟩ := stk2
+          refine Or.inr (Or.inr ⟨op, ?_⟩)
+          have hrw : Term.app (Term.abs x t1 body)
+              (multiPlug Es (Term.perform op v)) =
+              multiPlug (EvalCtx.appR (Term.abs x t1 body) :: Es)
+                (Term.perform op v) := by
+            simp [multiPlug, plug]
+          rw [hrw]
+          exact StuckOnPerform.mk (EvalCtx.appR (Term.abs x t1 body) :: Es)
+            v hv ⟨trivial, hEs⟩
+      · exact Or.inr (Or.inl ⟨sigma', Term.app e1' e2,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.appL e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk1
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.app (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.appL e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.appL e2 :: Es) v hv ⟨trivial, hEs⟩
   | letBind x e1 e2 =>
       obtain ⟨Γmid, _Γ3, t1, eps1, eps2, _hfilt, h1, _h2⟩ := HasType.letBind_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 t1 Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
-      · exact Or.inr ⟨sigma, subst e2 e1 x, Step.letBind sigma x e1 e2 hv1⟩
-      · exact Or.inr ⟨sigma', Term.letBind x e1' e2,
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
+      · exact Or.inr (Or.inl
+          ⟨sigma, subst e2 e1 x, Step.letBind sigma x e1 e2 hv1⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.letBind x e1' e2,
           by simpa using
-            Step.ctx sigma sigma' (EvalCtx.letBind x e2) e1 e1' hstep⟩
+            Step.ctx sigma sigma' (EvalCtx.letBind x e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.letBind x (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.letBind x e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.letBind x e2 :: Es) v hv ⟨trivial, hEs⟩
   | copy e1 =>
-      -- Wave 3: T-Copy is now tensor-only, so copy_inv gives a ds.
-      -- canonical_forms_tensor applies and gives us a loc for e1.
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.copy_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
                (Typ.tensor ds) Gamma' eps h_inner with
-          hv | ⟨sigma', e1', hstep⟩
-      · -- e1 is a value of tensor type, so by canonical_forms_tensor
-        -- it's a loc. Apply Step.copy.
-        obtain ⟨ell, hell_eq⟩ := canonical_forms_tensor h_inner hv
+          hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
+      · obtain ⟨ell, hell_eq⟩ := canonical_forms_tensor h_inner hv
         subst hell_eq
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
-        exact Or.inr ⟨storeExtend sigma (storeFreshLoc sigma) w,
-                      Term.pair (Term.loc ell) (Term.loc (storeFreshLoc sigma)),
-                      Step.copy sigma ell (storeFreshLoc sigma) w hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.copy e1',
-          by simpa using Step.ctx sigma sigma' EvalCtx.copy e1 e1' hstep⟩
+        exact Or.inr (Or.inl
+          ⟨storeExtend sigma (storeFreshLoc sigma) w,
+           Term.pair (Term.loc ell) (Term.loc (storeFreshLoc sigma)),
+           Step.copy sigma ell (storeFreshLoc sigma) w hw rfl⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.copy e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.copy e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.copy (multiPlug Es (Term.perform op v)) =
+            multiPlug (EvalCtx.copy :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.copy :: Es) v hv ⟨trivial, hEs⟩
   | letpair x y e1 e2 =>
       obtain ⟨Γmid, _Γ3, t1, t2, eps1, eps2, _hfilt, h1, _h2⟩ :=
         HasType.letpair_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
           (Typ.pair t1 t2) Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨v1, v2, he1_eq, hv1v, hv2v⟩ :=
           canonical_forms_pair h_wf h1 hv1
         subst he1_eq
-        exact Or.inr ⟨sigma, subst (subst e2 v1 x) v2 y,
-          Step.letpair sigma x y v1 v2 e2 hv1v hv2v⟩
-      · exact Or.inr ⟨sigma', Term.letpair x y e1' e2,
+        exact Or.inr (Or.inl ⟨sigma, subst (subst e2 v1 x) v2 y,
+          Step.letpair sigma x y v1 v2 e2 hv1v hv2v⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.letpair x y e1' e2,
           by simpa using
-            Step.ctx sigma sigma' (EvalCtx.letpair x y e2) e1 e1' hstep⟩
+            Step.ctx sigma sigma' (EvalCtx.letpair x y e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.letpair x y (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.letpair x y e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.letpair x y e2 :: Es) v hv
+          ⟨trivial, hEs⟩
   | fst e1 =>
       obtain ⟨t2, h_inner⟩ := HasType.fst_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair t t2) Gamma' eps h_inner
-          with hv | ⟨sigma', e1', hstep⟩
+          with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
-        exact Or.inr ⟨sigma, v1, Step.fst sigma v1 v2 hv1 hv2⟩
-      · exact Or.inr ⟨sigma', Term.fst e1',
-          by simpa using Step.ctx sigma sigma' EvalCtx.fst e1 e1' hstep⟩
+        exact Or.inr (Or.inl ⟨sigma, v1, Step.fst sigma v1 v2 hv1 hv2⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.fst e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.fst e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.fst (multiPlug Es (Term.perform op v)) =
+            multiPlug (EvalCtx.fst :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.fst :: Es) v hv ⟨trivial, hEs⟩
   | snd e1 =>
       obtain ⟨t1, h_inner⟩ := HasType.snd_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair t1 t) Gamma' eps h_inner
-          with hv | ⟨sigma', e1', hstep⟩
+          with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
-        exact Or.inr ⟨sigma, v2, Step.snd sigma v1 v2 hv1 hv2⟩
-      · exact Or.inr ⟨sigma', Term.snd e1',
-          by simpa using Step.ctx sigma sigma' EvalCtx.snd e1 e1' hstep⟩
+        exact Or.inr (Or.inl ⟨sigma, v2, Step.snd sigma v1 v2 hv1 hv2⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.snd e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.snd e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.snd (multiPlug Es (Term.perform op v)) =
+            multiPlug (EvalCtx.snd :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.snd :: Es) v hv ⟨trivial, hEs⟩
   | add e1 e2 =>
       obtain ⟨ds, Γmid, eps1, eps2, _hteq, h1, h2⟩ := HasType.add_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
           (Typ.tensor ds) Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk1⟩
       · have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h1
         subst hΓmid
         obtain ⟨ell1, he1_eq⟩ := canonical_forms_tensor h1 hv1
         subst he1_eq
         rcases progress_aux sigma Sigma h_wf h_store_wf e2
             (Typ.tensor ds) Gamma' eps2 h2 with
-            hv2 | ⟨sigma', e2', hstep⟩
+            hv2 | ⟨sigma', e2', hstep⟩ | ⟨op, stk2⟩
         · obtain ⟨ell2, he2_eq⟩ := canonical_forms_tensor h2 hv2
           subst he2_eq
           obtain ⟨hlk1, _⟩ := HasType.loc_inv h1
           obtain ⟨hlk2, _⟩ := HasType.loc_inv h2
           obtain ⟨w1, hw1⟩ := storeWf_lookup_witness h_store_wf hlk1
           obtain ⟨w2, hw2⟩ := storeWf_lookup_witness h_store_wf hlk2
-          exact Or.inr ⟨_, _,
-            Step.tadd sigma ell1 ell2 (storeFreshLoc sigma) w1 w2 hw1 hw2 rfl⟩
-        · exact Or.inr ⟨sigma', Term.add (Term.loc ell1) e2',
+          exact Or.inr (Or.inl ⟨_, _,
+            Step.tadd sigma ell1 ell2 (storeFreshLoc sigma) w1 w2 hw1 hw2 rfl⟩)
+        · exact Or.inr (Or.inl ⟨sigma', Term.add (Term.loc ell1) e2',
             by simpa using
               Step.ctx sigma sigma' (EvalCtx.addR (Term.loc ell1))
-                e2 e2' hstep⟩
-      · exact Or.inr ⟨sigma', Term.add e1' e2,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.addL e2) e1 e1' hstep⟩
+                e2 e2' hstep⟩)
+        · obtain ⟨Es, v, hv, hEs⟩ := stk2
+          refine Or.inr (Or.inr ⟨op, ?_⟩)
+          have hrw : Term.add (Term.loc ell1) (multiPlug Es (Term.perform op v)) =
+              multiPlug (EvalCtx.addR (Term.loc ell1) :: Es) (Term.perform op v) := by
+            simp [multiPlug, plug]
+          rw [hrw]
+          exact StuckOnPerform.mk (EvalCtx.addR (Term.loc ell1) :: Es) v hv
+            ⟨trivial, hEs⟩
+      · exact Or.inr (Or.inl ⟨sigma', Term.add e1' e2,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.addL e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk1
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.add (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.addL e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.addL e2 :: Es) v hv ⟨trivial, hEs⟩
   | mul e1 e2 =>
       obtain ⟨ds, Γmid, eps1, eps2, _hteq, h1, h2⟩ := HasType.mul_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
           (Typ.tensor ds) Γmid eps1 h1 with
-          hv1 | ⟨sigma', e1', hstep⟩
+          hv1 | ⟨sigma', e1', hstep⟩ | ⟨op, stk1⟩
       · have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h1
         subst hΓmid
         obtain ⟨ell1, he1_eq⟩ := canonical_forms_tensor h1 hv1
         subst he1_eq
         rcases progress_aux sigma Sigma h_wf h_store_wf e2
             (Typ.tensor ds) Gamma' eps2 h2 with
-            hv2 | ⟨sigma', e2', hstep⟩
+            hv2 | ⟨sigma', e2', hstep⟩ | ⟨op, stk2⟩
         · obtain ⟨ell2, he2_eq⟩ := canonical_forms_tensor h2 hv2
           subst he2_eq
           obtain ⟨hlk1, _⟩ := HasType.loc_inv h1
           obtain ⟨hlk2, _⟩ := HasType.loc_inv h2
           obtain ⟨w1, hw1⟩ := storeWf_lookup_witness h_store_wf hlk1
           obtain ⟨w2, hw2⟩ := storeWf_lookup_witness h_store_wf hlk2
-          exact Or.inr ⟨_, _,
-            Step.tmul sigma ell1 ell2 (storeFreshLoc sigma) w1 w2 hw1 hw2 rfl⟩
-        · exact Or.inr ⟨sigma', Term.mul (Term.loc ell1) e2',
+          exact Or.inr (Or.inl ⟨_, _,
+            Step.tmul sigma ell1 ell2 (storeFreshLoc sigma) w1 w2 hw1 hw2 rfl⟩)
+        · exact Or.inr (Or.inl ⟨sigma', Term.mul (Term.loc ell1) e2',
             by simpa using
               Step.ctx sigma sigma' (EvalCtx.mulR (Term.loc ell1))
-                e2 e2' hstep⟩
-      · exact Or.inr ⟨sigma', Term.mul e1' e2,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.mulL e2) e1 e1' hstep⟩
+                e2 e2' hstep⟩)
+        · obtain ⟨Es, v, hv, hEs⟩ := stk2
+          refine Or.inr (Or.inr ⟨op, ?_⟩)
+          have hrw : Term.mul (Term.loc ell1) (multiPlug Es (Term.perform op v)) =
+              multiPlug (EvalCtx.mulR (Term.loc ell1) :: Es) (Term.perform op v) := by
+            simp [multiPlug, plug]
+          rw [hrw]
+          exact StuckOnPerform.mk (EvalCtx.mulR (Term.loc ell1) :: Es) v hv
+            ⟨trivial, hEs⟩
+      · exact Or.inr (Or.inl ⟨sigma', Term.mul e1' e2,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.mulL e2) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk1
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.mul (multiPlug Es (Term.perform op v)) e2 =
+            multiPlug (EvalCtx.mulL e2 :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.mulL e2 :: Es) v hv ⟨trivial, hEs⟩
   | sum e1 d =>
       obtain ⟨ds, _hteq, _hmem, h_inner⟩ := HasType.sum_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps h_inner
-          with hv | ⟨sigma', e1', hstep⟩
+          with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨ell, he1_eq⟩ := canonical_forms_tensor h_inner hv
         subst he1_eq
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
-        exact Or.inr ⟨_, _,
-          Step.tsum sigma ell (storeFreshLoc sigma) w d hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.sum e1' d,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.sum d) e1 e1' hstep⟩
+        exact Or.inr (Or.inl ⟨_, _,
+          Step.tsum sigma ell (storeFreshLoc sigma) w d hw rfl⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.sum e1' d,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.sum d) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.sum (multiPlug Es (Term.perform op v)) d =
+            multiPlug (EvalCtx.sum d :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.sum d :: Es) v hv ⟨trivial, hEs⟩
   | expand e1 d =>
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.expand_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps h_inner
-          with hv | ⟨sigma', e1', hstep⟩
+          with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨ell, he1_eq⟩ := canonical_forms_tensor h_inner hv
         subst he1_eq
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
-        exact Or.inr ⟨_, _,
-          Step.texpand sigma ell (storeFreshLoc sigma) w d hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.expand e1' d,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.expand d) e1 e1' hstep⟩
+        exact Or.inr (Or.inl ⟨_, _,
+          Step.texpand sigma ell (storeFreshLoc sigma) w d hw rfl⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.expand e1' d,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.expand d) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.expand (multiPlug Es (Term.perform op v)) d =
+            multiPlug (EvalCtx.expand d :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.expand d :: Es) v hv ⟨trivial, hEs⟩
   | uniformLike e1 lo hi =>
       obtain ⟨ds, eps0, _hteq, h_inner, _hsub⟩ := HasType.uniformLike_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps0 h_inner
-          with hv | ⟨sigma', e1', hstep⟩
+          with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨ell, he1_eq⟩ := canonical_forms_tensor h_inner hv
         subst he1_eq
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
-        exact Or.inr ⟨_, _,
-          Step.tuniformLike sigma ell (storeFreshLoc sigma) w lo hi hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.uniformLike e1' lo hi,
+        exact Or.inr (Or.inl ⟨_, _,
+          Step.tuniformLike sigma ell (storeFreshLoc sigma) w lo hi hw rfl⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.uniformLike e1' lo hi,
           by simpa using
-            Step.ctx sigma sigma' (EvalCtx.uniformLike lo hi) e1 e1' hstep⟩
+            Step.ctx sigma sigma' (EvalCtx.uniformLike lo hi) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.uniformLike (multiPlug Es (Term.perform op v)) lo hi =
+            multiPlug (EvalCtx.uniformLike lo hi :: Es) (Term.perform op v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.uniformLike lo hi :: Es) v hv
+          ⟨trivial, hEs⟩
   | handle epsH body clauses =>
-      obtain ⟨Γ2, epsB, h_body⟩ := HasType.handle_inv h
+      obtain ⟨Γ2, epsB, h_body, _hHsubB, _hClIn, hClCov, _hcls, _hsub⟩ :=
+        HasType.handle_inv_strong h
       rcases progress_aux sigma Sigma h_wf h_store_wf body t Γ2 epsB h_body with
-          hv | ⟨sigma', body', hstep⟩
-      · exact Or.inr ⟨sigma, body, Step.handleRet sigma epsH body clauses hv⟩
-      · exact Or.inr ⟨sigma', Term.handle epsH body' clauses,
+          hv | ⟨sigma', body', hstep⟩ | ⟨op, stk⟩
+      · exact Or.inr (Or.inl
+          ⟨sigma, body, Step.handleRet sigma epsH body clauses hv⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.handle epsH body' clauses,
           by simpa using
-            Step.ctx sigma sigma' (EvalCtx.handle epsH clauses) body body' hstep⟩
+            Step.ctx sigma sigma' (EvalCtx.handle epsH clauses) body body' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        by_cases hopH : op ∈ epsH
+        · -- op is caught by this handle: pick the matching clause via
+          -- `hClCov` and fire `Step.handleOpCtxs`.
+          have hcov := hClCov op hopH
+          obtain ⟨cl, hcl_mem, hcl_eq⟩ := hcov
+          rcases hcl : cl with ⟨op', xVar, kVar, hb⟩
+          subst hcl
+          simp only at hcl_eq
+          subst hcl_eq
+          refine Or.inr (Or.inl ⟨sigma, _,
+            Step.handleOpCtxs sigma op' v epsH Es clauses xVar kVar hb Typ.unit
+              hv hcl_mem hopH hEs⟩)
+        · -- op not caught: propagate stuck outward with the handle frame.
+          refine Or.inr (Or.inr ⟨op, ?_⟩)
+          have hrw : Term.handle epsH (multiPlug Es (Term.perform op v)) clauses =
+              multiPlug (EvalCtx.handle epsH clauses :: Es) (Term.perform op v) := by
+            simp [multiPlug, plug]
+          rw [hrw]
+          exact StuckOnPerform.mk (EvalCtx.handle epsH clauses :: Es) v hv
+            ⟨hopH, hEs⟩
   | perform op e1 =>
-      -- perform op e1 is neither a value nor steppable when e1 is a
-      -- value — perform has no head reduction outside a handle.
-      -- For progress at closed effect row (eps = []) this case is
-      -- vacuous via effect-row contradiction: T-Perform produces
-      -- eps ⊇ [op], which can't be empty. But progress_aux has
-      -- loose eps, so we handle the sub-step direction here and
-      -- leave the value sub-case as a bounded sorry with TODO.
-      -- TODO Wave 4: restrict progress_aux to eps = [] or extract
-      -- a standalone "perform at non-handle is stuck only under
-      -- handled-context" result.
-      sorry
+      obtain ⟨tArg, eps0, h_inner, _hmatch, _hsub⟩ := HasType.perform_inv h
+      rcases progress_aux sigma Sigma h_wf h_store_wf e1 tArg Gamma' eps0 h_inner
+          with hv1 | ⟨sigma', e1', hstep⟩ | ⟨op', stk⟩
+      · -- e1 is a value: the whole term is stuck on `perform op e1`
+        -- at empty chain.
+        refine Or.inr (Or.inr ⟨op, ?_⟩)
+        have hrw : Term.perform op e1 = multiPlug [] (Term.perform op e1) := by
+          simp [multiPlug]
+        rw [hrw]
+        exact StuckOnPerform.mk [] e1 hv1 trivial
+      · exact Or.inr (Or.inl ⟨sigma', Term.perform op e1',
+          by simpa using
+            Step.ctx sigma sigma' (EvalCtx.perform op) e1 e1' hstep⟩)
+      · obtain ⟨Es, v, hv, hEs⟩ := stk
+        refine Or.inr (Or.inr ⟨op', ?_⟩)
+        have hrw : Term.perform op (multiPlug Es (Term.perform op' v)) =
+            multiPlug (EvalCtx.perform op :: Es) (Term.perform op' v) := by
+          simp [multiPlug, plug]
+        rw [hrw]
+        exact StuckOnPerform.mk (EvalCtx.perform op :: Es) v hv ⟨trivial, hEs⟩
 termination_by sizeOf e
 decreasing_by all_goals (simp_wf; decreasing_tactic)
 
-/-- The classic closed-form Progress: trivially follows from the
-    generalized form. -/
+/-- The classic closed-form Progress: at empty outer effect row, the
+    stuck disjunct from `progress_aux` is ruled out by `stuck_bubbles`
+    (a `StuckOnPerform op` witness would force `op ∈ []`). -/
 theorem progress
     (sigma : Store) (Sigma : StoreTyp)
     (h_wf : StoreTypTensorOnly Sigma)
     (h_store_wf : StoreWf sigma Sigma)
     (e : Term) (t : Typ)
     (h : HasType [] Sigma [] e t [] []) :
-    IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ :=
-  progress_aux sigma Sigma h_wf h_store_wf e t [] [] h
+    IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
+  rcases progress_aux sigma Sigma h_wf h_store_wf e t [] [] h with
+    hv | hstep | ⟨op, stk⟩
+  · exact Or.inl hv
+  · exact Or.inr hstep
+  · exfalso
+    cases stk with
+    | mk Es _v _hv hEs =>
+        have hop : op ∈ ([] : EffectRow) := stuck_bubbles Es hEs h
+        simp at hop
 
 end LaCaDiLE
