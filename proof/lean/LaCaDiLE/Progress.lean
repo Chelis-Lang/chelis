@@ -22,20 +22,36 @@ namespace LaCaDiLE
 
 /-! ## Helper lemmas used by Progress -/
 
+/-- Linear-context domain shrinks across every HasType derivation.
+    Wave 3 TODO: mechanical HasType.rec with a domain-subset motive.
+    Each of the ~25 cases is short but requires careful handling of
+    filter predicates in the binder cases (abs/letBind/letpair).
+    Stated here so value_preserves_closed_context can cite it. -/
+theorem has_type_linear_shrinks
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (_h : HasType Delta Sigma Gamma e t eps Gamma') :
+    ∀ x, x ∈ linearCtxDom Gamma' → x ∈ linearCtxDom Gamma := by
+  sorry
+
 /-- A well-typed value under a closed input context produces a closed
-    output context. Used to keep the input context of sub-term
-    progress calls empty once we learn the previous sub-term is a
-    value. Proof deferred (HasType.rec with equation motive); stated
-    here so the progress proof can cite it. -/
+    output context. Follows directly from `has_type_linear_shrinks`:
+    the output's domain is contained in the input's empty domain, so
+    the output is empty. -/
 theorem value_preserves_closed_context
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
     {v : Term} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma [] v t eps Gamma')
+    (h : HasType Delta Sigma [] v t eps Gamma')
     (_h_val : IsValue v) : Gamma' = [] := by
-  -- TODO Wave 3+: HasType.rec with equation motive on Γ_in = [] and
-  -- IsValue v; value-producing constructors (unit/abs/loc/tpair)
-  -- each enforce Γ_out = Γ_in = [].
-  sorry
+  have hshrink := has_type_linear_shrinks h
+  cases hΓ' : Gamma' with
+  | nil => rfl
+  | cons hd tl =>
+    exfalso
+    have hmem : hd.1 ∈ linearCtxDom Gamma' := by
+      rw [hΓ']; simp [linearCtxDom]
+    have := hshrink hd.1 hmem
+    simp [linearCtxDom] at this
 
 /-- Store typing well-formedness: every location maps to a tensor
     type. Holds for every Sigma reachable from an initially-empty
