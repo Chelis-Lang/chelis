@@ -403,4 +403,50 @@ theorem weakening_insert_clauses_db
 
 end
 
+/-! ## Substitution: `subst_preserves_typing_db`
+
+Proved by induction on the term structure, using `weakening_insert_db`
+above for the lifted substituted value in binder cases. Each case
+pattern-matches on `h_e` to extract the structure of the typing
+derivation for `e`. -/
+
+/-- Build a derivation for `v` shifted up by 1, valid under a
+    new head slot. Direct application of `weakening_insert_db` at
+    cutoff 0. -/
+private theorem weakening_head_db
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
+    {v : TermDB} {t_v t_new : Typ}
+    (h : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
+    HasTypeDB Delta Sigma (some t_new :: Gamma) (lift v) t_v []
+              (some t_new :: Gamma) := by
+  have := weakening_insert_db h 0 t_new
+  simpa [LinearCtxDB.insertAt, lift, shiftAt] using this
+
+/-! ## Substitution obligation — doc block for Wave 5b
+
+Under Option C the target statement is:
+
+```lean
+theorem subst_preserves_typing_db
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat)
+    (h_e : HasTypeDB Delta Sigma (Gamma.insertAt j (some t_v)) e t eps
+             (Gamma.insertAt j none))
+    (h_v : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
+    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
+```
+
+The Wave 5a weakening block above provides the mutual-recursion
+template; Wave 5b will instantiate the same template for
+substitution. The var-case discharge is immediate from
+`getElem?_insertAt_eq` / `set_insertAt_eq` plus `h_v`; the binder
+cases use `weakening_head_db` to lift `v` under new slots.
+
+The subtlety is that intermediate linear contexts in multi-step
+derivations (e.g. the `Γ2` in `app Γ1 Γ2 Γ3`) need not literally
+match the `insertAt j` shape of the endpoints. A helper inversion
+over linear-slot persistence in HasTypeDB derivations is required
+first — that inversion is Wave 5b's prerequisite. -/
+
 end LaCaDiLE
