@@ -363,6 +363,91 @@ theorem freshInTerm_handle_body {y : String} {epsH : EffectRow} {body : Term}
   simp only [freeVars, boundVars, List.mem_append, not_or] at hf hb
   exact ⟨hf.1, hb.1⟩
 
+/-- Per-clause freshness extraction from a `freshInTerm` on a handle term
+    with a non-empty clause list. Gives freshness in the head clause body
+    (plus inequality with the head's bound names) and freshness in the
+    residual handle term. -/
+theorem freshInTerm_clauses_cons {y : String} {epsH : EffectRow} {body : Term}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (h : freshInTerm y (Term.handle epsH body ((op, x, k, hb) :: rest))) :
+    y ≠ x ∧ y ≠ k ∧ freshInTerm y hb ∧
+      freshInTerm y (Term.handle epsH body rest) := by
+  unfold freshInTerm at h
+  obtain ⟨hf, hbnd⟩ := h
+  -- freeVars: body ++ ((freeVars hb).filter (!=x && !=k) ++ freeVarsClauses rest)
+  have hne_x : y ≠ x := by
+    intro he
+    apply hbnd
+    show y ∈ boundVars body ++ (x :: k :: boundVars hb ++ boundVarsClauses rest)
+    apply List.mem_append_right
+    rw [he]; exact List.mem_cons_self
+  have hne_k : y ≠ k := by
+    intro he
+    apply hbnd
+    show y ∈ boundVars body ++ (x :: k :: boundVars hb ++ boundVarsClauses rest)
+    apply List.mem_append_right
+    rw [he]
+    exact List.mem_cons.mpr (Or.inr List.mem_cons_self)
+  have hbnd_body : y ∉ boundVars body := by
+    intro hin
+    apply hbnd
+    show y ∈ boundVars body ++ (x :: k :: boundVars hb ++ boundVarsClauses rest)
+    exact List.mem_append_left _ hin
+  have hbnd_hb : y ∉ boundVars hb := by
+    intro hin
+    apply hbnd
+    show y ∈ boundVars body ++ (x :: k :: boundVars hb ++ boundVarsClauses rest)
+    apply List.mem_append_right
+    refine List.mem_cons.mpr (Or.inr (List.mem_cons.mpr (Or.inr ?_)))
+    exact List.mem_append_left _ hin
+  have hbnd_rest : y ∉ boundVarsClauses rest := by
+    intro hin
+    apply hbnd
+    show y ∈ boundVars body ++ (x :: k :: boundVars hb ++ boundVarsClauses rest)
+    apply List.mem_append_right
+    refine List.mem_cons.mpr (Or.inr (List.mem_cons.mpr (Or.inr ?_)))
+    exact List.mem_append_right _ hin
+  have hf_body : y ∉ freeVars body := by
+    intro hin
+    apply hf
+    show y ∈ freeVars body ++ ((freeVars hb).filter (fun z => z != x && z != k)
+                                ++ freeVarsClauses rest)
+    exact List.mem_append_left _ hin
+  have hf_hb : y ∉ freeVars hb := by
+    intro hin
+    apply hf
+    show y ∈ freeVars body ++ ((freeVars hb).filter (fun z => z != x && z != k)
+                                ++ freeVarsClauses rest)
+    apply List.mem_append_right
+    apply List.mem_append_left
+    rw [List.mem_filter]
+    refine ⟨hin, ?_⟩
+    simp only [Bool.and_eq_true, bne_iff_ne, ne_eq]
+    exact ⟨fun he => hne_x he, fun he => hne_k he⟩
+  have hf_rest : y ∉ freeVarsClauses rest := by
+    intro hin
+    apply hf
+    show y ∈ freeVars body ++ ((freeVars hb).filter (fun z => z != x && z != k)
+                                ++ freeVarsClauses rest)
+    apply List.mem_append_right
+    exact List.mem_append_right _ hin
+  refine ⟨hne_x, hne_k, ⟨hf_hb, hbnd_hb⟩, ⟨?_, ?_⟩⟩
+  · -- y ∉ freeVars (handle epsH body rest)
+    intro hin
+    show False
+    have : y ∈ freeVars body ++ freeVarsClauses rest := hin
+    rcases List.mem_append.mp this with h1 | h1
+    · exact hf_body h1
+    · exact hf_rest h1
+  · intro hin
+    show False
+    have : y ∈ boundVars body ++ boundVarsClauses rest := hin
+    rcases List.mem_append.mp this with h1 | h1
+    · exact hbnd_body h1
+    · exact hbnd_rest h1
+
+
 /-! ### Append split analysis for the var case -/
 
 /-- Shrinkage helper: if `h : HasType ... (Gpre ++ Gpost) e t eps (G2p ++ G2q)`
@@ -832,15 +917,44 @@ theorem weakening_insert
     refine ⟨G2p, G2q, hG2, ?_⟩
     exact HasType.perform Delta' Sigma' _ _ op e' tArg tRet eps' h' hMatch
   case handle =>
-    intro _Delta' _Sigma' _G1 _G2 _G3 _body _clauses _t _epsH _epsB
-           _hb _hEpsH _hCl _hCov _hCT _ihb _ihCT
-    intro _Gm_pre _Gm_post _hsplit _hfp _hfq _hft
-    -- TODO: handle case — structure drafted (body IH + clauses IH
-    -- via has_type_linear_shrinks for freshness propagation) but
-    -- per-clause freshness extraction from freshInTerm on the
-    -- handle term requires a dedicated freshInTerm_clauses_cons
-    -- helper. Deferred.
-    sorry
+    intro Delta' Sigma' G1 G2 G3 body clauses t epsH epsB
+           hb hEpsH hCl hCov hCT ihb ihCT
+    intro Gm_pre Gm_post hsplit hfp hfq hft
+    -- Body IH: weaken body typed Γ1 → Γ2 to insert (y, t_y).
+    have hfe_body : freshInTerm y body := freshInTerm_handle_body hft
+    obtain ⟨G2p, G2q, hG2eq, hbody'⟩ :=
+      ihb Gm_pre Gm_post hsplit hfp hfq hfe_body
+    -- Propagate freshness from Gm_pre/Gm_post (= Γ1) through to Γ2
+    -- via has_type_linear_shrinks on the original body derivation.
+    have hb_orig : HasType Delta' Sigma' (Gm_pre ++ Gm_post) body t epsB (G2p ++ G2q) := by
+      rw [← hsplit, ← hG2eq]; exact hb
+    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split hb_orig hfp hfq
+    subst hG2eq
+    -- Clauses IH: weaken clauses typed Γ2 → Γ3 at split (G2p, G2q).
+    -- Need per-clause freshness hypothesis: ∀ cl ∈ clauses, freshInTerm y cl.2.2.2.
+    have hfClauses : ∀ cl ∈ clauses, freshInTerm y cl.2.2.2 := by
+      -- Generic helper via induction: freshInTerm y (handle eps body cls)
+      -- implies per-clause freshness.
+      have aux : ∀ (cls : List (EffectLabel × String × String × Term)),
+          freshInTerm y (Term.handle epsH body cls) →
+          ∀ cl ∈ cls, freshInTerm y cl.2.2.2 := by
+        intro cls
+        induction cls with
+        | nil => intro _ cl hc; exact absurd hc List.not_mem_nil
+        | cons c cs ih =>
+          intro hft' cl hc
+          match c with
+          | (op_c, x_c, k_c, hb_c) =>
+            have hcl' := freshInTerm_clauses_cons hft'
+            rcases List.mem_cons.mp hc with heq | htl
+            · subst heq; exact hcl'.2.2.1
+            · exact ih hcl'.2.2.2 cl htl
+      exact aux clauses hft
+    obtain ⟨G3p, G3q, hG3eq, hclauses'⟩ :=
+      ihCT G2p G2q rfl hfp2 hfq2 hfClauses
+    refine ⟨G3p, G3q, hG3eq, ?_⟩
+    exact HasType.handle Delta' Sigma' _ _ _ body clauses t epsH epsB
+      hbody' hEpsH hCl hCov hclauses'
   case tgrad =>
     intro Delta' Sigma' Gamma x ds dsOut e' eps' _h hsub ih
     intro Gm_pre Gm_post hsplit hfp hfq hft
@@ -920,7 +1034,18 @@ theorem weakening_insert
     refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
     exact ClausesTyped.nil Delta' Sigma' _ t' epsR
   case cons =>
-    intros
+    intro _Delta' _Sigma' _Gamma2 _Gamma3 _t _tArg _tRet _epsR _op _x _k _hb _rest
+           _hHb _hRest _ihHb _ihRest
+    intro _Gm_pre _Gm_post _hsplit _hfp _hfq _hft
+    -- TODO (Wave 4): ClausesTyped.cons rigidity problem. The head-clause
+    -- HasType IH (motive_1) and the rest ClausesTyped IH (motive_2) each
+    -- return an existential output split of the common Γ3, but the
+    -- `ClausesTyped.cons` constructor needs BOTH derivations at the SAME
+    -- split. Without a choice/coherence lemma forcing the splits to
+    -- agree, we cannot rebuild the cons. Same structural obstruction as
+    -- tgrad/tvmap (input-output-identical shapes force a rigidity the
+    -- existential motive does not preserve). Deferred to motive
+    -- strengthening.
     sorry
 
 
