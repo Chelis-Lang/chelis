@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use tar::{Archive, Builder};
 use walkdir::WalkDir;
 
-const CURRENT_COMPILER_VERSION: &str = "=0.1.0";
+const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReefManifest {
@@ -1725,7 +1725,7 @@ mod tests {
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.1.0"
+compiler = "=0.1.3"
 module_prefix = "Demo"
 "#,
         );

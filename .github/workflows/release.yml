@@ -18,6 +18,8 @@ jobs:
   build-linux-x86_64:
     name: Build chelis (linux-x86_64)
     runs-on: ubuntu-latest
+    env:
+      HAS_MIRROR_TOKEN: ${{ secrets.CHELIS_TOOLCHAIN_TOKEN != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,3 +84,17 @@ jobs:
             chelis-*-linux-x86_64.tar.gz.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Mirror release to public Chelis-Lang/chelis-toolchain
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && env.HAS_MIRROR_TOKEN == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CHELIS_TOOLCHAIN_TOKEN }}
+          TAG: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo Chelis-Lang/chelis-toolchain \
+            --title "chelis $TAG" \
+            --notes "Mirror of Chelis-Lang/chelis release $TAG. Source stays private in Chelis-Lang/chelis; downstream shell repos pull the toolchain tarball from here using the default GITHUB_TOKEN." \
+            chelis-*-linux-x86_64.tar.gz \
+            chelis-*-linux-x86_64.tar.gz.sha256
