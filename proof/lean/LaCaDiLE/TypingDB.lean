@@ -1,47 +1,34 @@
 -- LaCaDiLE/TypingDB.lean — de Bruijn mirror of `HasType`.
 --
--- Track A contingency. The named `HasType` judgment in `Typing.lean`
--- uses a `LinearCtx = List (String × Typ)` whose string components
--- make the substitution metatheory proof hit a rigidity obstruction
--- in every binder case (the adjacent-swap exchange lemma is false in
--- a linear type system). This file mirrors `HasType` over `TermDB`
--- using a name-free, position-indexed linear context `List Typ`, so
--- that binder cases reduce to rigid `Nat`-arithmetic on the inserted
--- position rather than fighting a nonexistent name.
+-- Track A Option C. The linear context is
+-- `List (Option Typ)`: position `i` is either `some t` (the slot is
+-- "live" and holds a linear binding of type `t`) or `none` (the slot
+-- is "dead", already consumed). Consumption marks a slot as `none`
+-- instead of removing it, so every typing rule preserves the length
+-- of the linear context end-to-end. Under this shape, `shiftAt j`
+-- is uniformly correct and the substitution lemmas have clean
+-- uniform signatures.
 --
--- Every constructor corresponds 1:1 to a constructor of `HasType`.
--- Only two shape changes occur:
---
--- 1. The linear context is `List Typ` instead of `List (String × Typ)`.
---    Position `i` in the list holds the type bound by the `i`-th
---    outstanding linear binder, counted from the innermost. A
---    `Term.var x` named-lookup becomes `TermDB.var i` position-lookup.
---
--- 2. Every binder case that, in the named version, does
---    `Γ.filter (fun p => p.1 ≠ x)` at the *output* context instead
---    removes the binder position by (a) extending the *input* context
---    with the binder type at position 0 (via `t :: Γ`) and (b)
---    letting the body's output context `Γout` record whether the
---    body consumed the binder. The constructor then peels the
---    tail-removed entry, using the same convention as
---    `SyntaxDB.substDBAux`.
---
--- Store typings (`StoreTyp`), capability contexts (`CapCtx`), effect
--- rows, and dimension lists are name-free in `Syntax.lean` already
--- and are reused verbatim.
+-- Binder rules add new `some t` slots at the *head* of the context
+-- (innermost de Bruijn index 0). The body's output context has a
+-- head slot in either state (`some t` if unused, `none` if consumed)
+-- and the outer rule peels it off. Head-cons is chosen so that
+-- `insertAt (j+1)` on a cons naturally peels the head, which makes
+-- weakening under binders structurally trivial.
 
 import LaCaDiLE.SyntaxDB
 import LaCaDiLE.Typing
 
 namespace LaCaDiLE
 
-/-- De Bruijn linear context: position `i` is the type of the `i`-th
-    outstanding linear binder, counted from the innermost. -/
-abbrev LinearCtxDB := List Typ
+/-- De Bruijn linear context: position `i` is an optional type.
+    `some t` means the slot is live; `none` means consumed. Every
+    typing rule preserves the length of the context end-to-end. -/
+abbrev LinearCtxDB := List (Option Typ)
 
-/-- Peel the head `k` entries off a DB linear context. Used in binder
-    cases to "consume" the newly-introduced binder positions after the
-    body is typed. -/
+/-- Drop the first `k` entries off a DB linear context. Used in
+    binder cases to peel the binder slots added at the head after
+    the body is typed. -/
 def LinearCtxDB.dropHead (Γ : LinearCtxDB) (k : Nat) : LinearCtxDB :=
   Γ.drop k
 
@@ -51,27 +38,27 @@ mutual
 inductive HasTypeDB :
     CapCtx → StoreTyp → LinearCtxDB → TermDB → Typ → EffectRow →
     LinearCtxDB → Prop
-  -- T-Var-DB: consume position `Γpre.length` of the context. The
-  -- named rule's `Γpre ++ [(x, t)] ++ Γpost` becomes
-  -- `Γpre ++ [t] ++ Γpost`; the output context is `Γpre ++ Γpost`
-  -- (the consumed binding is removed in place).
+  -- T-Var-DB: the slot at position `i` must be live (`some t`); the
+  -- output context marks that slot `none`. Length preserved.
   | var
       (Delta : CapCtx) (Sigma : StoreTyp)
-      (Gamma_pre Gamma_post : LinearCtxDB) (t : Typ) :
-      HasTypeDB Delta Sigma (Gamma_pre ++ [t] ++ Gamma_post)
-                (TermDB.var Gamma_pre.length) t [] (Gamma_pre ++ Gamma_post)
+      (Gamma : LinearCtxDB) (i : Nat) (t : Typ) :
+      Gamma[i]? = some (some t) →
+      HasTypeDB Delta Sigma Gamma (TermDB.var i) t [] (Gamma.set i none)
 
   | unit
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtxDB) :
       HasTypeDB Delta Sigma Gamma TermDB.unit Typ.unit [] Gamma
 
-  -- T-Abs-DB: body is typed in `t1 :: Γ1`; the output context of the
-  -- body drops its head to recover the outer context. The named
-  -- version uses `.filter (· ≠ x)`; here removal is positional.
+  -- T-Abs-DB: body is typed under a new slot at the head (innermost
+  -- de Bruijn index 0). The body's output may leave it `some t1` or
+  -- `none`; the outer rule discards that head slot.
   | abs
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtxDB)
+      (slot : Option Typ)
       (t1 t2 : Typ) (eps : EffectRow) (body : TermDB) :
-      HasTypeDB Delta Sigma (t1 :: Gamma1) body t2 eps (t1 :: Gamma2) →
+      HasTypeDB Delta Sigma (some t1 :: Gamma1) body t2 eps
+                (slot :: Gamma2) →
       HasTypeDB Delta Sigma Gamma1 (TermDB.abs t1 body)
                 (Typ.arrow t1 t2 eps) [] Gamma2
 
@@ -87,9 +74,11 @@ inductive HasTypeDB :
   | letBind
       (Delta : CapCtx) (Sigma : StoreTyp)
       (Gamma1 Gamma2 Gamma3 : LinearCtxDB)
+      (slot : Option Typ)
       (e1 e2 : TermDB) (t1 t2 : Typ) (eps1 eps2 : EffectRow) :
       HasTypeDB Delta Sigma Gamma1 e1 t1 eps1 Gamma2 →
-      HasTypeDB Delta Sigma (t1 :: Gamma2) e2 t2 eps2 (t1 :: Gamma3) →
+      HasTypeDB Delta Sigma (some t1 :: Gamma2) e2 t2 eps2
+                (slot :: Gamma3) →
       HasTypeDB Delta Sigma Gamma1 (TermDB.letBind e1 e2) t2
                 (EffectRow.union eps1 eps2) Gamma3
 
@@ -100,18 +89,17 @@ inductive HasTypeDB :
       HasTypeDB Delta Sigma Gamma1 (TermDB.copy e)
                 (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) eps Gamma2
 
-  -- T-LetPair-DB: body sees two new positions. Convention matches
-  -- `SyntaxDB.substDBAux`: the body's innermost position 0 is `y`
-  -- (the second component), position 1 is `x` (the first component).
-  -- So the body's input context is `t2 :: t1 :: Γ2` and its output
-  -- context must still have the two binder types at the head.
+  -- T-LetPair-DB: body sees two new head slots. Convention matches
+  -- `SyntaxDB.substDBAux`: innermost (pos 0) is the second component,
+  -- next (pos 1) is the first component.
   | letpair
       (Delta : CapCtx) (Sigma : StoreTyp)
       (Gamma1 Gamma2 Gamma3 : LinearCtxDB)
+      (slot1 slot2 : Option Typ)
       (e1 e2 : TermDB) (t1 t2 t : Typ) (eps1 eps2 : EffectRow) :
       HasTypeDB Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 →
-      HasTypeDB Delta Sigma (t2 :: t1 :: Gamma2) e2 t eps2
-                (t2 :: t1 :: Gamma3) →
+      HasTypeDB Delta Sigma (some t2 :: some t1 :: Gamma2) e2 t eps2
+                (slot1 :: slot2 :: Gamma3) →
       HasTypeDB Delta Sigma Gamma1 (TermDB.letpair e1 e2) t
                 (EffectRow.union eps1 eps2) Gamma3
 
@@ -159,20 +147,10 @@ inductive HasTypeDB :
       HasTypeDB Delta Sigma Gamma1 (TermDB.mul e1 e2) (Typ.tensor ds)
                 (EffectRow.union eps1 eps2) Gamma3
 
-  -- Note: SyntaxDB's `TermDB.sum`/`TermDB.expand` still carry a `Nat`
-  -- positional index rather than a `Dim` name, matching the TermDB
-  -- shape declared in SyntaxDB.lean. The DB-side typing rules below
-  -- mirror the *pre-Stage-1* integer-index form because that's what
-  -- SyntaxDB encodes. Translations from the named (`Dim`-indexed)
-  -- form to DB therefore go through the positional index computed
-  -- from the named dimension's position in `ds`.
   | tsum
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtxDB)
       (e : TermDB) (ds : DimList) (i : Nat) (eps : EffectRow) :
       HasTypeDB Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 →
-      -- Existential on the resulting dim list: whatever shape the
-      -- translation produces, we just record it. The precise dim
-      -- arithmetic lives on the named side.
       ∀ ds' : DimList, True →
       HasTypeDB Delta Sigma Gamma1 (TermDB.sum e i) (Typ.tensor ds') eps Gamma2
 
@@ -217,10 +195,11 @@ inductive HasTypeDB :
 
   | tgrad
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtxDB)
+      (slot : Option Typ)
       (ds dsOut : DimList) (body : TermDB) (eps : EffectRow) :
       HasTypeDB (Capability.diff :: Delta) Sigma
-                (Typ.tensor ds :: Gamma) body (Typ.tensor dsOut) eps
-                (Typ.tensor ds :: Gamma) →
+                (some (Typ.tensor ds) :: Gamma) body (Typ.tensor dsOut) eps
+                (slot :: Gamma) →
       subsetEffRow eps DiffCompat = true →
       HasTypeDB Delta Sigma Gamma
                 (TermDB.grad (Typ.tensor ds) (Typ.tensor dsOut) body)
@@ -232,8 +211,10 @@ inductive HasTypeDB :
 
   | tvmap
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtxDB)
+      (slot : Option Typ)
       (t1 t2 : Typ) (body : TermDB) (eps : EffectRow) (d : Dim) :
-      HasTypeDB Delta Sigma (t1 :: Gamma) body t2 eps (t1 :: Gamma) →
+      HasTypeDB Delta Sigma (some t1 :: Gamma) body t2 eps
+                (slot :: Gamma) →
       HasTypeDB Delta Sigma Gamma (TermDB.vmap t1 body)
                 (Typ.arrow (addDim d t1) (addDim d t2) eps) [] Gamma
 
@@ -250,10 +231,8 @@ inductive HasTypeDB :
       SubEffRow eps eps' →
       HasTypeDB Delta Sigma Gamma e t eps' Gamma'
 
-/-- Handler-clause typing on DB terms. Mirrors `ClausesTyped` in
-    `Typing.lean`; each clause's body sees `tArg` at position 1 and
-    `(tRet → t ! εR)` at position 0, matching the two-positional-
-    binder convention of `SyntaxDB.liftClausesAux`. -/
+/-- Handler-clause typing on DB terms. Each clause's body sees `tArg`
+    and the resumption `(tRet → t ! εR)` as two new slots at the tail. -/
 inductive ClausesTypedDB :
     CapCtx → StoreTyp → LinearCtxDB → LinearCtxDB → Typ → EffectRow →
     List (EffectLabel × TermDB) → Prop
@@ -262,13 +241,14 @@ inductive ClausesTypedDB :
         ClausesTypedDB Delta Sigma Gamma2 Gamma2 t epsR []
   | cons (Delta : CapCtx) (Sigma : StoreTyp)
          (Gamma2 Gamma3 : LinearCtxDB)
+         (slot1 slot2 : Option Typ)
          (t tArg tRet : Typ) (epsR : EffectRow)
          (op : EffectLabel) (hb : TermDB)
          (rest : List (EffectLabel × TermDB)) :
          HasTypeDB Delta Sigma
-                   (Typ.arrow tRet t epsR :: tArg :: Gamma2)
+                   (some (Typ.arrow tRet t epsR) :: some tArg :: Gamma2)
                    hb t epsR
-                   (Typ.arrow tRet t epsR :: tArg :: Gamma3) →
+                   (slot1 :: slot2 :: Gamma3) →
          ClausesTypedDB Delta Sigma Gamma2 Gamma3 t epsR rest →
          ClausesTypedDB Delta Sigma Gamma2 Gamma3 t epsR ((op, hb) :: rest)
 
