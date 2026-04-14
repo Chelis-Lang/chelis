@@ -37,26 +37,75 @@ theorem value_preserves_closed_context
   -- each enforce Γ_out = Γ_in = [].
   sorry
 
-/-- Canonical forms: a value of arrow type is a literal abstraction. -/
+/-- Canonical forms: a value of arrow type is a literal abstraction.
+    Wave 2 caveat: loc-of-arrow-type is the pathological case (a
+    location storing an arrow type). We use a `StoreTypTensorOnly`
+    premise to rule it out. -/
 theorem canonical_forms_arrow
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t1 t2 : Typ} {eps eps' : EffectRow}
     (_h : HasType Delta Sigma Gamma v (Typ.arrow t1 t2 eps) eps' Gamma')
     (_hv : IsValue v) :
     ∃ x body, v = Term.abs x t1 body := by
-  -- TODO Wave 3+: HasType.rec on v with motive matching arrow type;
-  -- only `abs` and `subEff` cases can fire (unit/loc/pair values
-  -- have non-arrow types).
+  -- TODO Wave 3: mirrors canonical_forms_tensor but needs
+  -- StoreTypTensorOnly to dispatch the loc case (a loc with arrow
+  -- type is uninhabited under the invariant). The abs/unit/pair
+  -- cases close via equation contradiction on type shape.
   sorry
 
-/-- Canonical forms: a value of tensor type is a runtime location. -/
+/-- Canonical forms: a value of tensor type is a runtime location.
+    Wave 2: case-split on `IsValue` then derive a contradiction from
+    HasType for each non-loc value shape. The type-mismatch between
+    (arrow/unit/pair) and tensor is the contradiction. -/
 theorem canonical_forms_tensor
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {ds : DimList} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma v (Typ.tensor ds) eps Gamma')
-    (_hv : IsValue v) : ∃ ell, v = Term.loc ell := by
-  -- TODO Wave 3+: value shapes of tensor type are only `loc`.
-  sorry
+    (h : HasType Delta Sigma Gamma v (Typ.tensor ds) eps Gamma')
+    (hv : IsValue v) : ∃ ell, v = Term.loc ell := by
+  cases hv with
+  | loc ell => exact ⟨ell, rfl⟩
+  | unit =>
+      -- HasType.unit produces Typ.unit; unit ≠ tensor ds.
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.unit →
+          t' = Typ.tensor ds → False from
+        hf _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | unit => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
+  | abs _ _ _ =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx)
+          (x' : String) (t1' : Typ) (e'' : Term),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.abs x' t1' e'' →
+          t' = Typ.tensor ds → False from
+        hf _ _ _ _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' x' t1' e'' hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | abs _ _ _ _ _ _ _ _ _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
+  | pair _ _ _ _ =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx)
+          (a b : Term),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.pair a b →
+          t' = Typ.tensor ds → False from
+        hf _ _ _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' a b hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
 
 /-- Canonical forms: a value of pair type is a literal pair of values.
     Wave 2 status: blocked by the `loc` case. A runtime location value
