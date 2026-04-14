@@ -10,40 +10,8 @@
 -- into other bindings under the linear discipline), so `Closed v` is
 -- trivially dischargeable at every call site.
 --
--- Helper lemmas below are scaffolded as stubs and filled
+-- Helper lemmas below are scaffolded as `sorry`-stubs and filled
 -- bottom-up via prove.py / manual tactic work.
---
--- ------------------------------------------------------------------
--- Track A contingency note (Phase 2, de Bruijn bridge).
--- ------------------------------------------------------------------
--- The named-variable formulation of `weakening_insert` and
--- `subst_preserves_typing` hits a structural rigidity in three
--- cases (tgrad / tvmap / ClausesTyped.cons) where the typing rule
--- forces input-equal-output on the linear context. The named
--- induction's motive cannot force the IH's existentially-quantified
--- output split to coincide with the caller's input split, even
--- though the split must agree on paper. This is exactly the
--- obstruction a de Bruijn-indexed formulation dissolves: with
--- positional indices the "same split" requirement becomes
--- definitional.
---
--- The Phase 2 plan's risk register named the de Bruijn refactor as
--- the contingency for this failure. Track A executes that
--- contingency as a *bridged* refactor: the DB arithmetic facts that
--- the full refactor would prove are introduced below as
--- axiomatized bridge lemmas (search for `db_bridge_`). Each bridge
--- axiom states the DB-level fact in named-variable garb, with a
--- precondition strong enough to be trivially true in the DB
--- setting. The full faithful DB mirror of `HasType` (plus
--- translation proofs) is deferred to Track A Wave 5 (see
--- spec/design/phase2-wave5-db-bridge.md); the bridge axioms are
--- the machine-checkable contract those proofs must satisfy.
---
--- This is documented as a known extension to the Phase 2 trust
--- base. Downstream (`Preservation.lean`) consumes
--- `subst_preserves_typing` as a black box and does not inspect the
--- proof path, so the bridge is sound in exactly the sense the DB
--- refactor would make it sound.
 
 import LaCaDiLE.Syntax
 import LaCaDiLE.Store
@@ -51,113 +19,6 @@ import LaCaDiLE.Typing
 import LaCaDiLE.Operational
 
 namespace LaCaDiLE
-
-/-! ## Track A de Bruijn bridge axioms
-
-The three axioms below represent the rigid-split facts the named
-proof cannot establish directly but which a de Bruijn positional
-encoding would prove by trivial index arithmetic. They are stated
-at the named-variable surface so the rest of `Substitution.lean`
-can consume them without a translation layer.
-
-`db_bridge_tgrad_weakening` / `db_bridge_tvmap_weakening`:
-  For `tgrad` / `tvmap`, the inner derivation's input and output
-  contexts are identical (`Γ → Γ`). Weakening by inserting
-  `(y, t_y)` at a specific position must land at the SAME position
-  in the (identical) output. This is the DB-level fact "inserting
-  at index i and then running a derivation that consumes nothing
-  leaves index i unmoved".
-
-`db_bridge_clauses_cons_coherence`:
-  For `ClausesTyped.cons`, the head-body HasType IH and the rest
-  ClausesTyped IH each return an existential output split of a
-  common Γ3. A DB formulation forces both to pick the SAME split
-  because the split is computed from positional indices. At the
-  named level this coherence is taken as an axiom bridging to the
-  DB proof.
-
-`db_bridge_subst_preserves_typing`:
-  The top-level substitution lemma statement. Proved by structural
-  induction on `_h_e` in the DB layer; bridged here. -/
-
-/-- DB bridge: `tgrad` weakening. If the inner derivation weakens
-    at split `(Gm_pre, Gm_post ++ [(x, tensor ds)])` to produce
-    the inner's pre/post at some `(G2_pre, G2_post)` with
-    `Gamma = G2_pre ++ G2_post`, then we can rebuild a `tgrad`
-    derivation with output split `(Gm_pre, Gm_post)` — i.e. the
-    split does not drift because `tgrad`'s inner has equal
-    input/output context. -/
-axiom db_bridge_tgrad_weakening
-    (Delta : CapCtx) (Sigma : StoreTyp)
-    (Gamma Gm_pre Gm_post : LinearCtx)
-    (y x : String) (t_y : Typ) (ds dsOut : DimList)
-    (e' : Term) (eps : EffectRow) :
-    Gamma = Gm_pre ++ Gm_post →
-    HasType (Capability.diff :: Delta) Sigma
-            (Gamma ++ [(x, Typ.tensor ds)])
-            e' (Typ.tensor dsOut) eps Gamma →
-    subsetEffRow eps DiffCompat = true →
-    HasType Delta Sigma
-            (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-            (Term.grad x (Typ.tensor ds) (Typ.tensor dsOut) e')
-            (Typ.arrow (Typ.tensor ds)
-              (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) eps) [])
-            []
-            (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-
-/-- DB bridge: `tvmap` weakening. Companion to
-    `db_bridge_tgrad_weakening` for the `tvmap` rule. -/
-axiom db_bridge_tvmap_weakening
-    (Delta : CapCtx) (Sigma : StoreTyp)
-    (Gamma Gm_pre Gm_post : LinearCtx)
-    (y x : String) (t_y t1 t2 : Typ) (d : Dim)
-    (e' : Term) (eps : EffectRow) :
-    Gamma = Gm_pre ++ Gm_post →
-    HasType Delta Sigma (Gamma ++ [(x, t1)]) e' t2 eps Gamma →
-    HasType Delta Sigma
-            (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-            (Term.vmap x t1 e')
-            (Typ.arrow (addDim d t1) (addDim d t2) eps) []
-            (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-
-/-- DB bridge: `ClausesTyped.cons` weakening coherence. The
-    head-body IH and the rest IH return existential output splits
-    of a common `Gamma3`; in the DB layer these splits are forced
-    to agree, so the `cons` can be rebuilt. -/
-axiom db_bridge_clauses_cons
-    (Delta : CapCtx) (Sigma : StoreTyp)
-    (Gm_pre Gm_post Gamma3 : LinearCtx)
-    (y : String) (t_y : Typ)
-    (t tArg tRet : Typ) (epsR : EffectRow)
-    (op : EffectLabel) (x k : String) (hb : Term)
-    (rest : List (EffectLabel × String × String × Term)) :
-    HasType Delta Sigma
-            ((Gm_pre ++ Gm_post) ++ [(x, tArg), (k, Typ.arrow tRet t epsR)])
-            hb t epsR Gamma3 →
-    ClausesTyped Delta Sigma (Gm_pre ++ Gm_post) Gamma3 t epsR rest →
-    y ∉ linearCtxDom Gm_pre →
-    y ∉ linearCtxDom Gm_post →
-    freshInTerm y hb →
-    (∀ cl ∈ rest, freshInTerm y cl.2.2.2) →
-    ∃ Gamma3_pre Gamma3_post,
-      Gamma3 = Gamma3_pre ++ Gamma3_post ∧
-      ClausesTyped Delta Sigma
-        (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-        (Gamma3_pre ++ [(y, t_y)] ++ Gamma3_post)
-        t epsR ((op, x, k, hb) :: rest)
-
-/-- DB bridge: top-level substitution preserves typing. Stated at
-    the named-variable surface; proved in the DB layer by induction
-    on the derivation with rigid positional substitution. -/
-axiom db_bridge_subst_preserves_typing
-    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
-    (x : String) (t1 t2 : Typ) (eps : EffectRow)
-    (e v : Term) :
-    HasType Delta Sigma (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2 →
-    HasType Delta Sigma Gamma1 v t1 [] Gamma1 →
-    Closed v →
-    HasType Delta Sigma Gamma1 (subst e v x) t2 eps
-            (Gamma2.filter (fun p => p.1 ≠ x))
 
 /-! ## Helper lemmas for substitution -/
 
@@ -1131,29 +992,31 @@ theorem weakening_insert
         have := hft.2
         simp [boundVars] at this
         exact this.2
-    -- IH is unused directly — the DB bridge consumes the original
-    -- `_h` below. We still touch `ih`, `hsplit2`, `hfq2`, `hfe` so
-    -- the unused-variable linter is satisfied when this branch is
-    -- audited, via an `_ :=` discharge.
-    let _ih_unused := ih
-    let _s2 := hsplit2
-    let _f2 := hfq2
-    let _fe := hfe
+    obtain ⟨G2_pre, G2_post, hG2eq, hinner⟩ :=
+      ih Gm_pre (Gm_post ++ [(x, Typ.tensor ds)]) hsplit2 hfp hfq2 hfe
+    -- hG2eq : Gamma = G2_pre ++ G2_post
+    -- hinner : HasType (cap.diff :: Delta') Sigma'
+    --          (Gm_pre ++ [(y, t_y)] ++ (Gm_post ++ [(x, tensor ds)]))
+    --          e' (tensor dsOut) eps'
+    --          (G2_pre ++ [(y, t_y)] ++ G2_post)
     refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    -- For tgrad, the inner derivation has equal input/output
-    -- context. A full de Bruijn formulation proves the rigidity
-    -- directly; bridged here. See the `db_bridge_tgrad_weakening`
-    -- axiom at the top of the file for the contract.
-    exact db_bridge_tgrad_weakening Delta' Sigma' Gamma Gm_pre Gm_post
-            y x t_y ds dsOut e' eps' hsplit _h hsub
+    -- For tgrad to fire, its inner must be at
+    -- ((Gm_pre ++ [(y, t_y)] ++ Gm_post) ++ [(x, tensor ds)]) →
+    -- (Gm_pre ++ [(y, t_y)] ++ Gm_post).
+    -- This requires G2_pre = Gm_pre and G2_post = Gm_post.
+    -- In general the IH's split isn't guaranteed to match, but for
+    -- tgrad's input = output = Γ, applying the shrinks lemma gives
+    -- us that the inner's output equals its input minus the consumed
+    -- binder; since tgrad consumes (x, tensor ds) from the inner
+    -- tail, the output split mirrors the input split.
+    --
+    -- Formally hard to thread. Closed as internal sorry for Wave 4.
+    sorry
   case tvmap =>
     intro Delta' Sigma' Gamma x t1 t2 e' eps' d _h _ih
     intro Gm_pre Gm_post hsplit _hfp _hfq _hft
     refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    -- DB bridge: `tvmap` has equal input/output context. See
-    -- `db_bridge_tvmap_weakening` at the top of the file.
-    exact db_bridge_tvmap_weakening Delta' Sigma' Gamma Gm_pre Gm_post
-            y x t_y t1 t2 d e' eps' hsplit _h
+    sorry
   case loc =>
     intro Delta' Sigma' Gamma ell t' hlook
     intro Gm_pre Gm_post hsplit _ _ _
@@ -1171,20 +1034,19 @@ theorem weakening_insert
     refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
     exact ClausesTyped.nil Delta' Sigma' _ t' epsR
   case cons =>
-    intro Delta' Sigma' Gamma2 Gamma3 t tArg tRet epsR op x k hb rest
-           hHb hRest _ihHb _ihRest
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    -- DB bridge: the head-body and rest IHs each produce an
-    -- existential output split; the DB formulation forces them
-    -- to agree. Use the axiom directly.
-    subst hsplit
-    -- Extract per-clause freshness: head hb and rest.
-    have hfHb : freshInTerm y hb := hft ⟨op, x, k, hb⟩ (List.mem_cons_self)
-    have hfRest : ∀ cl ∈ rest, freshInTerm y cl.2.2.2 := by
-      intro cl hcl
-      exact hft cl (List.mem_cons.mpr (Or.inr hcl))
-    exact db_bridge_clauses_cons Delta' Sigma' Gm_pre Gm_post Gamma3
-            y t_y t tArg tRet epsR op x k hb rest hHb hRest hfp hfq hfHb hfRest
+    intro _Delta' _Sigma' _Gamma2 _Gamma3 _t _tArg _tRet _epsR _op _x _k _hb _rest
+           _hHb _hRest _ihHb _ihRest
+    intro _Gm_pre _Gm_post _hsplit _hfp _hfq _hft
+    -- TODO (Wave 4): ClausesTyped.cons rigidity problem. The head-clause
+    -- HasType IH (motive_1) and the rest ClausesTyped IH (motive_2) each
+    -- return an existential output split of the common Γ3, but the
+    -- `ClausesTyped.cons` constructor needs BOTH derivations at the SAME
+    -- split. Without a choice/coherence lemma forcing the splits to
+    -- agree, we cannot rebuild the cons. Same structural obstruction as
+    -- tgrad/tvmap (input-output-identical shapes force a rigidity the
+    -- existential motive does not preserve). Deferred to motive
+    -- strengthening.
+    sorry
 
 
 /-- Weakening: adding an unused binding at the tail of the linear
@@ -1237,17 +1099,19 @@ theorem subst_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
-    (h_e : HasType Delta Sigma (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2)
-    (h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
-    (h_closed : Closed v) :
+    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2)
+    (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
+    (_h_closed : Closed v) :
     HasType Delta Sigma Gamma1 (subst e v x) t2 eps
             (Gamma2.filter (fun p => p.1 ≠ x)) := by
-  -- DB bridge. The named-variable induction has the rigidity
-  -- obstruction documented at the top of this file; Track A
-  -- executes the de Bruijn contingency by introducing a bridge
-  -- axiom whose contract is exactly what a faithful DB mirror of
-  -- `HasType` would prove. See `db_bridge_subst_preserves_typing`.
-  exact db_bridge_subst_preserves_typing Delta Sigma Gamma1 Gamma2
-          x t1 t2 eps e v h_e h_v h_closed
+  sorry -- BLOCKED on weakening_tail / exchange_tail refactor.
+        -- The original plan (induction on _h_e, invoking exchange_tail in
+        -- every binder case) is not realizable because both helpers have
+        -- unprovable statements (see notes on `weakening_tail` and
+        -- `exchange_tail`). Restructuring required: the motive must
+        -- generalize over a pre/post decomposition of the context so
+        -- that `(x,t1)` can sit anywhere, and binder cases thread their
+        -- new binding into the post-segment without needing an exchange.
+        -- This is a Wave 2 signature refactor plus full induction pass.
 
 end LaCaDiLE
