@@ -1,27 +1,13 @@
 # Chelis
 
-Chelis is a functional programming language for AI research.
-It is designed for a workflow where a coding agent is the primary author and a human is
-the supervisor.
-Surf is the readable syntax for humans.
-Deep is the canonical s-expression syntax for machines and the compiler.
+Chelis is a functional programming language for AI research. It is designed for a
+workflow where a coding agent is the primary author and a human is the supervisor.
+Surf is the readable syntax for humans. Deep is the canonical s-expression syntax for
+machines and the compiler.
 
 <p align="center">
   <img src="assets/mascot/chev.svg" alt="Chev Chelis, the project mascot — a turtle on a mountain bike climbing a hill" width="320"/>
 </p>
-
-**Status:** Phase 0 is complete.
-Phases 0a-0i are complete.
-Phases 1a-1f are implemented.
-Phase 1 is structurally complete for the shipped fixed-workload deliverable, with known
-backend limitations carried forward explicitly in the design docs.
-Phase 2 has shipped substantial tooling and language surface (`tide` serve/MCP, LSP,
-`cove`, pretty Deep formatting, and the initial checked effect subset).
-Phase 3 language-completeness work now ships the package system, Python interop, direct
-execution, scalar/string values, collections, the pipe-first Surf idiom, core numeric
-primitives, the Rust runtime rewrite, data loading/tokenization, and the first stdlib
-expansion (`Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, `Std.Nn.Generate`).
-The main remaining Phase 3 item is the full `SKILL.md` v2 refresh.
 
 ## Prerequisites
 
@@ -31,7 +17,7 @@ rustup default stable
 rustup component add rustfmt clippy
 ```
 
-**C toolchain** (for the C backend — Phase 0f+):
+**C toolchain** (for the C backend):
 ```sh
 # Fedora / RHEL
 sudo dnf install gcc openblas-devel valgrind
@@ -58,120 +44,8 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-`cargo test --workspace` covers the compiler, evaluator, backend, and spec regressions.
-It does not run the full release-mode real-MNIST milestone by default.
-
-## Current Focus
-
-Phase 0 is complete through:
-
-- Surf -> Deep -> typecheck -> lower -> grad -> eval execution
-- C backend codegen with BLAS and OpenMP validation
-- executable spec-suite coverage by language behavior
-- end-to-end MNIST training on CPU
-
-Phase 0i shipped:
-
-- `chelis deep`
-- `chelis surf`
-- `chelis fmt`
-- `chelis eval`
-- `chelis check`
-- `chelis build`
-- `chelis tide`
-- `chelis tide serve`
-- `chelis tide mcp`
-- `chelis tide lsp`
-- `chelis cove`
-
-Deep formatting now defaults to canonical pretty-printed `.dp` output:
-
-- `chelis deep app.ch` prints width-aware canonical Deep
-- `chelis deep --flat app.ch` preserves flat per-form rendering for explicit machine
-  pipelines while keeping top-level forms separated
-- `chelis fmt file.dp --check` verifies canonical `.dp` formatting without rewriting the
-  file
-
-The current shipped surface includes the Phase 1 HIP backend work,
-`chelis validate` for executable grammar conformance, the shipped Phase 2 tooling
-surfaces, and the practical Phase 3 language-completeness foundation:
-
-- optional effect annotations on `sig` and `def`
-- `with seed(...) { ... }` and `with device(...) { ... }` Surf handler syntax
-- checked programs now flow downstream as annotated Deep, with type metadata written
-  onto the returned tree
-- `dropout(x, rate)` as the concrete `Random` source in evaluation/lowering
-- build-target validation for resource regions such as `with device("gpu:0") { ... }`
-- the Phase 2e Tide machine-facing API surface (`chelis tide serve` and
-  `chelis tide mcp`)
-- the Phase 2f Tide LSP/editor package surface in `editors/vscode/`
-- the Phase 2g `chelis cove` terminal UI plus checked-in tree-sitter grammars for Surf
-  and Deep
-- Reef package commands and local-first package resolution
-- Python bindings with CPU DLPack interop, safetensors, and direct execution helpers
-- first-class scalars, strings, collections, `Option`, records, and compiled host-value
-  execution through the Rust runtime
-- Phase 3 numeric/data surfaces: `einsum`, `concat`, `split`, `gather`, `scatter`,
-  `where`, `cumsum`, `sort`, `diagonal`, `trace`, `clamp`, `Std.IO`, `Std.Tokenizer`,
-  `Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate`
-The shipped Phase 1 benchmark models compile and run on both backends.
-Known carried-forward limitations are:
-
-- HIP does not yet implement `pad` / `shrink`; no current Phase 1 model uses them
-- symbolic dimensions now ship on both backends through the stable tensor ABI:
-  generated functions bind symbolic names from input tensor metadata at runtime, so
-  batch/sequence changes do not require recompilation on the supported Phase 1 surface
-- `layer_norm` still requires a concrete normalized-axis extent; symbolic leading dims
-  are supported, but a symbolic hidden size remains a follow-up
-- compiler-emitted dotted Deep module/import paths still do not fully round-trip through
-  the compiler-side Deep parser
-- `chelis build` does not yet codegen `dropout` for either `c` or `hip`; seeded dropout
-  currently ships on the evaluator path only
-
-These limitations are real debt, but they do not block the Phase 2 language work.
-AI assistance planning is split cleanly:
-
-- Phase 2: `SKILL.md` + Tide MCP/HTTP API for frontier models
-- Phase 3: language completeness, now mostly shipped apart from the `SKILL.md` v2
-  refresh
-- Phase 4: a local coding model that ships with the toolchain
-
-Phase 2g currently ships as:
-
-- `chelis cove --file examples/mnist.ch`
-- live Surf editing with checked-in tree-sitter highlighting
-- read-only Deep view derived from the current Surf buffer
-- live diagnostics and numeric fitness status
-- `Ctrl-S` save, `Ctrl-R` compile, `Ctrl-E` eval, `Ctrl-Q` quit
-
-Phase 3 now ships:
-
-- `chelis reef init`
-- `chelis reef build`
-- `chelis reef publish`
-- local-first Reef package resolution for `chelis check` and `chelis build`
-- bundled `packages/chelis-std` dogfooding the package system through `.chb` shell
-  metadata plus source archives
-- pipe-first Surf formatting and decompilation defaults
-- Rust runtime linkage through `libchelis_runtime.a`
-- `Std.IO` / `Std.Tokenizer` data-loading and tokenization modules
-- `Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate`
-- executable package-mode coverage for the shipped stdlib surface
-
-## Phase 0h Validation
-
-Release-mode MNIST validation is checked in as:
-
-```sh
-cargo run --release -p chelis-e2e --bin train_mnist -- --epochs 5 --min-acc 0.90
-```
-
-Measured on the checked-in path:
-- 5 epochs on real MNIST
-- final test accuracy: `0.9272`
-
-This release runner is the authoritative 0h gate.
-The ignored MNIST tests mirror it for manual test-harness use, but the normal workspace test run does not attempt the full long real-data training job.
+`cargo test --workspace` covers the compiler, evaluator, backend, and spec
+regressions.
 
 ## Project Structure
 
@@ -186,16 +60,16 @@ crates/
   chelis-ir/         RISC DAG, lowering, transforms, evaluator
   chelis-runtime/    Rust runtime library and C ABI header
   chelis-backend-c/  C backend code emitter
+  chelis-backend-hip/ HIP backend code emitter
   chelis-tide/       Tide HTTP/JSON API and MCP server
   chelis-lsp/        Tide Language Server Protocol support
   chelis-cove/       Cove terminal coding environment
   chelis-cli/        CLI binary
-  spec/                Numbered language specs and design docs
 editors/vscode/      VS Code-compatible extension and TextMate grammars
 grammars/            Tree-sitter grammars for Surf and Deep
-packages/chelis-std/ Reef-packaged standard-library dogfood set
-examples/            Executable Phase 0 example programs
-examples/illustrative/  Non-executable syntax/design examples
+packages/chelis-std/ Reef-packaged standard library
+examples/            Executable example programs
+spec/                Numbered language specs and design docs
 ```
 
 ## Key Ideas
@@ -219,31 +93,8 @@ examples/illustrative/  Non-executable syntax/design examples
 - [Architecture Guide](ARCHITECTURE.md)
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
-- [Phase 2 Plan](spec/design/chelis_phase2_plan.md)
-- [Phase 3 Plan](spec/design/chelis_phase3_plan.md)
 - [Roadmap](spec/12-roadmap.md)
 - [Project Plan](spec/design/chelis_project_plan.md)
-
-## Agent Tooling
-
-This repo keeps shared agent guidance in:
-
-- `AGENTS.md`: canonical coding-agent instructions
-- `CLAUDE.md`: should resolve to `AGENTS.md`
-- `SKILL.md`: compact Chelis code-generation teaching document
-- `agent-skills/`: project-local reusable workflows for red teaming, phase gating, spec sync,
-  backend numerics, CLI surface validation, and example policy
-
-Tool-specific skill entry points should resolve to the same local skill library:
-
-- `.claude/skills` -> `agent-skills/`
-- `.codex/skills` -> `agent-skills/`
-
-External Phase 2e validation can be run with:
-
-```sh
-python scripts/redteam_tide_phase2e.py
-```
 
 ## License
 
