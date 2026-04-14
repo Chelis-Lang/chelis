@@ -487,6 +487,99 @@ theorem hasTypeDB_length_preservation_clauses
 
 end
 
+/-! ## None-slot monotonicity
+
+Once a slot in a DB linear context is `none` (consumed), no typing
+rule can restore it to `some`. Formally: every rule either leaves a
+given slot untouched or transitions it from `some` to `none`. This
+monotonicity is one of two ingredients needed for the tail-rebase
+machinery that `subst_preserves_typing_db` depends on (the other is
+length preservation, landed in Wave 5b above).
+
+The proof is structural on `HasTypeDB`, with a mutual partner for
+`ClausesTypedDB`. -/
+
+mutual
+
+theorem hasTypeDB_none_monotone
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Delta Sigma Γ e t eps Γ')
+    (i : Nat) (hi : Γ[i]? = some none) : Γ'[i]? = some none := by
+  match h with
+  | HasTypeDB.var _ _ Γ k _ hlook =>
+    -- var consumes position k (live slot). If i = k, `hi` would say
+    -- Γ[k]? = some none, contradicting `hlook`. Otherwise set leaves
+    -- position i untouched.
+    by_cases hik : i = k
+    · subst hik
+      rw [hlook] at hi
+      cases hi
+    · have hne : k ≠ i := fun h => hik h.symm
+      have h1 : (Γ.set k none)[i]? = Γ[i]? := List.getElem?_set_ne hne
+      exact h1.trans hi
+  | HasTypeDB.unit _ _ _ => exact hi
+  | HasTypeDB.abs _ _ Γ1 _ _ t1 _ _ _ hbody =>
+    have hi' : (some t1 :: Γ1)[i + 1]? = some none := by simp [hi]
+    have hm := hasTypeDB_none_monotone hbody (i + 1) hi'
+    simpa using hm
+  | HasTypeDB.app _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact hasTypeDB_none_monotone h2 i (hasTypeDB_none_monotone h1 i hi)
+  | HasTypeDB.letBind _ _ _ Γ2 _ _ _ _ t1 _ _ _ h1 h2 =>
+    have m1 := hasTypeDB_none_monotone h1 i hi
+    have m2 : (some t1 :: Γ2)[i + 1]? = some none := by simp [m1]
+    have hm := hasTypeDB_none_monotone h2 (i + 1) m2
+    simpa using hm
+  | HasTypeDB.copy _ _ _ _ _ _ _ hbody => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.letpair _ _ _ Γ2 _ _ _ _ _ t1 t2 _ _ _ h1 h2 =>
+    have m1 := hasTypeDB_none_monotone h1 i hi
+    have m2 : (some t2 :: some t1 :: Γ2)[i + 2]? = some none := by simp [m1]
+    have hm := hasTypeDB_none_monotone h2 (i + 2) m2
+    simpa using hm
+  | HasTypeDB.tpair _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact hasTypeDB_none_monotone h2 i (hasTypeDB_none_monotone h1 i hi)
+  | HasTypeDB.fst _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.snd _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.const _ _ _ _ _ => exact hi
+  | HasTypeDB.tadd _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact hasTypeDB_none_monotone h2 i (hasTypeDB_none_monotone h1 i hi)
+  | HasTypeDB.tmul _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact hasTypeDB_none_monotone h2 i (hasTypeDB_none_monotone h1 i hi)
+  | HasTypeDB.tsum _ _ _ _ _ _ _ _ hbody _ _ => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.texpand _ _ _ _ _ _ _ _ _ hbody _ _ => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.uniformLike _ _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.perform _ _ _ _ _ _ _ _ _ hbody _ => exact hasTypeDB_none_monotone hbody i hi
+  | HasTypeDB.handle _ _ _ _ _ _ _ _ _ _ hb _ _ _ hcls =>
+    have m1 := hasTypeDB_none_monotone hb i hi
+    exact hasTypeDB_none_monotone_clauses hcls i m1
+  | HasTypeDB.tgrad _ _ Γ _ ds _ _ _ hbody _ =>
+    have hi' : (some (Typ.tensor ds) :: Γ)[i + 1]? = some none := by simp [hi]
+    have hm := hasTypeDB_none_monotone hbody (i + 1) hi'
+    simpa using hm
+  | HasTypeDB.tvmap _ _ Γ _ t1 _ _ _ _ hbody =>
+    have hi' : (some t1 :: Γ)[i + 1]? = some none := by simp [hi]
+    have hm := hasTypeDB_none_monotone hbody (i + 1) hi'
+    simpa using hm
+  | HasTypeDB.loc _ _ _ _ _ _ => exact hi
+  | HasTypeDB.subEff _ _ _ _ _ _ _ _ hbody _ => exact hasTypeDB_none_monotone hbody i hi
+
+theorem hasTypeDB_none_monotone_clauses
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow} {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls)
+    (i : Nat) (hi : Γ2[i]? = some none) : Γ3[i]? = some none := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ => exact hi
+  | ClausesTypedDB.cons _ _ Γ2 _ _ _ t tArg tRet epsR _ _ _ hbody hrest =>
+    have hi' :
+        (some (Typ.arrow tRet t epsR) :: some tArg :: Γ2)[i + 2]? = some none := by
+      simp [hi]
+    have mb := hasTypeDB_none_monotone hbody (i + 2) hi'
+    -- The body's output context is `slot1 :: slot2 :: Γ3`; extract Γ3[i]?.
+    simpa using mb
+
+end
+
 /-! ## Substitution obligation — doc block for Wave 5b → 5c
 
 Under Option C the target statement is:
