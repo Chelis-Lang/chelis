@@ -372,6 +372,17 @@ theorem SubEffRow.union_left (eps eps_extra : EffectRow) :
   show op ∈ eps ++ eps_extra.filter (fun o => !eps.contains o)
   exact List.mem_append_left _ hop
 
+/-- `SubEffRow` is reflexive. -/
+theorem SubEffRow.refl (eps : EffectRow) : SubEffRow eps eps :=
+  fun _ h => h
+
+/-- `SubEffRow` is transitive. -/
+theorem SubEffRow.trans
+    {eps1 eps2 eps3 : EffectRow}
+    (h12 : SubEffRow eps1 eps2) (h23 : SubEffRow eps2 eps3) :
+    SubEffRow eps1 eps3 :=
+  fun op hop => h23 op (h12 op hop)
+
 /-- Widen the effect row of a typing derivation. Wave 0.5 made this
     trivial: with `HasType.subEff` as a constructor, we apply it
     directly with a `SubEffRow.union_left` witness. -/

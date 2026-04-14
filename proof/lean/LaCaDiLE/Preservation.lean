@@ -36,10 +36,8 @@ proof. We expose the handful of small inversion lemmas that the
 preservation proof below needs. Each is a one-liner by `cases` in its
 own top-level `theorem`, which Lean accepts. -/
 
-/-- Generic inversion scaffold. Wave 0.5 approach: inversion lemmas
-    absorb `subEff` stripping by carrying an explicit equation premise
-    and using `HasType.rec`, which is structurally recursive over
-    HasType derivations without termination-proof gymnastics. -/
+/-- fst inversion: Wave 0.5 HasType.rec pattern absorbs subEff.
+    Since fst propagates eps unchanged, no restatement needed. -/
 theorem HasType.fst_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
@@ -78,23 +76,27 @@ theorem HasType.snd_inv
       exact ⟨t1, HasType.subEff Δ S Γ Γ' e (Typ.pair t1 t') eps0 eps1 h_inv h_sub⟩
   | _ => (try cases heq) <;> first | exact True.intro | (exfalso; contradiction)
 
-/-- Pair inversion with subEff widening. Effect-row equation dropped. -/
+/-- Pair inversion with subEff widening. Produces sub-derivations at
+    internal effect rows `eps1`, `eps2` plus a `SubEffRow` witness
+    connecting `union eps1 eps2` to the outer `eps`. -/
 theorem HasType.pair_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
     {e1 e2 : Term} {t1 t2 : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) (Typ.pair t1 t2) eps Gamma3) :
     ∃ Gamma2 eps1 eps2,
       HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
-      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 := by
+      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
   generalize heq : Term.pair e1 e2 = e_in at h
   generalize htq : Typ.pair t1 t2 = t_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | tpair _ _ _ Γ2 _ _ _ _ _ eps1 eps2 h1 h2 _ _ =>
       cases heq; cases htq
-      exact ⟨Γ2, eps1, eps2, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq htq
+      exact ⟨Γ2, eps1, eps2, h1, h2, SubEffRow.refl _⟩
+  | subEff _ _ _ _ _ _ _ _ _ h_sub ih =>
+      obtain ⟨Γ2, eps1, eps2, hh1, hh2, hsr⟩ := ih heq htq
+      exact ⟨Γ2, eps1, eps2, hh1, hh2, SubEffRow.trans hsr h_sub⟩
   | _ => (try cases heq) <;> (try cases htq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -328,10 +330,15 @@ theorem preservation
       -- TODO Wave 2: needs subst_preserves_typing
       sorry
   | fst s v1 v2 hv1 hv2 =>
-      -- E-Fst: fst (pair v1 v2) ↦ v1. Needs weaken_eff PLUS a value
-      -- context-preservation lemma (values don't consume linear ctx,
-      -- so the middle Gamma2 from T-Pair must equal the theorem's []).
-      -- TODO Wave 2: value_preserves_context + weaken_eff.
+      -- E-Fst: fst (pair v1 v2) ↦ v1. Use fst_inv + pair_inv
+      -- (strengthened with SubEffRow witness) to extract h1 : v1 at
+      -- eps1, then widen eps1 to eps via subEff.
+      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
+      obtain ⟨Γ2, eps1, eps2, h1, _h2, _hsub⟩ := HasType.pair_inv h_pair
+      refine ⟨Sigma, ?_, h_wf⟩
+      -- TODO Wave 2: h1 is at Γ2 and eps1, but we need Γ = [] and
+      -- eps. Needs value_preserves_closed_context (Γ2 = []) plus
+      -- SubEffRow eps1 eps from the union sub-relationship.
       sorry
   | snd s v1 v2 hv1 hv2 =>
       -- Symmetric to fst; same obstacle.
