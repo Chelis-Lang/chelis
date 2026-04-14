@@ -1,6 +1,6 @@
 # Lines of Code Report
 
-Generated: 2026-04-14 11:36 UTC
+Generated: 2026-04-14 11:59 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
@@ -12,9 +12,9 @@ Generated: 2026-04-14 11:36 UTC
 | TOML | 26 | 405 | 0 | 54 | 459 | Cargo/reef manifests |
 | PEG Grammars (.pest) | 2 | 248 | 0 | 28 | 276 | Validator grammars (Surf + Deep) |
 | XML | 1 | 212 | 57 | 38 | 307 |  |
-| YAML | 2 | 202 | 0 | 36 | 238 | CI workflows |
 | JavaScript | 2 | 190 | 0 | 28 | 218 | Tree-sitter grammar definitions |
+| YAML | 2 | 187 | 0 | 35 | 222 | CI workflows |
 | Tree-sitter Queries (.scm) | 2 | 98 | 0 | 6 | 104 | Syntax highlighting for Surf and Deep |
 | **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
-| Markdown | 66 | 0 | 5,730 | 3,093 | 8,823 | Specs, design docs, plans |
-| **Total** | **312** | **89,779** | **7,702** | **27,500** | **124,981** | |
+| Markdown | 66 | 0 | 5,668 | 3,066 | 8,734 | Specs, design docs, plans |
+| **Total** | **312** | **89,764** | **7,640** | **27,472** | **124,876** | |
