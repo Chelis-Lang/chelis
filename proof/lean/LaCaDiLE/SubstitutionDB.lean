@@ -580,6 +580,247 @@ theorem hasTypeDB_none_monotone_clauses
 
 end
 
+/-! ## Live-slot preservation
+
+The none-monotonicity lemma tracks only the `none` → `none` direction.
+For the `tail_rebase_db` sandwich argument we also need that a
+position which starts live with type `t` either stays live with
+*the same* type `t` or gets consumed to `none`. No rule ever rewrites
+a live slot to a differently-typed live slot: every typing rule
+either preserves the slot verbatim or writes `none` via `.set i none`
+(the var rule). -/
+
+mutual
+
+theorem hasTypeDB_live_slot_monotone
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Delta Sigma Γ e t eps Γ')
+    (i : Nat) (t_slot : Typ) (hi : Γ[i]? = some (some t_slot)) :
+    Γ'[i]? = some (some t_slot) ∨ Γ'[i]? = some none := by
+  match h with
+  | HasTypeDB.var _ _ Γ k _ _ =>
+    by_cases hik : i = k
+    · subst hik
+      right
+      have hlt : i < Γ.length := by
+        rcases hg : Γ[i]? with _ | _
+        · rw [hg] at hi; cases hi
+        · exact (List.getElem?_eq_some_iff.mp hg).1
+      exact List.getElem?_set_self hlt
+    · left
+      have hne : k ≠ i := fun h => hik h.symm
+      rw [List.getElem?_set_ne hne]; exact hi
+  | HasTypeDB.unit _ _ _ => left; exact hi
+  | HasTypeDB.abs _ _ Γ1 _ _ t1 _ _ _ hbody =>
+    have hi' : (some t1 :: Γ1)[i + 1]? = some (some t_slot) := by simp [hi]
+    have hm := hasTypeDB_live_slot_monotone hbody (i + 1) t_slot hi'
+    simpa using hm
+  | HasTypeDB.app _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · exact hasTypeDB_live_slot_monotone h2 i t_slot h1'
+    · right; exact hasTypeDB_none_monotone h2 i h1'
+  | HasTypeDB.letBind _ _ _ Γ2 _ _ _ _ t1 _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · have m2 : (some t1 :: Γ2)[i + 1]? = some (some t_slot) := by simp [h1']
+      have hm := hasTypeDB_live_slot_monotone h2 (i + 1) t_slot m2
+      simpa using hm
+    · have m2 : (some t1 :: Γ2)[i + 1]? = some none := by simp [h1']
+      have hm := hasTypeDB_none_monotone h2 (i + 1) m2
+      right; simpa using hm
+  | HasTypeDB.copy _ _ _ _ _ _ _ hbody =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.letpair _ _ _ Γ2 _ _ _ _ _ t1 t2 _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · have m2 : (some t2 :: some t1 :: Γ2)[i + 2]? = some (some t_slot) := by simp [h1']
+      have hm := hasTypeDB_live_slot_monotone h2 (i + 2) t_slot m2
+      simpa using hm
+    · have m2 : (some t2 :: some t1 :: Γ2)[i + 2]? = some none := by simp [h1']
+      have hm := hasTypeDB_none_monotone h2 (i + 2) m2
+      right; simpa using hm
+  | HasTypeDB.tpair _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · exact hasTypeDB_live_slot_monotone h2 i t_slot h1'
+    · right; exact hasTypeDB_none_monotone h2 i h1'
+  | HasTypeDB.fst _ _ _ _ _ _ _ _ hbody =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.snd _ _ _ _ _ _ _ _ hbody =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.const _ _ _ _ _ => left; exact hi
+  | HasTypeDB.tadd _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · exact hasTypeDB_live_slot_monotone h2 i t_slot h1'
+    · right; exact hasTypeDB_none_monotone h2 i h1'
+  | HasTypeDB.tmul _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    rcases hasTypeDB_live_slot_monotone h1 i t_slot hi with h1' | h1'
+    · exact hasTypeDB_live_slot_monotone h2 i t_slot h1'
+    · right; exact hasTypeDB_none_monotone h2 i h1'
+  | HasTypeDB.tsum _ _ _ _ _ _ _ _ hbody _ _ =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.texpand _ _ _ _ _ _ _ _ _ hbody _ _ =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.uniformLike _ _ _ _ _ _ _ _ _ hbody =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.perform _ _ _ _ _ _ _ _ _ hbody _ =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+  | HasTypeDB.handle _ _ _ _ _ _ _ _ _ _ hb _ _ _ hcls =>
+    rcases hasTypeDB_live_slot_monotone hb i t_slot hi with hb' | hb'
+    · exact hasTypeDB_live_slot_monotone_clauses hcls i t_slot hb'
+    · right; exact hasTypeDB_none_monotone_clauses hcls i hb'
+  | HasTypeDB.tgrad _ _ Γ _ ds _ _ _ hbody _ =>
+    have hi' : (some (Typ.tensor ds) :: Γ)[i + 1]? = some (some t_slot) := by simp [hi]
+    have hm := hasTypeDB_live_slot_monotone hbody (i + 1) t_slot hi'
+    simpa using hm
+  | HasTypeDB.tvmap _ _ Γ _ t1 _ _ _ _ hbody =>
+    have hi' : (some t1 :: Γ)[i + 1]? = some (some t_slot) := by simp [hi]
+    have hm := hasTypeDB_live_slot_monotone hbody (i + 1) t_slot hi'
+    simpa using hm
+  | HasTypeDB.loc _ _ _ _ _ _ => left; exact hi
+  | HasTypeDB.subEff _ _ _ _ _ _ _ _ hbody _ =>
+    exact hasTypeDB_live_slot_monotone hbody i t_slot hi
+
+theorem hasTypeDB_live_slot_monotone_clauses
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow} {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls)
+    (i : Nat) (t_slot : Typ) (hi : Γ2[i]? = some (some t_slot)) :
+    Γ3[i]? = some (some t_slot) ∨ Γ3[i]? = some none := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ => left; exact hi
+  | ClausesTypedDB.cons _ _ Γ2 _ _ _ _ _ _ _ _ _ _ _ hrest =>
+    -- hrest : ClausesTypedDB Γ2 Γ3 ...; recurse on it.
+    exact hasTypeDB_live_slot_monotone_clauses hrest i t_slot hi
+
+end
+
+/-! ## Append split helpers for Wave 5d
+
+The tail-rebase lemma decomposes contexts as `pre ++ Γ_old`. Before
+attempting the structural induction, we pre-land the pure list
+manipulation glue so that Wave 5d proofs have a stable foundation
+and each rule-case reduces to bookkeeping rather than new list
+algebra. -/
+
+/-- `getElem?` in the left half of an append. -/
+theorem LinearCtxDB.getElem?_append_lt
+    (pre tail : LinearCtxDB) (i : Nat) (h : i < pre.length) :
+    (pre ++ tail)[i]? = pre[i]? :=
+  List.getElem?_append_left h
+
+/-- `getElem?` in the right half of an append. -/
+theorem LinearCtxDB.getElem?_append_ge
+    (pre tail : LinearCtxDB) (i : Nat) (h : pre.length ≤ i) :
+    (pre ++ tail)[i]? = tail[i - pre.length]? :=
+  List.getElem?_append_right h
+
+/-- `set` into the left half of an append commutes with append. -/
+theorem LinearCtxDB.set_append_lt
+    (pre tail : LinearCtxDB) (i : Nat) (v : Option Typ)
+    (h : i < pre.length) :
+    (pre ++ tail).set i v = pre.set i v ++ tail := by
+  rw [List.set_append]
+  simp [h]
+
+/-- `set` into the right half of an append commutes with append. -/
+theorem LinearCtxDB.set_append_ge
+    (pre tail : LinearCtxDB) (i : Nat) (v : Option Typ)
+    (h : pre.length ≤ i) :
+    (pre ++ tail).set i v = pre ++ tail.set (i - pre.length) v := by
+  rw [List.set_append]
+  simp [Nat.not_lt.mpr h]
+
+/-- If a derivation has matching input/output endpoints modulo a
+    common tail `Γ_old`, length preservation forces the prefixes to
+    have equal length. -/
+theorem hasTypeDB_tail_pre_length_eq
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {pre pre' Γ_old : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Delta Sigma (pre ++ Γ_old) e t eps (pre' ++ Γ_old)) :
+    pre.length = pre'.length := by
+  have hl := hasTypeDB_length_preservation h
+  simp [List.length_append] at hl
+  exact hl
+
+/-- Tail slots of the input are preserved: the `(pre.length + k)`-th
+    slot of `pre ++ Γ_old` is exactly `Γ_old[k]?`. Pure append
+    bookkeeping, stated in the form consumed by the Wave 5d
+    monotonicity argument. -/
+theorem LinearCtxDB.getElem?_append_tail
+    (pre Γ_old : LinearCtxDB) (k : Nat) :
+    (pre ++ Γ_old)[pre.length + k]? = Γ_old[k]? := by
+  have hle : pre.length ≤ pre.length + k := Nat.le_add_right _ _
+  rw [List.getElem?_append_right hle]
+  simp
+
+/-- Along any derivation whose endpoints both end in the common tail
+    `Γ_old`, the intermediate context dropped past the prefix equals
+    `Γ_old`. This is the live-slot + none-slot sandwich: if any tail
+    slot were consumed midway, `hasTypeDB_none_monotone` through the
+    second half would propagate `none` to the output, contradicting
+    the output's intact tail. Type preservation of the unconsumed
+    case comes from `hasTypeDB_live_slot_monotone`. -/
+theorem hasTypeDB_tail_through_middle
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {pre pre' Γ_old Γ_mid : LinearCtxDB}
+    {e1 e2 : TermDB} {t1 t2 : Typ} {eps1 eps2 : EffectRow}
+    (h1 : HasTypeDB Delta Sigma (pre ++ Γ_old) e1 t1 eps1 Γ_mid)
+    (h2 : HasTypeDB Delta Sigma Γ_mid e2 t2 eps2 (pre' ++ Γ_old)) :
+    Γ_mid.drop pre.length = Γ_old := by
+  have hl1 := hasTypeDB_length_preservation h1
+  have hl2 := hasTypeDB_length_preservation h2
+  have hlen_mid : Γ_mid.length = pre.length + Γ_old.length := by
+    have h := hl1.symm
+    simp [List.length_append] at h; exact h
+  have hpre : pre.length = pre'.length := by
+    have h : (pre ++ Γ_old).length = (pre' ++ Γ_old).length := hl1.trans hl2
+    simp [List.length_append] at h; exact h
+  have hdrop_len : (Γ_mid.drop pre.length).length = Γ_old.length := by
+    rw [List.length_drop, hlen_mid]; omega
+  apply List.ext_getElem? (l₁ := Γ_mid.drop pre.length) (l₂ := Γ_old)
+  intro k
+  by_cases hk : k < Γ_old.length
+  · have hdrop_get : (Γ_mid.drop pre.length)[k]? = Γ_mid[pre.length + k]? := by
+      rw [List.getElem?_drop]
+    rw [hdrop_get]
+    have hin : (pre ++ Γ_old)[pre.length + k]? = Γ_old[k]? :=
+      LinearCtxDB.getElem?_append_tail pre Γ_old k
+    have hout : (pre' ++ Γ_old)[pre.length + k]? = Γ_old[k]? := by
+      have h := LinearCtxDB.getElem?_append_tail pre' Γ_old k
+      rw [← hpre] at h; exact h
+    -- Γ_old[k]? is some slot (since k < length).
+    have hk_some : ∃ slot : Option Typ, Γ_old[k]? = some slot := by
+      rcases hg : Γ_old[k]? with _ | s
+      · exfalso; have := List.getElem?_eq_none_iff.mp hg; omega
+      · exact ⟨s, rfl⟩
+    obtain ⟨slot, hslot⟩ := hk_some
+    rw [hslot]
+    cases slot with
+    | none =>
+      -- Input is none at pre.length+k. By monotone h1, Γ_mid same.
+      have hin_none : (pre ++ Γ_old)[pre.length + k]? = some none := by
+        rw [hin, hslot]
+      exact hasTypeDB_none_monotone h1 (pre.length + k) hin_none
+    | some t =>
+      -- Input is some (some t) at pre.length+k.
+      have hin_live : (pre ++ Γ_old)[pre.length + k]? = some (some t) := by
+        rw [hin, hslot]
+      rcases hasTypeDB_live_slot_monotone h1 (pre.length + k) t hin_live with hmid_live | hmid_none
+      · exact hmid_live
+      · -- Γ_mid[p]? = some none; monotone h2 forces output = some none.
+        exfalso
+        have hout_none := hasTypeDB_none_monotone h2 (pre.length + k) hmid_none
+        rw [hout, hslot] at hout_none
+        cases hout_none
+  · -- k ≥ Γ_old.length: both sides are none.
+    have h1none : Γ_old[k]? = none := by
+      rw [List.getElem?_eq_none_iff]; omega
+    have h2none : (Γ_mid.drop pre.length)[k]? = none := by
+      rw [List.getElem?_eq_none_iff, hdrop_len]; omega
+    rw [h1none, h2none]
+
+
+
 /-! ## Substitution obligation — doc block for Wave 5c → 5d
 
 Under Option C the target statement is:
