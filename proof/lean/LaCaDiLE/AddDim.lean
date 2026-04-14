@@ -282,7 +282,28 @@ theorem addDim_preserves_typing
     exact HasType.tgrad Delta Sigma (addDimCtx d Gamma)
       x (d :: ds) (d :: dsOut) (addDimTerm d e) eps ih' hsub
   | tvmap Delta Sigma Gamma x t1 t2 e eps d' _h ih =>
-    -- Need to shift inner d' past outer d. Without a freshness lemma, leave sorry.
+    -- This case is genuinely stuck at the current calculus definition.
+    --
+    -- Concrete obstacle: `addDim` prepends the dim to the left of the
+    -- tensor shape list, so `addDim d_out (addDim d_in τ)` and
+    -- `addDim d_in (addDim d_out τ)` are NOT definitionally equal —
+    -- they differ in prepend order. HasType.tvmap, given an IH at type
+    -- `addDim d_out (Typ.arrow (addDim d_in t1) (addDim d_in t2) eps)`,
+    -- has no choice of fresh dim that makes the reconstructed arrow
+    -- match without a full commutativity lemma that doesn't hold.
+    --
+    -- Fix options (all Phase 1 T7 definitional refactors, outside Wave
+    -- 1 scope):
+    --   (1) Represent tensor dims as a multiset / canonically sorted
+    --       list so prepend order is irrelevant.
+    --   (2) Change `addDim` to insert at a canonical position keyed by
+    --       a total order on `Dim`.
+    --   (3) Rewrite T-Vmap so the result type does not appeal to
+    --       `addDim` at all (e.g. dependent tensor shapes).
+    --
+    -- TODO Phase 2 Wave 0.5: pick one of (1)-(3), refactor the Typ
+    -- representation, and re-run this proof. All other HasType cases
+    -- above will remain closed because they don't commute addDims.
     sorry
   | nil Delta Sigma Gamma2 Gamma3 t epsR =>
     simp [addDimClauses]

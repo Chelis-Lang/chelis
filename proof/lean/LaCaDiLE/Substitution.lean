@@ -208,6 +208,14 @@ theorem subst_value
       exact IsValue.pair _ _ ih1 ih2
   | unit => unfold subst; exact IsValue.unit
 
+/-! ### Context filter helpers for weakening/exchange -/
+
+/-- Appending a binding at the tail commutes with re-association. -/
+@[simp] theorem append_singleton_append (G : LinearCtx) (y : String) (t : Typ)
+    (ys : LinearCtx) :
+    (G ++ [(y, t)]) ++ ys = G ++ ((y, t) :: ys) := by
+  simp [List.append_assoc]
+
 /-- Weakening: adding an unused binding at the tail of the linear
     context preserves typing. "Unused" means `y` does not appear in
     the output context either. Phase 2 Wave 1 helper for substitution. -/
