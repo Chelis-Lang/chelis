@@ -21,15 +21,15 @@ namespace LaCaDiLE
 
 /-! ## Progress -/
 
-/-- General Progress: a term with closed input linear context is
-    either a value or can step. The effect row `eps` and output
-    linear context `Gamma'` are unconstrained — this is what lets
-    sub-term recursion work (the outer theorem's `[]` effect row
-    doesn't propagate to sub-derivations that carry internal effect
-    rows from the strengthened inversion lemmas). -/
-theorem progress
+/-- General Progress with loose output context and effect row.
+    Closed input only; output can be any linear context and any
+    effect row can arise. This is the form needed for sub-term
+    recursion to work (pair_inv / app_inv etc. give sub-derivations
+    at non-trivial output contexts). -/
+theorem progress_aux
     (sigma : Store) (Sigma : StoreTyp) (e : Term) (t : Typ)
-    (h : HasType [] Sigma [] e t [] []) :
+    (Gamma' : LinearCtx) (eps : EffectRow)
+    (h : HasType [] Sigma [] e t eps Gamma') :
     IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
   -- Case analysis on the term syntax (not on the HasType derivation,
   -- which Lean's `cases` cannot directly eliminate because it is in a
@@ -85,5 +85,13 @@ theorem progress
       sorry  -- TODO Phase 2: needs E-Ctx congruence closure
   | perform op e1 =>
       sorry  -- TODO Phase 2: effect-row inversion on empty output row
+
+/-- The classic closed-form Progress: trivially follows from the
+    generalized form. -/
+theorem progress
+    (sigma : Store) (Sigma : StoreTyp) (e : Term) (t : Typ)
+    (h : HasType [] Sigma [] e t [] []) :
+    IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ :=
+  progress_aux sigma Sigma e t [] [] h
 
 end LaCaDiLE
