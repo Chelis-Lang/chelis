@@ -40,8 +40,18 @@ import LaCaDiLE.Syntax
 namespace LaCaDiLE
 
 /-- Fresh variable name suffix for tape-binding generation.
-    Phase 1 uses a static name; Phase 2 will thread a counter. -/
+    Phase 1 uses a static name; Phase 2 threads a counter via
+    `freshName` below. `tapeName` is kept as a legacy helper. -/
 def tapeName (base : String) : String := base ++ "_tape"
+
+/-- Counter-based fresh name. Attaches the counter `n` to the given
+    prefix so two recursion levels with different counters produce
+    disjoint names. Wave-4 Track B: threading this through
+    `adjointFrom` makes freshness provable in the inner linear
+    context of the `add`/`mul`/`handle` cases of
+    `adjoint_typed_aux`. -/
+def freshName (base : String) (n : Nat) : String :=
+  base ++ "_" ++ toString n
 
 -- The adjoint transformation. Phase-1-note historical summary:
 --   * `mul(e1, e2)` gets full tape treatment (two copies of each operand,
@@ -57,11 +67,19 @@ def tapeName (base : String) : String := base ++ "_tape"
 --     T0 §4 adjoint rules.
 mutual
 
-/-- The adjoint term-to-term transformation. Wave 0 P1: total function
-    (no `partial`) via explicit structural recursion on `body`. Every
-    recursive call lands on a strictly smaller sub-term, so Lean's
-    structural recursion checker accepts the definition. -/
-def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
+/-- The adjoint term-to-term transformation, counter-threaded form.
+    Wave 0 P1: total function (no `partial`) via explicit structural
+    recursion on `body`. Every recursive call lands on a strictly
+    smaller sub-term, so Lean's structural recursion checker accepts
+    the definition.
+
+    Wave 4 Track B: `n` is a fresh-name counter. Each recursion level
+    that introduces bindings mints them via `freshName prefix n` and
+    increases the counter it hands to sub-calls by the number of
+    bindings introduced locally, so sub-calls produce names disjoint
+    from everything in the enclosing linear context. The public
+    entry point `adjoint` below starts the counter at `0`. -/
+def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
   match body with
   | Term.var y =>
       -- Parameter gradient: if y is the differentiated parameter, the
@@ -84,74 +102,97 @@ def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
       -- No tape; copy(gSeed) and route to each operand. Sub-adjoints
       -- have type `unit` (each emits `perform accum`); sequence them
       -- via `letBind` so the compound result is also `unit` rather
-      -- than `pair unit unit`.
-      Term.letpair "gA" "gB" (Term.copy gSeed)
-        (Term.letBind "_adjA" (adjoint e1 x (Term.var "gA"))
-                   (adjoint e2 x (Term.var "gB")))
+      -- than `pair unit unit`. Three fresh names at this level
+      -- (gA, gB, adjA), so inner calls use `n + 3`.
+      Term.letpair (freshName "gA" n) (freshName "gB" n) (Term.copy gSeed)
+        (Term.letBind (freshName "adjA" n)
+          (adjointFrom e1 x (Term.var (freshName "gA" n)) (n + 3))
+          (adjointFrom e2 x (Term.var (freshName "gB" n)) (n + 3)))
   | Term.mul e1 e2 =>
       -- Tape both operands, forward mul, backward via copy(gSeed).
       -- Sub-adjoints sequenced via `letBind` (see `add` note).
-      Term.letpair "a" (tapeName "a") (Term.copy e1)
-        (Term.letpair "b" (tapeName "b") (Term.copy e2)
-          (Term.letBind "y" (Term.mul (Term.var "a") (Term.var "b"))
-            (Term.letpair "gA" "gB" (Term.copy gSeed)
-              (Term.letBind "_adjA"
-                (adjoint e1 x (Term.mul (Term.var "gA")
-                                         (Term.var (tapeName "b"))))
-                (adjoint e2 x (Term.mul (Term.var "gB")
-                                         (Term.var (tapeName "a"))))))))
+      -- Eight fresh names at this level (a, aTape, b, bTape, y,
+      -- gA, gB, adjA), so inner calls use `n + 8`.
+      Term.letpair (freshName "a" n) (freshName "aTape" n) (Term.copy e1)
+        (Term.letpair (freshName "b" n) (freshName "bTape" n) (Term.copy e2)
+          (Term.letBind (freshName "y" n)
+            (Term.mul (Term.var (freshName "a" n))
+                      (Term.var (freshName "b" n)))
+            (Term.letpair (freshName "gA" n) (freshName "gB" n) (Term.copy gSeed)
+              (Term.letBind (freshName "adjA" n)
+                (adjointFrom e1 x
+                  (Term.mul (Term.var (freshName "gA" n))
+                            (Term.var (freshName "bTape" n))) (n + 8))
+                (adjointFrom e2 x
+                  (Term.mul (Term.var (freshName "gB" n))
+                            (Term.var (freshName "aTape" n))) (n + 8))))))
   | Term.sum e d =>
       -- Backward for sum is expand at the same dim `d` (Stage 1:
       -- dimensions are now named, so extent comes along with `d`).
-      adjoint e x (Term.expand gSeed d)
+      adjointFrom e x (Term.expand gSeed d) n
   | Term.expand e d =>
-      adjoint e x (Term.sum gSeed d)
+      adjointFrom e x (Term.sum gSeed d) n
   | Term.uniformLike e _ _ =>
       -- `uniform_like` is rejected by T-Grad's DiffCompat premise, so
       -- this case is vacuous — but we structurally recurse anyway to
-      -- keep `adjoint` total.
-      adjoint e x gSeed
+      -- keep `adjointFrom` total.
+      adjointFrom e x gSeed n
   | Term.letBind _ e1 _ =>
       -- Phase 2 T9 will invert the forward/backward order; Phase 1
       -- skeleton recurses into `e1` to preserve the structural measure.
-      adjoint e1 x gSeed
+      adjointFrom e1 x gSeed n
   | Term.letpair _ _ e1 _ =>
-      adjoint e1 x gSeed
+      adjointFrom e1 x gSeed n
   | Term.pair e1 _ =>
-      adjoint e1 x gSeed
-  | Term.fst e => adjoint e x gSeed
-  | Term.snd e => adjoint e x gSeed
-  | Term.copy e => adjoint e x gSeed
-  | Term.abs _ _ e => adjoint e x gSeed
-  | Term.app e1 _ => adjoint e1 x gSeed
+      adjointFrom e1 x gSeed n
+  | Term.fst e => adjointFrom e x gSeed n
+  | Term.snd e => adjointFrom e x gSeed n
+  | Term.copy e => adjointFrom e x gSeed n
+  | Term.abs _ _ e => adjointFrom e x gSeed n
+  | Term.app e1 _ => adjointFrom e1 x gSeed n
   | Term.grad _ _ _ e =>
       -- Nested grad is out of T0 §0 scope; structurally recurse so
-      -- adjoint stays total. Phase 2 T9 may reject this case.
-      adjoint e x gSeed
+      -- adjointFrom stays total. Phase 2 T9 may reject this case.
+      adjointFrom e x gSeed n
   | Term.vmap _ _ e =>
       -- vmap-in-grad-body is out of T0 §0 scope; same treatment.
-      adjoint e x gSeed
-  | Term.perform _ e => adjoint e x gSeed
+      adjointFrom e x gSeed n
+  | Term.perform _ e => adjointFrom e x gSeed n
   | Term.handle _ body clauses =>
-      adjointClauses clauses x gSeed (adjoint body x gSeed)
+      adjointClausesFrom clauses x gSeed (adjointFrom body x gSeed n) n
 
-/-- Companion to `adjoint`: walks a handler-clause list, recursing on
-    each clause body. Takes an accumulator `acc` (the `adjoint body`
-    result) so the final term threads the body's adjoint with each
-    clause's adjoint. For Phase 1 skeleton, each clause's adjoint
-    emits a vestigial `perform accum` via `adjoint` on the clause
-    body. -/
-def adjointClauses (clauses : List (EffectLabel × String × String × Term))
-                   (x : String) (gSeed : Term) (acc : Term) : Term :=
+/-- Companion to `adjointFrom`: walks a handler-clause list, recursing
+    on each clause body. Takes an accumulator `acc` (the
+    `adjointFrom body` result) so the final term threads the body's
+    adjoint with each clause's adjoint. For Phase 1 skeleton, each
+    clause's adjoint emits a vestigial `perform accum` via
+    `adjointFrom` on the clause body. One fresh binder per clause;
+    the tail call uses `n + 1`. -/
+def adjointClausesFrom
+    (clauses : List (EffectLabel × String × String × Term))
+    (x : String) (gSeed : Term) (acc : Term) (n : Nat) : Term :=
   match clauses with
   | [] => acc
   | (_op, _xv, _kv, hb) :: rest =>
       -- Recurse on hb then on the tail. For Phase 1 skeleton, the
       -- produced term just chains the sub-adjoints; Phase 2 T9 will
       -- restructure to match the handler's semantic reduction.
-      Term.letBind "_adj_hb" (adjoint hb x gSeed)
-                   (adjointClauses rest x gSeed acc)
+      Term.letBind (freshName "adjHb" n)
+                   (adjointFrom hb x gSeed (n + 1))
+                   (adjointClausesFrom rest x gSeed acc (n + 1))
 
 end
+
+/-- Compatibility shim: the original fresh-name-free entry point.
+    Starts the counter at `0`. Callers in Operational/Preservation use
+    this form; Wave-4 Track B proofs that need freshness discipline
+    call `adjointFrom` with an explicit counter instead. -/
+def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
+  adjointFrom body x gSeed 0
+
+/-- Compatibility shim for `adjointClausesFrom`. -/
+def adjointClauses (clauses : List (EffectLabel × String × String × Term))
+                   (x : String) (gSeed : Term) (acc : Term) : Term :=
+  adjointClausesFrom clauses x gSeed acc 0
 
 end LaCaDiLE

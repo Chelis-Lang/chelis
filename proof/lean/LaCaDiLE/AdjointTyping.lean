@@ -48,51 +48,51 @@ private theorem adjoint_typed_aux
   match e with
   -- Leaf cases: emit `perform accum gSeed` directly.
   | Term.var _ =>
-      simp only [adjoint]; split <;> exact leaf_perform
+      simp only [adjoint, adjointFrom]; split <;> exact leaf_perform
   | Term.const _ _ =>
-      simp only [adjoint]; exact leaf_perform
+      simp only [adjoint, adjointFrom]; exact leaf_perform
   | Term.unit =>
-      simp only [adjoint]; exact leaf_perform
+      simp only [adjoint, adjointFrom]; exact leaf_perform
   | Term.loc _ =>
-      simp only [adjoint]; exact leaf_perform
+      simp only [adjoint, adjointFrom]; exact leaf_perform
   -- Vestigial Phase-1 structural cases: adjoint recurses on a single
   -- sub-term with the same seed. The IH applies directly via
   -- termination on sizeOf.
   | Term.letBind _ e1 _ =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.letpair _ _ e1 _ =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.pair e1 _ =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.fst e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.snd e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.copy e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.abs _ _ e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.app e1 _ =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.grad _ _ _ e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.vmap _ _ e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.perform _ e1 =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   | Term.uniformLike e1 _ _ =>
-      simp only [adjoint]
+      simp only [adjoint, adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x e1 gSeed h_seed
   -- Real adjoint cases (mul/sum/expand/add/handle) require new typed
   -- sub-expressions; handled below.
