@@ -19,22 +19,78 @@ inductive Dim where
   | lit   (k : Nat)
   deriving DecidableEq, Repr
 
-/-- A dimension list is an ordered sequence of dimensions (`d̄` in the paper). -/
-abbrev DimList := List Dim
+/-- Setoid on `List Dim` via `List.Perm`. `DimList` is a quotient of
+    `List Dim` under permutation equivalence — a "dimension multiset".
+    Stage 2 refactor: this replaces the Stage 1 `abbrev DimList := List Dim`
+    so that `d1 :: d2 :: ds` and `d2 :: d1 :: ds` are identified at the
+    type level, making `addDim_comm` provable via a one-line
+    `Quotient.sound (List.Perm.swap ...)`. -/
+def ListDimSetoid : Setoid (List Dim) :=
+  { r := List.Perm
+  , iseqv := ⟨List.Perm.refl, fun h => h.symm, fun h1 h2 => h1.trans h2⟩ }
 
-/-- Insert a dimension `d` into a dimension list. Stage 1 refactor:
-    `ins` now takes a `Dim` argument instead of a `(position, extent)`
-    pair. Semantics: prepend. Stage 2 will switch `DimList` to a
-    multiset representation; at that point the prepend order becomes
-    irrelevant. Paper notation: `ins(d̄, d)`. Used by T-Expand and
-    E-Expand. -/
-def ins (ds : DimList) (d : Dim) : DimList := d :: ds
+/-- A multiset of dimensions. Currently `Quotient ListDimSetoid`; could
+    be swapped for a sorted-list normal form in a future refinement
+    without changing any client code (clients only use `DimList.mk`,
+    `cons`, `erase`, `mem`, `length`, and opaque equality). Paper
+    notation: `d̄`. -/
+def DimList : Type := Quotient ListDimSetoid
 
-/-- Remove a dimension `d` from a dimension list. Stage 1 refactor:
-    `rem` now takes a `Dim` argument instead of a positional index.
-    Semantics: `List.erase` — remove the first occurrence by equality.
-    Paper notation: `rem(d̄, d)`. Used by T-Sum and E-Sum. -/
-def rem (ds : DimList) (d : Dim) : DimList := ds.erase d
+namespace DimList
+
+/-- Inject a concrete `List Dim` into the quotient. -/
+def mk (l : List Dim) : DimList := Quotient.mk ListDimSetoid l
+
+/-- The empty dimension list. -/
+def empty : DimList := mk []
+
+/-- Cons a dimension onto a `DimList`. Stage 2 note:
+    `cons d1 (cons d2 ds) = cons d2 (cons d1 ds)` holds propositionally
+    (by `Quotient.sound (List.Perm.swap ...)`), which is what unlocks
+    the tvmap/tsum/texpand cases of `addDim_preserves_typing`. -/
+def cons (d : Dim) (ds : DimList) : DimList :=
+  Quotient.lift (fun l => mk (d :: l))
+    (fun a b (h : List.Perm a b) =>
+      Quotient.sound (s := ListDimSetoid) (List.Perm.cons d h)) ds
+
+/-- Erase the first occurrence of `d` from a `DimList`. Respects the
+    permutation quotient because `List.Perm.erase` carries permutation
+    through `List.erase`. -/
+def erase (ds : DimList) (d : Dim) : DimList :=
+  Quotient.lift (fun l => mk (l.erase d))
+    (fun a b (h : List.Perm a b) =>
+      Quotient.sound (s := ListDimSetoid) (List.Perm.erase d h)) ds
+
+/-- Membership on `DimList`. Permutation preserves membership, so this
+    descends to the quotient. -/
+def mem (d : Dim) (ds : DimList) : Prop :=
+  Quotient.lift (fun l => d ∈ l)
+    (fun a b (h : List.Perm a b) => propext h.mem_iff) ds
+
+instance : Membership Dim DimList := ⟨fun ds d => mem d ds⟩
+
+/-- Length of a `DimList`. Permutations preserve length. -/
+def length (ds : DimList) : Nat :=
+  Quotient.lift List.length (fun a b (h : List.Perm a b) => h.length_eq) ds
+
+end DimList
+
+/-- Trivial `Repr` for `DimList`: a quotient has no canonical
+    representative to pretty-print, so we emit a placeholder. Required
+    so that the `deriving Repr` on `Typ` and `TensorVal` can discharge
+    their dependency on a `Repr DimList` instance. -/
+instance : Repr DimList where
+  reprPrec _ _ := "«DimList»"
+
+/-- Insert a dimension `d` into a dimension list. Stage 2 refactor:
+    operates on the quotient `DimList` via `DimList.cons`. Paper
+    notation: `ins(d̄, d)`. Used by T-Expand and E-Expand. -/
+def ins (ds : DimList) (d : Dim) : DimList := DimList.cons d ds
+
+/-- Remove a dimension `d` from a dimension list. Stage 2 refactor:
+    operates on the quotient `DimList` via `DimList.erase`. Paper
+    notation: `rem(d̄, d)`. Used by T-Sum and E-Sum. -/
+def rem (ds : DimList) (d : Dim) : DimList := DimList.erase ds d
 
 /-! ## Effect rows and capabilities -/
 
@@ -122,7 +178,7 @@ inductive Typ where
     addDim(d, α)                    = α
     ``` -/
 def addDim (d : Dim) : Typ → Typ
-  | Typ.tensor ds       => Typ.tensor (d :: ds)
+  | Typ.tensor ds       => Typ.tensor (DimList.cons d ds)
   | Typ.arrow t1 t2 eps => Typ.arrow (addDim d t1) (addDim d t2) eps
   | Typ.pair t1 t2      => Typ.pair (addDim d t1) (addDim d t2)
   | Typ.unit            => Typ.unit
@@ -257,7 +313,7 @@ def addDimTerm (d : Dim) : Term → Term
   | Term.fst e => Term.fst (addDimTerm d e)
   | Term.snd e => Term.snd (addDimTerm d e)
   | Term.unit => Term.unit
-  | Term.const v ds => Term.const v (d :: ds)
+  | Term.const v ds => Term.const v (DimList.cons d ds)
   | Term.add e1 e2 => Term.add (addDimTerm d e1) (addDimTerm d e2)
   | Term.mul e1 e2 => Term.mul (addDimTerm d e1) (addDimTerm d e2)
   -- Stage 1 refactor: `sum`/`expand` now reference dimensions by

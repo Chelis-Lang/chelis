@@ -45,7 +45,7 @@ theorem addDimCtx_filter_name (d : Dim) (G : LinearCtx) (p : String → Bool) :
     · simp [hp]; exact ih
 
 -- Stage 1 refactor: positional `rem`/`ins` replaced by named
--- `rem ds d := ds.erase d` and `ins ds d := d :: ds`. The previous
+-- `rem ds d := ds.erase d` and `ins ds d := DimList.cons d ds`. The previous
 -- `rem_cons_succ`, `ins_cons_succ`, `addDim_tensor_rem`, and
 -- `addDim_tensor_ins` helper lemmas (which lived on positional
 -- indices with an `i + 1` shift) no longer have meaningful content
@@ -115,11 +115,11 @@ theorem addDim_preserves_typing
     -- Wave 3: T-Copy now takes DimList; addDim prepends `d`.
     simp only [addDimTerm, addDim]
     have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1)
-                 (addDimTerm d e) (Typ.tensor (d :: ds)) eps (addDimCtx d Gamma2) := by
+                 (addDimTerm d e) (Typ.tensor (DimList.cons d ds)) eps (addDimCtx d Gamma2) := by
       simpa [addDim] using ih
     exact HasType.copy Delta (addDimStoreTyp d Sigma)
       (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimTerm d e) (d :: ds) eps ih'
+      (addDimTerm d e) (DimList.cons d ds) eps ih'
   | letpair Delta Sigma Gamma1 Gamma2 Gamma3 x y e1 e2 t1 t2 t eps1 eps2 _h1 _h2 ih1 ih2 =>
     simp only [addDimTerm]
     have ih1' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e1)
@@ -162,36 +162,36 @@ theorem addDim_preserves_typing
       (addDimTerm d e) (addDim d t1) (addDim d t2) eps ih'
   | const Delta Sigma Gamma v ds =>
     simp [addDimTerm, addDim]
-    exact HasType.const Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma) v (d :: ds)
+    exact HasType.const Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma) v (DimList.cons d ds)
   | tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
     simp [addDimTerm, addDim]
     have ih1' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e1)
-        (Typ.tensor (d :: ds)) eps1 (addDimCtx d Gamma2) := by
+        (Typ.tensor (DimList.cons d ds)) eps1 (addDimCtx d Gamma2) := by
       simpa [addDim] using ih1
     have ih2' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimTerm d e2)
-        (Typ.tensor (d :: ds)) eps2 (addDimCtx d Gamma3) := by
+        (Typ.tensor (DimList.cons d ds)) eps2 (addDimCtx d Gamma3) := by
       simpa [addDim] using ih2
     exact HasType.tadd Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2) (d :: ds)
+      (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2) (DimList.cons d ds)
       eps1 eps2 ih1' ih2'
   | tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
     simp [addDimTerm, addDim]
     have ih1' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e1)
-        (Typ.tensor (d :: ds)) eps1 (addDimCtx d Gamma2) := by
+        (Typ.tensor (DimList.cons d ds)) eps1 (addDimCtx d Gamma2) := by
       simpa [addDim] using ih1
     have ih2' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimTerm d e2)
-        (Typ.tensor (d :: ds)) eps2 (addDimCtx d Gamma3) := by
+        (Typ.tensor (DimList.cons d ds)) eps2 (addDimCtx d Gamma3) := by
       simpa [addDim] using ih2
     exact HasType.tmul Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2) (d :: ds)
+      (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2) (DimList.cons d ds)
       eps1 eps2 ih1' ih2'
   | uniformLike Delta Sigma Gamma1 Gamma2 e ds lo hi eps _h ih =>
     simp [addDimTerm]
     have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
-        (Typ.tensor (d :: ds)) eps (addDimCtx d Gamma2) := by
+        (Typ.tensor (DimList.cons d ds)) eps (addDimCtx d Gamma2) := by
       simpa [addDim] using ih
     have key := HasType.uniformLike Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimTerm d e) (d :: ds) lo hi eps ih'
+      (addDimTerm d e) (DimList.cons d ds) lo hi eps ih'
     simpa [addDim] using key
   | perform Delta Sigma Gamma1 Gamma2 op e tArg tRet eps _h hMatch ih =>
     -- Wave 3 calculus refinement: T-Perform now takes tArg/tRet
@@ -204,7 +204,7 @@ theorem addDim_preserves_typing
     -- relation: each constructor is preserved by prepending d.
     have hMatch' : OpSigMatch op (addDim d tArg) (addDim d tRet) := by
       cases hMatch with
-      | accumTensor ds => simpa [addDim] using OpSigMatch.accumTensor (d :: ds)
+      | accumTensor ds => simpa [addDim] using OpSigMatch.accumTensor (DimList.cons d ds)
       | accumUnit      => simpa [addDim] using OpSigMatch.accumUnit
       | random         => simpa [addDim] using OpSigMatch.random
       | resource       => simpa [addDim] using OpSigMatch.resource
@@ -264,13 +264,13 @@ theorem addDim_preserves_typing
   | tgrad Delta Sigma Gamma x ds dsOut e eps _h hsub ih =>
     simp [addDimTerm, addDim]
     have ih' : HasType (Capability.diff :: Delta) (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma ++ [(x, Typ.tensor (d :: ds))]) (addDimTerm d e)
-        (Typ.tensor (d :: dsOut)) eps (addDimCtx d Gamma) := by
+        (addDimCtx d Gamma ++ [(x, Typ.tensor (DimList.cons d ds))]) (addDimTerm d e)
+        (Typ.tensor (DimList.cons d dsOut)) eps (addDimCtx d Gamma) := by
       have := ih
       rw [addDimCtx_append, addDimCtx_singleton] at this
       simpa [addDim] using this
     exact HasType.tgrad Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
-      x (d :: ds) (d :: dsOut) (addDimTerm d e) eps ih' hsub
+      x (DimList.cons d ds) (DimList.cons d dsOut) (addDimTerm d e) eps ih' hsub
   | loc Delta Sigma Gamma ell t hlook =>
     -- Wave 2: closed via addDimStoreTyp_lookup. The store typing in
     -- the output is lifted via addDimStoreTyp, so the looked-up type
@@ -311,7 +311,7 @@ theorem addDim_preserves_typing
     -- be equal, which fails definitionally on ordered lists.
     --
     -- `tsum` / `texpand` obstacle (new in Stage 1): with
-    -- `rem ds d = ds.erase d` and `ins ds d = d :: ds`, the goal after
+    -- `rem ds d = ds.erase d` and `ins ds d = DimList.cons d ds`, the goal after
     -- lifting becomes
     --   Typ.tensor (d_new :: ds.erase d) ≟ Typ.tensor ((d_new :: ds).erase d)
     -- (and analogously for `ins`). These are only propositionally equal

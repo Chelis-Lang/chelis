@@ -77,7 +77,7 @@ end
     operations (`oplus`, `odot`, etc.) are not exercised by Phase 1
     metatheory. -/
 def tensorOpPlaceholder (_l1 _l2 : TensorVal) : TensorVal :=
-  { shape := [], data := 0.0 }
+  { shape := DimList.empty, data := 0.0 }
 
 /-! ## Evaluation contexts (Wave 0.5)
 
