@@ -81,17 +81,21 @@ def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
       -- Runtime locations don't appear in source programs under grad.
       Term.perform EffectLabel.accum gSeed
   | Term.add e1 e2 =>
-      -- No tape; copy(gSeed) and route to each operand.
+      -- No tape; copy(gSeed) and route to each operand. Sub-adjoints
+      -- have type `unit` (each emits `perform accum`); sequence them
+      -- via `letBind` so the compound result is also `unit` rather
+      -- than `pair unit unit`.
       Term.letpair "gA" "gB" (Term.copy gSeed)
-        (Term.pair (adjoint e1 x (Term.var "gA"))
+        (Term.letBind "_adjA" (adjoint e1 x (Term.var "gA"))
                    (adjoint e2 x (Term.var "gB")))
   | Term.mul e1 e2 =>
       -- Tape both operands, forward mul, backward via copy(gSeed).
+      -- Sub-adjoints sequenced via `letBind` (see `add` note).
       Term.letpair "a" (tapeName "a") (Term.copy e1)
         (Term.letpair "b" (tapeName "b") (Term.copy e2)
           (Term.letBind "y" (Term.mul (Term.var "a") (Term.var "b"))
             (Term.letpair "gA" "gB" (Term.copy gSeed)
-              (Term.pair
+              (Term.letBind "_adjA"
                 (adjoint e1 x (Term.mul (Term.var "gA")
                                          (Term.var (tapeName "b"))))
                 (adjoint e2 x (Term.mul (Term.var "gB")
