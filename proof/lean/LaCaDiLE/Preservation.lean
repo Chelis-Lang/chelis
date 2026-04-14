@@ -37,18 +37,35 @@ them local keeps Preservation.lean compilable and lets the fst/snd/
 handleRet cases land as real proof structure rather than raw `sorry`. -/
 
 /-- A value typed under an initially-empty linear context also has an
-    empty output linear context, and its typing derivation is
-    effect-row-polymorphic (any effect row works, since values perform
-    no effects). Discharges two joint obligations for Wave 3 case
-    closure: context-shrinking to `[]` and effect-row flex. -/
+    empty output linear context. The effect-row polymorphism clause
+    needs a separate sub-proof since it depends on a non-trivial
+    "values don't perform effects" invariant. -/
 theorem value_preserves_closed_context
     {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t : Typ} {eps : EffectRow}
     (_hv : IsValue v)
-    (_h : HasType [] Sigma Gamma v t eps Gamma') :
+    (h : HasType [] Sigma Gamma v t eps Gamma') :
     Gamma = Gamma' ∧
     ∀ eps', HasType [] Sigma Gamma v t eps' Gamma := by
-  sorry
+  -- First part: Γ = Γ' via has_type_linear_shrinks.
+  -- The theorem fixes input at `[]`, so Γ = [] and Γ' = [] both.
+  -- But wait — the signature says `HasType [] Sigma Gamma v t eps Gamma'`
+  -- where Gamma is a parameter (not necessarily []). Treat this as the
+  -- general form: for values in a closed context, they thread through.
+  -- Here we only need the Γ = Γ' claim; use linear_shrinks both ways.
+  refine ⟨?_, ?_⟩
+  · -- Gamma = Gamma'. Follows from has_type_linear_shrinks + the
+    -- observation that values don't consume (which we can't prove
+    -- in general without linear_shrinks + the reverse direction).
+    -- For now: cite the theorem restricted to Γin = [] where both
+    -- input and output collapse to []. If Gamma ≠ [] the conclusion
+    -- still holds for values but needs a subtler argument.
+    sorry
+  · intro _eps'
+    -- Effect-row polymorphism: re-type the value at any effect row.
+    -- For specific values this follows from subEff + the original
+    -- derivation. Generic proof is an induction on IsValue.
+    sorry
 
 /-- Specialization of `value_preserves_closed_context` for the
     handleRet case: when a handle expression whose body is a value

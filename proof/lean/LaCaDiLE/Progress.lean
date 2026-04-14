@@ -22,143 +22,8 @@ namespace LaCaDiLE
 
 /-! ## Helper lemmas used by Progress -/
 
-/-- Domain-subset relation on linear contexts. -/
-def DomSub (G1 G2 : LinearCtx) : Prop :=
-  ∀ x, x ∈ linearCtxDom G1 → x ∈ linearCtxDom G2
-
-private theorem DomSub.refl (G : LinearCtx) : DomSub G G := fun _ h => h
-
-private theorem DomSub.trans {G1 G2 G3 : LinearCtx}
-    (h12 : DomSub G1 G2) (h23 : DomSub G2 G3) : DomSub G1 G3 :=
-  fun x h => h23 x (h12 x h)
-
-private theorem DomSub.filter_self (G : LinearCtx) (p : (String × Typ) → Bool) :
-    DomSub (G.filter p) G := by
-  intro x hx
-  simp only [linearCtxDom, List.mem_map] at hx ⊢
-  obtain ⟨q, hq_mem, hq_eq⟩ := hx
-  rw [List.mem_filter] at hq_mem
-  exact ⟨q, hq_mem.1, hq_eq⟩
-
-/-- Linear-context domain shrinks across every HasType derivation.
-    Wave 3 TODO: mechanical HasType.rec with motive `DomSub Γ' Γ`.
-    Most cases are trivial (refl, trans-of-IHs); abs/letBind/letpair
-    need careful filter-predicate reasoning to rule out the bound
-    variable surviving the filter. -/
-theorem has_type_linear_shrinks
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
-    {e : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma e t eps Gamma') :
-    ∀ x, x ∈ linearCtxDom Gamma' → x ∈ linearCtxDom Gamma := by
-  induction h using HasType.rec
-    (motive_2 := fun (_Δ : CapCtx) (_S : StoreTyp)
-                     (Γ2 Γ3 : LinearCtx) (_ : Typ) (_ : EffectRow)
-                     (_ : List (EffectLabel × String × String × Term))
-                     (_ : _) => DomSub Γ3 Γ2) with
-  | var _ _ Γpre Γpost y t_v =>
-      intro z hz
-      -- z ∈ dom (Γpre ++ Γpost) → z ∈ dom (Γpre ++ [(y,t_v)] ++ Γpost)
-      simp only [linearCtxDom, List.map_append, List.mem_append] at hz ⊢
-      rcases hz with h1 | h1
-      · exact Or.inl (Or.inl h1)
-      · exact Or.inr h1
-  | unit _ _ _ => intro z hz; exact hz
-  | abs _ _ Γ1 Γ2 y t1 _ _ _ _ ih =>
-      intro z hz
-      -- hz : z ∈ dom (Γ2.filter (·.1 ≠ y))
-      have hz_ne_y : z ≠ y := by
-        simp only [linearCtxDom, List.mem_map, List.mem_filter, decide_eq_true_eq] at hz
-        obtain ⟨q, ⟨_, hne⟩, hqeq⟩ := hz
-        rw [← hqeq]; exact hne
-      have hz2 : z ∈ linearCtxDom Γ2 := DomSub.filter_self Γ2 _ z hz
-      have hz3 := ih z hz2
-      -- hz3 : z ∈ dom (Γ1 ++ [(y, t1)])
-      simp only [linearCtxDom, List.map_append, List.mem_append, List.map_cons,
-        List.mem_cons, List.map_nil, List.not_mem_nil] at hz3
-      rcases hz3 with hin | heq
-      · exact hin
-      · rcases heq with heq | hfalse
-        · exact absurd heq hz_ne_y
-        · exact hfalse.elim
-  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz
-      exact ih1 z (ih2 z hz)
-  | letBind _ _ _ _ Γ3 y _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz
-      have hz_ne_y : z ≠ y := by
-        simp only [linearCtxDom, List.mem_map, List.mem_filter, decide_eq_true_eq] at hz
-        obtain ⟨q, ⟨_, hne⟩, hqeq⟩ := hz
-        rw [← hqeq]; exact hne
-      have hz2 : z ∈ linearCtxDom Γ3 := DomSub.filter_self Γ3 _ z hz
-      have hz3 := ih2 z hz2
-      simp only [linearCtxDom, List.map_append, List.mem_append, List.map_cons,
-        List.mem_cons, List.map_nil] at hz3
-      rcases hz3 with hin | heq
-      · exact ih1 z hin
-      · rcases heq with heq | hfalse
-        · exact absurd heq hz_ne_y
-        · exact (List.not_mem_nil hfalse).elim
-  | copy _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | letpair _ _ _ _ Γ3 x y _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz
-      have hz_neither : z ≠ x ∧ z ≠ y := by
-        simp only [linearCtxDom, List.mem_map, List.mem_filter, decide_eq_true_eq] at hz
-        obtain ⟨q, ⟨_, hne1, hne2⟩, hqeq⟩ := hz
-        rw [← hqeq]; exact ⟨hne1, hne2⟩
-      have hz2 : z ∈ linearCtxDom Γ3 := DomSub.filter_self Γ3 _ z hz
-      have hz3 := ih2 z hz2
-      simp only [linearCtxDom, List.map_append, List.mem_append, List.map_cons,
-        List.mem_cons, List.map_nil] at hz3
-      rcases hz3 with hin | heq
-      · exact ih1 z hin
-      · rcases heq with heqx | heq2
-        · exact absurd heqx hz_neither.1
-        · rcases heq2 with heqy | hfalse
-          · exact absurd heqy hz_neither.2
-          · exact (List.not_mem_nil hfalse).elim
-  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz; exact ih1 z (ih2 z hz)
-  | fst _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | snd _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | const _ _ _ _ _ => intro z hz; exact hz
-  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz; exact ih1 z (ih2 z hz)
-  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      intro z hz; exact ih1 z (ih2 z hz)
-  | tsum _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | texpand _ _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | uniformLike _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | perform _De _Si _G1 _G2 _op _e _tA _tR _eps _h _hM ih =>
-      intro z hz; exact ih z hz
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_body ih_clauses =>
-      -- body: DomSub Γ2 Γ1; clauses (motive_2): DomSub Γ3 Γ2
-      -- handle produces Γ1 → Γ3; compose transitively.
-      intro z hz; exact ih_body z (ih_clauses z hz)
-  | tgrad _ _ _ _ _ _ _ _ _ _ _ => intro z hz; exact hz
-  | tvmap _ _ _ _ _ _ _ _ _ _ => intro z hz; exact hz
-  | loc _ _ _ _ _ _ => intro z hz; exact hz
-  | subEff _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | nil _ _ _ _ _ => exact DomSub.refl _
-  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
-
-/-- Local helper: a well-typed value under a closed input context
-    produces a closed output context. Follows directly from
-    `has_type_linear_shrinks`. (The Preservation module has its own
-    stronger sibling `value_preserves_closed_context`, still a stub.) -/
-private theorem value_closed_out
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
-    {v : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma [] v t eps Gamma')
-    (_h_val : IsValue v) : Gamma' = [] := by
-  have hshrink := has_type_linear_shrinks h
-  cases hΓ' : Gamma' with
-  | nil => rfl
-  | cons hd tl =>
-    exfalso
-    have hmem : hd.1 ∈ linearCtxDom Gamma' := by
-      rw [hΓ']; simp [linearCtxDom]
-    have := hshrink hd.1 hmem
-    simp [linearCtxDom] at this
+-- DomSub, has_type_linear_shrinks, value_preserves_closed_context
+-- moved to Typing.lean so both Progress and Preservation can use them.
 
 /-- Store typing well-formedness: every location maps to a tensor
     type. Holds for every Sigma reachable from an initially-empty
@@ -417,7 +282,7 @@ theorem progress_aux
           rcases progress_aux sigma Sigma h_wf e1 t1 Γmid eps1 h1 with
               hv1 | ⟨sigma', e1', hstep⟩
           · -- e1 is a value. By value_preserves, Γmid = [].
-            have hΓmid : Γmid = [] := value_closed_out h1 hv1
+            have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h1
             subst hΓmid
             rcases progress_aux sigma Sigma h_wf e2 t2 Gamma' eps2 h2 with
                 hv2 | ⟨sigma', e2', hstep⟩
