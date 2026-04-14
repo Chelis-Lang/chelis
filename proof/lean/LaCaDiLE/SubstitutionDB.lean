@@ -580,7 +580,7 @@ theorem hasTypeDB_none_monotone_clauses
 
 end
 
-/-! ## Substitution obligation — doc block for Wave 5b → 5c
+/-! ## Substitution obligation — doc block for Wave 5c → 5d
 
 Under Option C the target statement is:
 
@@ -595,42 +595,71 @@ theorem subst_preserves_typing_db
     HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
 ```
 
-**Wave 5b status.** Added `hasTypeDB_length_preservation` above,
-plus its mutual partner `hasTypeDB_length_preservation_clauses`.
-These are the structural prerequisite for every subsequent Option C
-metatheoretic lemma over linear contexts, including the slot
-persistence inversion that subst needs.
+**Status after Wave 5c.** The following structural prerequisites
+are now landed in this file:
 
-**Remaining obstruction for `subst_preserves_typing_db`.** The task
-as originally scoped for Wave 5b requires, in addition to slot
-persistence, a way to thread `h_v` through intermediate contexts of
-multi-context constructors (`app Γ1 Γ2 Γ3`, `letBind`, `letpair`,
-`handle`, binary tensor ops). Slot persistence alone is
-insufficient: the IH call on `h2 : HasTypeDB .. Γ2 .. Γ3` needs a
-hypothesis `h_v : HasTypeDB .. Γ2_base v t_v [] Γ2_base` under the
-*intermediate* base, not the outer base `Γ`. Because `v` is typed at
-pure effect with the trivial context transition `Γ → Γ`, it uses no
-linear resources and so should transport to any length-matching
-context, but that transport is itself an unstated lemma
-(`pure_context_rebase`).
+- `hasTypeDB_length_preservation` (+ clauses partner) — Wave 5b.
+- `hasTypeDB_none_monotone` (+ clauses partner) — Wave 5c, just
+  above. States that a `none` slot never revives along a derivation.
 
-Concretely Wave 5c should add, in order:
+**Refined obstruction analysis.** During Wave 5c the originally-
+proposed `pure_context_rebase_db` lemma was shown to be unprovable
+by direct structural induction on a pure `Γ → Γ` derivation.
+Counter-example: the abs case has body derivation
+`(some t1 :: Γ) → (slot :: Γ)` which is *not* itself of the
+`Γ' → Γ'` pure shape, so the induction hypothesis does not apply to
+the body. The same failure recurs in every binder case and in
+every multi-context case where the intermediate context Γ_mid is
+only known to length-match, not to equal, the endpoints.
 
-1. `hasTypeDB_slot_persistence` — use `hasTypeDB_length_preservation`
-   above to rule out empty-base edge cases when peeling
-   binder-augmented outputs.
-2. `pure_context_rebase` — a `Γ → Γ` pure derivation transports to
-   any length-matching `Γ' → Γ'`. This is the "no free linear vars"
-   observation made formal, and it relies on (1) applied at cutoff 0.
-3. `subst_preserves_typing_db` as a mutual block with
-   `subst_preserves_typing_clauses_db`. The var case is immediate
-   from `getElem?_insertAt_eq` + `set_insertAt_eq` + `h_v`; binder
-   cases use `weakening_head_db`; multi-context cases chain (1) and
-   (2) to rebase `h_v` for each sub-derivation.
+The correct generalization is a **tail-rebase** lemma:
 
-Wave 5b lands only the length preservation foundation. Slot
-persistence + rebase + subst is Wave 5c alongside the named ↔ DB
-translation so the two named theorems in `Substitution.lean` can
-close against DB results at the same time. -/
+```lean
+theorem tail_rebase_db :
+    Γ_old.length = Γ_new.length →
+    HasTypeDB Δ Σ (pre ++ Γ_old) e t eps (pre' ++ Γ_old) →
+    HasTypeDB Δ Σ (pre ++ Γ_new) e t eps (pre' ++ Γ_new)
+```
+
+`pure_context_rebase_db` is the specialization at `pre = pre' = []`.
+This reformulation is sound because, along any derivation whose
+endpoints both end in `Γ_old`, no slot of `Γ_old` can have been
+consumed anywhere in the middle: consumption at position
+`pre.length + k` would push `(pre ++ Γ_old)[pre.length + k]?` from
+`some (some t)` to `some none`, and `hasTypeDB_none_monotone` would
+then force the output at that position to still be `some none`,
+contradicting `(pre' ++ Γ_old)[pre.length + k]? = some (some t')`.
+
+**Concrete Wave 5d plan.** Build up, in order:
+
+1. `LinearCtxDB` append split lemmas: `(pre ++ Γ).set i v = pre ++ Γ`
+   decomposition, `getElem?_append_right`, etc. These are pure list
+   shuffles.
+2. `tail_rebase_db` proved by structural match on the derivation.
+   Each case carries `pre : LinearCtxDB` as an explicit argument
+   (generalizing over it before `match`). Binder cases push a head
+   slot onto `pre` and recurse. Multi-context cases first establish
+   that `Γ_mid = pre_mid ++ Γ_old` via `hasTypeDB_none_monotone`
+   applied to every position `≥ pre.length`, then recurse on each
+   sub-derivation. The var case splits on `i < pre.length`
+   (trivial rebase) vs `i ≥ pre.length` (impossible by
+   monotonicity, discharged from the output-shape hypothesis).
+3. `pure_context_rebase_db` as the `pre = pre' = []` corollary.
+4. `subst_preserves_typing_db` mutual with `subst_preserves_typing_clauses_db`:
+   - `var`: three-way split on `i` vs `j`, using
+     `getElem?_insertAt_eq` + `set_insertAt_eq` + `h_v`.
+   - Leaf/binder cases: `unit`, `const`, `loc` trivial; `abs`,
+     `letBind`, `letpair`, `tgrad`, `tvmap` recurse with
+     `weakening_head_db` (and its two-slot variant for letpair/
+     clause bodies).
+   - Multi-context cases (`app`, `letBind`, `letpair`, `tpair`,
+     `tadd`, `tmul`, `handle`): use `tail_rebase_db` to restate
+     `h_v` under the intermediate base provided by the
+     decomposition of `Γ_mid` (slot persistence via monotonicity).
+
+Wave 5c lands the monotonicity foundation. Tail-rebase, rebase,
+and subst itself remain for Wave 5d, which also bridges named ↔ DB
+so the two named sorries in `Substitution.lean` can close against
+DB results at the same time. -/
 
 end LaCaDiLE
