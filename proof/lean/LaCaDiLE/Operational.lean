@@ -136,6 +136,16 @@ def plug : EvalCtx → Term → Term
   | EvalCtx.handle epsH clauses, e => Term.handle epsH e clauses
   | EvalCtx.perform op, e          => Term.perform op e
 
+/-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
+    context `E` is not itself a `handle` whose effect row catches `op`.
+    Because `EvalCtx` is a one-step (non-recursive) context, this is a
+    simple case split: only the `handle` constructor can catch an
+    operation, and it does so exactly when `op ∈ epsH`. All other
+    contexts trivially do not catch anything at their own level. -/
+def EvalCtx.noHandleFor (op : EffectLabel) : EvalCtx → Prop
+  | EvalCtx.handle epsH _ => op ∉ epsH
+  | _                     => True
+
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
     congruence closure via evaluation contexts. -/
@@ -267,13 +277,15 @@ inductive Step : Config → Config → Prop
   -- `λy:tRet. y` for `k`. Multiple clauses are supported: the
   -- membership premise picks whichever clause's op matches.
   --
-  -- The full E-Handle-Op rule from opsem.tex captures an evaluation
-  -- context E[·] around the `perform` and substitutes it for `k`;
-  -- Phase 1 still encodes only the "perform at the top of the body"
-  -- special case. The identity `λy:tRet. y` is the right-typed
-  -- stand-in for the full captured context `λy:tRet. handle[epsH]
-  -- E[y] with clauses`. Round-3 M1 fix: was previously a unit-constant
-  -- lambda that did not typecheck under T-Handle's continuation type.
+  -- `handleOpDirect` is the `E = hole` special case of the full
+  -- E-Handle-Op rule (see `handleOpCtx` below). It is kept as a
+  -- standalone constructor because it uses the identity continuation
+  -- `λy:tRet. y` rather than the general reified context, and
+  -- Preservation's hand-closed cases refer to it by name.
+  -- Wave 1 P1 update: the Phase 1 "top-of-body only" limitation that
+  -- this rule used to document is now lifted by the companion
+  -- `handleOpCtx` constructor, which fires when `perform` sits inside
+  -- a non-trivial evaluation context.
   -- Wave 0 W0-audit M-W0-3 fix: the rule now matches any clause list
   -- in which the matching clause appears, not just a singleton list.
   | handleOpDirect
@@ -288,6 +300,37 @@ inductive Step : Config → Config → Prop
            ⟨sigma,
             subst (subst handlerBody v x)
                   (Term.abs "y" tRet (Term.var "y")) k⟩
+
+  -- E-Handle-Op (paper-accurate, captured-context form). When the
+  -- handle body has the shape `plug E (perform op v)` with `E` an
+  -- evaluation context that does NOT itself catch `op`, the step
+  -- picks the matching clause `(op, xVar, kVar, hb)` from the clause
+  -- list and reduces to
+  --   `hb[v / xVar][λ _kArg : tRet. handle epsH (plug E (var _kArg))
+  --                     clauses / kVar]`.
+  -- The reified continuation re-enters the same handle around the
+  -- captured context `E`, which is the standard delimited-control
+  -- semantics for algebraic effects. `tRet` is the return type of
+  -- the operation's signature (threaded in as a parameter, matching
+  -- `handleOpDirect`'s convention). Freshness of `_kArg` is provided
+  -- by a hardcoded sentinel name; a proper fresh-name discipline is
+  -- a separate Wave 1 task (see Phase 1 WS2.1 notes).
+  | handleOpCtx
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (E : EvalCtx)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ) :
+      IsValue v →
+      (op, xVar, kVar, hb) ∈ clauses →
+      op ∈ epsH →
+      EvalCtx.noHandleFor op E →
+      Step ⟨sigma,
+            Term.handle epsH (plug E (Term.perform op v)) clauses⟩
+           ⟨sigma,
+            subst (subst hb v xVar)
+                  (Term.abs "_kArg" tRet
+                    (Term.handle epsH
+                      (plug E (Term.var "_kArg")) clauses)) kVar⟩
 
   /- ## AD and vectorization transforms -/
 

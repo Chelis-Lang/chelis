@@ -615,6 +615,12 @@ theorem preservation
   | handleOpDirect s op v epsH clauses x k hb tRet hv hmem =>
       -- TODO Wave 2: needs subst_preserves_typing
       sorry
+  | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hmem hop hE =>
+      -- TODO Wave 2: paper-accurate captured-context handle-op case.
+      -- Needs `subst_preserves_typing` plus a `plug`-typing inversion
+      -- lemma for the captured evaluation context `E`. Grouped with
+      -- the existing preservation omnibus sorry (header line 392).
+      sorry
   | tgrad s x tv tOut body =>
       -- TODO Wave 2: needs adjoint_preserves_typing (AdjointTyping.lean)
       sorry
