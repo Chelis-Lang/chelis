@@ -12,27 +12,16 @@ import LaCaDiLE.Operational
 
 namespace LaCaDiLE
 
-/-- Linearity soundness: reduction preserves the live-location /
-    linear-context correspondence. Structural form — shows that every
-    Step produces a reachable store-typing witness. Stronger forms
-    (exact Sigma monotonicity via StoreTypSub, correspondence with
-    linear context domain) are tracked for Wave 5 once `StoreWf` is
-    sharpened. -/
-theorem linearity_soundness
-    (sigma sigma' : Store) (Sigma : StoreTyp)
-    (e e' : Term)
-    (h_wf : StoreWf sigma Sigma)
-    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
-    ∃ Sigma', StoreWf sigma' Sigma' := by
-  -- Case-analyze on the Step constructor. Most cases leave the store
-  -- unchanged (beta, letBind, letpair, fst, snd, handleRet,
-  -- handleOpDirect, tgrad, tvmap) — for these Sigma' = Sigma works.
-  -- Store-mutating cases (tconst, copy, tadd, tmul, tsum, texpand,
-  -- tuniformLike) need to exhibit a fresh Sigma' that tracks the
-  -- new store shape. For Wave 1 we use a blunt witness — the image
-  -- of the new store — and defer the sharpened correspondence to
-  -- Wave 5 LinearityInvariant work.
-  cases h_step with
+/-- Generalized Linearity soundness over arbitrary configurations,
+    suitable for structural induction on Step. The concrete
+    `linearity_soundness` below is a trivial specialization. -/
+private theorem linearity_soundness_aux
+    (Sigma : StoreTyp)
+    (c1 c2 : Config)
+    (h_wf : StoreWf c1.store Sigma)
+    (h_step : Step c1 c2) :
+    ∃ Sigma', StoreWf c2.store Sigma' := by
+  induction h_step with
   | beta => exact ⟨Sigma, h_wf⟩
   | letBind => exact ⟨Sigma, h_wf⟩
   | letpair => exact ⟨Sigma, h_wf⟩
@@ -44,50 +33,68 @@ theorem linearity_soundness
   | tvmap => exact ⟨Sigma, h_wf⟩
   | tconst s v ds ell hell =>
       refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_⟩
-      exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf hell
+      exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
   | copy s ell ellNew w _hlook hfresh =>
       refine ⟨storeTypExtend Sigma ellNew (Typ.tensor w.shape), ?_⟩
-      exact StoreWf.extend_fresh ellNew w (Typ.tensor w.shape) h_wf hfresh
-  | tadd s ell1 ell2 ellOut w1 w2 _ _ _ =>
-      refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
-      sorry -- TODO Wave 5: StoreWf for remove-remove-extend
-  | tmul s ell1 ell2 ellOut w1 w2 _ _ _ =>
-      refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
-      sorry -- TODO Wave 5: StoreWf for remove-remove-extend
+      exact StoreWf.extend_fresh ellNew w (Typ.tensor w.shape) h_wf
+  | tadd s ell1 ell2 ellOut w1 w2 _h1 _h2 _hfresh =>
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor w1.shape), ?_⟩
+      have h_wf1 := StoreWf.remove ell1 h_wf
+      have h_wf2 := StoreWf.remove ell2 h_wf1
+      exact StoreWf.extend_fresh ellOut
+        (tensorOpPlaceholder w1 w2) (Typ.tensor w1.shape) h_wf2
+  | tmul s ell1 ell2 ellOut w1 w2 _h1 _h2 _hfresh =>
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor w1.shape), ?_⟩
+      have h_wf1 := StoreWf.remove ell1 h_wf
+      have h_wf2 := StoreWf.remove ell2 h_wf1
+      exact StoreWf.extend_fresh ellOut
+        (tensorOpPlaceholder w1 w2) (Typ.tensor w1.shape) h_wf2
   | tsum s ell ellOut w i hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (rem w.shape i)), ?_⟩
-      have h_isSome : (storeLookup sigma ell).isSome := by
+      have h_isSome : (storeLookup s ell).isSome := by
         rw [hlook]; rfl
       have hne : ell ≠ ellOut := by
-        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := rem w.shape i, data := w.data }
         (Typ.tensor (rem w.shape i)) h_wf hfresh hne
   | texpand s ell ellOut w i k hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (ins w.shape i k)), ?_⟩
-      have h_isSome : (storeLookup sigma ell).isSome := by
+      have h_isSome : (storeLookup s ell).isSome := by
         rw [hlook]; rfl
       have hne : ell ≠ ellOut := by
-        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := ins w.shape i k, data := w.data }
         (Typ.tensor (ins w.shape i k)) h_wf hfresh hne
   | tuniformLike s ell ellOut w lo hi hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor w.shape), ?_⟩
-      have h_isSome : (storeLookup sigma ell).isSome := by
+      have h_isSome : (storeLookup s ell).isSome := by
         rw [hlook]; rfl
       have hne : ell ≠ ellOut := by
-        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := w.shape, data := lo }
         (Typ.tensor w.shape) h_wf hfresh hne
-  | ctx _sig _sig' _E _e _e' _h_inner =>
-      -- E-Ctx: cases can't directly dispatch because Step is indexed
-      -- on Configs; we lose the induction hypothesis. Wave 5 will
-      -- rewrite this using a helper that takes Step structurally.
-      sorry -- TODO Wave 5: recurse via Step-structural helper
+  | ctx _sig _sig' _E _e _e' _h_inner ih =>
+      -- E-Ctx: ih is the inner step's witness, which uses the same
+      -- store-side states since plugging an evaluation context doesn't
+      -- touch the store further.
+      exact ih h_wf
+
+theorem linearity_soundness
+    (sigma sigma' : Store) (Sigma : StoreTyp)
+    (e e' : Term)
+    (h_wf : StoreWf sigma Sigma)
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    ∃ Sigma', StoreWf sigma' Sigma' :=
+  linearity_soundness_aux Sigma ⟨sigma, e⟩ ⟨sigma', e'⟩ h_wf h_step
 
 end LaCaDiLE

@@ -354,7 +354,7 @@ theorem preservation
           HasType.loc _ _ _ ell (Typ.tensor ds) hlook
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_loc hsub
-      · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf hell
+      · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
   | copy s ell ellNew w hlook hfresh =>
       -- E-Copy: copy(loc ell) ↦ pair (loc ell) (loc ellNew).
       -- Both locs type at t0 under the extended Sigma. StoreWf as
@@ -391,7 +391,7 @@ theorem preservation
           HasType.tpair [] _ [] [] [] _ _ t0 t0 [] [] h_l1 h_l2
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
-      · exact StoreWf.extend_fresh ellNew w t0 h_wf hfresh
+      · exact StoreWf.extend_fresh ellNew w t0 h_wf
   | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
       -- E-Add consumes ell1, ell2 and allocates ellOut at tensor[ds].
       -- Substitution: need to prove store stays well-formed under the

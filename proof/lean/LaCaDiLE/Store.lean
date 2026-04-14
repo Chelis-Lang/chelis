@@ -193,13 +193,13 @@ theorem mem_storeTypDom_remove_iff (Sigma : StoreTyp) (ell1 ell2 : Loc)
 
 /-- Extending both the store and the store-typing with the same
     location preserves well-formedness. Since `StoreWf` tracks domain
-    membership only, freshness is accepted as a documentation premise
-    rather than being load-bearing. -/
+    membership only, freshness is not load-bearing and the `h_fresh`
+    premise was dropped in Wave 1 (making the lemma applicable after
+    upstream store operations have changed the fresh-loc value). -/
 theorem StoreWf.extend_fresh
     {sigma : Store} {Sigma : StoreTyp}
     (ell : Loc) (w : TensorVal) (t : Typ)
-    (h_wf : StoreWf sigma Sigma)
-    (_h_fresh : ell = storeFreshLoc sigma) :
+    (h_wf : StoreWf sigma Sigma) :
     StoreWf (storeExtend sigma ell w) (storeTypExtend Sigma ell t) := by
   refine ⟨?_, ?_⟩
   · intro ell' hell'
@@ -234,6 +234,55 @@ theorem StoreWf.extend_fresh
         exact this
       have := h_wf.2 ell' hSigmaLive
       simpa [storeTypDom] using this
+
+/-- Removing a location from the store and the store-typing together
+    preserves well-formedness. -/
+theorem StoreWf.remove
+    {sigma : Store} {Sigma : StoreTyp}
+    (ell : Loc) (h_wf : StoreWf sigma Sigma) :
+    StoreWf (storeRemove sigma ell) (storeTypRemove Sigma ell) := by
+  refine ⟨?_, ?_⟩
+  · intro ell' hell'
+    by_cases h_eq : ell' = ell
+    · exfalso
+      rw [h_eq] at hell'
+      -- ell shouldn't be in the filtered domain; this is a direct
+      -- contradiction on filter membership.
+      have hc : ell ∈ (Sigma.filter (fun p => p.1 ≠ ell)).map Prod.fst := hell'
+      rw [List.mem_map] at hc
+      rcases hc with ⟨p, hp_mem, hp_eq⟩
+      rw [List.mem_filter] at hp_mem
+      have : p.1 ≠ ell := by
+        have := hp_mem.2
+        simp only [ne_eq, decide_not, Bool.not_eq_true',
+                   decide_eq_false_iff_not] at this
+        exact this
+      exact this hp_eq
+    · have hInSigma : ell' ∈ storeTypDom Sigma :=
+        (mem_storeTypDom_remove_iff Sigma ell ell' h_eq).mp hell'
+      have hLive : (storeLookup sigma ell').isSome := h_wf.1 ell' hInSigma
+      rw [storeLookup_isSome_remove_ne sigma ell ell' h_eq]
+      exact hLive
+  · intro ell' hell'
+    by_cases h_eq : ell' = ell
+    · exfalso
+      rw [h_eq] at hell'
+      -- lookup in storeRemove σ ell at ell is none
+      have : storeLookup (storeRemove sigma ell) ell = none := by
+        simp only [storeLookup, storeRemove]
+        induction sigma with
+        | nil => rfl
+        | cons hd tl ihl =>
+          by_cases hHd : hd.1 = ell
+          · simp [List.filter_cons, hHd, ihl]
+          · simp [List.filter_cons, hHd, List.find?, ihl]
+      rw [this] at hell'
+      exact absurd hell' (by simp)
+    · have hLiveOrig : (storeLookup sigma ell').isSome := by
+        rw [← storeLookup_isSome_remove_ne sigma ell ell' h_eq]
+        exact hell'
+      have hSigmaDom : ell' ∈ storeTypDom Sigma := h_wf.2 ell' hLiveOrig
+      exact (mem_storeTypDom_remove_iff Sigma ell ell' h_eq).mpr hSigmaDom
 
 /-- Remove-then-extend for single-location-consume Steps (tsum,
     texpand, tuniformLike). Removing a live location and extending
