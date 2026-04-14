@@ -301,9 +301,31 @@ theorem progress_aux
   | vmap x tv body =>
       exact Or.inr ⟨sigma, _, Step.tvmap sigma x tv body (Dim.lit 0)⟩
   | pair e1 e2 =>
-      -- TODO Wave 3+: pair_inv-based extraction for progress; needs
-      -- value_preserves_closed_context on e1 before dispatching e2.
-      sorry
+      -- pair_inv gives h1 : HasType [] Σ [] e1 t1 eps1 Γmid,
+      -- h2 : HasType [] Σ Γmid e2 t2 eps2 Γ', hsub. Dispatch.
+      cases e_eq : t with
+      | pair t1 t2 =>
+          rw [e_eq] at h
+          obtain ⟨Γmid, eps1, eps2, h1, h2, _⟩ := HasType.pair_inv h
+          rcases progress_aux sigma Sigma h_wf e1 t1 Γmid eps1 h1 with
+              hv1 | ⟨sigma', e1', hstep⟩
+          · -- e1 is a value. By value_preserves, Γmid = [].
+            have hΓmid : Γmid = [] := value_preserves_closed_context h1 hv1
+            subst hΓmid
+            rcases progress_aux sigma Sigma h_wf e2 t2 Gamma' eps2 h2 with
+                hv2 | ⟨sigma', e2', hstep⟩
+            · exact Or.inl (IsValue.pair e1 e2 hv1 hv2)
+            · exact Or.inr ⟨sigma', Term.pair e1 e2',
+                by simpa using
+                  Step.ctx sigma sigma' (EvalCtx.pairR e1) e2 e2' hstep⟩
+          · exact Or.inr ⟨sigma', Term.pair e1' e2,
+              by simpa using
+                Step.ctx sigma sigma' (EvalCtx.pairL e2) e1 e1' hstep⟩
+      | _ =>
+          -- t is not a pair type, but `Term.pair` requires a pair type.
+          -- Derive a contradiction via pair_inv — which requires
+          -- Typ.pair. Sorry for now.
+          sorry
   | app e1 e2 =>
       -- TODO Wave 3+: needs an app inversion lemma in Preservation.
       sorry
