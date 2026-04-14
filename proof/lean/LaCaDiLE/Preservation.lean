@@ -764,6 +764,126 @@ theorem hasType_store_weaken
     exact ClausesTyped.cons Δ Sigma' Γ2 Γ3 tr tArg tRet epsR op x k hb rest
       (ih_hb hs) (ih_rest hs)
 
+/-- Plug-local app inversion: Preservation's sibling file Progress.lean
+    depends on Preservation, so app_inv / letBind_inv / letpair_inv are
+    defined there. We re-derive the shapes we need here under
+    `plug_`-prefixed names to sidestep the import cycle. -/
+theorem HasType.plug_app_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.app e1 e2) t eps Gamma3) :
+    ∃ Gamma2 t1 epsBody eps1 eps2,
+      HasType Delta Sigma Gamma1 e1 (Typ.arrow t1 t epsBody) eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 t1 eps2 Gamma3 := by
+  generalize heq : Term.app e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | app _ _ _ Γ2 _ _ _ t1 _ epsBody eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, t1, epsBody, eps1, eps2, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Plug-local letBind inversion. -/
+theorem HasType.plug_letBind_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
+    {x : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.letBind x e1 e2) t eps Gamma_out) :
+    ∃ Gamma2 Gamma3 t1 eps1 eps2,
+      Gamma_out = Gamma3.filter (fun p => p.1 ≠ x) ∧
+      HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
+      HasType Delta Sigma (Gamma2 ++ [(x, t1)]) e2 t eps2 Gamma3 := by
+  generalize heq : Term.letBind x e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, rfl, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Plug-local letpair inversion. -/
+theorem HasType.plug_letpair_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
+    {x y : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.letpair x y e1 e2) t eps Gamma_out) :
+    ∃ Gamma2 Gamma3 t1 t2 eps1 eps2,
+      Gamma_out = Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y) ∧
+      HasType Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 ∧
+      HasType Delta Sigma (Gamma2 ++ [(x, t1), (y, t2)]) e2 t eps2 Gamma3 := by
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1' t2' _ eps1' eps2' h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1', t2', eps1', eps2', rfl, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Perform inversion: extract the argument sub-derivation at the
+    operation's argument type. The result type equals the operation's
+    return type via `OpSigMatch`. The exact effect-row equation is
+    dropped but the operation is guaranteed to be in the outer eps via
+    `hasType_perform_eff_mem`. -/
+theorem HasType.perform_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {op : EffectLabel} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.perform op e) t eps Gamma2) :
+    ∃ tArg eps0,
+      HasType Delta Sigma Gamma1 e tArg eps0 Gamma2 ∧
+      OpSigMatch op tArg t ∧
+      SubEffRow (EffectRow.union [op] eps0) eps := by
+  generalize heq : Term.perform op e = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | perform _ _ _ _ _ _ tArg _ eps0 h' hmatch _ =>
+      cases heq
+      exact ⟨tArg, eps0, h', hmatch, fun _ h => h⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨tArg, eps0, h', hmatch, hwit⟩ := ih heq
+      refine ⟨tArg, eps0, h', hmatch, ?_⟩
+      intro op' hop'
+      exact hSub op' (hwit op' hop')
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Strengthened handle inversion (Wave C3): returns a body
+    sub-derivation plus a `SubEffRow` witness tying the body's
+    effect row (minus `epsH`) to the outer effect row via `removeOps`.
+    Necessary for the `plug_preserves_typing` handle case. -/
+theorem HasType.handle_inv_strong
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {body : Term} {clauses : List (EffectLabel × String × String × Term)}
+    {epsH : EffectRow} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.handle epsH body clauses) t eps Gamma3) :
+    ∃ Gamma2 epsB,
+      HasType Delta Sigma Gamma1 body t epsB Gamma2 ∧
+      (∀ op ∈ epsH, op ∈ epsB) ∧
+      (∀ cl ∈ clauses, cl.1 ∈ epsH) ∧
+      (∀ op ∈ epsH, ∃ cl ∈ clauses, cl.1 = op) ∧
+      ClausesTyped Delta Sigma Gamma2 Gamma3 t
+                   (EffectRow.removeOps epsB epsH) clauses ∧
+      SubEffRow (EffectRow.removeOps epsB epsH) eps := by
+  generalize heq : Term.handle epsH body clauses = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | handle _ _ _ Γ2 _ _ _ _ _ epsB hb hHsubB hClIn hClCov hcls _ _ =>
+      cases heq
+      exact ⟨Γ2, epsB, hb, hHsubB, hClIn, hClCov, hcls, fun _ h => h⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, epsB, hb, hHsubB, hClIn, hClCov, hcls, hwit⟩ := ih heq
+      refine ⟨Γ2, epsB, hb, hHsubB, hClIn, hClCov, hcls, ?_⟩
+      intro op hop
+      exact hSub op (hwit op hop)
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
 theorem plug_preserves_typing
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
