@@ -307,6 +307,206 @@ theorem storeWf_lookup_witness
   have hsome := h_wf.1 ell hmem
   exact Option.isSome_iff_exists.mp hsome
 
+/-! ## Small effect-row helpers used by `stuck_bubbles` -/
+
+/-- If `op ∈ eps1`, then `op ∈ EffectRow.union eps1 eps2`. -/
+theorem union_mem_left (eps1 eps2 : EffectRow) (op : EffectLabel)
+    (h : op ∈ eps1) : op ∈ EffectRow.union eps1 eps2 := by
+  unfold EffectRow.union
+  exact List.mem_append_left _ h
+
+/-- If `op ∈ eps2`, then `op ∈ EffectRow.union eps1 eps2`. -/
+theorem union_mem_right (eps1 eps2 : EffectRow) (op : EffectLabel)
+    (h : op ∈ eps2) : op ∈ EffectRow.union eps1 eps2 := by
+  unfold EffectRow.union
+  by_cases hmem : op ∈ eps1
+  · exact List.mem_append_left _ hmem
+  · refine List.mem_append_right _ ?_
+    refine List.mem_filter.mpr ⟨h, ?_⟩
+    simp [List.contains, hmem]
+
+/-- `op ∈ removeOp eps op'` iff `op ∈ eps` and `op ≠ op'`. -/
+theorem removeOp_mem_iff (eps : EffectRow) (op op' : EffectLabel) :
+    op ∈ EffectRow.removeOp eps op' ↔ op ∈ eps ∧ op ≠ op' := by
+  unfold EffectRow.removeOp
+  constructor
+  · intro h
+    obtain ⟨hmem, hne⟩ := List.mem_filter.mp h
+    refine ⟨hmem, ?_⟩
+    intro heq
+    subst heq
+    simp at hne
+  · intro ⟨hmem, hne⟩
+    refine List.mem_filter.mpr ⟨hmem, ?_⟩
+    simp [hne]
+
+/-- If `op ∈ eps` and `op ∉ ops`, then `op ∈ removeOps eps ops`. -/
+theorem removeOps_mem_of_not_in
+    {eps ops : EffectRow} {op : EffectLabel}
+    (hmem : op ∈ eps) (hnot : op ∉ ops) :
+    op ∈ EffectRow.removeOps eps ops := by
+  induction ops with
+  | nil => simpa [EffectRow.removeOps] using hmem
+  | cons o rest ih =>
+      have hne : op ≠ o := by
+        intro heq; subst heq; exact hnot (List.mem_cons_self _ _)
+      have hnot' : op ∉ rest := fun h => hnot (List.mem_cons_of_mem _ h)
+      have hrec : op ∈ EffectRow.removeOps eps rest := ih hnot'
+      show op ∈ EffectRow.removeOp (EffectRow.removeOps eps rest) o
+      exact (removeOp_mem_iff _ _ _).mpr ⟨hrec, hne⟩
+
+/-! ## StuckOnPerform (Wave 1 P2)
+
+Direct multi-frame existential: `e = multiPlug Es (perform op v)`
+where `v` is a value and no frame in `Es` catches `op`. Such a
+term cannot take a step in isolation — it needs an enclosing
+handler of `op`. It is the third disjunct of `progress_aux`. -/
+
+inductive StuckOnPerform (op : EffectLabel) : Term → Prop where
+  | mk (Es : EvalCtxChain) (v : Term)
+       (hv : IsValue v)
+       (hEs : EvalCtxChain.noHandleFor op Es) :
+       StuckOnPerform op (multiPlug Es (Term.perform op v))
+
+/-- A stuck-on-perform derivation forces `op ∈ eps`. Induction on
+    the chain; the `cons` case inverts the enclosing frame via the
+    matching `HasType.*_inv` lemma and pushes membership through
+    the associated effect-row union / removeOps step. -/
+theorem stuck_bubbles
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {op : EffectLabel} {v : Term}
+    : ∀ (Es : EvalCtxChain) {Gamma Gamma' : LinearCtx}
+        {t : Typ} {eps : EffectRow},
+      EvalCtxChain.noHandleFor op Es →
+      HasType Delta Sigma Gamma (multiPlug Es (Term.perform op v)) t eps Gamma' →
+      op ∈ eps := by
+  intro Es
+  induction Es with
+  | nil =>
+      intro Gamma Gamma' t eps _hEs h
+      exact hasType_perform_eff_mem h
+  | cons E Es ih =>
+      intro Gamma Gamma' t eps hEs h
+      obtain ⟨hE, hEs'⟩ := hEs
+      cases E with
+      | hole =>
+          simp only [multiPlug, plug] at h
+          exact ih hEs' h
+      | appL e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.app (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, eps1, _, h1, _, hsub⟩ := HasType.plug_app_inv h'
+          exact hsub op (union_mem_left _ _ op (union_mem_left _ _ op (ih hEs' h1)))
+      | appR v1 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.app v1 (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, _, eps2, _, h2, hsub⟩ := HasType.plug_app_inv h'
+          exact hsub op (union_mem_left _ _ op (union_mem_right _ _ op (ih hEs' h2)))
+      | letBind x e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.letBind x (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, eps1, _, _, h1, _, hsub⟩ := HasType.plug_letBind_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h1))
+      | copy =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.copy (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, h_inner⟩ := HasType.copy_inv h'
+          exact ih hEs' h_inner
+      | letpair x y e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.letpair x y (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, _, eps1, _, _, h1, _, hsub⟩ :=
+            HasType.plug_letpair_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h1))
+      | pairL e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.pair (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, eps1, _, _, h1, _, hsub⟩ := HasType.plug_pair_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h1))
+      | pairR v1 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.pair v1 (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, _, eps2, _, _, h2, hsub⟩ := HasType.plug_pair_inv h'
+          exact hsub op (union_mem_right _ _ op (ih hEs' h2))
+      | fst =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.fst (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, h_inner⟩ := HasType.fst_inv h'
+          exact ih hEs' h_inner
+      | snd =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.snd (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, h_inner⟩ := HasType.snd_inv h'
+          exact ih hEs' h_inner
+      | addL e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.add (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, eps1, _, _, h1, _, hsub⟩ := HasType.plug_add_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h1))
+      | addR v1 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.add v1 (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, eps2, _, _, h2, hsub⟩ := HasType.plug_add_inv h'
+          exact hsub op (union_mem_right _ _ op (ih hEs' h2))
+      | mulL e2 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.mul (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, eps1, _, _, h1, _, hsub⟩ := HasType.plug_mul_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h1))
+      | mulR v1 =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.mul v1 (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, eps2, _, _, h2, hsub⟩ := HasType.plug_mul_inv h'
+          exact hsub op (union_mem_right _ _ op (ih hEs' h2))
+      | sum d =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.sum (multiPlug Es (Term.perform op v)) d) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, _, h_inner⟩ := HasType.sum_inv h'
+          exact ih hEs' h_inner
+      | expand d =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.expand (multiPlug Es (Term.perform op v)) d) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, _, h_inner⟩ := HasType.expand_inv h'
+          exact ih hEs' h_inner
+      | uniformLike lo hi =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.uniformLike (multiPlug Es (Term.perform op v)) lo hi)
+              t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, eps0, _, h_inner, hsub⟩ := HasType.uniformLike_inv h'
+          exact hsub op (union_mem_left _ _ op (ih hEs' h_inner))
+      | handle epsH clauses =>
+          have hopH : op ∉ epsH := hE
+          have h' : HasType Delta Sigma Gamma
+              (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)
+              t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, epsB, h_body, _, _, _, _, hsub⟩ :=
+            HasType.handle_inv_strong h'
+          have hopB : op ∈ epsB := ih hEs' h_body
+          exact hsub op (removeOps_mem_of_not_in hopB hopH)
+      | perform op' =>
+          have h' : HasType Delta Sigma Gamma
+              (Term.perform op' (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+            simpa [multiPlug, plug] using h
+          obtain ⟨_, eps0, h_inner, _, hsub⟩ := HasType.perform_inv h'
+          exact hsub op (union_mem_right _ _ op (ih hEs' h_inner))
+
 /-! ## Progress -/
 
 /-- General Progress with loose output context and effect row.
@@ -321,7 +521,8 @@ theorem progress_aux
     (e : Term) (t : Typ)
     (Gamma' : LinearCtx) (eps : EffectRow)
     (h : HasType [] Sigma [] e t eps Gamma') :
-    IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
+    IsValue e ∨ (∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩) ∨
+    ∃ op, StuckOnPerform op e := by
   -- Case analysis on the term syntax; recursive `progress_aux` calls
   -- on strict sub-terms are accepted via the `termination_by sizeOf e`
   -- measure declared at the bottom of the definition.
