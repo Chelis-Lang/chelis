@@ -44,19 +44,81 @@ def StoreTypTensorOnly (Sigma : StoreTyp) : Prop :=
   ∀ ell t, storeTypLookup Sigma ell = some t → ∃ ds, t = Typ.tensor ds
 
 /-- Canonical forms: a value of arrow type is a literal abstraction.
-    Wave 3 TODO: mirrors canonical_forms_tensor but needs an extra
-    StoreTypTensorOnly premise to rule out loc-of-arrow (loc case),
-    plus a cleaner abs-case pattern that doesn't trip on Lean's
-    dependent elimination of the abs constructor's internal type
-    parameter t1. -/
+    Uses StoreTypTensorOnly to rule out loc-of-arrow pathology. -/
 theorem canonical_forms_arrow
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t1 t2 : Typ} {eps eps' : EffectRow}
-    (_h_wf : StoreTypTensorOnly Sigma)
-    (_h : HasType Delta Sigma Gamma v (Typ.arrow t1 t2 eps) eps' Gamma')
-    (_hv : IsValue v) :
+    (h_wf : StoreTypTensorOnly Sigma)
+    (h : HasType Delta Sigma Gamma v (Typ.arrow t1 t2 eps) eps' Gamma')
+    (hv : IsValue v) :
     ∃ x body, v = Term.abs x t1 body := by
-  sorry
+  cases hv with
+  | abs x ta e =>
+      -- HasType.abs gives output type `arrow ta t2' eps'` for some
+      -- ta, t2', eps' — and we have ht : this = arrow t1 t2 eps, so
+      -- ta = t1. Return ⟨x, e, rfl⟩.
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx)
+          (x0 : String) (ta0 : Typ) (body0 : Term),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.abs x0 ta0 body0 →
+          t' = Typ.arrow t1 t2 eps → ta0 = t1 from by
+        have := hf _ _ _ _ _ _ _ x ta e h rfl rfl
+        exact ⟨x, e, by rw [this]⟩
+      intro Δ S Γ e' t' ε Γ' x0 ta0 body0 hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | abs _ _ _ _ _ _ _ _ _ _ _ =>
+          intro heq ht
+          cases heq
+          cases ht
+          rfl
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
+  | loc ell =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx) (ell2 : Loc),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.loc ell2 →
+          t' = Typ.arrow t1 t2 eps → S = Sigma → False from
+        hf _ _ _ _ _ _ _ _ h rfl rfl rfl
+      intro Δ S Γ e' t' ε Γ' ell2 hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | loc _ _ _ ell_m t_m hlook_m =>
+          intro _ ht hS
+          subst hS
+          obtain ⟨ds, hds⟩ := h_wf ell_m t_m hlook_m
+          subst hds
+          cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht hS; exact ih he ht hS
+      | _ => first | (intro he _ _; cases he) | exact True.intro
+  | unit =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.unit →
+          t' = Typ.arrow t1 t2 eps → False from
+        hf _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | unit _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
+  | pair _ _ _ _ =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx)
+          (a b : Term),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.pair a b →
+          t' = Typ.arrow t1 t2 eps → False from
+        hf _ _ _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' a b hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
 
 /-- Canonical forms: a value of tensor type is a runtime location.
     Wave 2: case-split on `IsValue` then derive a contradiction from
