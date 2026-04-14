@@ -42,16 +42,12 @@ theorem linearity_soundness
   | handleOpDirect => exact ⟨Sigma, h_wf⟩
   | tgrad => exact ⟨Sigma, h_wf⟩
   | tvmap => exact ⟨Sigma, h_wf⟩
-  | tconst sigma_in v ds ell _ =>
-      -- Store grew by one fresh location. Exhibit the extended Sigma.
+  | tconst sigma_in v ds ell hell =>
       refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_⟩
-      -- TODO Wave 5: prove StoreWf (storeExtend sigma ell ⟨ds, v⟩)
-      -- (storeTypExtend Sigma ell (tensor ds)). Requires a StoreWf
-      -- extend lemma.
-      sorry
-  | copy sigma_in ell ellNew w _ _ =>
+      exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf hell
+  | copy sigma_in ell ellNew w _hlook hfresh =>
       refine ⟨storeTypExtend Sigma ellNew (Typ.tensor w.shape), ?_⟩
-      sorry -- TODO Wave 5: StoreWf extension for copy
+      exact StoreWf.extend_fresh ellNew w (Typ.tensor w.shape) h_wf hfresh
   | tadd sigma_in ell1 ell2 ellOut w1 w2 _ _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-remove-extend
@@ -68,14 +64,10 @@ theorem linearity_soundness
   | tuniformLike sigma_in ell ellOut w lo hi _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-extend
-  | ctx _sigma _sigma' _E _e _e' _h_inner =>
-      -- E-Ctx: recursive structure is not visible to Lean's
-      -- termination checker under the cases-with binding (h_inner is
-      -- a projection out of a bound variable, not a fresh recursive
-      -- subterm). Wave 5 will refactor this to a standalone induction
-      -- over Step that uses HasType.rec's motive_2 pattern, making
-      -- recursion explicit. For now: same TODO family as the store-
-      -- mutating cases above.
-      sorry -- TODO Wave 5: recurse on inner Step
+  | ctx _sig _sig' _E _e _e' _h_inner =>
+      -- E-Ctx: cases can't directly dispatch because Step is indexed
+      -- on Configs; we lose the induction hypothesis. Wave 5 will
+      -- rewrite this using a helper that takes Step structurally.
+      sorry -- TODO Wave 5: recurse via Step-structural helper
 
 end LaCaDiLE

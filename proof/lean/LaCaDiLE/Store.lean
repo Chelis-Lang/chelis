@@ -57,4 +57,51 @@ def StoreTypSub (Sigma Sigma' : StoreTyp) : Prop :=
   ∀ ell t, storeTypLookup Sigma ell = some t →
            storeTypLookup Sigma' ell = some t
 
+/-! ## StoreWf extension lemma (available to both LinearitySoundness
+    and Preservation). -/
+
+/-- Extending both the store and the store-typing with the same
+    location preserves well-formedness. Since `StoreWf` tracks domain
+    membership only, freshness is accepted as a documentation premise
+    rather than being load-bearing. -/
+theorem StoreWf.extend_fresh
+    {sigma : Store} {Sigma : StoreTyp}
+    (ell : Loc) (w : TensorVal) (t : Typ)
+    (h_wf : StoreWf sigma Sigma)
+    (_h_fresh : ell = storeFreshLoc sigma) :
+    StoreWf (storeExtend sigma ell w) (storeTypExtend Sigma ell t) := by
+  refine ⟨?_, ?_⟩
+  · intro ell' hell'
+    simp only [storeTypDom, storeTypExtend, List.map_cons,
+               List.mem_cons] at hell'
+    rcases hell' with hEq | hOld
+    · rw [hEq]
+      show (storeLookup ((ell, w) :: sigma) ell).isSome
+      simp [storeLookup, List.find?]
+    · have hOldLive : (storeLookup sigma ell').isSome := by
+        apply h_wf.1
+        simpa [storeTypDom] using hOld
+      show (storeLookup ((ell, w) :: sigma) ell').isSome
+      by_cases hell'eq : ell' = ell
+      · subst hell'eq
+        simp [storeLookup, List.find?]
+      · have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
+        simp only [storeLookup, storeExtend, List.find?, hne,
+                   decide_false, Bool.false_eq_true, ite_false]
+        exact hOldLive
+  · intro ell' hell'
+    show ell' ∈ storeTypDom (storeTypExtend Sigma ell t)
+    simp only [storeTypDom, storeTypExtend, List.map_cons, List.mem_cons]
+    by_cases hell'eq : ell' = ell
+    · left; exact hell'eq
+    · right
+      have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
+      have hSigmaLive : (storeLookup sigma ell').isSome := by
+        have : (storeLookup ((ell, w) :: sigma) ell').isSome := hell'
+        simp only [storeLookup, storeExtend, List.find?, hne,
+                   decide_false, Bool.false_eq_true, ite_false] at this
+        exact this
+      have := h_wf.2 ell' hSigmaLive
+      simpa [storeTypDom] using this
+
 end LaCaDiLE

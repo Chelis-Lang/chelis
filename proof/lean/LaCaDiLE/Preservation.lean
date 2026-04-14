@@ -245,54 +245,7 @@ theorem HasType.uniformLike_inv
       HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps0 Gamma2 := by
   sorry -- TODO Wave 2: strip_subEff helper
 
-/-! ### StoreWf extension helper
-
-Extending both the store and the store-typing with the same fresh
-location preserves well-formedness. The freshness premise gets threaded
-through `storeLookup`/`storeTypDom` via a small side lemma that Wave 1
-leaves as an axiom-shaped `sorry` to avoid a detour into `List.find?`
-reasoning; Wave 2 will discharge it alongside the substitution work. -/
-theorem StoreWf.extend_fresh
-    {sigma : Store} {Sigma : StoreTyp}
-    (ell : Loc) (w : TensorVal) (t : Typ)
-    (h_wf : StoreWf sigma Sigma)
-    (_h_fresh : ell = storeFreshLoc sigma) :
-    StoreWf (storeExtend sigma ell w) (storeTypExtend Sigma ell t) := by
-  refine ⟨?_, ?_⟩
-  · intro ell' hell'
-    simp only [storeTypDom, storeTypExtend, List.map_cons,
-               List.mem_cons] at hell'
-    rcases hell' with hEq | hOld
-    · -- ell' = ell: the extended store contains (ell, w).
-      rw [hEq]
-      show (storeLookup ((ell, w) :: sigma) ell).isSome
-      simp [storeLookup, List.find?]
-    · -- ell' is in Sigma's existing domain.
-      have hOldLive : (storeLookup sigma ell').isSome := by
-        apply h_wf.1
-        simpa [storeTypDom] using hOld
-      show (storeLookup ((ell, w) :: sigma) ell').isSome
-      by_cases hell'eq : ell' = ell
-      · subst hell'eq
-        simp [storeLookup, List.find?]
-      · have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
-        simp only [storeLookup, storeExtend, List.find?, hne,
-                   decide_false, Bool.false_eq_true, ite_false]
-        exact hOldLive
-  · intro ell' hell'
-    show ell' ∈ storeTypDom (storeTypExtend Sigma ell t)
-    simp only [storeTypDom, storeTypExtend, List.map_cons, List.mem_cons]
-    by_cases hell'eq : ell' = ell
-    · left; exact hell'eq
-    · right
-      have hne : ¬ (ell = ell') := fun he => hell'eq he.symm
-      have hSigmaLive : (storeLookup sigma ell').isSome := by
-        have : (storeLookup ((ell, w) :: sigma) ell').isSome := hell'
-        simp only [storeLookup, storeExtend, List.find?, hne,
-                   decide_false, Bool.false_eq_true, ite_false] at this
-        exact this
-      have := h_wf.2 ell' hSigmaLive
-      simpa [storeTypDom] using this
+-- StoreWf.extend_fresh moved to Store.lean so LinearitySoundness can use it.
 
 theorem storeTypLookup_extend_other
     (Sigma : StoreTyp) (ell ellNew : Loc) (t t' : Typ)
@@ -387,11 +340,57 @@ theorem preservation
       -- TODO Wave 2: value_preserves_context + weaken_eff + union_comm.
       sorry
   | tconst s v ds ell hell =>
-      -- TODO Wave 2: re-close after inversion lemmas ship.
-      sorry
+      -- E-Const: const(v, ds) ↦ loc ell in extended store.
+      obtain ⟨ht, hG⟩ := HasType.const_inv h_typ
+      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_, ?_⟩
+      · subst ht
+        subst hG
+        have hlook := storeTypLookup_extend_self Sigma ell (Typ.tensor ds)
+        -- HasType.loc at [] for the extended Sigma, then widen to eps
+        -- via subEff since SubEffRow [] eps is trivially true.
+        have h_loc : HasType [] (storeTypExtend Sigma ell (Typ.tensor ds))
+                              [] (Term.loc ell) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ell (Typ.tensor ds) hlook
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_loc hsub
+      · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf hell
   | copy s ell ellNew w hlook hfresh =>
-      -- TODO Wave 2: re-close after inversion lemmas ship.
-      sorry
+      -- E-Copy: copy(loc ell) ↦ pair (loc ell) (loc ellNew).
+      -- Both locs type at t0 under the extended Sigma. StoreWf as
+      -- defined tracks domain membership only, so we don't need
+      -- ell ≠ ellNew for well-formedness (the lookups remain isSome
+      -- in both directions regardless).
+      obtain ⟨t0, htEq, h_e⟩ := HasType.copy_inv h_typ
+      obtain ⟨hlookT, hGE⟩ := HasType.loc_inv h_e
+      refine ⟨storeTypExtend Sigma ellNew t0, ?_, ?_⟩
+      · subst htEq
+        subst hGE
+        -- Build `pair (loc ell) (loc ellNew)` at the empty effect row,
+        -- then widen to the outer eps via subEff.
+        have hlookSelf := storeTypLookup_extend_self Sigma ellNew t0
+        -- For ell ≠ ellNew, lookup falls through. For ell = ellNew,
+        -- lookup hits the new entry which is the same type t0.
+        have hlookEll :
+            storeTypLookup (storeTypExtend Sigma ellNew t0) ell = some t0 := by
+          by_cases hne : ell = ellNew
+          · rw [hne]; exact hlookSelf
+          · have hne' : ¬ (ellNew = ell) := fun he => hne he.symm
+            simp only [storeTypLookup, storeTypExtend, List.find?,
+                       hne', decide_false, Bool.false_eq_true, ite_false]
+            simpa [storeTypLookup] using hlookT
+        have h_l1 : HasType [] (storeTypExtend Sigma ellNew t0) []
+                      (Term.loc ell) t0 [] [] :=
+          HasType.loc _ _ _ ell t0 hlookEll
+        have h_l2 : HasType [] (storeTypExtend Sigma ellNew t0) []
+                      (Term.loc ellNew) t0 [] [] :=
+          HasType.loc _ _ _ ellNew t0 hlookSelf
+        have h_pair : HasType [] (storeTypExtend Sigma ellNew t0) []
+                        (Term.pair (Term.loc ell) (Term.loc ellNew))
+                        (Typ.pair t0 t0) [] [] :=
+          HasType.tpair [] _ [] [] [] _ _ t0 t0 [] [] h_l1 h_l2
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
+      · exact StoreWf.extend_fresh ellNew w t0 h_wf hfresh
   | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
       -- E-Add consumes ell1, ell2 and allocates ellOut at tensor[ds].
       -- Substitution: need to prove store stays well-formed under the
@@ -412,7 +411,16 @@ theorem preservation
       -- TODO Wave 2: parallel to tsum.
       sorry
   | handleRet s epsH v clauses hv =>
-      -- TODO Wave 2: needs inversion + value-context preservation.
+      -- E-Handle-Ret: handle[εH] v clauses ↦ v when v is a value.
+      -- handle_inv gives us a sub-derivation for v at some interior
+      -- effect row epsB and intermediate context Γ2. We use subEff
+      -- to widen epsB to the outer eps, and (since the theorem's
+      -- output context is []) we rely on h_body directly when it
+      -- already lands at the right context shape. Full value-context-
+      -- preservation is still a Wave 2 task for the Γ2 = [] step.
+      obtain ⟨Gamma2, epsB, h_body⟩ := HasType.handle_inv h_typ
+      refine ⟨Sigma, ?_, h_wf⟩
+      -- TODO Wave 2: value-context-preservation gives Γ2 = Gamma = [].
       sorry
   | handleOpDirect s op v epsH clauses x k hb tRet hv hmem =>
       -- TODO Wave 2: needs subst_preserves_typing
