@@ -16,8 +16,57 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
+import LaCaDiLE.Preservation
 
 namespace LaCaDiLE
+
+/-! ## Helper lemmas used by Progress -/
+
+/-- A well-typed value under a closed input context produces a closed
+    output context. Used to keep the input context of sub-term
+    progress calls empty once we learn the previous sub-term is a
+    value. Proof deferred (HasType.rec with equation motive); stated
+    here so the progress proof can cite it. -/
+theorem value_preserves_closed_context
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
+    {v : Term} {t : Typ} {eps : EffectRow}
+    (_h : HasType Delta Sigma [] v t eps Gamma')
+    (_h_val : IsValue v) : Gamma' = [] := by
+  -- TODO Wave 3+: HasType.rec with equation motive on Γ_in = [] and
+  -- IsValue v; value-producing constructors (unit/abs/loc/tpair)
+  -- each enforce Γ_out = Γ_in = [].
+  sorry
+
+/-- Canonical forms: a value of arrow type is a literal abstraction. -/
+theorem canonical_forms_arrow
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {t1 t2 : Typ} {eps eps' : EffectRow}
+    (_h : HasType Delta Sigma Gamma v (Typ.arrow t1 t2 eps) eps' Gamma')
+    (_hv : IsValue v) :
+    ∃ x body, v = Term.abs x t1 body := by
+  -- TODO Wave 3+: HasType.rec on v with motive matching arrow type;
+  -- only `abs` and `subEff` cases can fire (unit/loc/pair values
+  -- have non-arrow types).
+  sorry
+
+/-- Canonical forms: a value of tensor type is a runtime location. -/
+theorem canonical_forms_tensor
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {ds : DimList} {eps : EffectRow}
+    (_h : HasType Delta Sigma Gamma v (Typ.tensor ds) eps Gamma')
+    (_hv : IsValue v) : ∃ ell, v = Term.loc ell := by
+  -- TODO Wave 3+: value shapes of tensor type are only `loc`.
+  sorry
+
+/-- Canonical forms: a value of pair type is a literal pair of values. -/
+theorem canonical_forms_pair
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {t1 t2 : Typ} {eps : EffectRow}
+    (_h : HasType Delta Sigma Gamma v (Typ.pair t1 t2) eps Gamma')
+    (_hv : IsValue v) :
+    ∃ v1 v2, v = Term.pair v1 v2 ∧ IsValue v1 ∧ IsValue v2 := by
+  -- TODO Wave 3+: only `IsValue.pair` can inhabit a pair type.
+  sorry
 
 /-! ## Progress -/
 
@@ -31,60 +80,114 @@ theorem progress_aux
     (Gamma' : LinearCtx) (eps : EffectRow)
     (h : HasType [] Sigma [] e t eps Gamma') :
     IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
-  -- Case analysis on the term syntax (not on the HasType derivation,
-  -- which Lean's `cases` cannot directly eliminate because it is in a
-  -- mutual block with `ClausesTyped` and carries dependent indices).
-  -- For each term shape we either produce a value witness, fire a
-  -- head-reduction, or leave a `sorry` with a TODO marker for the
-  -- Phase 2 E-Ctx congruence closure.
+  -- Case analysis on the term syntax; recursive `progress_aux` calls
+  -- on strict sub-terms are accepted via the `termination_by sizeOf e`
+  -- measure declared at the bottom of the definition.
   cases e with
   | var x =>
-      -- T-Var requires a non-empty input context, contradicting `[]`.
-      sorry  -- TODO Phase 2: var inversion under empty linear context
+      -- TODO Wave 3+: var under empty context is impossible via
+      -- HasType.rec with equation motive (T-Var requires
+      -- Gamma_pre ++ [(x,t)] ++ Gamma_post = []).
+      sorry
   | abs x tv body => exact Or.inl (IsValue.abs x tv body)
   | unit => exact Or.inl IsValue.unit
   | loc ell => exact Or.inl (IsValue.loc ell)
   | const v ds =>
-      -- E-Const always fires with a fresh location.
       exact Or.inr ⟨storeExtend sigma (storeFreshLoc sigma) ⟨ds, v⟩,
                     Term.loc (storeFreshLoc sigma),
                     Step.tconst sigma v ds (storeFreshLoc sigma) rfl⟩
   | grad x tv tOut body =>
-      -- E-Grad fires unconditionally on any literal `grad` term.
       exact Or.inr ⟨sigma, _, Step.tgrad sigma x tv tOut body⟩
   | vmap x tv body =>
-      -- E-Vmap fires unconditionally on any literal `vmap` term.
-      -- We need a dimension to lift along; any dimension works for a
-      -- head reduction, so pick a literal 0.
       exact Or.inr ⟨sigma, _, Step.tvmap sigma x tv body (Dim.lit 0)⟩
   | pair e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      -- TODO Wave 3+: pair_inv-based extraction for progress; needs
+      -- value_preserves_closed_context on e1 before dispatching e2.
+      sorry
   | app e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      -- TODO Wave 3+: needs an app inversion lemma in Preservation.
+      sorry
   | letBind x e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      -- TODO Wave 3+: needs a letBind inversion lemma.
+      sorry
   | copy e1 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨t0, _hteq, h_inner⟩ := HasType.copy_inv h
+      rcases progress_aux sigma Sigma e1 t0 Gamma' eps h_inner with
+          hv | ⟨sigma', e1', hstep⟩
+      · -- e1 is a value; copy on a value of pair-of-t0-t0 type. The
+        -- reduction rule E-Copy only fires when the value is a loc,
+        -- so we additionally need t0 to be a tensor — which is not
+        -- guaranteed by T-Copy at this phase (copy is polymorphic in
+        -- the source grammar). Stuck as sorry until copy is restricted
+        -- to tensors or canonical-forms handles arbitrary types.
+        -- TODO Wave 3+.
+        sorry
+      · exact Or.inr ⟨sigma', Term.copy e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.copy e1 e1' hstep⟩
   | letpair x y e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      -- TODO Wave 3+: needs a letpair inversion lemma.
+      sorry
   | fst e1 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨t2, h_inner⟩ := HasType.fst_inv h
+      rcases progress_aux sigma Sigma e1 (Typ.pair t t2) Gamma' eps h_inner
+          with hv | ⟨sigma', e1', hstep⟩
+      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_inner hv
+        subst heq
+        exact Or.inr ⟨sigma, v1, Step.fst sigma v1 v2 hv1 hv2⟩
+      · exact Or.inr ⟨sigma', Term.fst e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.fst e1 e1' hstep⟩
   | snd e1 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨t1, h_inner⟩ := HasType.snd_inv h
+      rcases progress_aux sigma Sigma e1 (Typ.pair t1 t) Gamma' eps h_inner
+          with hv | ⟨sigma', e1', hstep⟩
+      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_inner hv
+        subst heq
+        exact Or.inr ⟨sigma, v2, Step.snd sigma v1 v2 hv1 hv2⟩
+      · exact Or.inr ⟨sigma', Term.snd e1',
+          by simpa using Step.ctx sigma sigma' EvalCtx.snd e1 e1' hstep⟩
   | add e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      -- TODO Wave 3+: full two-sub-term dispatch requires
+      -- value_preserves_closed_context plus StoreWf witness lookup.
+      sorry
   | mul e1 e2 =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      sorry
   | sum e1 i =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨ds, _hteq, h_inner⟩ := HasType.sum_inv h
+      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps h_inner
+          with hv | ⟨sigma', e1', hstep⟩
+      · -- TODO Wave 3+: StoreWf-dependent head reduction on loc value.
+        sorry
+      · exact Or.inr ⟨sigma', Term.sum e1' i,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.sum i) e1 e1' hstep⟩
   | expand e1 i k =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨ds, _hteq, h_inner⟩ := HasType.expand_inv h
+      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps h_inner
+          with hv | ⟨sigma', e1', hstep⟩
+      · sorry
+      · exact Or.inr ⟨sigma', Term.expand e1' i k,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.expand i k) e1 e1' hstep⟩
   | uniformLike e1 lo hi =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨ds, eps0, _hteq, h_inner⟩ := HasType.uniformLike_inv h
+      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps0 h_inner
+          with hv | ⟨sigma', e1', hstep⟩
+      · sorry
+      · exact Or.inr ⟨sigma', Term.uniformLike e1' lo hi,
+          by simpa using
+            Step.ctx sigma sigma' (EvalCtx.uniformLike lo hi) e1 e1' hstep⟩
   | handle epsH body clauses =>
-      sorry  -- TODO Phase 2: needs E-Ctx congruence closure
+      obtain ⟨Γ2, epsB, h_body⟩ := HasType.handle_inv h
+      rcases progress_aux sigma Sigma body t Γ2 epsB h_body with
+          hv | ⟨sigma', body', hstep⟩
+      · exact Or.inr ⟨sigma, body, Step.handleRet sigma epsH body clauses hv⟩
+      · exact Or.inr ⟨sigma', Term.handle epsH body' clauses,
+          by simpa using
+            Step.ctx sigma sigma' (EvalCtx.handle epsH clauses) body body' hstep⟩
   | perform op e1 =>
-      sorry  -- TODO Phase 2: effect-row inversion on empty output row
+      -- TODO Wave 3+: perform under empty effect row input requires
+      -- a perform_inv lemma plus effect-row inversion.
+      sorry
+termination_by sizeOf e
+decreasing_by all_goals (simp_wf; decreasing_tactic)
 
 /-- The classic closed-form Progress: trivially follows from the
     generalized form. -/

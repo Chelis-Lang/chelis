@@ -308,6 +308,53 @@ end
     uses `Closed v` as the side condition on the substituted value. -/
 def Closed (e : Term) : Prop := freeVars e = []
 
+/-! ## Bound-variable set (Wave 2 freshness predicate)
+
+`boundVars e` lists every binder occurrence inside `e`. Combined with
+`freeVars e`, this gives a sufficient freshness predicate for the
+position-indexed `weakening_insert` lemma: a variable `y` that is
+not in `freeVars e ∪ boundVars e` cannot be consumed by a T-Var
+inside the derivation (free freshness) and cannot collide with any
+binder (bound freshness), so weakening commutes through every
+binder without needing an exchange lemma. -/
+mutual
+
+def boundVars : Term → List String
+  | Term.var _ => []
+  | Term.abs x _ body => x :: boundVars body
+  | Term.app e1 e2 => boundVars e1 ++ boundVars e2
+  | Term.letBind x e1 e2 => x :: (boundVars e1 ++ boundVars e2)
+  | Term.copy e => boundVars e
+  | Term.letpair x y e1 e2 => x :: y :: (boundVars e1 ++ boundVars e2)
+  | Term.pair e1 e2 => boundVars e1 ++ boundVars e2
+  | Term.fst e => boundVars e
+  | Term.snd e => boundVars e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => boundVars e1 ++ boundVars e2
+  | Term.mul e1 e2 => boundVars e1 ++ boundVars e2
+  | Term.sum e _ => boundVars e
+  | Term.expand e _ _ => boundVars e
+  | Term.uniformLike e _ _ => boundVars e
+  | Term.grad x _ _ body => x :: boundVars body
+  | Term.vmap x _ body => x :: boundVars body
+  | Term.handle _ body clauses => boundVars body ++ boundVarsClauses clauses
+  | Term.perform _ e => boundVars e
+  | Term.loc _ => []
+
+def boundVarsClauses :
+    List (EffectLabel × String × String × Term) → List String
+  | [] => []
+  | (_, x, k, hb) :: rest => x :: k :: boundVars hb ++ boundVarsClauses rest
+
+end
+
+/-- Freshness of `y` with respect to term `e`: `y` is neither free nor
+    bound anywhere inside `e`. Sufficient precondition for the
+    position-indexed weakening lemma. -/
+def freshInTerm (y : String) (e : Term) : Prop :=
+  y ∉ freeVars e ∧ y ∉ boundVars e
+
 /-! ## Values -/
 
 /-- Value predicate on `Term`. A term is a value iff it is a location, a

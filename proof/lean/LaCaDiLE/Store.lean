@@ -50,6 +50,34 @@ def storeTypExtend (Sigma : StoreTyp) (ell : Loc) (t : Typ) : StoreTyp :=
 def storeTypRemove (Sigma : StoreTyp) (ell : Loc) : StoreTyp :=
   Sigma.filter (fun p => p.1 ≠ ell)
 
+/-- Lift `addDim d` through every type in a store typing. Used by
+    `addDim_preserves_typing` to handle the `loc` case and the
+    Phase 2 Wave 2 tvmap dim-swap fix. -/
+def addDimStoreTyp (d : Dim) (Sigma : StoreTyp) : StoreTyp :=
+  Sigma.map (fun p => (p.1, addDim d p.2))
+
+/-- Lookup lemma: lifting a store typing through `addDim d` lifts the
+    looked-up type too. -/
+theorem addDimStoreTyp_lookup (d : Dim) (Sigma : StoreTyp) (ell : Loc) (t : Typ)
+    (h : storeTypLookup Sigma ell = some t) :
+    storeTypLookup (addDimStoreTyp d Sigma) ell = some (addDim d t) := by
+  induction Sigma with
+  | nil => simp [storeTypLookup, List.find?] at h
+  | cons hd tl ih =>
+    simp only [storeTypLookup, addDimStoreTyp, List.map_cons,
+               List.find?]
+    by_cases hHd : hd.1 = ell
+    · simp only [hHd, decide_true, ite_true,
+                 Option.map_some]
+      simp only [storeTypLookup, List.find?, hHd, decide_true,
+                 ite_true, Option.map_some] at h
+      rw [Option.some_inj] at h
+      rw [h]
+    · simp only [hHd, decide_false, Bool.false_eq_true, ite_false]
+      simp only [storeTypLookup, List.find?, hHd, decide_false,
+                 Bool.false_eq_true, ite_false] at h
+      exact ih h
+
 /-- `StoreTyp` sub-typing: `Sigma ⊑ Sigma'` iff every location typed
     in `Sigma` is typed to the same type in `Sigma'`. Used to state
     Preservation's store-monotonicity conclusion. -/

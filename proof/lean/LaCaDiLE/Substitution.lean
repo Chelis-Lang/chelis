@@ -230,6 +230,39 @@ theorem append_singleton_inj {α} (G1 G2 : List α) (a b : α)
   have : [a] = [b] := this
   exact List.head_eq_of_cons_eq this
 
+/-! ### Position-indexed weakening (Wave 2 — statement under construction)
+
+The binder obstruction that blocks `weakening_tail` is dissolved by
+allowing the IH of an inductive proof to choose an arbitrary
+`Γ_pre / Γ_post` split. The right shape is:
+
+```
+theorem weakening_insert
+    (h : HasType Δ Σ (Γ_pre ++ Γ_post) e t ε Γ')
+    (h_fresh_ctx : y ∉ linearCtxDom (Γ_pre ++ Γ_post))
+    (h_fresh_term : freshInTerm y e) :
+    ∃ Γ'_pre Γ'_post,
+      Γ' = Γ'_pre ++ Γ'_post ∧
+      HasType Δ Σ (Γ_pre ++ [(y, t_y)] ++ Γ_post) e t ε
+              (Γ'_pre ++ [(y, t_y)] ++ Γ'_post)
+```
+
+with `freshInTerm` already in `Syntax.lean`. Every binder case
+descends into a sub-derivation at `(Γ_pre ++ Γ_post) ++ [(x, t1)]`,
+which re-splits as `Γ_pre ++ (Γ_post ++ [(x, t1)])`; the IH at this
+new split yields a derivation at
+`(Γ_pre ++ [(y, t_y)] ++ (Γ_post ++ [(x, t1)]))
+ = (Γ_pre ++ [(y, t_y)] ++ Γ_post) ++ [(x, t1)]`,
+which is exactly the input the outer binder rule needs — no exchange
+required. Non-binder cases are mechanical.
+
+Wave 2 deliverable (next agent turn): implement the proof above via
+`HasType.rec` with a motive of type
+`∀ Γ_pre Γ_post, Γ = Γ_pre ++ Γ_post → ... → ∃ ...`. Budget ~300
+lines. The three theorems below remain as `sorry`s until that work
+lands; the helper definitions (`freshInTerm`, `boundVars`) needed
+for the statement are already in place. -/
+
 /-- Weakening: adding an unused binding at the tail of the linear
     context preserves typing. "Unused" means `y` does not appear in
     the output context either. Phase 2 Wave 1 helper for substitution. -/
