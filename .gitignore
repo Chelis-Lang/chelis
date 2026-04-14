@@ -1,5 +1,6 @@
 /target
 .env
+.claude/scheduled_tasks.lock
 *.swp
 *.swo
 .DS_Store
