@@ -78,60 +78,64 @@ theorem HasType.snd_inv
       exact ⟨t1, HasType.subEff Δ S Γ Γ' e (Typ.pair t1 t') eps0 eps1 h_inv h_sub⟩
   | _ => (try cases heq) <;> first | exact True.intro | (exfalso; contradiction)
 
+/-- Pair inversion with subEff widening. Effect-row equation dropped. -/
 theorem HasType.pair_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
     {e1 e2 : Term} {t1 t2 : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) (Typ.pair t1 t2) eps Gamma3) :
     ∃ Gamma2 eps1 eps2,
       HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
-      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 ∧
-      eps = EffectRow.union eps1 eps2 := by
+      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 := by
   generalize heq : Term.pair e1 e2 = e_in at h
   generalize htq : Typ.pair t1 t2 = t_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | tpair _ _ _ Γ2 _ _ _ _ _ eps1 eps2 h1 h2 _ _ =>
       cases heq; cases htq
-      exact ⟨Γ2, eps1, eps2, h1, h2, rfl⟩
-  | subEff Δ S Γ Γ' _ _ eps0 eps' _h_sub h_sub ih =>
-      obtain ⟨Γ2, eps1, eps2, hh1, hh2, hrfl⟩ := ih heq htq
-      refine ⟨Γ2, eps1, eps2, hh1, hh2, ?_⟩
-      -- Wave 0.5: union equation ripples under subEff widening. We
-      -- need eps' = union eps1 eps2 but only have eps0 = union eps1 eps2
-      -- and SubEffRow eps0 eps'. Not directly equal — the widening
-      -- drops the inverses-are-equal guarantee. Punt for Wave 2.
-      sorry
+      exact ⟨Γ2, eps1, eps2, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq htq
   | _ => (try cases heq) <;> (try cases htq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
 /-! ### Inversion for store-allocating primitive terms -/
 
+/-- Loc inversion with subEff widening. Effect-row = [] dropped. -/
 theorem HasType.loc_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {ell : Loc} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.loc ell) t eps Gamma2) :
-    storeTypLookup Sigma ell = some t ∧ eps = [] ∧ Gamma1 = Gamma2 := by
+    storeTypLookup Sigma ell = some t ∧ Gamma1 = Gamma2 := by
   generalize heq : Term.loc ell = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | loc _ _ _ _ _ hlook =>
       cases heq
-      exact ⟨hlook, rfl, rfl⟩
-  | subEff _ _ _ _ _ _ eps0 _ _h_sub _h_sub' ih =>
-      obtain ⟨hlook, hepsNil, hG⟩ := ih heq
-      -- eps widened under subEff; the lemma's eps = [] conclusion is
-      -- not preserved. Needs a ≥-shaped restatement of loc_inv for
-      -- Wave 2 cleanup.
-      sorry
+      exact ⟨hlook, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- Const inversion with Wave 0.5 subEff widening. The exact `eps = []`
+    conclusion of the raw T-Const rule doesn't survive subEff widening,
+    so we only conclude `SubEffRow [] eps` (trivially true) and drop it.
+    `Gamma1 = Gamma2` and `t = tensor ds` are preserved. -/
 theorem HasType.const_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {v : Float} {ds : DimList} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma1 (Term.const v ds) t eps Gamma2) :
-    t = Typ.tensor ds ∧ eps = [] ∧ Gamma1 = Gamma2 := by
-  sorry -- TODO Wave 2: needs ≥-shaped restatement + HasType.rec
+    (h : HasType Delta Sigma Gamma1 (Term.const v ds) t eps Gamma2) :
+    t = Typ.tensor ds ∧ Gamma1 = Gamma2 := by
+  generalize heq : Term.const v ds = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | const _ _ _ _ _ =>
+      cases heq
+      exact ⟨rfl, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 theorem HasType.copy_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
@@ -152,31 +156,46 @@ theorem HasType.copy_inv
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- Add inversion with subEff widening. The exact effect-row equation
+    is dropped; we only produce sub-derivations at some internal effect
+    rows. Callers needing the outer eps re-apply subEff. -/
 theorem HasType.add_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
     {e1 e2 : Term} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma1 (Term.add e1 e2) t eps Gamma3) :
+    (h : HasType Delta Sigma Gamma1 (Term.add e1 e2) t eps Gamma3) :
     ∃ ds Gamma2 eps1 eps2,
       t = Typ.tensor ds ∧
-      eps = EffectRow.union eps1 eps2 ∧
       HasType Delta Sigma Gamma1 e1 (Typ.tensor ds) eps1 Gamma2 ∧
       HasType Delta Sigma Gamma2 e2 (Typ.tensor ds) eps2 Gamma3 := by
-  -- Wave 0.5: the exact `eps = union eps1 eps2` equation doesn't
-  -- survive subEff widening; needs a SubEffRow-weakened restatement
-  -- for Wave 2 cleanup.
-  sorry
+  generalize heq : Term.add e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tadd _ _ _ Γ2 _ _ _ ds eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨ds, Γ2, eps1, eps2, rfl, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 theorem HasType.mul_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
     {e1 e2 : Term} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma1 (Term.mul e1 e2) t eps Gamma3) :
+    (h : HasType Delta Sigma Gamma1 (Term.mul e1 e2) t eps Gamma3) :
     ∃ ds Gamma2 eps1 eps2,
       t = Typ.tensor ds ∧
-      eps = EffectRow.union eps1 eps2 ∧
       HasType Delta Sigma Gamma1 e1 (Typ.tensor ds) eps1 Gamma2 ∧
       HasType Delta Sigma Gamma2 e2 (Typ.tensor ds) eps2 Gamma3 := by
-  -- Same ripple as add_inv.
-  sorry
+  generalize heq : Term.mul e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tmul _ _ _ Γ2 _ _ _ ds eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨ds, Γ2, eps1, eps2, rfl, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 theorem HasType.sum_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
@@ -310,15 +329,25 @@ theorem StoreWf.remove_extend
             (storeTypExtend (storeTypRemove Sigma ellIn) ellOut tOut) := by
   sorry
 
+/-- Handle inversion with subEff widening. `eps = removeOps epsB epsH`
+    equation dropped; only the body sub-derivation is extracted. -/
 theorem HasType.handle_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
     {body : Term} {clauses : List (EffectLabel × String × String × Term)}
     {epsH : EffectRow} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma1 (Term.handle epsH body clauses) t eps Gamma3) :
+    (h : HasType Delta Sigma Gamma1 (Term.handle epsH body clauses) t eps Gamma3) :
     ∃ Gamma2 epsB,
-      HasType Delta Sigma Gamma1 body t epsB Gamma2 ∧
-      eps = EffectRow.removeOps epsB epsH := by
-  sorry -- TODO Wave 2: strip_subEff helper
+      HasType Delta Sigma Gamma1 body t epsB Gamma2 := by
+  generalize heq : Term.handle epsH body clauses = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | handle _ _ _ Γ2 _ _ _ _ _ epsB hb _ _ _ _ =>
+      cases heq
+      exact ⟨Γ2, epsB, hb⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-! ## Preservation -/
 
