@@ -36,51 +36,50 @@ rely on. They will be discharged by the canonical `has_type_linear_shrinks`
 them local keeps Preservation.lean compilable and lets the fst/snd/
 handleRet cases land as real proof structure rather than raw `sorry`. -/
 
-/-- A value typed under an initially-empty linear context also has an
-    empty output linear context. The effect-row polymorphism clause
-    needs a separate sub-proof since it depends on a non-trivial
-    "values don't perform effects" invariant. -/
-theorem value_preserves_closed_context
-    {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+/-- Values are effect-row polymorphic: a value typed at any effect row
+    can be re-typed at any other effect row with the same type and
+    contexts. The four value forms (unit, abs, pair, loc) are all
+    natively typed at `[]` by their introduction rules, so the proof is
+    a structural recursion via `HasType.rec` followed by `subEff`
+    widening from `[]` to the target row. -/
+theorem HasType.value_eff_polymorphic
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t : Typ} {eps : EffectRow}
-    (_hv : IsValue v)
-    (h : HasType [] Sigma Gamma v t eps Gamma') :
-    Gamma = Gamma' ∧
-    ∀ eps', HasType [] Sigma Gamma v t eps' Gamma := by
-  -- First part: Γ = Γ' via has_type_linear_shrinks.
-  -- The theorem fixes input at `[]`, so Γ = [] and Γ' = [] both.
-  -- But wait — the signature says `HasType [] Sigma Gamma v t eps Gamma'`
-  -- where Gamma is a parameter (not necessarily []). Treat this as the
-  -- general form: for values in a closed context, they thread through.
-  -- Here we only need the Γ = Γ' claim; use linear_shrinks both ways.
-  refine ⟨?_, ?_⟩
-  · -- Gamma = Gamma'. Follows from has_type_linear_shrinks + the
-    -- observation that values don't consume (which we can't prove
-    -- in general without linear_shrinks + the reverse direction).
-    -- For now: cite the theorem restricted to Γin = [] where both
-    -- input and output collapse to []. If Gamma ≠ [] the conclusion
-    -- still holds for values but needs a subtler argument.
-    sorry
-  · intro _eps'
-    -- Effect-row polymorphism: re-type the value at any effect row.
-    -- For specific values this follows from subEff + the original
-    -- derivation. Generic proof is an induction on IsValue.
-    sorry
+    (h : HasType Delta Sigma Gamma v t eps Gamma') (hv : IsValue v) :
+    ∀ eps', HasType Delta Sigma Gamma v t eps' Gamma' := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | unit Δ S G =>
+      intro eps'
+      have h0 : HasType Δ S G Term.unit Typ.unit [] G := HasType.unit Δ S G
+      exact HasType.subEff Δ S G G _ _ [] eps' h0 (fun _ hm => by cases hm)
+  | abs Δ S G1 G2 y t1 t2 epsBody body h_body =>
+      intro eps'
+      have h0 := HasType.abs Δ S G1 G2 y t1 t2 epsBody body h_body
+      exact HasType.subEff Δ S G1 _ _ _ [] eps' h0 (fun _ hm => by cases hm)
+  | tpair Δ S G1 G2 G3 v1 v2 t1 t2 eps1 eps2 _hv1 _hv2 ih1 ih2 =>
+      intro eps'
+      cases hv with
+      | pair _ _ hp1 hp2 =>
+          have h1' := ih1 hp1 ([] : EffectRow)
+          have h2' := ih2 hp2 ([] : EffectRow)
+          have h0 : HasType Δ S G1 (Term.pair v1 v2) (Typ.pair t1 t2)
+                      (EffectRow.union ([] : EffectRow) []) G3 :=
+            HasType.tpair Δ S G1 G2 G3 v1 v2 t1 t2 [] [] h1' h2'
+          exact HasType.subEff Δ S G1 G3 _ _ _ eps' h0
+                  (fun _ hm => by cases hm)
+  | loc Δ S G ell t' hlook =>
+      intro eps'
+      have h0 := HasType.loc Δ S G ell t' hlook
+      exact HasType.subEff Δ S G G _ _ [] eps' h0 (fun _ hm => by cases hm)
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      intro eps'
+      exact ih hv eps'
+  | nil => exact True.intro
+  | cons => exact True.intro
+  | _ => intro _; cases hv
 
-/-- Specialization of `value_preserves_closed_context` for the
-    handleRet case: when a handle expression whose body is a value
-    reduces to that value, the reduction type-checks at the handle's
-    outer output context. Discharged jointly with the main oracle in
-    Wave 3's linearity-shrinks pass. -/
-theorem handleRet_value_preserves_typing
-    {Sigma : StoreTyp} {Gamma : LinearCtx}
-    {epsH : EffectRow} {v : Term}
-    {clauses : List (EffectLabel × String × String × Term)}
-    {t : Typ} {eps : EffectRow}
-    (_hv : IsValue v)
-    (_h : HasType [] Sigma Gamma (Term.handle epsH v clauses) t eps []) :
-    HasType [] Sigma Gamma v t eps [] := by
-  sorry
+-- (handleRet_value_preserves_typing moved below handle_inv)
 
 /-! ## HasType inversion lemmas
 
@@ -353,6 +352,29 @@ theorem HasType.handle_inv
       exact ih heq
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
+
+/-- handleRet preservation: if a handle whose body is a value reduces
+    to that value, the value re-types at the handle's outer effect row. -/
+theorem handleRet_value_preserves_typing
+    {Sigma : StoreTyp}
+    {epsH : EffectRow} {v : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {t : Typ} {eps : EffectRow}
+    (hv : IsValue v)
+    (h : HasType [] Sigma [] (Term.handle epsH v clauses) t eps []) :
+    HasType [] Sigma [] v t eps [] := by
+  obtain ⟨Γ2, epsB, hb⟩ := HasType.handle_inv h
+  have hG2 : Γ2 = [] := by
+    have hdom := has_type_linear_shrinks hb
+    cases Γ2 with
+    | nil => rfl
+    | cons p ps =>
+        exfalso
+        have : p.1 ∈ linearCtxDom ([] : LinearCtx) :=
+          hdom p.1 (by simp [linearCtxDom])
+        simpa [linearCtxDom] using this
+  subst hG2
+  exact HasType.value_eff_polymorphic hb hv eps
 
 /-- Preservation: if a configuration is well-typed and steps, the
     resulting configuration has the same type (under a possibly-extended
