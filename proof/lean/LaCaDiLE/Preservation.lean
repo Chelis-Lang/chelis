@@ -664,6 +664,106 @@ drop `SubEffRow` witnesses require an extra `HasType.subEff` widening,
 which is currently left as a local sorry pending the Wave-2 inversion
 upgrade; the top-level theorem statement is stable. -/
 
+/-- Store-typing weakening: every `HasType` derivation remains valid
+    under a monotone extension of the store typing. Unblocks every
+    binary `EvalCtx` case of `plug_preserves_typing`, since after the
+    inner step advances the first sub-term to `Σ'`, the sibling sub-term
+    (originally typed at `Σ`) must be lifted to `Σ'` before rebuilding
+    the outer constructor. Proved by a 23-case induction on `HasType`,
+    closed uniformly by reapplying each constructor at the new `Σ'`.
+    Only the `loc` case consults `hsub`; every other case just threads
+    the new store typing through the premises. -/
+theorem hasType_store_weaken
+    {Delta : CapCtx} {Sigma Sigma' : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (hsub : StoreTypSub Sigma Sigma') :
+    HasType Delta Sigma' Gamma e t eps Gamma' := by
+  -- Term-mode recursor application with both motives pinned.
+  refine
+    @HasType.rec
+      (fun Δ_ S_ Γ_ e_ t_ ε_ Γ'_ _ =>
+        StoreTypSub S_ Sigma' → HasType Δ_ Sigma' Γ_ e_ t_ ε_ Γ'_)
+      (fun Δ_ S_ Γ2_ Γ3_ t_ εR_ cls_ _ =>
+        StoreTypSub S_ Sigma' → ClausesTyped Δ_ Sigma' Γ2_ Γ3_ t_ εR_ cls_)
+      ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+      Delta Sigma Gamma e t eps Gamma' h hsub
+  case _ =>
+    intro Δ _ Γpre Γpost x tv hs
+    exact HasType.var Δ Sigma' Γpre Γpost x tv
+  case _ =>
+    intro Δ _ Γ hs
+    exact HasType.unit Δ Sigma' Γ
+  case _ =>
+    intro Δ _ Γ1 Γ2 x t1 t2 epsB body _h_body ih hs
+    exact HasType.abs Δ Sigma' Γ1 Γ2 x t1 t2 epsB body (ih hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 epsF eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.app Δ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 epsF eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.letBind Δ Sigma' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 ds ep _h ih hs
+    exact HasType.copy Δ Sigma' Γ1 Γ2 e0 ds ep (ih hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.letpair Δ Sigma' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.tpair Δ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 t1 t2 ep _h ih hs
+    exact HasType.fst Δ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 t1 t2 ep _h ih hs
+    exact HasType.snd Δ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hs)
+  case _ =>
+    intro Δ _ Γ v ds hs
+    exact HasType.const Δ Sigma' Γ v ds
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.tadd Δ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 hs
+    exact HasType.tmul Δ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 ds d ep _h hmem ih hs
+    exact HasType.tsum Δ Sigma' Γ1 Γ2 e0 ds d ep (ih hs) hmem
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 ds d ep _h ih hs
+    exact HasType.texpand Δ Sigma' Γ1 Γ2 e0 ds d ep (ih hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 e0 ds lo hi ep _h ih hs
+    exact HasType.uniformLike Δ Sigma' Γ1 Γ2 e0 ds lo hi ep (ih hs)
+  case _ =>
+    intro Δ _ Γ1 Γ2 op e0 tArg tRet ep _h hmatch ih hs
+    exact HasType.perform Δ Sigma' Γ1 Γ2 op e0 tArg tRet ep (ih hs) hmatch
+  case _ =>
+    intro Δ _ Γ1 Γ2 Γ3 body clauses tr epsH epsB _hb hHsubB hClIn hClCov _hcls
+          ih_body ih_cls hs
+    exact HasType.handle Δ Sigma' Γ1 Γ2 Γ3 body clauses tr epsH epsB
+      (ih_body hs) hHsubB hClIn hClCov (ih_cls hs)
+  case _ =>
+    intro Δ _ Γ x ds dsOut e0 ep _h hsubEff ih hs
+    exact HasType.tgrad Δ Sigma' Γ x ds dsOut e0 ep (ih hs) hsubEff
+  case _ =>
+    intro Δ _ Γ x t1 t2 e0 ep d _h ih hs
+    exact HasType.tvmap Δ Sigma' Γ x t1 t2 e0 ep d (ih hs)
+  case _ =>
+    intro Δ _ Γ ell tv hlook hs
+    exact HasType.loc Δ Sigma' Γ ell tv (hs ell tv hlook)
+  case _ =>
+    intro Δ _ Γ Γ'' e0 tv eps0 eps1 _h hSub ih hs
+    exact HasType.subEff Δ Sigma' Γ Γ'' e0 tv eps0 eps1 (ih hs) hSub
+  case _ =>
+    intro Δ _ Γ2 tr epsR hs
+    exact ClausesTyped.nil Δ Sigma' Γ2 tr epsR
+  case _ =>
+    intro Δ _ Γ2 Γ3 tr tArg tRet epsR op x k hb rest _hhb _hrest ih_hb ih_rest hs
+    exact ClausesTyped.cons Δ Sigma' Γ2 Γ3 tr tArg tRet epsR op x k hb rest
+      (ih_hb hs) (ih_rest hs)
+
 theorem plug_preserves_typing
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
