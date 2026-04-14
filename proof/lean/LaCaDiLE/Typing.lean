@@ -282,6 +282,19 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
       HasType Delta Sigma Gamma (Term.vmap x t1 e)
               (Typ.arrow (addDim d t1) (addDim d t2) eps) [] Gamma
 
+  -- T-Loc: runtime locations.
+  -- Not in the paper's source language — introduced by reduction. The
+  -- store typing records which type each live location holds; T-Loc
+  -- retrieves it. Phase 2 Wave 1 structural fix: without this rule,
+  -- every store-allocating Step (tconst, copy, tadd, ...) reduces to
+  -- a Term.loc with no reachable typing derivation, blocking the
+  -- Preservation proof.
+  | loc
+      (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
+      (ell : Loc) (t : Typ) :
+      storeTypLookup Sigma ell = some t →
+      HasType Delta Sigma Gamma (Term.loc ell) t [] Gamma
+
 /-- Handler-clause typing judgment used by `HasType.handle` (Wave 0 P5).
     `ClausesTyped Δ Γ₂ Γ₃ τ ε_r cls` asserts that every clause in `cls`
     type-checks its handler body `hb` under `Γ₂` extended with the
@@ -309,5 +322,23 @@ inductive ClausesTyped :
          ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR ((op, x, k, hb) :: rest)
 
 end
+
+/-! ## Effect-row weakening (Wave 1 structural helper)
+
+Preservation's value-case sub-derivations (E-Fst, E-Snd, E-HandleRet)
+reduce a redex typed at effect row `union ε1 ε2` to a sub-value typed
+at `ε1` — but the goal demands `union ε1 ε2`. Widening the effect row
+of a typing derivation is the canonical fix. -/
+
+/-- Widen the effect row of a typing derivation. Adding operations to
+    the effect row never invalidates a derivation because every rule
+    that PRODUCES effects adds them via union, which is monotone. -/
+theorem HasType.weaken_eff
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (eps_extra : EffectRow)
+    (_h : HasType Delta Sigma Gamma e t eps Gamma') :
+    HasType Delta Sigma Gamma e t (EffectRow.union eps eps_extra) Gamma' := by
+  sorry
 
 end LaCaDiLE

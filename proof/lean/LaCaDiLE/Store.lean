@@ -38,4 +38,17 @@ def LinearityInvariant (_sigma : Store) (_Sigma : StoreTyp)
     (_Gamma : LinearCtx) : Prop :=
   True  -- Phase 1: stated but not formalized in detail; filled in Phase 2.
 
+/-- Extend a store typing with a fresh location. Used by Preservation
+    on the store-allocating Step rules (tconst, copy, tadd, tmul, tsum,
+    texpand, tuniformLike). -/
+def storeTypExtend (Sigma : StoreTyp) (ell : Loc) (t : Typ) : StoreTyp :=
+  (ell, t) :: Sigma
+
+/-- `StoreTyp` sub-typing: `Sigma ⊑ Sigma'` iff every location typed
+    in `Sigma` is typed to the same type in `Sigma'`. Used to state
+    Preservation's store-monotonicity conclusion. -/
+def StoreTypSub (Sigma Sigma' : StoreTyp) : Prop :=
+  ∀ ell t, storeTypLookup Sigma ell = some t →
+           storeTypLookup Sigma' ell = some t
+
 end LaCaDiLE

@@ -305,6 +305,18 @@ theorem addDim_preserves_typing
     -- representation, and re-run this proof. All other HasType cases
     -- above will remain closed because they don't commute addDims.
     sorry
+  | loc Delta Sigma Gamma ell t _h =>
+    -- Vacuous in practice: `Term.loc` does not appear in source
+    -- programs, so this case is never reached when `addDim` is
+    -- applied to a user-level derivation. Closing it would require
+    -- lifting the store typing via `addDimStoreTyp d Sigma` and
+    -- proving a lookup lemma. Flag as TODO alongside `tvmap` — both
+    -- are corner cases that don't affect the main metatheory path.
+    -- TODO Phase 2 Wave 0.5: lift Sigma through addDim, prove
+    -- `storeTypLookup Sigma ell = some t →
+    --   storeTypLookup (addDimStoreTyp d Sigma) ell = some (addDim d t)`,
+    -- close this case via HasType.loc on the lifted store typing.
+    sorry
   | nil Delta Sigma Gamma2 Gamma3 t epsR =>
     simp [addDimClauses]
     exact ClausesTyped.nil Delta Sigma (addDimCtx d Gamma2) (addDimCtx d Gamma3)
