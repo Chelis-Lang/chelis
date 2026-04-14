@@ -46,11 +46,21 @@ mutual
     sidestepping the `∃ tArg tRet` positivity restriction. -/
 inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → EffectRow → LinearCtx → Prop
 
-  -- T-Var: consume the tail binding from Γ.
-  -- Paper: Δ; Γ, x:τ ⊢ x : τ ! ∅ ⊣ Γ
+  -- T-Var: consume the binding for `x` from any position in Γ.
+  -- Paper: Δ; Γpre, x:τ, Γpost ⊢ x : τ ! ∅ ⊣ Γpre, Γpost
+  --
+  -- Wave 0.5: generalized from tail-only consumption to arbitrary
+  -- position. The tail form (Γ ++ [(x,t)] with output Γ) is the
+  -- special case where Γpost = []. Generalization is required for
+  -- the substitution lemma's `var` and `binder` cases — a tail-only
+  -- rule makes the statement of `exchange_tail`/`weakening_tail`/
+  -- `subst_preserves_typing` uninhabited because consumption can't
+  -- reach the middle of a swapped or weakened context.
   | var
-      (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx) (x : String) (t : Typ) :
-      HasType Delta Sigma (Gamma ++ [(x, t)]) (Term.var x) t [] Gamma
+      (Delta : CapCtx) (Sigma : StoreTyp)
+      (Gamma_pre Gamma_post : LinearCtx) (x : String) (t : Typ) :
+      HasType Delta Sigma (Gamma_pre ++ [(x, t)] ++ Gamma_post)
+              (Term.var x) t [] (Gamma_pre ++ Gamma_post)
 
   -- T-Unit.
   -- Paper: Δ; Γ ⊢ () : unit ! ∅ ⊣ Γ
@@ -294,6 +304,23 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
       (ell : Loc) (t : Typ) :
       storeTypLookup Sigma ell = some t →
       HasType Delta Sigma Gamma (Term.loc ell) t [] Gamma
+
+  -- T-SubEff: effect-row subsumption (Wave 0.5).
+  -- A derivation at effect row ε can be widened to any ε' that
+  -- includes every operation of ε. Standard row-polymorphic
+  -- subsumption (Koka-style). Required by Preservation's value-case
+  -- sub-derivations (E-Fst, E-Snd, E-HandleRet) and by the effect-row
+  -- widening that happens in E-Ctx congruence on effectful sub-terms.
+  --
+  -- The ripple: every inversion lemma must strip off trailing subEff
+  -- applications. A helper `HasType.strip_subEff` (Wave 1+) does this
+  -- once and every inversion reuses it.
+  | subEff
+      (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
+      (e : Term) (t : Typ) (eps eps' : EffectRow) :
+      HasType Delta Sigma Gamma e t eps Gamma' →
+      SubEffRow eps eps' →
+      HasType Delta Sigma Gamma e t eps' Gamma'
 
 /-- Handler-clause typing judgment used by `HasType.handle` (Wave 0 P5).
     `ClausesTyped Δ Γ₂ Γ₃ τ ε_r cls` asserts that every clause in `cls`

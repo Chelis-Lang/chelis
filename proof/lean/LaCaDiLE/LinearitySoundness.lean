@@ -68,5 +68,14 @@ theorem linearity_soundness
   | tuniformLike sigma_in ell ellOut w lo hi _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-extend
+  | ctx _sigma _sigma' _E _e _e' _h_inner =>
+      -- E-Ctx: recursive structure is not visible to Lean's
+      -- termination checker under the cases-with binding (h_inner is
+      -- a projection out of a bound variable, not a fresh recursive
+      -- subterm). Wave 5 will refactor this to a standalone induction
+      -- over Step that uses HasType.rec's motive_2 pattern, making
+      -- recursion explicit. For now: same TODO family as the store-
+      -- mutating cases above.
+      sorry -- TODO Wave 5: recurse on inner Step
 
 end LaCaDiLE

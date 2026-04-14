@@ -61,6 +61,12 @@ abbrev EffectRow := List EffectLabel
 def subsetEffRow (eps1 eps2 : EffectRow) : Bool :=
   eps1.all (fun op => eps2.contains op)
 
+/-- Propositional effect-row subset. Used by the `HasType.subEff`
+    subsumption rule (Wave 0.5). Membership-preserving: every
+    operation in the narrower row appears in the wider row. -/
+def SubEffRow (eps1 eps2 : EffectRow) : Prop :=
+  ∀ op, op ∈ eps1 → op ∈ eps2
+
 /-- Union of two effect rows. Wave 0 P2: set semantics — duplicates
     from the right operand are dropped if already present in the left.
     `List.union` is not in Lean 4 core, so we spell it out: append

@@ -79,12 +79,66 @@ end
 def tensorOpPlaceholder (_l1 _l2 : TensorVal) : TensorVal :=
   { shape := [], data := 0.0 }
 
-/-- The small-step reduction relation.
+/-! ## Evaluation contexts (Wave 0.5)
 
-    Head-reduction only: each constructor fires when the configuration is
-    a redex at the outermost position. The full small-step relation is
-    the congruence closure of these rules via an evaluation context
-    (opsem.tex E-Ctx), to be added in Phase 2. -/
+Call-by-value left-to-right evaluation contexts. `EvalCtx` enumerates
+the positions where reduction can happen under a compound term; each
+constructor names one such position, and `plug E e` produces the term
+with `e` substituted at the hole. The `Step.ctx` congruence rule
+reduces `plug E e` to `plug E e'` whenever `e` reduces to `e'`. This
+is the standard workaround for needing one structural reduction rule
+per (term-former × sub-position) combination. -/
+
+inductive EvalCtx where
+  | hole                                            : EvalCtx
+  | appL       (e2 : Term)                          : EvalCtx
+  | appR       (v1 : Term)                          : EvalCtx
+  | letBind    (x : String) (e2 : Term)             : EvalCtx
+  | copy                                            : EvalCtx
+  | letpair    (x y : String) (e2 : Term)           : EvalCtx
+  | pairL      (e2 : Term)                          : EvalCtx
+  | pairR      (v1 : Term)                          : EvalCtx
+  | fst                                             : EvalCtx
+  | snd                                             : EvalCtx
+  | addL       (e2 : Term)                          : EvalCtx
+  | addR       (v1 : Term)                          : EvalCtx
+  | mulL       (e2 : Term)                          : EvalCtx
+  | mulR       (v1 : Term)                          : EvalCtx
+  | sum        (i : Nat)                            : EvalCtx
+  | expand     (i k : Nat)                          : EvalCtx
+  | uniformLike (lo hi : Float)                     : EvalCtx
+  | handle     (epsH : EffectRow)
+               (clauses : List (EffectLabel × String × String × Term))
+                                                    : EvalCtx
+  | perform    (op : EffectLabel)                   : EvalCtx
+  deriving Repr
+
+/-- Plug a term into an evaluation context, producing the compound
+    term with the hole replaced by `e`. -/
+def plug : EvalCtx → Term → Term
+  | EvalCtx.hole, e                => e
+  | EvalCtx.appL e2, e             => Term.app e e2
+  | EvalCtx.appR v1, e             => Term.app v1 e
+  | EvalCtx.letBind x e2, e        => Term.letBind x e e2
+  | EvalCtx.copy, e                => Term.copy e
+  | EvalCtx.letpair x y e2, e      => Term.letpair x y e e2
+  | EvalCtx.pairL e2, e            => Term.pair e e2
+  | EvalCtx.pairR v1, e            => Term.pair v1 e
+  | EvalCtx.fst, e                 => Term.fst e
+  | EvalCtx.snd, e                 => Term.snd e
+  | EvalCtx.addL e2, e             => Term.add e e2
+  | EvalCtx.addR v1, e             => Term.add v1 e
+  | EvalCtx.mulL e2, e             => Term.mul e e2
+  | EvalCtx.mulR v1, e             => Term.mul v1 e
+  | EvalCtx.sum i, e               => Term.sum e i
+  | EvalCtx.expand i k, e          => Term.expand e i k
+  | EvalCtx.uniformLike lo hi, e   => Term.uniformLike e lo hi
+  | EvalCtx.handle epsH clauses, e => Term.handle epsH e clauses
+  | EvalCtx.perform op, e          => Term.perform op e
+
+/-- The small-step reduction relation. Constructors cover the head
+    reductions (redex at top position); `Step.ctx` provides the
+    congruence closure via evaluation contexts. -/
 inductive Step : Config → Config → Prop
 
   /- ## Core λ-calculus redexes -/
@@ -268,5 +322,15 @@ inductive Step : Config → Config → Prop
       (sigma : Store) (x : String) (t : Typ) (e : Term) (d : Dim) :
       Step ⟨sigma, Term.vmap x t e⟩
            ⟨sigma, Term.abs x (addDim d t) (addDimTerm d e)⟩
+
+  -- E-Ctx: congruence closure via evaluation contexts (Wave 0.5).
+  -- If `e` steps to `e'`, then `plug E e` steps to `plug E e'` for
+  -- any evaluation context `E`. This collapses what would otherwise
+  -- be one congruence constructor per (term-former × position) pair
+  -- into a single parameterized rule.
+  | ctx
+      (sigma sigma' : Store) (E : EvalCtx) (e e' : Term) :
+      Step ⟨sigma, e⟩ ⟨sigma', e'⟩ →
+      Step ⟨sigma, plug E e⟩ ⟨sigma', plug E e'⟩
 
 end LaCaDiLE

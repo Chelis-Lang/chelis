@@ -73,9 +73,13 @@ theorem addDim_preserves_typing
     (motive_2 := fun Delta Sigma Gamma2 Gamma3 t epsR cls _ =>
       ClausesTyped Delta Sigma (addDimCtx d Gamma2) (addDimCtx d Gamma3)
         (addDim d t) epsR (addDimClauses d cls)) with
-  | var Delta Sigma Gamma x t =>
-    simp [addDimTerm, addDim, addDimCtx_append, addDimCtx_singleton]
-    exact HasType.var Delta Sigma (addDimCtx d Gamma) x (addDim d t)
+  | var Delta Sigma Gamma_pre Gamma_post x t =>
+    -- Wave 0.5: var consumes from arbitrary position. Lift both
+    -- Gamma_pre and Gamma_post through addDimCtx, then re-apply T-Var
+    -- at the lifted split.
+    simp only [addDimTerm, addDim, addDimCtx_append, addDimCtx_singleton]
+    exact HasType.var Delta Sigma (addDimCtx d Gamma_pre)
+      (addDimCtx d Gamma_post) x (addDim d t)
   | unit Delta Sigma Gamma =>
     simp [addDimTerm, addDim]
     exact HasType.unit Delta Sigma (addDimCtx d Gamma)
@@ -310,13 +314,18 @@ theorem addDim_preserves_typing
     -- programs, so this case is never reached when `addDim` is
     -- applied to a user-level derivation. Closing it would require
     -- lifting the store typing via `addDimStoreTyp d Sigma` and
-    -- proving a lookup lemma. Flag as TODO alongside `tvmap` — both
-    -- are corner cases that don't affect the main metatheory path.
+    -- proving a lookup lemma.
     -- TODO Phase 2 Wave 0.5: lift Sigma through addDim, prove
     -- `storeTypLookup Sigma ell = some t →
     --   storeTypLookup (addDimStoreTyp d Sigma) ell = some (addDim d t)`,
     -- close this case via HasType.loc on the lifted store typing.
     sorry
+  | subEff Delta Sigma Gamma Gamma' e t eps eps' _h hsub ih =>
+    -- Wave 0.5: widen the lifted derivation's effect row via subEff.
+    -- The sub-derivation `ih` is at the narrower eps, and we re-apply
+    -- the original SubEffRow proof to widen to eps' post-lifting.
+    exact HasType.subEff Delta Sigma (addDimCtx d Gamma) (addDimCtx d Gamma')
+      (addDimTerm d e) (addDim d t) eps eps' ih hsub
   | nil Delta Sigma Gamma2 Gamma3 t epsR =>
     simp [addDimClauses]
     exact ClausesTyped.nil Delta Sigma (addDimCtx d Gamma2) (addDimCtx d Gamma3)
