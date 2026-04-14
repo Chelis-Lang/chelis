@@ -422,7 +422,72 @@ private theorem weakening_head_db
   have := weakening_insert_db h 0 t_new
   simpa [LinearCtxDB.insertAt, lift, shiftAt] using this
 
-/-! ## Substitution obligation — doc block for Wave 5b
+/-! ## Length preservation
+
+Foundational invariant: every `HasTypeDB` derivation preserves the
+length of the linear context from input to output. This is the
+Option C consumption discipline made structural — marking a slot
+`none` does not change list length. Used as a prerequisite for slot
+persistence inversion and for the subst metatheory at large. -/
+
+mutual
+
+theorem hasTypeDB_length_preservation
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Delta Sigma Γ e t eps Γ') : Γ.length = Γ'.length := by
+  match h with
+  | HasTypeDB.var _ _ _ _ _ _ => simp
+  | HasTypeDB.unit _ _ _ => rfl
+  | HasTypeDB.abs _ _ _ _ _ _ _ _ _ hbody =>
+    exact Nat.succ.inj (hasTypeDB_length_preservation hbody)
+  | HasTypeDB.app _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact (hasTypeDB_length_preservation h1).trans (hasTypeDB_length_preservation h2)
+  | HasTypeDB.letBind _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    have l1 := hasTypeDB_length_preservation h1
+    have l2 := hasTypeDB_length_preservation h2
+    exact l1.trans (Nat.succ.inj l2)
+  | HasTypeDB.copy _ _ _ _ _ _ _ hbody => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.letpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    have l1 := hasTypeDB_length_preservation h1
+    have l2 := hasTypeDB_length_preservation h2
+    exact l1.trans (Nat.succ.inj (Nat.succ.inj l2))
+  | HasTypeDB.tpair _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact (hasTypeDB_length_preservation h1).trans (hasTypeDB_length_preservation h2)
+  | HasTypeDB.fst _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.snd _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.const _ _ _ _ _ => rfl
+  | HasTypeDB.tadd _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact (hasTypeDB_length_preservation h1).trans (hasTypeDB_length_preservation h2)
+  | HasTypeDB.tmul _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+    exact (hasTypeDB_length_preservation h1).trans (hasTypeDB_length_preservation h2)
+  | HasTypeDB.tsum _ _ _ _ _ _ _ _ hbody _ _ => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.texpand _ _ _ _ _ _ _ _ _ hbody _ _ => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.uniformLike _ _ _ _ _ _ _ _ _ hbody => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.perform _ _ _ _ _ _ _ _ _ hbody _ => exact hasTypeDB_length_preservation hbody
+  | HasTypeDB.handle _ _ _ _ _ _ _ _ _ _ hb _ _ _ hcls =>
+    have l1 := hasTypeDB_length_preservation hb
+    have l2 := hasTypeDB_length_preservation_clauses hcls
+    exact l1.trans l2
+  | HasTypeDB.tgrad _ _ _ _ _ _ _ _ hbody _ =>
+    exact Nat.succ.inj (hasTypeDB_length_preservation hbody)
+  | HasTypeDB.tvmap _ _ _ _ _ _ _ _ _ hbody =>
+    exact Nat.succ.inj (hasTypeDB_length_preservation hbody)
+  | HasTypeDB.loc _ _ _ _ _ _ => rfl
+  | HasTypeDB.subEff _ _ _ _ _ _ _ _ hbody _ => exact hasTypeDB_length_preservation hbody
+
+theorem hasTypeDB_length_preservation_clauses
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow} {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls) : Γ2.length = Γ3.length := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ => rfl
+  | ClausesTypedDB.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
+    exact hasTypeDB_length_preservation_clauses hrest
+
+end
+
+/-! ## Substitution obligation — doc block for Wave 5b → 5c
 
 Under Option C the target statement is:
 
@@ -437,16 +502,42 @@ theorem subst_preserves_typing_db
     HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
 ```
 
-The Wave 5a weakening block above provides the mutual-recursion
-template; Wave 5b will instantiate the same template for
-substitution. The var-case discharge is immediate from
-`getElem?_insertAt_eq` / `set_insertAt_eq` plus `h_v`; the binder
-cases use `weakening_head_db` to lift `v` under new slots.
+**Wave 5b status.** Added `hasTypeDB_length_preservation` above,
+plus its mutual partner `hasTypeDB_length_preservation_clauses`.
+These are the structural prerequisite for every subsequent Option C
+metatheoretic lemma over linear contexts, including the slot
+persistence inversion that subst needs.
 
-The subtlety is that intermediate linear contexts in multi-step
-derivations (e.g. the `Γ2` in `app Γ1 Γ2 Γ3`) need not literally
-match the `insertAt j` shape of the endpoints. A helper inversion
-over linear-slot persistence in HasTypeDB derivations is required
-first — that inversion is Wave 5b's prerequisite. -/
+**Remaining obstruction for `subst_preserves_typing_db`.** The task
+as originally scoped for Wave 5b requires, in addition to slot
+persistence, a way to thread `h_v` through intermediate contexts of
+multi-context constructors (`app Γ1 Γ2 Γ3`, `letBind`, `letpair`,
+`handle`, binary tensor ops). Slot persistence alone is
+insufficient: the IH call on `h2 : HasTypeDB .. Γ2 .. Γ3` needs a
+hypothesis `h_v : HasTypeDB .. Γ2_base v t_v [] Γ2_base` under the
+*intermediate* base, not the outer base `Γ`. Because `v` is typed at
+pure effect with the trivial context transition `Γ → Γ`, it uses no
+linear resources and so should transport to any length-matching
+context, but that transport is itself an unstated lemma
+(`pure_context_rebase`).
+
+Concretely Wave 5c should add, in order:
+
+1. `hasTypeDB_slot_persistence` — use `hasTypeDB_length_preservation`
+   above to rule out empty-base edge cases when peeling
+   binder-augmented outputs.
+2. `pure_context_rebase` — a `Γ → Γ` pure derivation transports to
+   any length-matching `Γ' → Γ'`. This is the "no free linear vars"
+   observation made formal, and it relies on (1) applied at cutoff 0.
+3. `subst_preserves_typing_db` as a mutual block with
+   `subst_preserves_typing_clauses_db`. The var case is immediate
+   from `getElem?_insertAt_eq` + `set_insertAt_eq` + `h_v`; binder
+   cases use `weakening_head_db`; multi-context cases chain (1) and
+   (2) to rebase `h_v` for each sub-derivation.
+
+Wave 5b lands only the length preservation foundation. Slot
+persistence + rebase + subst is Wave 5c alongside the named ↔ DB
+translation so the two named theorems in `Substitution.lean` can
+close against DB results at the same time. -/
 
 end LaCaDiLE
