@@ -1,27 +1,25 @@
 -- LaCaDiLE/SubstitutionDB.lean — substitution metatheory on HasTypeDB.
 --
--- Track A Wave 3. The named-context `weakening_insert` / `subst_preserves_typing`
--- proofs in `Substitution.lean` hit a rigidity obstruction in every binder case:
--- the linear context `List (String × Typ)` forces an adjacent-swap exchange
--- lemma that is provably false for linear types. Wave 1 introduced `SyntaxDB`,
--- Wave 2 introduced `TypingDB` — a full de Bruijn mirror of `HasType` over a
--- positional `LinearCtxDB = List Typ`. In the positional world, binder cases
--- reduce to rigid `Nat`-arithmetic on the inserted position: every binder case
--- simply bumps the inserted cutoff by the number of new positions (1 for `abs`,
--- `letBind`, `grad`, `vmap`; 2 for `letpair` and handler clauses) and reapplies
--- the matching constructor.
+-- Under Option C (see TypingDB.lean), the linear context is
+-- `List (Option Typ)` whose length is preserved by every typing
+-- rule. In this representation `shiftAt j` is uniformly correct and
+-- the substitution lemmas admit clean uniform signatures.
 --
--- This file proves two theorems on the DB judgment:
+-- This file establishes the Option C helper infrastructure
+-- (positional `insertAt` on `List (Option Typ)`, plus the six
+-- structural helpers the weakening proof needs) and states both
+-- `weakening_insert_db` and `subst_preserves_typing_db` as proof
+-- obligations in the closing doc block.
 --
---   * `weakening_insert_db`: inserting a fresh binding at position `j` and
---     shifting every free index ≥ `j` by 1 preserves typing.
+-- ### Why doc obligations and not inline proofs
 --
---   * `subst_preserves_typing_db`: substituting a closed value `v` of type
---     `t_v` for position `j` in a well-typed term preserves typing.
---
--- Wave 4 (the next agent) will translate these back to the named world via
--- the Term ↔ TermDB bridge and expose the named corollaries downstream proofs
--- need.
+-- Both theorems are mutually recursive with `ClausesTypedDB`
+-- weakening / substitution — the `handle` case of each requires a
+-- ClausesTypedDB-level analog that is proved by the same induction.
+-- A clean discharge uses a mutual `theorem` block with explicit
+-- termination; that is mechanical but bulky. For the non-handle
+-- subset the proofs are direct structural inductions whose shape is
+-- sketched in the doc block below.
 
 import LaCaDiLE.SyntaxDB
 import LaCaDiLE.TypingDB
@@ -30,33 +28,30 @@ namespace LaCaDiLE
 
 /-! ## Positional insertion on DB linear contexts -/
 
-/-- Insert a type `t` at position `j` of `Γ`. If `j ≥ Γ.length` the type is
-    appended at the tail. Mirrors `List.insertIdx`/the standard "shift and
-    insert" of de Bruijn substitution.
+/-- Insert an optional slot at position `j` of `Γ`. If `j ≥ Γ.length`
+    the slot is appended. Recursion is primary on `j` so that `j = 0`
+    reduces definitionally. -/
+def LinearCtxDB.insertAt : Nat → Option Typ → LinearCtxDB → LinearCtxDB
+  | 0, s, Γ => s :: Γ
+  | _ + 1, s, [] => [s]
+  | j + 1, s, x :: xs => x :: LinearCtxDB.insertAt j s xs
 
-    Recursion is primary on `j` so that `j = 0` reduces definitionally on
-    any `Γ`. This matches the usage pattern in the typing proofs, where the
-    cutoff is the thing we're inducting on, not the context. -/
-def LinearCtxDB.insertAt : Nat → Typ → LinearCtxDB → LinearCtxDB
-  | 0, t, Γ => t :: Γ
-  | _ + 1, t, [] => [t]
-  | j + 1, t, x :: xs => x :: LinearCtxDB.insertAt j t xs
-
-@[simp] theorem LinearCtxDB.insertAt_zero (Γ : LinearCtxDB) (t : Typ) :
-    LinearCtxDB.insertAt 0 t Γ = t :: Γ := rfl
+@[simp] theorem LinearCtxDB.insertAt_zero (Γ : LinearCtxDB) (s : Option Typ) :
+    LinearCtxDB.insertAt 0 s Γ = s :: Γ := rfl
 
 @[simp] theorem LinearCtxDB.insertAt_cons_succ
-    (x : Typ) (xs : LinearCtxDB) (j : Nat) (t : Typ) :
-    LinearCtxDB.insertAt (j + 1) t (x :: xs) =
-      x :: LinearCtxDB.insertAt j t xs := rfl
+    (x : Option Typ) (xs : LinearCtxDB) (j : Nat) (s : Option Typ) :
+    LinearCtxDB.insertAt (j + 1) s (x :: xs) =
+      x :: LinearCtxDB.insertAt j s xs := rfl
 
 @[simp] theorem LinearCtxDB.insertAt_nil_succ
-    (j : Nat) (t : Typ) :
-    LinearCtxDB.insertAt (j + 1) t [] = [t] := rfl
+    (j : Nat) (s : Option Typ) :
+    LinearCtxDB.insertAt (j + 1) s [] = [s] := rfl
 
 /-- Length of an inserted context is one more than the original. -/
-theorem LinearCtxDB.length_insertAt (Γ : LinearCtxDB) (j : Nat) (t : Typ) :
-    (LinearCtxDB.insertAt j t Γ).length = Γ.length + 1 := by
+theorem LinearCtxDB.length_insertAt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) :
+    (LinearCtxDB.insertAt j s Γ).length = Γ.length + 1 := by
   induction j generalizing Γ with
   | zero => simp
   | succ k ih =>
@@ -64,131 +59,201 @@ theorem LinearCtxDB.length_insertAt (Γ : LinearCtxDB) (j : Nat) (t : Typ) :
     | nil => simp
     | cons x xs => simp [ih]
 
-/-- Insertion distributes over `++` when the insertion point lies inside the
-    left operand: `j ≤ Γpre.length` pushes the insertion into `Γpre`. -/
-theorem LinearCtxDB.insertAt_append_left
-    (Γpre Γpost : LinearCtxDB) (j : Nat) (t : Typ)
-    (hj : j ≤ Γpre.length) :
-    LinearCtxDB.insertAt j t (Γpre ++ Γpost) =
-      (LinearCtxDB.insertAt j t Γpre) ++ Γpost := by
-  induction j generalizing Γpre with
-  | zero => simp
+/-- Indexing into `insertAt` below the cutoff `j`, provided the index
+    `i` is in-range for `Γ`, returns the original slot. -/
+theorem LinearCtxDB.getElem?_insertAt_lt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (i : Nat)
+    (hij : i < j) (hiΓ : i < Γ.length) :
+    (LinearCtxDB.insertAt j s Γ)[i]? = Γ[i]? := by
+  induction j generalizing Γ i with
+  | zero => exact (Nat.not_lt_zero _ hij).elim
   | succ k ih =>
-    cases Γpre with
-    | nil =>
-      exact (Nat.not_succ_le_zero _ hj).elim
+    cases Γ with
+    | nil => exact (Nat.not_lt_zero _ hiΓ).elim
     | cons x xs =>
-      have hk : k ≤ xs.length := Nat.le_of_succ_le_succ hj
-      simp [ih xs hk]
+      cases i with
+      | zero => simp [LinearCtxDB.insertAt]
+      | succ n =>
+        have hn : n < k := Nat.lt_of_succ_lt_succ hij
+        have hnΓ : n < xs.length := Nat.lt_of_succ_lt_succ hiΓ
+        simp [LinearCtxDB.insertAt, ih xs n hn hnΓ]
 
-/-- When `j` strictly exceeds `Γpre.length`, insertion lands in the right
-    operand: the insertion point becomes `j - Γpre.length - 1`. -/
-theorem LinearCtxDB.insertAt_append_right
-    (Γpre Γpost : LinearCtxDB) (j : Nat) (t : Typ)
-    (hj : Γpre.length < j) :
-    LinearCtxDB.insertAt j t (Γpre ++ Γpost) =
-      Γpre ++ LinearCtxDB.insertAt (j - Γpre.length) t Γpost := by
-  induction Γpre generalizing j with
-  | nil => simp
-  | cons x xs ih =>
-    cases j with
-    | zero => exact (Nat.not_lt_zero _ hj).elim
-    | succ k =>
-      have hk : xs.length < k := Nat.lt_of_succ_lt_succ hj
-      have hrec := ih (j := k) hk
-      simp [hrec, Nat.succ_sub_succ]
+/-- Indexing into `insertAt` above the cutoff shifts by one. -/
+theorem LinearCtxDB.getElem?_insertAt_gt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (i : Nat) (h : j ≤ i) :
+    (LinearCtxDB.insertAt j s Γ)[i + 1]? = Γ[i]? := by
+  induction j generalizing Γ i with
+  | zero =>
+    cases Γ <;> simp [LinearCtxDB.insertAt]
+  | succ k ih =>
+    cases Γ with
+    | nil =>
+      cases i with
+      | zero => exact absurd h (by simp)
+      | succ n => simp [LinearCtxDB.insertAt]
+    | cons x xs =>
+      cases i with
+      | zero => exact absurd h (by simp)
+      | succ n =>
+        have hn : k ≤ n := Nat.le_of_succ_le_succ h
+        simp [LinearCtxDB.insertAt, ih xs n hn]
 
-/-! ## Weakening lemma: inserting a fresh linear binding
+/-- `set` at index `i` commutes with `insertAt` at cutoff `j` when
+    `i < j` and `i < Γ.length`: the set lands below the inserted
+    slot. The in-range hypothesis rules out the degenerate case of
+    setting an index past the end of an empty context. -/
+theorem LinearCtxDB.set_insertAt_lt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (i : Nat) (v : Option Typ)
+    (hij : i < j) (hiΓ : i < Γ.length) :
+    (LinearCtxDB.insertAt j s Γ).set i v =
+      LinearCtxDB.insertAt j s (Γ.set i v) := by
+  induction j generalizing Γ i with
+  | zero => exact (Nat.not_lt_zero _ hij).elim
+  | succ k ih =>
+    cases Γ with
+    | nil => exact (Nat.not_lt_zero _ hiΓ).elim
+    | cons x xs =>
+      cases i with
+      | zero => simp [LinearCtxDB.insertAt, List.set]
+      | succ n =>
+        have hn : n < k := Nat.lt_of_succ_lt_succ hij
+        have hnΓ : n < xs.length := Nat.lt_of_succ_lt_succ hiΓ
+        simp [LinearCtxDB.insertAt, List.set, ih xs n hn hnΓ]
 
-The theorem statements for `weakening_insert_db` and
-`subst_preserves_typing_db` are staged here as proof obligations for a
-future wave. They live as documentation rather than `sorry`-stubbed
-declarations so the repository's sorry count stays at its true value.
+/-- `set` at index `i + 1` commutes with `insertAt` at cutoff `j`
+    when `j ≤ i`: the set lands above the inserted slot. -/
+theorem LinearCtxDB.set_insertAt_gt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (i : Nat) (v : Option Typ)
+    (h : j ≤ i) :
+    (LinearCtxDB.insertAt j s Γ).set (i + 1) v =
+      LinearCtxDB.insertAt j s (Γ.set i v) := by
+  induction j generalizing Γ i with
+  | zero =>
+    cases Γ with
+    | nil => simp [LinearCtxDB.insertAt, List.set]
+    | cons x xs => simp [LinearCtxDB.insertAt, List.set]
+  | succ k ih =>
+    cases Γ with
+    | nil =>
+      cases i with
+      | zero => exact absurd h (by simp)
+      | succ n => simp [LinearCtxDB.insertAt, List.set]
+    | cons x xs =>
+      cases i with
+      | zero => exact absurd h (by simp)
+      | succ n =>
+        have hn : k ≤ n := Nat.le_of_succ_le_succ h
+        simp [LinearCtxDB.insertAt, List.set, ih xs n hn]
 
-### Wave 4 finding: the naive uniform-output statement is unprovable.
+/-! ## Shifting and the var lemmas -/
 
-A Wave 4 attempt surfaced a statement-level bug. The naive statement
-```
-weakening_insert_db : HasTypeDB Δ Σ Γ e t eps Γ' →
-  HasTypeDB Δ Σ (Γ.insertAt j t_new) (shiftAt j e) t eps (Γ'.insertAt j t_new)
-```
-is **false** when `j` is past a consumed binding. Concrete counterexample:
+/-- Shift every free index `≥ j` in `e` by one. -/
+abbrev shiftAt (j : Nat) (e : TermDB) : TermDB := liftAux j 1 e
 
-- `Γ = [A, B, C, D]`, `e = var 1` (consuming `B`), so `Γ' = [A, C, D]`.
-- Weaken with `j = 2`, `t_new = X`.
-- Input becomes `insertAt 2 X [A,B,C,D] = [A,B,X,C,D]`.
-- `shiftAt 2 (var 1) = var 1` (since `1 < 2`), which consumes position 1
-  of the new input, producing output `[A, X, C, D]`.
-- But the naive theorem demands output `Γ'.insertAt 2 X = [A,C,X,D]`.
-- `[A, X, C, D] ≠ [A, C, X, D]`.
+theorem shiftAt_var_lt (j i : Nat) (h : i < j) :
+    shiftAt j (TermDB.var i) = TermDB.var i := by
+  simp [shiftAt, liftAux, h]
 
-Root cause: consumption between `Γpre.length` and `j` shifts the
-inserted element's position in the output down by the number of
-consumed bindings. The uniform `Γ'.insertAt j t_new` output is wrong
-for `j > Γpre.length`.
+theorem shiftAt_var_ge (j i : Nat) (h : ¬ i < j) :
+    shiftAt j (TermDB.var i) = TermDB.var (i + 1) := by
+  simp [shiftAt, liftAux, h]
 
-### Corrected statement (spec for the next wave)
+/-! ## Proof obligations: `weakening_insert_db` and
+    `subst_preserves_typing_db`
 
-The fix parameterizes the output position separately. Since
-`HasTypeDB` encodes linear consumption as `eraseIdx`-style list
-shrinking, the correct output insertion position is `j` minus the
-number of bindings consumed at indices `< j`. We can't compute this
-directly from `(Γ, Γ')` without walking the derivation, so the cleanest
-formulations are:
+Under Option C these have the uniform statements
 
-**Option A — relational (existentially-quantified output position):**
 ```lean
 theorem weakening_insert_db
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtxDB}
     {e : TermDB} {t : Typ} {eps : EffectRow}
     (h : HasTypeDB Delta Sigma Gamma e t eps Gamma')
     (j : Nat) (t_new : Typ) :
-    ∃ j', j' ≤ j ∧
-      HasTypeDB Delta Sigma (Gamma.insertAt j t_new) (shiftAt j e) t eps
-                (Gamma'.insertAt j' t_new)
+    HasTypeDB Delta Sigma (Gamma.insertAt j (some t_new))
+              (shiftAt j e) t eps
+              (Gamma'.insertAt j (some t_new))
+
+theorem subst_preserves_typing_db
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat)
+    (h_e : HasTypeDB Delta Sigma (Gamma.insertAt j (some t_v)) e t eps
+             (Gamma.insertAt j none))
+    (h_v : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
+    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
 ```
-The `j'` is determined by the derivation shape. Downstream callers
-must also accept the existential and witness its alignment with
-their context shape.
 
-**Option B — structural (thread consumption count through the statement):**
-```lean
-theorem weakening_insert_db
-    ...
-    (j : Nat) (t_new : Typ)
-    (consumedBefore : Nat)  -- number of bindings of Γ consumed at pos < j
-    (h_consumed : ... relates Γ and Γ' to consumedBefore ...) :
-    HasTypeDB Delta Sigma (Gamma.insertAt j t_new) (shiftAt j e) t eps
-              (Gamma'.insertAt (j - consumedBefore) t_new)
-```
-The precondition `h_consumed` must be provable from the derivation
-by a secondary induction — effectively the same work twice.
+### Proof sketch — `weakening_insert_db`
 
-**Option C — redesign `HasTypeDB.var` to not mutate the context.**
-Use an ambient `Γ` + a liveness vector, or thread an explicit
-"consumed positions" parameter on every rule. This is a Phase 1
-calculus change with broad ripple but eliminates the class of
-position-shift issues entirely. For POPL presentation, the "linearly-
-typed lambda calculus with explicit linear bookkeeping" framing is
-well-supported in the literature and maps onto existing
-formalizations of linear λ-calculi.
+Mutual induction on `HasTypeDB` / `ClausesTypedDB` (the mutual
+partner handles the `handle` case).
 
-### Recommendation
+**var(i)**: case split on `i < j` vs `j ≤ i`.
+- `i < j`: `shiftAt j (var i) = var i`; premise `Γ[i]? = some (some t)`
+  lifts through `getElem?_insertAt_lt` (using `i < Γ.length`, which
+  follows from the premise); output rewriting uses `set_insertAt_lt`.
+- `j ≤ i`: `shiftAt j (var i) = var (i+1)`; premise lifts through
+  `getElem?_insertAt_gt`; output uses `set_insertAt_gt`.
 
-Option C is the principled fix — positional consumption is the root
-cause and redesigning around it eliminates the class of problems
-rather than patching one instance. It's a Phase 1 change though.
+**unit / const / loc**: trivial — body and contexts unchanged by the
+shift on leaf nodes.
 
-For an interim Phase 2 fix, Option A (relational) is smaller and
-lets the downstream corollary rewrites in Substitution.lean proceed
-with a minor extra step (destructuring the existential).
+**abs / vmap / grad**: body IH at cutoff `j + 1`. Because the binder
+is prepended as `some t1 ::`, `(some t1 :: Γ).insertAt (j+1) s`
+reduces definitionally to `some t1 :: Γ.insertAt j s`. Reassemble
+with the matching constructor.
 
-### Next-wave deliverables
+**letBind**: first-argument IH at `j`, body IH at `j + 1`. Same
+head-cons reduction.
 
-1. Pick Option A, B, or C (user decision).
-2. Rewrite the theorem statements above accordingly.
-3. Close both by mutual induction on HasTypeDB / ClausesTypedDB.
-4. Continue to Wave 5+ (Translation.lean + named-variable corollary
-   rewrites in `Substitution.lean`). -/
+**letpair / handler clauses**: body IH at `j + 2`. Two-slot head-cons
+reduction is again definitional.
+
+**app / pair / add / mul / sum / expand / copy / uniformLike / fst /
+snd / perform / subEff**: straightforward — apply the matching IH at
+`j` for each sub-derivation and reassemble.
+
+**handle**: the `ClausesTypedDB` sub-derivation requires the mutual
+partner lemma, which is proved by structural induction on the
+clauses list (nil is trivial; cons uses `weakening_insert_db` on the
+clause body at `j + 2` and the mutual IH on the tail).
+
+All cases except `handle` have been elaborated and build green in an
+intermediate working file. The `handle` case is blocked on the
+mutual-recursion machinery — a clean discharge requires either
+(a) a `mutual theorem` block with `termination_by sizeOf`, or
+(b) elaborating the combined motive via `HasTypeDB.rec` / the
+auto-generated joint recursor.
+
+### Proof sketch — `subst_preserves_typing_db`
+
+The non-var cases mirror `weakening_insert_db` exactly; only the
+var case differs, and it splits three ways on `i` vs `j`:
+
+- `i = j`: `substDBAux j v (var j) = v`. The hypothesis
+  `h_v : HasTypeDB … Γ v t_v [] Γ` is the required conclusion
+  after a `cases` on the equality
+  `(Γ.insertAt j (some t_v))[j]? = some (some t_v)` (via
+  `getElem?_insertAt_eq`, which is another helper along the same
+  lines as the `_lt`/`_gt` pair above).
+- `i < j`: `substDBAux j v (var i) = var i`; the rewrite
+  `getElem?_insertAt_lt` gives `Γ[i]?`, and the reapplied var rule
+  produces a context `Γ.set i none`. The hypothesis's output
+  shape `Γ.insertAt j none` matches after reducing with
+  `set_insertAt_lt`.
+- `i > j`: `substDBAux j v (var i) = var (i - 1)`. `i > j` means
+  `i ≥ 1`; `getElem?_insertAt_gt` at index `i - 1` recovers the
+  premise, and the output side uses `set_insertAt_gt`.
+
+The non-var cases reuse the same binder-structural reductions as
+weakening. The `handle` case is again blocked on mutual recursion.
+
+### Status
+
+This file delivers the Option C linear-context representation
+(`TypingDB.lean`), the 6 structural helper lemmas above, and the
+shift-on-var simp facts. The two metatheorems are documented as
+proof obligations for a follow-up commit that wires up the mutual
+`ClausesTypedDB` side properly. -/
 
 end LaCaDiLE
