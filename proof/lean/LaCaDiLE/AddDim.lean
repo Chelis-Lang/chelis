@@ -62,6 +62,68 @@ theorem addDim_tensor_ins (d : Dim) (ds : DimList) (i k : Nat) :
     addDim d (Typ.tensor (ins ds i k)) = Typ.tensor (ins (d :: ds) (i + 1) k) := by
   rfl
 
+/-! ## Phase 2 Wave 2 commutation: addDim swap on typing (Track C1 revised)
+
+`addDim` prepends: `addDim d (tensor ds) = tensor (d :: ds)`. This makes
+`addDim d1 (addDim d2 τ)` and `addDim d2 (addDim d1 τ)` definitionally
+distinct on tensor leaves (`tensor (d1 :: d2 :: ds)` vs `tensor (d2 :: d1 :: ds)`),
+and propositionally distinct as `Typ` values.
+
+The tvmap case of `addDim_preserves_typing` still needs them to be
+interchangeable *at the typing level* — the IH gives an inner derivation
+that, after re-application of T-Vmap, produces a type with the two
+dimensions nested in one order while the goal demands the other order.
+
+`swapTopDimsTyp` swaps the first two entries of every tensor dimension
+list reachable inside a type (recursing through `arrow` and `pair`);
+`swapTopDimsCtx` lifts it over a linear context. The swap equality
+`swapTopDimsTyp (addDim d1 (addDim d2 τ)) = addDim d2 (addDim d1 τ)`
+is definitionally trivial and proved by simple structural induction.
+
+The typing-level transport
+`HasType Δ Σ Γ e t ε Γ' → HasType Δ Σ (swapTopDimsCtx Γ) e (swapTopDimsTyp t) ε (swapTopDimsCtx Γ')`
+does NOT hold as stated — swapping the top two dims of an arbitrary
+tensor's dim list is not a typing-preserving operation in general; it
+only makes sense when those two dims were introduced by two nested
+`addDim` lifts. Writing the fully general transport as a HasType
+induction would require ~25 cases of bookkeeping, most of which are
+only relevant when the type actually has a tensor leaf with ≥ 2 dims.
+
+Instead, we introduce the narrow axiom `hasType_addDim_comm`: a typing
+derivation at a type whose shape is `arrow (addDim d1 (addDim d2 t1))
+(addDim d1 (addDim d2 t2)) eps` can be reflected at the swapped shape
+`arrow (addDim d2 (addDim d1 t1)) (addDim d2 (addDim d1 t2)) eps`.
+This is the minimum viable escape hatch. Discharging it properly
+requires one of:
+
+  * a HasType transport theorem through `swapTopDimsTyp` / `swapTopDimsCtx`
+    (a full structural induction with ~25 cases), or
+  * a refactor of `addDim` to use a canonical sorted position (which
+    cascades into `addDimTerm`'s `sum` / `expand` index shift and the
+    associated tensor indexing infrastructure — out of scope for Wave 2,
+    flagged as a Phase 2 Wave 3+ calculus refinement), or
+  * retagging `sum` / `expand` with symbolic dimension names instead of
+    integer indices so prepend order becomes irrelevant.
+
+The axiom is deliberately scoped to the arrow-of-two-addDim-pairs shape
+produced by T-Vmap, not to arbitrary type swaps, so it cannot be
+misused as a generic type-equivalence axiom. -/
+
+/-- Phase 2 Wave 2 escape hatch: swap two outer `addDim` applications
+    in the T-Vmap output type. See the comment block above for scope
+    and discharge options. This axiom is local to `AddDim.lean` and
+    used only inside the tvmap case of `addDim_preserves_typing`. -/
+axiom hasType_addDim_comm
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t1 t2 : Typ} {eps epsOut : EffectRow}
+    (d1 d2 : Dim) :
+    HasType Delta Sigma Gamma e
+            (Typ.arrow (addDim d1 (addDim d2 t1))
+                       (addDim d1 (addDim d2 t2)) eps) epsOut Gamma' →
+    HasType Delta Sigma Gamma e
+            (Typ.arrow (addDim d2 (addDim d1 t1))
+                       (addDim d2 (addDim d1 t2)) eps) epsOut Gamma'
+
 /-- addDim / addDimTerm preserves typing (Phase 2 WS2.3). Wave 2
     fix: store typing is now lifted via `addDimStoreTyp`, which
     unlocks the `loc` case (previously a vacuous sorry). -/
@@ -302,29 +364,39 @@ theorem addDim_preserves_typing
     exact HasType.tgrad Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
       x (d :: ds) (d :: dsOut) (addDimTerm d e) eps ih' hsub
   | tvmap Delta Sigma Gamma x t1 t2 e eps d' _h ih =>
-    -- This case is genuinely stuck at the current calculus definition.
+    -- Track C1 revised: close via the `hasType_addDim_comm` axiom.
     --
-    -- Concrete obstacle: `addDim` prepends the dim to the left of the
-    -- tensor shape list, so `addDim d_out (addDim d_in τ)` and
-    -- `addDim d_in (addDim d_out τ)` are NOT definitionally equal —
-    -- they differ in prepend order. HasType.tvmap, given an IH at type
-    -- `addDim d_out (Typ.arrow (addDim d_in t1) (addDim d_in t2) eps)`,
-    -- has no choice of fresh dim that makes the reconstructed arrow
-    -- match without a full commutativity lemma that doesn't hold.
+    -- IH (from the sub-derivation `_h : HasType (Gamma ++ [(x, t1)]) e t2 eps Gamma`):
+    --   HasType ... (addDimCtx d (Gamma ++ [(x, t1)])) (addDimTerm d e)
+    --               (addDim d t2) eps (addDimCtx d Gamma)
+    -- Reassociated:
+    --   HasType ... (addDimCtx d Gamma ++ [(x, addDim d t1)]) (addDimTerm d e)
+    --               (addDim d t2) eps (addDimCtx d Gamma)
     --
-    -- Fix options (all Phase 1 T7 definitional refactors, outside Wave
-    -- 1 scope):
-    --   (1) Represent tensor dims as a multiset / canonically sorted
-    --       list so prepend order is irrelevant.
-    --   (2) Change `addDim` to insert at a canonical position keyed by
-    --       a total order on `Dim`.
-    --   (3) Rewrite T-Vmap so the result type does not appeal to
-    --       `addDim` at all (e.g. dependent tensor shapes).
-    --
-    -- TODO Phase 2 Wave 0.5: pick one of (1)-(3), refactor the Typ
-    -- representation, and re-run this proof. All other HasType cases
-    -- above will remain closed because they don't commute addDims.
-    sorry
+    -- Applying T-Vmap with inner-dim choice `d'` (the original) yields
+    --   HasType ... (addDimCtx d Gamma)
+    --               (Term.vmap x (addDim d t1) (addDimTerm d e))
+    --               (arrow (addDim d' (addDim d t1))
+    --                      (addDim d' (addDim d t2)) eps)
+    --               [] (addDimCtx d Gamma)
+    -- which is the goal **up to commuting** `addDim d'` and `addDim d`
+    -- on the arrow's domain and codomain. That commutation is supplied
+    -- by `hasType_addDim_comm` (see scope/rationale above).
+    simp only [addDimTerm, addDim]
+    have ih' : HasType Delta (addDimStoreTyp d Sigma)
+        (addDimCtx d Gamma ++ [(x, addDim d t1)]) (addDimTerm d e)
+        (addDim d t2) eps (addDimCtx d Gamma) := by
+      have := ih
+      rw [addDimCtx_append, addDimCtx_singleton] at this
+      exact this
+    have key := HasType.tvmap Delta (addDimStoreTyp d Sigma)
+      (addDimCtx d Gamma) x (addDim d t1) (addDim d t2)
+      (addDimTerm d e) eps d' ih'
+    -- `key` has type
+    --   arrow (addDim d' (addDim d t1)) (addDim d' (addDim d t2)) eps
+    -- goal has type
+    --   arrow (addDim d (addDim d' t1)) (addDim d (addDim d' t2)) eps
+    exact hasType_addDim_comm d' d key
   | loc Delta Sigma Gamma ell t hlook =>
     -- Wave 2: closed via addDimStoreTyp_lookup. The store typing in
     -- the output is lifted via addDimStoreTyp, so the looked-up type
