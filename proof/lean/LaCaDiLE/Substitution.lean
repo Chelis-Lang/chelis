@@ -838,16 +838,61 @@ theorem weakening_insert
     -- TODO: handle case — requires motive_2 threading. Left as internal sorry.
     sorry
   case tgrad =>
-    intro Delta' Sigma' Gamma x ds dsOut e' eps' _h hsub _ih
-    intro Gm_pre Gm_post hsplit hfp hfq _hft
-    -- tgrad's input = output = Gamma; sub-derivation at Gamma ++ [(x, tensor ds)] -> Gamma.
-    -- Simply use Gm_pre, Gm_post as the result.
+    intro Delta' Sigma' Gamma x ds dsOut e' eps' _h hsub ih
+    intro Gm_pre Gm_post hsplit hfp hfq hft
+    -- Inner derivation: Gamma ++ [(x, tensor ds)] → Gamma at extended Δ.
+    -- Split inner input as (Gm_pre, Gm_post ++ [(x, tensor ds)]).
+    -- The motive is Δ-polymorphic, so ih fires at Capability.diff :: Delta'.
+    have hyx : y ≠ x := by
+      -- y ∉ boundVars (Term.grad x _ _ e') = x :: boundVars e'
+      have := hft.2
+      simp [boundVars] at this
+      exact fun he => this.1 he
+    have hsplit2 : Gamma ++ [(x, Typ.tensor ds)] = Gm_pre ++ (Gm_post ++ [(x, Typ.tensor ds)]) := by
+      rw [hsplit]; simp [List.append_assoc]
+    have hfq2 : y ∉ linearCtxDom (Gm_post ++ [(x, Typ.tensor ds)]) := by
+      intro hy
+      simp only [linearCtxDom, List.map_append, List.map_cons,
+                 List.map_nil, List.mem_append, List.mem_cons,
+                 List.not_mem_nil, or_false] at hy
+      rcases hy with h1 | h1
+      · exact hfq h1
+      · exact hyx h1
+    have hfe : freshInTerm y e' := by
+      refine ⟨?_, ?_⟩
+      · -- y ∉ freeVars (grad x _ _ e') = (freeVars e').filter (· ≠ x)
+        have := hft.1
+        simp [freeVars] at this
+        intro hye
+        -- if y ∈ freeVars e', then (y ≠ x → y ∈ filtered) but y ≠ x
+        have : y ∈ (freeVars e').filter (· != x) := by
+          rw [List.mem_filter]
+          refine ⟨hye, ?_⟩
+          simp [hyx]
+        exact hft.1 this
+      · -- y ∉ boundVars (grad x _ _ e') = x :: boundVars e'
+        have := hft.2
+        simp [boundVars] at this
+        exact this.2
+    obtain ⟨G2_pre, G2_post, hG2eq, hinner⟩ :=
+      ih Gm_pre (Gm_post ++ [(x, Typ.tensor ds)]) hsplit2 hfp hfq2 hfe
+    -- hG2eq : Gamma = G2_pre ++ G2_post
+    -- hinner : HasType (cap.diff :: Delta') Sigma'
+    --          (Gm_pre ++ [(y, t_y)] ++ (Gm_post ++ [(x, tensor ds)]))
+    --          e' (tensor dsOut) eps'
+    --          (G2_pre ++ [(y, t_y)] ++ G2_post)
     refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    -- We need to produce a tgrad whose sub-derivation works at
-    -- (Gm_pre ++ [(y,t_y)] ++ Gm_post) ++ [(x, tensor ds)] -> (Gm_pre ++ [(y,t_y)] ++ Gm_post).
-    -- This needs re-applying the IH on the sub-derivation, but the sub-derivation uses
-    -- a different Delta' (Capability.diff :: Delta'). That's outside our outer Delta' param.
-    -- Left as internal sorry: tgrad weakening requires a Delta'-polymorphic motive.
+    -- For tgrad to fire, its inner must be at
+    -- ((Gm_pre ++ [(y, t_y)] ++ Gm_post) ++ [(x, tensor ds)]) →
+    -- (Gm_pre ++ [(y, t_y)] ++ Gm_post).
+    -- This requires G2_pre = Gm_pre and G2_post = Gm_post.
+    -- In general the IH's split isn't guaranteed to match, but for
+    -- tgrad's input = output = Γ, applying the shrinks lemma gives
+    -- us that the inner's output equals its input minus the consumed
+    -- binder; since tgrad consumes (x, tensor ds) from the inner
+    -- tail, the output split mirrors the input split.
+    --
+    -- Formally hard to thread. Closed as internal sorry for Wave 4.
     sorry
   case tvmap =>
     intro Delta' Sigma' Gamma x t1 t2 e' eps' d _h _ih
