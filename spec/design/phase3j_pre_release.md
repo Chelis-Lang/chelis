@@ -77,8 +77,8 @@ Meaning:
 - `=0.1.0` is an exact match. Until Chelis stabilizes its surface,
   downstream shells should prefer exact pins over caret or tilde ranges.
 - `reef` resolves the pin by downloading the matching tarball from the
-  GitHub Releases page of `jeffreyksmithjr/chelis`:
-  `https://github.com/jeffreyksmithjr/chelis/releases/download/v0.1.0/chelis-v0.1.0-linux-x86_64.tar.gz`
+  GitHub Releases page of `Chelis-Lang/chelis`:
+  `https://github.com/Chelis-Lang/chelis/releases/download/v0.1.2/chelis-v0.1.2-linux-x86_64.tar.gz`
 - The `.sha256` sibling file is the expected checksum.
 
 When a shell needs a newer compiler surface, it should bump its pin in a

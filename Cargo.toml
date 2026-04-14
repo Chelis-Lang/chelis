@@ -27,7 +27,7 @@ members = [
 edition = "2024"
 version = "0.1.2"
 license = "MIT"
-repository = "https://github.com/jeffreyksmithjr/chelis"
+repository = "https://github.com/Chelis-Lang/chelis"
 
 [workspace.dependencies]
 chelis-deep = { path = "crates/chelis-deep" }

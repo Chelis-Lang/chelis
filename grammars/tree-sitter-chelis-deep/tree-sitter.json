@@ -14,7 +14,7 @@
     "license": "MIT",
     "description": "Tree-sitter grammar for Chelis Deep source files",
     "links": {
-      "repository": "https://github.com/jeffreyksmithjr/chelis"
+      "repository": "https://github.com/Chelis-Lang/chelis"
     }
   },
   "bindings": {
