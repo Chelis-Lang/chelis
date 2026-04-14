@@ -541,4 +541,29 @@ theorem has_type_closed_output_of_closed_input
     have := hshrink hd.1 hmem
     simp [linearCtxDom] at this
 
+/-! ## Effect-scoping lemma (Track C2)
+
+Every derivation of `Term.perform op e` produces an outer effect row
+that contains `op`. Absorbs `HasType.subEff` via membership
+preservation. Used by the closed-form `progress` theorem to rule
+out a top-level unhandled `perform` when `eps = []`. -/
+
+theorem hasType_perform_eff_mem
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {op : EffectLabel} {e : Term} {tRet : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma (Term.perform op e) tRet eps Gamma') :
+    op ∈ eps := by
+  generalize heq : Term.perform op e = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | perform _ _ _ _ op' _ _ _ eps' _ _ _ =>
+      cases heq
+      -- Goal: op ∈ EffectRow.union [op] eps'
+      show op ∈ [op] ++ eps'.filter (fun o => !([op] : EffectRow).contains o)
+      exact List.mem_append_left _ (List.mem_singleton.mpr rfl)
+  | subEff _ _ _ _ _ _ _ _ _ hsub ih =>
+      exact hsub _ (ih heq)
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
 end LaCaDiLE
