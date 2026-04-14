@@ -292,22 +292,28 @@ theorem HasType.expand_inv
 
 /-- uniformLike inversion with subEff widening. Exact effect-row
     equation dropped (since subEff can widen further); the Random
-    effect is only guaranteed in the inner eps0 via the union. -/
+    effect is only guaranteed in the inner eps0 via the union.
+    Returns a SubEffRow witness `union eps0 [random] ⊆ eps` so callers
+    can re-widen after rebuilding the constructor. -/
 theorem HasType.uniformLike_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {lo hi : Float} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.uniformLike e lo hi) t eps Gamma2) :
     ∃ ds eps0,
       t = Typ.tensor ds ∧
-      HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps0 Gamma2 := by
+      HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps0 Gamma2 ∧
+      SubEffRow (EffectRow.union eps0 [EffectLabel.random]) eps := by
   generalize heq : Term.uniformLike e lo hi = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | uniformLike _ _ _ _ _ ds _ _ eps0 h' _ =>
       cases heq
-      exact ⟨ds, eps0, rfl, h'⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
+      exact ⟨ds, eps0, rfl, h', fun _ hm => hm⟩
+  | subEff _ _ _ _ _ _ _ _ _ h_sub ih =>
+      obtain ⟨ds, eps0, hteq, h_inv, hsub⟩ := ih heq
+      refine ⟨ds, eps0, hteq, h_inv, ?_⟩
+      intro op hop
+      exact h_sub op (hsub op hop)
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -578,7 +584,7 @@ theorem preservation
           { shape := ins w.shape d, data := w.data }
           (Typ.tensor (ins ds d)) h_wf hfresh hne
   | tuniformLike s ell ellOut w lo hi hlook hfresh =>
-      obtain ⟨ds, eps0, htEq, h_loc_e⟩ := HasType.uniformLike_inv h_typ
+      obtain ⟨ds, eps0, htEq, h_loc_e, _hsub⟩ := HasType.uniformLike_inv h_typ
       obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor ds), ?_, ?_⟩
@@ -723,6 +729,19 @@ theorem plug_preserves_typing
       subst hteq
       show HasType Delta Sigma2 Gamma (Term.expand e' d) (Typ.tensor (ins ds d)) eps Gamma'
       exact HasType.texpand Delta Sigma2 Gamma Gamma' e' ds d eps h_e'
+  | uniformLike lo hi =>
+      have h' : HasType Delta Sigma Gamma (Term.uniformLike e lo hi) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, eps0, hteq, h_inner_ds, hsub_eps⟩ := HasType.uniformLike_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_inner_ds
+      refine ⟨Sigma2, ?_, h_sub⟩
+      subst hteq
+      -- Rebuild at the raw T-UniformLike effect row then widen via subEff.
+      have h_raw : HasType Delta Sigma2 Gamma (Term.uniformLike e' lo hi)
+                     (Typ.tensor ds)
+                     (EffectRow.union eps0 [EffectLabel.random]) Gamma' :=
+        HasType.uniformLike Delta Sigma2 Gamma Gamma' e' ds lo hi eps0 h_e'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
   | _ => sorry
 
 end LaCaDiLE

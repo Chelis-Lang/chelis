@@ -522,7 +522,7 @@ theorem progress_aux
       · exact Or.inr ⟨sigma', Term.mul e1' e2,
           by simpa using Step.ctx sigma sigma' (EvalCtx.mulL e2) e1 e1' hstep⟩
   | sum e1 d =>
-      obtain ⟨ds, _hteq, h_inner⟩ := HasType.sum_inv h
+      obtain ⟨ds, _hteq, _hmem, h_inner⟩ := HasType.sum_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
       · obtain ⟨ell, he1_eq⟩ := canonical_forms_tensor h_inner hv
@@ -546,7 +546,7 @@ theorem progress_aux
       · exact Or.inr ⟨sigma', Term.expand e1' d,
           by simpa using Step.ctx sigma sigma' (EvalCtx.expand d) e1 e1' hstep⟩
   | uniformLike e1 lo hi =>
-      obtain ⟨ds, eps0, _hteq, h_inner⟩ := HasType.uniformLike_inv h
+      obtain ⟨ds, eps0, _hteq, h_inner, _hsub⟩ := HasType.uniformLike_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps0 h_inner
           with hv | ⟨sigma', e1', hstep⟩
       · obtain ⟨ell, he1_eq⟩ := canonical_forms_tensor h_inner hv
