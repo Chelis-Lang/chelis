@@ -393,24 +393,116 @@ theorem preservation
         exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
       · exact StoreWf.extend_fresh ellNew w t0 h_wf
   | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      -- E-Add consumes ell1, ell2 and allocates ellOut at tensor[ds].
-      -- Substitution: need to prove store stays well-formed under the
-      -- remove+extend pattern, which requires a richer StoreWf
-      -- manipulation than the simple extend_fresh lemma covers.
-      -- TODO Wave 2: StoreWf.remove_remove_extend lemma.
-      sorry
+      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
+      obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
+      obtain ⟨hLook2, hG2⟩ := HasType.loc_inv h_e2
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        -- hG1 : Gamma = Γmid, hG2 : Γmid = []. So Gamma = [].
+        have hGamma : Gamma = [] := hG1.trans hG2
+        subst hGamma
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_wf1 := StoreWf.remove ell1 h_wf
+        have h_wf2 := StoreWf.remove ell2 h_wf1
+        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor ds) h_wf2
   | tmul s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      -- TODO Wave 2: same as tadd.
-      sorry
+      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.mul_inv h_typ
+      obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
+      obtain ⟨hLook2, hG2⟩ := HasType.loc_inv h_e2
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        -- hG1 : Gamma = Γmid, hG2 : Γmid = []. So Gamma = [].
+        have hGamma : Gamma = [] := hG1.trans hG2
+        subst hGamma
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_wf1 := StoreWf.remove ell1 h_wf
+        have h_wf2 := StoreWf.remove ell2 h_wf1
+        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor ds) h_wf2
   | tsum s ell ellOut w i hlook hfresh =>
-      -- TODO Wave 2: needs StoreWf.remove_extend lemma.
-      sorry
+      -- sum_inv gives ds with t = tensor (rem ds i); loc_inv gives
+      -- storeTypLookup Sigma ell = some (tensor ds) + Gamma = [].
+      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.sum_inv h_typ
+      obtain ⟨hLook, hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor (rem ds i)), ?_, ?_⟩
+      · subst htEq
+        subst hGE
+        have hlookNew : storeTypLookup (storeTypExtend
+                          (storeTypRemove Sigma ell) ellOut
+                          (Typ.tensor (rem ds i))) ellOut
+                      = some (Typ.tensor (rem ds i)) :=
+          storeTypLookup_extend_self _ _ _
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor (rem ds i)) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor (rem ds i)) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := rem w.shape i, data := w.data }
+          (Typ.tensor (rem ds i)) h_wf hfresh hne
   | texpand s ell ellOut w i k hlook hfresh =>
-      -- TODO Wave 2: parallel to tsum.
-      sorry
+      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.expand_inv h_typ
+      obtain ⟨hLook, hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor (ins ds i k)), ?_, ?_⟩
+      · subst htEq
+        subst hGE
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove Sigma ell) ellOut (Typ.tensor (ins ds i k))
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor (ins ds i k)) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor (ins ds i k)) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := ins w.shape i k, data := w.data }
+          (Typ.tensor (ins ds i k)) h_wf hfresh hne
   | tuniformLike s ell ellOut w lo hi hlook hfresh =>
-      -- TODO Wave 2: parallel to tsum.
-      sorry
+      obtain ⟨ds, eps0, htEq, h_loc_e⟩ := HasType.uniformLike_inv h_typ
+      obtain ⟨hLook, hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        subst hGE
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove Sigma ell) ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := w.shape, data := lo }
+          (Typ.tensor ds) h_wf hfresh hne
   | handleRet s epsH v clauses hv =>
       -- E-Handle-Ret: handle[εH] v clauses ↦ v when v is a value.
       -- handle_inv gives us a sub-derivation for v at some interior
