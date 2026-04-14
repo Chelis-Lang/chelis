@@ -51,7 +51,7 @@ def tapeName (base : String) : String := base ++ "_tape"
     context of the `add`/`mul`/`handle` cases of
     `adjoint_typed_aux`. -/
 def freshName (base : String) (n : Nat) : String :=
-  base ++ "_" ++ toString n
+  String.ofList (base.toList ++ '#' :: List.replicate n 'x')
 
 -- The adjoint transformation. Phase-1-note historical summary:
 --   * `mul(e1, e2)` gets full tape treatment (two copies of each operand,

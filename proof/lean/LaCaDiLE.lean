@@ -5,6 +5,7 @@ import LaCaDiLE.Typing
 import LaCaDiLE.TypingDB
 import LaCaDiLE.Operational
 import LaCaDiLE.AdjointTransform
+import LaCaDiLE.StringHelpers
 import LaCaDiLE.Substitution
 import LaCaDiLE.SubstitutionDB
 import LaCaDiLE.AdjointTyping
