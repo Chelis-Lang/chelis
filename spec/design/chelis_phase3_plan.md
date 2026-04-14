@@ -904,10 +904,20 @@ check`/`chelis eval` with hand-computed exact reference values.
 Release infrastructure is also in place as of 3j-pre Batch 6: the
 hand-rolled `.github/workflows/release.yml` builds and publishes a
 Linux x86_64 `chelis` tarball to the GitHub Releases page on any `v*`
-tag push, and the first real tag `v0.1.0` ships the Phase 3j-pre
-compiler binary that downstream shells (Nautilus, Coral) can pin via
-`compiler = "=0.1.0"` in their `reef.toml`. See
-`spec/design/phase3j_pre_release.md` for the full release contract.
+tag push. Release history:
+
+- `v0.1.0` — marked prerelease; cut before the Batch 5b/7b red-team
+  findings were resolved, so the C backend silent-seed-drop and the
+  weak oracle assertions shipped in that tarball. Left in place for
+  forensics; do NOT pin.
+- `v0.1.1` — shipped the Batch 7b fixes but the workspace `Cargo.toml`
+  was still pinned at `0.1.0`, so the published binary self-reports
+  `chelis 0.1.0`. Do NOT pin. Caught by the post-fix red team.
+- `v0.1.2` — first release whose `chelis --version` matches its tag.
+  Downstream shells (Nautilus, Coral) should pin via
+  `compiler = "=0.1.2"` in their `reef.toml`. Also ships the Batch 7c
+  KL divergence `0·log(0)` guard. See
+  `spec/design/phase3j_pre_release.md` for the full release contract.
 
   - **Acknowledged limitations (3j-pre, current state after Batch 7b):**
     - **Fixed in Batches 5b and 7b** (now exercised end-to-end through

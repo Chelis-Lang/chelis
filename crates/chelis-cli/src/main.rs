@@ -99,7 +99,7 @@ fn copy_runtime_artifacts(
 #[derive(Parser)]
 #[command(
     name = "chelis",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "The Chelis programming language"
 )]
 struct Cli {
@@ -241,7 +241,10 @@ fn main() {
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
         None => {
-            println!("chelis 0.1.0 -- use --help for commands");
+            println!(
+                "chelis {} -- use --help for commands",
+                env!("CARGO_PKG_VERSION")
+            );
             Ok(())
         }
     };
