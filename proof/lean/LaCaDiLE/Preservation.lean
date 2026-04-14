@@ -237,15 +237,26 @@ theorem HasType.expand_inv
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- uniformLike inversion with subEff widening. Exact effect-row
+    equation dropped (since subEff can widen further); the Random
+    effect is only guaranteed in the inner eps0 via the union. -/
 theorem HasType.uniformLike_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {lo hi : Float} {t : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma1 (Term.uniformLike e lo hi) t eps Gamma2) :
+    (h : HasType Delta Sigma Gamma1 (Term.uniformLike e lo hi) t eps Gamma2) :
     ∃ ds eps0,
       t = Typ.tensor ds ∧
-      eps = EffectRow.union eps0 [EffectLabel.random] ∧
       HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps0 Gamma2 := by
-  sorry -- TODO Wave 2: strip_subEff helper
+  generalize heq : Term.uniformLike e lo hi = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | uniformLike _ _ _ _ _ ds _ _ eps0 h' _ =>
+      cases heq
+      exact ⟨ds, eps0, rfl, h'⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 -- StoreWf.extend_fresh moved to Store.lean so LinearitySoundness can use it.
 
@@ -265,24 +276,175 @@ theorem storeTypLookup_extend_self
     storeTypLookup (storeTypExtend Sigma ell t) ell = some t := by
   simp [storeTypLookup, storeTypExtend]
 
-/-- Remove-then-extend for single-location-consume Steps (tsum,
-    texpand, tuniformLike). Removing a live location and extending with
-    a fresh one produces a new well-formed store/store-typing pair.
-    Like `extend_fresh`, this tracks domain membership only — type
-    matching is tightened by Wave 5 LinearityInvariant work.
+/-- After removing `ell1`, a lookup at `ell2 ≠ ell1` agrees with the
+    lookup in the original store. Proved on Option.isSome since
+    StoreWf only tracks membership. -/
+theorem storeLookup_isSome_remove_ne (sigma : Store) (ell1 ell2 : Loc)
+    (hne : ell2 ≠ ell1) :
+    (storeLookup (storeRemove sigma ell1) ell2).isSome =
+    (storeLookup sigma ell2).isSome := by
+  induction sigma with
+  | nil => rfl
+  | cons hd tl ih =>
+    show (storeLookup ((hd :: tl).filter (fun p => p.1 ≠ ell1)) ell2).isSome =
+         (storeLookup (hd :: tl) ell2).isSome
+    by_cases hHd1 : hd.1 = ell1
+    · -- hd removed
+      have : ((hd :: tl).filter (fun p => p.1 ≠ ell1)) =
+             (tl.filter (fun p => p.1 ≠ ell1)) := by
+        simp [List.filter_cons, hHd1]
+      rw [this]
+      have hHdNe2 : hd.1 ≠ ell2 := by rw [hHd1]; exact fun h => hne h.symm
+      show (storeLookup (tl.filter (fun p => p.1 ≠ ell1)) ell2).isSome =
+           (storeLookup (hd :: tl) ell2).isSome
+      rw [show storeLookup (hd :: tl) ell2 = storeLookup tl ell2 from by
+            simp [storeLookup, List.find?, hHdNe2]]
+      exact ih
+    · -- hd survives
+      have hFilter : ((hd :: tl).filter (fun p => p.1 ≠ ell1)) =
+             hd :: (tl.filter (fun p => p.1 ≠ ell1)) := by
+        simp [List.filter_cons, hHd1]
+      rw [hFilter]
+      by_cases hHd2 : hd.1 = ell2
+      · -- hd is our target
+        simp [storeLookup, List.find?, hHd2]
+      · show (storeLookup (hd :: (tl.filter _)) ell2).isSome =
+             (storeLookup (hd :: tl) ell2).isSome
+        simp only [storeLookup, List.find?, hHd2, decide_false,
+                   Bool.false_eq_true, ite_false]
+        exact ih
 
-    Wave 2 TODO: fill in this proof. The shape is symmetric to
-    `extend_fresh` but needs a `storeLookup_remove` side lemma
-    showing removal of `ellIn ≠ ell'` preserves lookup. -/
+/-- After removing `ell1` from a store typing, `ell2 ≠ ell1` is in the
+    filtered domain iff it was in the original. -/
+theorem mem_storeTypDom_remove_iff (Sigma : StoreTyp) (ell1 ell2 : Loc)
+    (hne : ell2 ≠ ell1) :
+    ell2 ∈ storeTypDom (storeTypRemove Sigma ell1) ↔
+    ell2 ∈ storeTypDom Sigma := by
+  induction Sigma with
+  | nil => simp [storeTypDom, storeTypRemove]
+  | cons hd tl ih =>
+    show ell2 ∈ storeTypDom ((hd :: tl).filter (fun p => p.1 ≠ ell1)) ↔
+         ell2 ∈ storeTypDom (hd :: tl)
+    by_cases hHd1 : hd.1 = ell1
+    · have hFilt : ((hd :: tl).filter (fun p => p.1 ≠ ell1)) =
+                   tl.filter (fun p => p.1 ≠ ell1) := by
+        simp [List.filter_cons, hHd1]
+      rw [hFilt]
+      show ell2 ∈ storeTypDom (storeTypRemove tl ell1) ↔
+           ell2 ∈ storeTypDom (hd :: tl)
+      rw [ih]
+      show ell2 ∈ tl.map Prod.fst ↔ ell2 ∈ (hd :: tl).map Prod.fst
+      simp only [List.map_cons, List.mem_cons]
+      constructor
+      · intro h; right; exact h
+      · rintro (h_eq | h_mem)
+        · exfalso; apply hne; rw [h_eq, hHd1]
+        · exact h_mem
+    · have hFilt : ((hd :: tl).filter (fun p => p.1 ≠ ell1)) =
+                   hd :: tl.filter (fun p => p.1 ≠ ell1) := by
+        simp [List.filter_cons, hHd1]
+      rw [hFilt]
+      show ell2 ∈ (hd :: storeTypRemove tl ell1).map Prod.fst ↔
+           ell2 ∈ (hd :: tl).map Prod.fst
+      simp only [List.map_cons, List.mem_cons]
+      show ell2 = hd.fst ∨ ell2 ∈ storeTypDom (storeTypRemove tl ell1) ↔
+           ell2 = hd.fst ∨ ell2 ∈ storeTypDom tl
+      rw [ih]
+
+/-- Remove-then-extend for single-location-consume Steps (tsum,
+    texpand, tuniformLike). Removing a live location and extending
+    with a fresh one preserves store well-formedness. -/
 theorem StoreWf.remove_extend
     {sigma : Store} {Sigma : StoreTyp}
     (ellIn ellOut : Loc) (w : TensorVal) (tOut : Typ)
-    (_h_wf : StoreWf sigma Sigma)
+    (h_wf : StoreWf sigma Sigma)
     (_h_fresh : ellOut = storeFreshLoc sigma)
     (_h_ne : ellIn ≠ ellOut) :
     StoreWf (storeExtend (storeRemove sigma ellIn) ellOut w)
             (storeTypExtend (storeTypRemove Sigma ellIn) ellOut tOut) := by
-  sorry
+  refine ⟨?_, ?_⟩
+  · intro ell' hell'
+    -- hell' : ell' ∈ storeTypDom (ellOut :: storeTypRemove Sigma ellIn)
+    simp only [storeTypDom, storeTypExtend, List.map_cons,
+               List.mem_cons] at hell'
+    rcases hell' with hEq | hOld
+    · -- ell' = ellOut: the extended store has (ellOut, w) at head.
+      rw [hEq]
+      show (storeLookup ((ellOut, w) :: storeRemove sigma ellIn) ellOut).isSome
+      simp [storeLookup, List.find?]
+    · -- ell' ∈ storeTypDom (storeTypRemove Sigma ellIn): peel off the
+      -- filter to get ell' ∈ Sigma's domain + ell' ≠ ellIn.
+      by_cases hell'In : ell' = ellIn
+      · -- ell' = ellIn means it was filtered out — contradiction.
+        exfalso
+        rw [hell'In] at hOld
+        -- ellIn not in filtered domain
+        have : ellIn ∉ storeTypDom (storeTypRemove Sigma ellIn) := by
+          intro hc
+          show False
+          have hc' : ellIn ∈ (Sigma.filter (fun p => p.1 ≠ ellIn)).map Prod.fst := hc
+          rw [List.mem_map] at hc'
+          rcases hc' with ⟨p, hp_mem, hp_eq⟩
+          rw [List.mem_filter] at hp_mem
+          -- hp_eq : p.fst = ellIn; hp_mem.2 : p.1 ≠ ellIn (decoded)
+          have : p.1 ≠ ellIn := by
+            have := hp_mem.2
+            simp only [ne_eq, decide_not, Bool.not_eq_true',
+                       decide_eq_false_iff_not] at this
+            exact this
+          exact this hp_eq
+        exact this hOld
+      · -- ell' ≠ ellIn: transfer to Sigma's domain via mem_storeTypDom_remove_iff
+        have hInSigma : ell' ∈ storeTypDom Sigma :=
+          (mem_storeTypDom_remove_iff Sigma ellIn ell' hell'In).mp hOld
+        have hSigmaLive : (storeLookup sigma ell').isSome :=
+          h_wf.1 ell' hInSigma
+        -- Propagate through remove + extend
+        have hRemLive : (storeLookup (storeRemove sigma ellIn) ell').isSome := by
+          rw [storeLookup_isSome_remove_ne sigma ellIn ell' hell'In]
+          exact hSigmaLive
+        show (storeLookup ((ellOut, w) :: storeRemove sigma ellIn) ell').isSome
+        by_cases hell'Out : ell' = ellOut
+        · rw [hell'Out]; simp [storeLookup, List.find?]
+        · have hne : ¬ (ellOut = ell') := fun he => hell'Out he.symm
+          simp only [storeLookup, List.find?, hne, decide_false,
+                     Bool.false_eq_true, ite_false]
+          exact hRemLive
+  · intro ell' hell'
+    show ell' ∈ storeTypDom (storeTypExtend (storeTypRemove Sigma ellIn) ellOut tOut)
+    simp only [storeTypDom, storeTypExtend, List.map_cons, List.mem_cons]
+    by_cases hell'Out : ell' = ellOut
+    · left; exact hell'Out
+    · right
+      have hne : ¬ (ellOut = ell') := fun he => hell'Out he.symm
+      -- Lookup fell through ellOut to storeRemove sigma ellIn.
+      have hRem : (storeLookup (storeRemove sigma ellIn) ell').isSome := by
+        have : (storeLookup ((ellOut, w) :: storeRemove sigma ellIn) ell').isSome := hell'
+        simp only [storeLookup, List.find?, hne, decide_false,
+                   Bool.false_eq_true, ite_false] at this
+        exact this
+      -- Now ell' is isSome in the removed store. If ell' = ellIn, the
+      -- removed store can't have it (contradiction). Otherwise use
+      -- storeLookup_isSome_remove_ne + h_wf.2.
+      by_cases hell'In : ell' = ellIn
+      · exfalso
+        rw [hell'In] at hRem
+        -- storeLookup (storeRemove sigma ellIn) ellIn = none
+        have : storeLookup (storeRemove sigma ellIn) ellIn = none := by
+          simp only [storeLookup, storeRemove]
+          induction sigma with
+          | nil => rfl
+          | cons hd tl ihl =>
+            by_cases hHd : hd.1 = ellIn
+            · simp [List.filter_cons, hHd, ihl]
+            · simp [List.filter_cons, hHd, List.find?, ihl]
+        rw [this] at hRem
+        exact absurd hRem (by simp)
+      · have hInSigma : (storeLookup sigma ell').isSome := by
+          rw [← storeLookup_isSome_remove_ne sigma ellIn ell' hell'In]
+          exact hRem
+        have hSigmaDom : ell' ∈ storeTypDom Sigma := h_wf.2 ell' hInSigma
+        exact (mem_storeTypDom_remove_iff Sigma ellIn ell' hell'In).mpr hSigmaDom
 
 /-- Handle inversion with subEff widening. `eps = removeOps epsB epsH`
     equation dropped; only the body sub-derivation is extracted. -/
