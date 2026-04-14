@@ -302,8 +302,6 @@ theorem HasType.handle_inv
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
-/-! ## Preservation -/
-
 /-- Preservation: if a configuration is well-typed and steps, the
     resulting configuration has the same type (under a possibly-extended
     store typing) and preserves store well-formedness.

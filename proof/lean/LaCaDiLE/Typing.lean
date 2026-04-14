@@ -363,26 +363,25 @@ of a typing derivation is the canonical fix. -/
     EffectRow.union [] eps = eps := by
   simp [EffectRow.union]
 
-/-- Widen the effect row of a typing derivation. Adding operations to
-    the effect row never invalidates a derivation because every rule
-    that PRODUCES effects adds them via union, which is monotone.
+/-- `eps` is a SubEffRow of its union with anything on the right.
+    Direct consequence of `EffectRow.union` being list append +
+    filter: every op of the left operand appears in the result. -/
+theorem SubEffRow.union_left (eps eps_extra : EffectRow) :
+    SubEffRow eps (EffectRow.union eps eps_extra) := by
+  intro op hop
+  show op ∈ eps ++ eps_extra.filter (fun o => !eps.contains o)
+  exact List.mem_append_left _ hop
 
-    Wave 1 status: LEFT AS SORRY. A faithful proof requires a full
-    associativity + commutativity + idempotence theory for
-    `EffectRow.union` (which is defined as list append + dedup filter),
-    because cases like `app` produce `union (union eps1 eps2) eps` and
-    reassembling at `union (union (union eps1 eps2) eps) eps_extra`
-    needs to thread `eps_extra` into one of the sub-derivations in a way
-    the raw list definition does not support without rewriting. This is
-    tractable list-level algebra but out of scope for Wave 1; tracked
-    for Wave 2 alongside the substitution lemma. Preservation's value
-    cases use this as an oracle. -/
+/-- Widen the effect row of a typing derivation. Wave 0.5 made this
+    trivial: with `HasType.subEff` as a constructor, we apply it
+    directly with a `SubEffRow.union_left` witness. -/
 theorem HasType.weaken_eff
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (eps_extra : EffectRow)
-    (_h : HasType Delta Sigma Gamma e t eps Gamma') :
-    HasType Delta Sigma Gamma e t (EffectRow.union eps eps_extra) Gamma' := by
-  sorry
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    HasType Delta Sigma Gamma e t (EffectRow.union eps eps_extra) Gamma' :=
+  HasType.subEff Delta Sigma Gamma Gamma' e t eps
+    (EffectRow.union eps eps_extra) h (SubEffRow.union_left eps eps_extra)
 
 end LaCaDiLE
