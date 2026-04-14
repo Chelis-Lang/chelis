@@ -1,67 +1,60 @@
-//! Phase 3j-pre acceptance oracle (Batch 5).
+//! Phase 3j-pre acceptance oracle (Batches 5, 5b, 7b).
 //!
-//! The original 3j-pre plan called for a "build + gcc + run + verify
-//! against a PyTorch reference" oracle that exercises a small transformer
-//! block (RMSNorm + multi-head attention + GELU MLP + Kaiming init) end
-//! to end through the C backend.
+//! Current shipped state (Batch 7b):
 //!
-//! Probing the current compiler at oracle authoring time showed that
-//! `chelis build --target c` is broken across **every new 3j-pre surface
-//! item** that the oracle would touch. The full enumeration is in
-//! `spec/design/chelis_phase3_plan.md` §3j-pre Acknowledged Limitations
-//! (Batch 5); briefly:
+//!   - `Std.Nn.RmsNorm.forward` rank-1 wrapper: builds and runs through
+//!     `chelis build --target c`. Numerically verified against
+//!     hand-computed f32 references in
+//!     `phase3j_pre_oracle_build_path_repros_rmsnorm_forward`.
+//!   - `Std.Nn.Gelu.forward` rank-1 wrapper: builds and runs through
+//!     the C backend. Numerically verified against hand-computed f32
+//!     references in `phase3j_pre_oracle_build_path_repros_gelu_forward`.
+//!   - `Std.Tensor.Reduce.{min, prod, argmax, argmin}` wrappers: build
+//!     and link cleanly. `min` is numerically verified end-to-end in
+//!     `phase3j_pre_oracle_build_path_repros_tensor_reduce_min`.
+//!   - `Std.Nn.Attention.scaled_dot_product_attention` import: the
+//!     duplicate `chelis_uniform_sample_f32` regression is fixed; a
+//!     downstream package can import the symbol, and a minimal program
+//!     that touches it builds and runs through the C backend. Numeric
+//!     verification of the attention math itself is still deferred to
+//!     Phase 3j (Nautilus); see §3j-pre Acknowledged Limitations.
+//!   - `Std.Init.Kaiming.kaiming_uniform` under `with seed(...)`: the C
+//!     and HIP backends do **not** plumb the user-provided seed through
+//!     the generated runtime. Rather than silently drop the seed, Batch
+//!     7b makes `chelis build --target c|hip` reject any program that
+//!     contains `with seed(...)` with a hard error. The negative test
+//!     `phase3j_pre_oracle_build_path_repros_kaiming_uniform_seed_rejected`
+//!     pins that contract. The host-runtime path is still numerically
+//!     exercised by `phase3j_pre_oracle_integrated_eval`.
 //!
-//!   - `Std.Nn.RmsNorm.forward` rank-1 wrapper: C codegen emits an
-//!     empty dim-variable name and the generated source does not
-//!     compile.
-//!   - `Std.Nn.Gelu.forward` rank-1 wrapper: compiles but the binary
-//!     prints `-nan` for every output, even when `chelis eval` returns
-//!     finite values for the same program.
-//!   - `Std.Init.Kaiming.kaiming_uniform`: compiles but the seeded
-//!     `Random` handler in the C backend returns `()` instead of a
-//!     tensor.
-//!   - `Std.Tensor.Reduce.{min, prod, argmax, argmin}` wrappers:
-//!     emitted as implicit declarations only; the link fails.
-//!   - `Std.Nn.Attention.scaled_dot_product_attention` and friends:
-//!     importing the module pulls two duplicated definitions of
-//!     `chelis_uniform_sample_f32` into `main.c`, which fails to
-//!     compile. (Independent of the host-runtime
-//!     `matmul`/`softmax`/`permute`/`expand` gap that already blocks
-//!     attention through `chelis eval`.)
+//! No tests in this file are `#[ignore]`d. Every assertion uses exact
+//! line equality (or an explicit error-substring match for negative
+//! tests) — never `contains("0.")`-style fuzzy matching for positive
+//! correctness.
 //!
-//! The Batch 5 oracle therefore verifies what *is* reachable from the
-//! CLI today and pins each broken build path with a documented
-//! `#[ignore]`-marked reproduction so the failure modes cannot silently
-//! bit-rot:
+//! Test inventory:
 //!
 //!   1. `phase3j_pre_oracle_integrated_eval` — `chelis check` clean
-//!      score=1 plus `chelis eval` with hand-computed exact reference
-//!      values for `Std.Nn.RmsNorm.rms_scale`, `Std.Nn.Gelu.gelu_scalar`
-//!      at a fixed input grid, and seeded `Std.Init.Kaiming.kaiming_uniform`
-//!      output (deterministic under `with seed(7) { ... }`). These are
-//!      the integrated transformer-block-flavoured numerics the plan
-//!      asked for, just routed through the host runtime instead of the
-//!      C backend.
+//!      score=1 plus `chelis eval` with hand-computed exact references
+//!      for `Std.Nn.RmsNorm.rms_scale`, `Std.Nn.Gelu.gelu_scalar`, and
+//!      seeded `Std.Init.Kaiming.kaiming_uniform` (deterministic under
+//!      `with seed(7) { ... }`).
 //!   2. `phase3j_pre_oracle_attention_importable` — publishes the full
-//!      `chelis-std` and pins that `Std.Nn.Attention.scaled_dot_product_attention`
-//!      type-checks from a downstream consumer with a clean `score=1`.
-//!      This guards against a regression that would silently break the
-//!      attention surface for downstream shells.
+//!      `chelis-std` and pins that the `Std.Nn.Attention` symbols
+//!      type-check from a downstream consumer with a clean `score=1`.
 //!   3. `phase3j_pre_oracle_grad_argmax_rejected_at_check` — calling
 //!      `grad` on a closure that returns the result of
 //!      `Std.Tensor.Reduce.argmax` is rejected by `chelis check` with
-//!      a non-zero `errors` array containing the
-//!      `"grad requires a scalar floating output"` diagnostic. The
-//!      IR-level "non-differentiable" rejection lives in
-//!      `crates/chelis-ir/src/grad.rs` and is exercised by the
-//!      `adv_argmax_on_grad_path_errors_cleanly` /
-//!      `adv_argmin_on_grad_path_errors_cleanly` tests there; the
-//!      package-mode lowering panics with `` `grad` is not
-//!      representable in the Phase 0e RISC DAG `` before the gradient
-//!      pass can run, so this CLI-level test pins the typecheck-time
-//!      refusal instead. Either way the no-silent-zero contract is
-//!      enforced: there is no path on which `grad(argmax(...))` runs
-//!      and produces a wrong gradient.
+//!      `"grad requires a scalar floating output"`. The no-silent-zero
+//!      contract is enforced: there is no execution path on which
+//!      `grad(argmax(...))` produces a wrong gradient.
+//!   4. `phase3j_pre_oracle_build_path_repros_*` — one build-path test
+//!      per shipped surface item, asserting exact-line stdout of the
+//!      compiled binary against hand-computed references.
+//!   5. `phase3j_pre_oracle_integrated_build_c` — end-to-end
+//!      `chelis build --target c` + gcc-link + run, asserting
+//!      byte-exact stdout against a hand-computed reference covering
+//!      RMSNorm and GELU.
 //!   4. `phase3j_pre_oracle_build_path_repros_*` (`#[ignore]`d) —
 //!      one minimal reproduction per broken build path. Each is
 //!      expected to start passing once the underlying C backend bug
@@ -214,22 +207,18 @@ init_w = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
     //     captured from the host runtime is:
     //       [-1.0460046285409985, 1.1421814412976825,
     //         0.4906169070918174, 0.9969459709846217]
-    let expected = [
-        "xs = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
-        "rms_inv = 0.3651483473268884",
-        "g_neg1 = -0.15880800939172324",
-        "g0 = 0",
-        "g1 = 0.8411919906082768",
-        "g2 = 1.954597694087775",
-        "template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])",
-        "init_w = tensor(shape=[4], data=[-1.0460046285409985, 1.1421814412976825, 0.4906169070918174, 0.9969459709846217])",
-    ];
-    for line in expected {
-        assert!(
-            stdout.contains(line),
-            "expected exact line `{line}` in eval stdout:\n{stdout}"
-        );
-    }
+    let expected = "xs = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])\n\
+                    rms_inv = 0.3651483473268884\n\
+                    g_neg1 = -0.15880800939172324\n\
+                    g0 = 0\n\
+                    g1 = 0.8411919906082768\n\
+                    g2 = 1.954597694087775\n\
+                    template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])\n\
+                    init_w = tensor(shape=[4], data=[-1.0460046285409985, 1.1421814412976825, 0.4906169070918174, 0.9969459709846217])\n";
+    assert_eq!(
+        stdout, expected,
+        "byte-exact eval stdout mismatch.\nactual:\n{stdout}\nexpected:\n{expected}"
+    );
 }
 
 /// SDPA importability guard. Pins that the
@@ -323,17 +312,14 @@ g = grad(loss_fn)
 }
 
 // -------------------------------------------------------------------------
-// Build-path reproduction tests (ignored by default).
+// Build-path tests.
 //
-// Each of these is a minimal failing reproduction of a `chelis build
-// --target c` bug in the Phase 3j-pre new surface. They are gated
-// behind `#[ignore]` so default CI does not turn red on a known
-// compiler defect, but they exist so the failure modes cannot silently
-// bit-rot. When a fix lands, drop the `#[ignore]` and the
-// corresponding bullet from the spec acknowledged-limitations
-// section. Run with:
-//
-//     cargo test -p chelis-cli --test phase3j_pre_std -- --ignored
+// Each of these exercises a Phase 3j-pre std surface item end to end
+// through `chelis build --target c` + gcc-link + run, and asserts
+// **byte-exact** stdout against a hand-computed reference (positive)
+// or an exact error-substring against the build CLI (negative).
+// None of these are `#[ignore]`d; they run in the default workspace
+// pass.
 // -------------------------------------------------------------------------
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
@@ -385,9 +371,12 @@ fn build_and_run(reef_home: &Path, app_pkg: &Path) -> (std::process::ExitStatus,
     (run_output.status, stdout, stderr)
 }
 
-/// REPRO: `Std.Nn.RmsNorm.forward` rank-1 wrapper — C backend emits
-/// an empty dim-variable name inside the generated `main.c`
-/// (`int * = inputs[0]->shape[0];`) and the source does not compile.
+/// `Std.Nn.RmsNorm.forward` rank-1 wrapper through `chelis build
+/// --target c`. Asserts byte-exact compiled-binary stdout against a
+/// hand-computed f32 reference. With `xs = [1,2,3,4]` and unit gain,
+/// `mean(xs^2) = 7.5`, so `rms_inv ≈ 1/sqrt(7.5+1e-6) ≈ 0.3651483...`
+/// and `rms_unit[i] = xs[i] * rms_inv`. The exact f32-rounded output
+/// captured from the compiled binary is locked in below.
 #[test]
 fn phase3j_pre_oracle_build_path_repros_rmsnorm_forward() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-rmsnorm");
@@ -402,23 +391,20 @@ unit_gain = to_tensor([cast(1.0, f32), cast(1.0, f32), cast(1.0, f32), cast(1.0,
 rms_unit = forward(xs, unit_gain, cast(0.000001, f32))
 "#,
     );
-    let (status, stdout, _stderr) = build_and_run(&reef_home, &app_pkg);
-    assert!(status.success(), "compiled binary failed");
-    // C backend stores tensors as f32, so only 7 digits of precision are
-    // preserved. The reference `0.3651483473268884` truncates to
-    // `0.3651483` in f32; we match that prefix here. The full f64 reference
-    // is still verified by the `phase3j_pre_oracle_integrated_eval` oracle.
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
     assert!(
-        stdout.contains("rms_unit = tensor(shape=[4], data=[0.3651483"),
-        "expected RMSNorm output, got:\n{stdout}"
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
     );
+    let expected = "xs = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])\n\
+                    unit_gain = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n\
+                    rms_unit = tensor(shape=[4], data=[0.3651483356952667, 0.7302966713905334, 1.095445036888123, 1.460593342781067])\n";
+    assert_eq!(stdout, expected, "byte-exact compiled stdout mismatch");
 }
 
-/// REPRO: `Std.Nn.Gelu.forward` rank-1 wrapper — compiles, but the
-/// compiled binary prints `-nan` for every output, even for positive
-/// inputs whose `chelis eval` value is finite. The
-/// `to_tensor(map(scalar_fn, to_list(...)))` lowering for the scalar
-/// GELU path is unsound in the C backend.
+/// `Std.Nn.Gelu.forward` rank-1 wrapper through `chelis build --target c`.
+/// Asserts byte-exact compiled stdout against the hand-computed f32 GELU
+/// (tanh approximation) values for the input grid `[0, 0.5, 1, 2]`.
 #[test]
 fn phase3j_pre_oracle_build_path_repros_gelu_forward() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-gelu");
@@ -432,19 +418,24 @@ ys = to_tensor([cast(0.0, f32), cast(0.5, f32), cast(1.0, f32), cast(2.0, f32)])
 gelu_out = forward(ys)
 "#,
     );
-    let (status, stdout, _stderr) = build_and_run(&reef_home, &app_pkg);
-    assert!(status.success(), "compiled binary failed");
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
     assert!(
-        !stdout.contains("nan") && !stdout.contains("NaN"),
-        "Gelu.forward compiled output must not contain NaN, got:\n{stdout}"
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
     );
+    let expected = "ys = tensor(shape=[4], data=[0.0, 0.5, 1.0, 2.0])\n\
+                    gelu_out = tensor(shape=[4], data=[0.0, 0.3457140028476715, 0.8411920070648193, 1.95459771156311])\n";
+    assert_eq!(stdout, expected, "byte-exact compiled stdout mismatch");
 }
 
-/// REPRO: `Std.Init.Kaiming.kaiming_uniform` — compiles, but the
-/// runtime seeded-Random handler in the C backend returns `()`
-/// instead of a tensor, so the result is not numerically usable.
+/// `Std.Init.Kaiming.kaiming_uniform` under `with seed(...)` is rejected
+/// at `chelis build --target c` time with a hard error. The C backend
+/// does not yet plumb the user-provided seed through the generated
+/// runtime, and Batch 7b chose to fail loudly rather than silently drop
+/// the seed. This test pins that contract: the build CLI exits non-zero
+/// and prints the documented error substring.
 #[test]
-fn phase3j_pre_oracle_build_path_repros_kaiming_uniform() {
+fn phase3j_pre_oracle_build_path_repros_kaiming_uniform_seed_rejected() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-kaiming");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -456,18 +447,35 @@ template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, 
 sample = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
 "#,
     );
-    let (status, stdout, _stderr) = build_and_run(&reef_home, &app_pkg);
-    assert!(status.success(), "compiled binary failed");
+    let out_dir = app_pkg.join("out");
+    let _ = fs::remove_dir_all(&out_dir);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not yet plumb `with seed(...)` into the generated runtime",
+        ));
+    // No `out_dir` should have been written.
     assert!(
-        stdout.contains("sample = tensor(shape=[4]"),
-        "expected tensor output for Kaiming init, got:\n{stdout}"
+        !out_dir.join("main.c").exists(),
+        "main.c must not be emitted when `with seed` is rejected"
     );
 }
 
-/// REPRO: `Std.Tensor.Reduce.min` (and prod/argmax/argmin) wrappers —
-/// the C backend emits an implicit forward declaration only, never a
-/// definition, so the link fails with implicit-declaration warnings
-/// promoted to errors and an integer-to-pointer assignment.
+/// `Std.Tensor.Reduce.min` through `chelis build --target c`. Asserts
+/// byte-exact compiled stdout for a column-wise min over a 2x3 tensor:
+/// `min([[1,2,3],[4,0.5,6]], axis=0) = [1, 0.5, 3]`.
 #[test]
 fn phase3j_pre_oracle_build_path_repros_tensor_reduce_min() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-reduce");
@@ -481,12 +489,14 @@ xs = pad_sequences_to([[1.0, 2.0, 3.0], [4.0, 0.5, 6.0]], cast(3, int64), 0.0)
 min_axis0 = min(xs, cast(0, int32))
 "#,
     );
-    let (status, stdout, _stderr) = build_and_run(&reef_home, &app_pkg);
-    assert!(status.success(), "compiled binary failed");
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
     assert!(
-        stdout.contains("min_axis0 = tensor"),
-        "expected min reduction output, got:\n{stdout}"
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
     );
+    let expected = "xs = tensor(shape=[2, 3], data=[1.0, 2.0, 3.0, 4.0, 0.5, 6.0])\n\
+                    min_axis0 = tensor(shape=[3], data=[1.0, 0.5, 3.0])\n";
+    assert_eq!(stdout, expected, "byte-exact compiled stdout mismatch");
 }
 
 /// REPRO: `Std.Nn.Attention.scaled_dot_product_attention` import —
@@ -515,16 +525,27 @@ touch_sdpa = scaled_dot_product_attention
 touch_ok = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 "#,
     );
-    let (status, _stdout, _stderr) = build_and_run(&reef_home, &app_pkg);
-    assert!(status.success(), "compiled binary failed");
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
+    assert!(
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
+    );
+    // `touch_sdpa` is a function-typed top-level binding; the host
+    // formatter does not print it. The only printed global is the
+    // tensor `touch_ok`. We assert byte-exact stdout to lock in that
+    // the binary actually runs to completion (no duplicate-definition
+    // link bug, no missing main).
+    let expected = "touch_ok = tensor(shape=[2], data=[1.0, 2.0])\n";
+    assert_eq!(stdout, expected, "byte-exact compiled stdout mismatch");
 }
 
-/// Integrated build-to-C oracle for Phase 3j-pre Batch 5b. Exercises
+/// Integrated build-to-C oracle for Phase 3j-pre. Exercises
 /// `chelis build --target c`, gcc-links with `gcc_link_generated`,
-/// runs the binary, and asserts exact-string equality against a
-/// hand-computed reference. This covers RMSNorm, GELU, and Kaiming
-/// init all routed through the C backend end to end, so the Batch 5b
-/// fixes cannot silently regress.
+/// runs the binary, and asserts **byte-exact** stdout against a
+/// hand-computed f64 reference covering RMSNorm and GELU through their
+/// scalar host helpers. Kaiming under `with seed(...)` is intentionally
+/// excluded here and is covered by the seed-rejected negative test
+/// above; this is the no-silent-drop contract from Batch 7b.
 #[test]
 fn phase3j_pre_oracle_integrated_build_c() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-build-c");
@@ -534,7 +555,6 @@ fn phase3j_pre_oracle_integrated_build_c() {
 
 import Std.Nn.RmsNorm (rms_scale)
 import Std.Nn.Gelu (gelu_scalar)
-import Std.Init.Kaiming (kaiming_uniform)
 
 xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
 rms_inv = rms_scale(xs, cast(0.000001, f32))
@@ -545,7 +565,6 @@ g1 = gelu_scalar(cast(1.0, f32))
 g2 = gelu_scalar(cast(2.0, f32))
 
 template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-kaiming_out = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
 "#,
     );
     let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
@@ -554,38 +573,17 @@ kaiming_out = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
         "compiled binary failed: stdout={stdout}\nstderr={stderr}"
     );
 
-    // Hand-computed f32 references. RMSNorm and GELU can be reproduced
-    // by the tanh-approximation formulas from the std package; Kaiming
-    // values here are captured from the compiled binary itself (the
-    // seeded random path in the host-mode emitter does not forward the
-    // with-seed(7) binding into the C uniform sampler, so the sequence
-    // is fixed by the default seed used when the seed value is
-    // dropped). The string must match exactly — no fuzzy `contains`
-    // prefix matching beyond whole-line granularity.
     // `rms_scale` and `gelu_scalar` are scalar host defs that compute
     // in `double`, so the full f64 reference strings match exactly.
-    let expected_lines = [
-        "xs = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
-        "rms_inv = 0.3651483473268884",
-        "g_neg1 = -0.1588080093917232",
-        "g0 = 0",
-        "g1 = 0.8411919906082768",
-        "g2 = 1.954597694087775",
-        "template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])",
-    ];
-    for line in expected_lines {
-        assert!(
-            stdout.contains(line),
-            "expected line `{line}` in compiled stdout:\n{stdout}"
-        );
-    }
-    // Kaiming has a looser shape-only check: the host-mode emitter
-    // currently drops the `with seed(...)` value, so the numeric
-    // sequence is governed by the default seed and is asserted only on
-    // shape to avoid locking in a behavior that is really a known
-    // limitation (documented in spec/design/chelis_phase3_plan.md).
-    assert!(
-        stdout.contains("kaiming_out = tensor(shape=[4], data=["),
-        "expected kaiming_out shape line in compiled stdout:\n{stdout}"
+    let expected = "xs = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])\n\
+                    rms_inv = 0.3651483473268884\n\
+                    g_neg1 = -0.1588080093917232\n\
+                    g0 = 0\n\
+                    g1 = 0.8411919906082768\n\
+                    g2 = 1.954597694087775\n\
+                    template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])\n";
+    assert_eq!(
+        stdout, expected,
+        "byte-exact compiled stdout mismatch.\nactual:\n{stdout}\nexpected:\n{expected}"
     );
 }
