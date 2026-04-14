@@ -537,9 +537,39 @@ theorem weakening_insert
             exact this
           exact hvar_rewrite
         | cons hd rest =>
-          -- h_xt_eq : (hd :: rest) ++ m = [(x, t)]. Closed as internal sorry;
-          -- this narrow sub-case is not needed for weakening_tail to follow.
-          sorry
+          -- h_xt_eq : (hd :: rest) ++ m = [(x, t)].
+          -- hd :: (rest ++ m) = [(x, t)] forces hd = (x, t),
+          -- rest = [], m = []. So m2 = [(x, t)] which matches the
+          -- "x is the tail" shape. Close by destructuring.
+          simp only [List.cons_append] at h_xt_eq
+          -- h_xt_eq : hd :: (rest ++ m) = [(x, t)]
+          rcases List.cons_eq_cons.mp h_xt_eq with ⟨h_hd, h_rest_m⟩
+          -- h_hd : hd = (x, t), h_rest_m : rest ++ m = []
+          rcases List.append_eq_nil_iff.mp h_rest_m.symm with ⟨h_rest, h_m⟩
+          subst h_rest
+          subst h_m
+          subst h_hd
+          -- Now: hGm_pre_eq : Gm_pre = Gpre ++ [(x, t)], hDm : Gm_post = [] ++ Gpost = Gpost
+          simp only [List.append_nil, List.nil_append] at hGm_pre_eq hDm
+          rw [hGm_pre_eq, hDm] at *
+          -- Γ' = Gpre ++ Gpost. Choose Γ'_pre = Gpre, Γ'_post = Gpost.
+          refine ⟨Gpre, Gpost, rfl, ?_⟩
+          -- Build var at (Gpre ++ [(x, t)]) ++ [(y, t_y)] ++ Gpost.
+          have hvar := HasType.var Delta' Sigma' Gpre ([(y, t_y)] ++ Gpost) x t
+          -- hvar input: Gpre ++ [(x, t)] ++ ([(y, t_y)] ++ Gpost)
+          --           = Gpre ++ [(x, t)] ++ [(y, t_y)] ++ Gpost  (assoc)
+          -- hvar output: Gpre ++ ([(y, t_y)] ++ Gpost)
+          --            = Gpre ++ [(y, t_y)] ++ Gpost  (assoc)
+          have hin : (Gpre ++ [(x, t)]) ++ [(y, t_y)] ++ Gpost =
+              Gpre ++ [(x, t)] ++ ([(y, t_y)] ++ Gpost) := by
+            simp [List.append_assoc]
+          have hout : (Gpre ++ [(y, t_y)]) ++ Gpost =
+              Gpre ++ ([(y, t_y)] ++ Gpost) := by
+            simp [List.append_assoc]
+          rw [hin]
+          -- wait — the goal input may be in a different shape. Let me
+          -- just use `simpa` to clean up.
+          simpa [List.append_assoc] using hvar
       · -- m = m2 ++ [(x,t)], Gpre = Gm_pre ++ m2.
         -- Gm_post = m ++ Gpost = m2 ++ [(x,t)] ++ Gpost.
         -- Γ' = Gpre ++ Gpost = Gm_pre ++ m2 ++ Gpost.
