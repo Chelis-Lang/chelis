@@ -835,7 +835,11 @@ theorem weakening_insert
     intro _Delta' _Sigma' _G1 _G2 _G3 _body _clauses _t _epsH _epsB
            _hb _hEpsH _hCl _hCov _hCT _ihb _ihCT
     intro _Gm_pre _Gm_post _hsplit _hfp _hfq _hft
-    -- TODO: handle case — requires motive_2 threading. Left as internal sorry.
+    -- TODO: handle case — structure drafted (body IH + clauses IH
+    -- via has_type_linear_shrinks for freshness propagation) but
+    -- per-clause freshness extraction from freshInTerm on the
+    -- handle term requires a dedicated freshInTerm_clauses_cons
+    -- helper. Deferred.
     sorry
   case tgrad =>
     intro Delta' Sigma' Gamma x ds dsOut e' eps' _h hsub ih
