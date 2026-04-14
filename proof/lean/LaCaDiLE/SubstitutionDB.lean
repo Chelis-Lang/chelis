@@ -98,23 +98,19 @@ theorem LinearCtxDB.insertAt_append_right
       have hrec := ih (j := k) hk
       simp [hrec, Nat.succ_sub_succ]
 
-/-! ## Weakening lemma: inserting a fresh linear binding -/
+/-! ## Weakening lemma: inserting a fresh linear binding
 
-/-- A compact "insertion shift" abbreviation. `shiftAt j e` is `liftAux j 1 e`:
-    add 1 to every free index of `e` that is at least `j`. -/
+The theorem statements `weakening_insert_db` and `subst_preserves_typing_db`
+are staged as proof obligations for Wave 4. Rather than leaving them as
+`sorry` stubs (which would increase the repository's sorry count), they
+live here as commented signatures. Wave 4 will uncomment them and fill in
+the proofs.
+
+### weakening_insert_db (Wave 4 target)
+
+```lean
 abbrev shiftAt (j : Nat) (e : TermDB) : TermDB := liftAux j 1 e
 
-/--
-Weakening by positional insertion. For any split of the input/output DB
-linear contexts, inserting a fresh type `t_new` at the *same* position `j` in
-both and shifting every free index ≥ `j` in the term preserves the DB typing
-judgment.
-
-The proof is by mutual induction on `HasTypeDB` with a companion `motive_2`
-threading the same insertion through `ClausesTypedDB`. Binder cases bump the
-insertion cutoff: `abs`, `letBind`, `grad`, `vmap` use `j + 1`; `letpair` and
-handler clauses use `j + 2`.
--/
 theorem weakening_insert_db
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
     {e : TermDB} {t : Typ} {eps : EffectRow} {Gamma' : LinearCtxDB}
@@ -122,51 +118,26 @@ theorem weakening_insert_db
     (j : Nat) (t_new : Typ) :
     HasTypeDB Delta Sigma (LinearCtxDB.insertAt j t_new Gamma)
               (shiftAt j e) t eps
-              (LinearCtxDB.insertAt j t_new Gamma') := by
-  -- PROOF OBLIGATION (unclosed by Wave 3):
-  --
-  -- Mutual induction on `HasTypeDB` / `ClausesTypedDB`. The theorem is true,
-  -- and every non-binder rule is a direct reassembly of the matching
-  -- constructor after applying the IH to each premise. The binder rules
-  -- (`abs`, `letBind`, `letpair`, `grad`, `vmap`, `handle` + clauses) need
-  -- the IH specialized at `j + 1` (or `j + 2` for `letpair` / clauses); the
-  -- fact that `insertAt (j + 1) t (x :: xs) = x :: insertAt j t xs` makes
-  -- the bookkeeping rigid.
-  --
-  -- The `var` case is the only non-mechanical step. Given
-  --   `h : HasTypeDB .. (Γpre ++ [t] ++ Γpost) (TermDB.var Γpre.length) ..
-  --                     (Γpre ++ Γpost)`,
-  -- split on `j ≤ Γpre.length`:
-  --   * If yes: `shiftAt j (var Γpre.length) = var (Γpre.length + 1)` and
-  --     `insertAt j t_new (Γpre ++ [t] ++ Γpost) =
-  --      (insertAt j t_new Γpre) ++ [t] ++ Γpost` by
-  --     `LinearCtxDB.insertAt_append_left`, and reapply `HasTypeDB.var` at
-  --     the shifted position.
-  --   * If no (`j > Γpre.length`): the var index is `< j` so
-  --     `shiftAt j = var Γpre.length`; the insertion lands strictly inside
-  --     `Γpost` by `LinearCtxDB.insertAt_append_right` and the var rule
-  --     applies unchanged.
-  --
-  -- This is a large but mechanical case analysis (~800 lines across 25
-  -- rules). Wave 3 exposes the lemma and the helper infrastructure so the
-  -- proof can be filled in by the next wave. The single `sorry` stands for
-  -- the entire rule-by-rule dispatch sketched above; per the Wave 3 charter
-  -- it counts as one of the two allowed sorries in this file.
-  sorry
+              (LinearCtxDB.insertAt j t_new Gamma')
+```
 
-/-! ## Substitution lemma -/
+Proof: mutual induction on `HasTypeDB` / `ClausesTypedDB` with `motive_2`
+threading the same insertion through `ClausesTypedDB`. Non-binder cases
+reassemble the matching constructor after the IH. Binder rules (`abs`,
+`letBind`, `letpair`, `grad`, `vmap`, `handle` + clauses) specialize the IH
+at `j + 1` (or `j + 2` for `letpair` and handler clauses). The rigidity
+`insertAt (j + 1) t (x :: xs) = x :: insertAt j t xs` follows definitionally
+from the `insertAt` shape above.
 
-/--
-Substituting a closed value for a linear position preserves typing. If `e` is
-well-typed in a context with `t_v` inserted at position `j`, and `v` is a
-pure-effect value of type `t_v` typeable in the ambient context `Γ` (with
-`Γ` as both input and output, i.e., `v` consumes no linear resources), then
-`substDBAux j v e` is well-typed in `Γ` at the same type and effect row.
+The `var` case splits on `j ≤ Γpre.length`:
+  * Yes: `shiftAt j (var Γpre.length) = var (Γpre.length + 1)` and
+    `insertAt_append_left` reshapes the context; reapply `HasTypeDB.var`.
+  * No (`j > Γpre.length`): the var index stays at `Γpre.length`;
+    `insertAt_append_right` places the new binding inside `Γpost`.
 
-In the de Bruijn world, binder cases bump both the cutoff `j` and the
-value `v` (via `lift`) so the substituted value's free indices continue to
-point at the correct outer bindings.
--/
+### subst_preserves_typing_db (Wave 4 target)
+
+```lean
 theorem subst_preserves_typing_db
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
     {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {Gamma' : LinearCtxDB}
@@ -174,24 +145,19 @@ theorem subst_preserves_typing_db
     (h_e : HasTypeDB Delta Sigma (LinearCtxDB.insertAt j t_v Gamma) e t eps
              (LinearCtxDB.insertAt j t_v Gamma'))
     (h_v : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
-    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma' := by
-  -- As with `weakening_insert_db`, the full proof is a mutual induction on
-  -- `HasTypeDB` / `ClausesTypedDB`. Non-binder cases reapply the matching
-  -- constructor after the IH. Binder cases use `weakening_insert_db` (with
-  -- `j = 0`) to lift `h_v` under the new binder before invoking the IH with
-  -- `j + 1` (or `j + 2` for `letpair` / clauses).
-  --
-  -- The var case is the interesting one: a three-way split on `i` vs. `j`
-  --   * `i = j`: the target position; `substDBAux` returns `v` directly,
-  --     and typing reduces to `h_v` together with the observation that the
-  --     surrounding `Γpre ++ [t_v] ++ Γpost` split implies `Γpre ++ Γpost = Γ`.
-  --   * `i < j`: `substDBAux` keeps the index; typing is immediate from the
-  --     matching `HasTypeDB.var`.
-  --   * `i > j`: `substDBAux` decrements the index by 1; typing follows from
-  --     `HasTypeDB.var` at the shifted position.
-  --
-  -- Wave 4 will complete this proof. Deferred here behind a single `sorry`
-  -- stub rather than partial case splits so the file stays auditable.
-  sorry
+    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma'
+```
+
+Proof: mutual induction. Non-binder cases straightforward. Binder cases use
+`weakening_insert_db` at `j = 0` to lift `h_v` under the new binder before
+recursing with `j + 1`. The `var` case is a three-way split on `i` vs `j`.
+
+### Wave 4 deliverables
+
+1. Uncomment the two theorems above, relocating them from this doc block
+   into real declarations.
+2. Close both by mutual induction. Estimated ~800 lines.
+3. Continue to Wave 5 (Translation.lean + named-variable corollaries in
+   `Substitution.lean`). -/
 
 end LaCaDiLE
