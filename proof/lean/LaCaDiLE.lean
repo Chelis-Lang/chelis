@@ -2,6 +2,7 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.SyntaxDB
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
+import LaCaDiLE.TypingDB
 import LaCaDiLE.Operational
 import LaCaDiLE.AdjointTransform
 import LaCaDiLE.Substitution
