@@ -113,18 +113,63 @@ theorem canonical_forms_tensor
       | _ => first | (intro he _; cases he) | exact True.intro
 
 /-- Canonical forms: a value of pair type is a literal pair of values.
-    Wave 2 status: blocked by the `loc` case. A runtime location value
-    typed at a pair type is not a pair term, which would contradict
-    the conclusion. The fix is a `StoreTypTensorOnly` well-formedness
-    invariant asserting every Σ entry is a tensor type; this is
-    Wave 3 infrastructure. -/
+    Uses `StoreTypTensorOnly` to rule out loc-of-pair pathology. -/
 theorem canonical_forms_pair
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t1 t2 : Typ} {eps : EffectRow}
-    (_h : HasType Delta Sigma Gamma v (Typ.pair t1 t2) eps Gamma')
-    (_hv : IsValue v) :
+    (h_wf : StoreTypTensorOnly Sigma)
+    (h : HasType Delta Sigma Gamma v (Typ.pair t1 t2) eps Gamma')
+    (hv : IsValue v) :
     ∃ v1 v2, v = Term.pair v1 v2 ∧ IsValue v1 ∧ IsValue v2 := by
-  sorry
+  cases hv with
+  | pair v1 v2 hv1 hv2 => exact ⟨v1, v2, rfl, hv1, hv2⟩
+  | loc ell =>
+      -- StoreTypTensorOnly says Sigma maps ell to a tensor, not pair.
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx) (ell2 : Loc),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.loc ell2 →
+          t' = Typ.pair t1 t2 → S = Sigma → False from
+        hf _ _ _ _ _ _ _ _ h rfl rfl rfl
+      intro Δ S Γ e' t' ε Γ' ell2 hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | loc _ _ _ ell_m t_m hlook_m =>
+          intro _ ht hS
+          subst hS
+          obtain ⟨ds, hds⟩ := h_wf ell_m t_m hlook_m
+          subst hds
+          cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+          intro he ht hS; exact ih he ht hS
+      | _ => first | (intro he _ _; cases he) | exact True.intro
+  | abs _ _ _ =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx)
+          (x' : String) (t1' : Typ) (e'' : Term),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.abs x' t1' e'' →
+          t' = Typ.pair t1 t2 → False from
+        hf _ _ _ _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' x' t1' e'' hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | abs _ _ _ _ _ _ _ _ _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
+  | unit =>
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γ : LinearCtx)
+          (e' : Term) (t' : Typ) (ε : EffectRow) (Γ' : LinearCtx),
+          HasType Δ S Γ e' t' ε Γ' → e' = Term.unit →
+          t' = Typ.pair t1 t2 → False from
+        hf _ _ _ _ _ _ _ h rfl rfl
+      intro Δ S Γ e' t' ε Γ' hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | unit _ _ _ => intro _ ht; cases ht
+      | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
+      | _ => first | (intro he _; cases he) | exact True.intro
 
 /-! ## Progress -/
 
@@ -134,7 +179,9 @@ theorem canonical_forms_pair
     recursion to work (pair_inv / app_inv etc. give sub-derivations
     at non-trivial output contexts). -/
 theorem progress_aux
-    (sigma : Store) (Sigma : StoreTyp) (e : Term) (t : Typ)
+    (sigma : Store) (Sigma : StoreTyp)
+    (h_wf : StoreTypTensorOnly Sigma)
+    (e : Term) (t : Typ)
     (Gamma' : LinearCtx) (eps : EffectRow)
     (h : HasType [] Sigma [] e t eps Gamma') :
     IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
@@ -187,7 +234,7 @@ theorem progress_aux
       sorry
   | copy e1 =>
       obtain ⟨t0, _hteq, h_inner⟩ := HasType.copy_inv h
-      rcases progress_aux sigma Sigma e1 t0 Gamma' eps h_inner with
+      rcases progress_aux sigma Sigma h_wf e1 t0 Gamma' eps h_inner with
           hv | ⟨sigma', e1', hstep⟩
       · -- e1 is a value; copy on a value of pair-of-t0-t0 type. The
         -- reduction rule E-Copy only fires when the value is a loc,
@@ -204,18 +251,18 @@ theorem progress_aux
       sorry
   | fst e1 =>
       obtain ⟨t2, h_inner⟩ := HasType.fst_inv h
-      rcases progress_aux sigma Sigma e1 (Typ.pair t t2) Gamma' eps h_inner
+      rcases progress_aux sigma Sigma h_wf e1 (Typ.pair t t2) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
-      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_inner hv
+      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
         exact Or.inr ⟨sigma, v1, Step.fst sigma v1 v2 hv1 hv2⟩
       · exact Or.inr ⟨sigma', Term.fst e1',
           by simpa using Step.ctx sigma sigma' EvalCtx.fst e1 e1' hstep⟩
   | snd e1 =>
       obtain ⟨t1, h_inner⟩ := HasType.snd_inv h
-      rcases progress_aux sigma Sigma e1 (Typ.pair t1 t) Gamma' eps h_inner
+      rcases progress_aux sigma Sigma h_wf e1 (Typ.pair t1 t) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
-      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_inner hv
+      · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
         exact Or.inr ⟨sigma, v2, Step.snd sigma v1 v2 hv1 hv2⟩
       · exact Or.inr ⟨sigma', Term.snd e1',
@@ -228,7 +275,7 @@ theorem progress_aux
       sorry
   | sum e1 i =>
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.sum_inv h
-      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps h_inner
+      rcases progress_aux sigma Sigma h_wf e1 (Typ.tensor ds) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
       · -- TODO Wave 3+: StoreWf-dependent head reduction on loc value.
         sorry
@@ -236,14 +283,14 @@ theorem progress_aux
           by simpa using Step.ctx sigma sigma' (EvalCtx.sum i) e1 e1' hstep⟩
   | expand e1 i k =>
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.expand_inv h
-      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps h_inner
+      rcases progress_aux sigma Sigma h_wf e1 (Typ.tensor ds) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
       · sorry
       · exact Or.inr ⟨sigma', Term.expand e1' i k,
           by simpa using Step.ctx sigma sigma' (EvalCtx.expand i k) e1 e1' hstep⟩
   | uniformLike e1 lo hi =>
       obtain ⟨ds, eps0, _hteq, h_inner⟩ := HasType.uniformLike_inv h
-      rcases progress_aux sigma Sigma e1 (Typ.tensor ds) Gamma' eps0 h_inner
+      rcases progress_aux sigma Sigma h_wf e1 (Typ.tensor ds) Gamma' eps0 h_inner
           with hv | ⟨sigma', e1', hstep⟩
       · sorry
       · exact Or.inr ⟨sigma', Term.uniformLike e1' lo hi,
@@ -251,7 +298,7 @@ theorem progress_aux
             Step.ctx sigma sigma' (EvalCtx.uniformLike lo hi) e1 e1' hstep⟩
   | handle epsH body clauses =>
       obtain ⟨Γ2, epsB, h_body⟩ := HasType.handle_inv h
-      rcases progress_aux sigma Sigma body t Γ2 epsB h_body with
+      rcases progress_aux sigma Sigma h_wf body t Γ2 epsB h_body with
           hv | ⟨sigma', body', hstep⟩
       · exact Or.inr ⟨sigma, body, Step.handleRet sigma epsH body clauses hv⟩
       · exact Or.inr ⟨sigma', Term.handle epsH body' clauses,
@@ -267,9 +314,11 @@ decreasing_by all_goals (simp_wf; decreasing_tactic)
 /-- The classic closed-form Progress: trivially follows from the
     generalized form. -/
 theorem progress
-    (sigma : Store) (Sigma : StoreTyp) (e : Term) (t : Typ)
+    (sigma : Store) (Sigma : StoreTyp)
+    (h_wf : StoreTypTensorOnly Sigma)
+    (e : Term) (t : Typ)
     (h : HasType [] Sigma [] e t [] []) :
     IsValue e ∨ ∃ sigma' e', Step ⟨sigma, e⟩ ⟨sigma', e'⟩ :=
-  progress_aux sigma Sigma e t [] [] h
+  progress_aux sigma Sigma h_wf e t [] [] h
 
 end LaCaDiLE
