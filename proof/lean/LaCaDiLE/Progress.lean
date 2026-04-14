@@ -58,14 +58,18 @@ theorem canonical_forms_tensor
   -- TODO Wave 3+: value shapes of tensor type are only `loc`.
   sorry
 
-/-- Canonical forms: a value of pair type is a literal pair of values. -/
+/-- Canonical forms: a value of pair type is a literal pair of values.
+    Wave 2 status: blocked by the `loc` case. A runtime location value
+    typed at a pair type is not a pair term, which would contradict
+    the conclusion. The fix is a `StoreTypTensorOnly` well-formedness
+    invariant asserting every Σ entry is a tensor type; this is
+    Wave 3 infrastructure. -/
 theorem canonical_forms_pair
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t1 t2 : Typ} {eps : EffectRow}
     (_h : HasType Delta Sigma Gamma v (Typ.pair t1 t2) eps Gamma')
     (_hv : IsValue v) :
     ∃ v1 v2, v = Term.pair v1 v2 ∧ IsValue v1 ∧ IsValue v2 := by
-  -- TODO Wave 3+: only `IsValue.pair` can inhabit a pair type.
   sorry
 
 /-! ## Progress -/
@@ -85,10 +89,27 @@ theorem progress_aux
   -- measure declared at the bottom of the definition.
   cases e with
   | var x =>
-      -- TODO Wave 3+: var under empty context is impossible via
-      -- HasType.rec with equation motive (T-Var requires
-      -- Gamma_pre ++ [(x,t)] ++ Gamma_post = []).
-      sorry
+      -- T-Var requires `Γ_pre ++ [(x,t)] ++ Γ_post = []`, impossible.
+      exfalso
+      suffices hf : ∀ (Δ : CapCtx) (S : StoreTyp) (Γin : LinearCtx)
+          (e' : Term) (t' : Typ) (eps' : EffectRow) (Γout : LinearCtx),
+          HasType Δ S Γin e' t' eps' Γout →
+          Γin = [] → e' = Term.var x → False from
+        hf [] Sigma [] (Term.var x) t eps Gamma' h rfl rfl
+      intro Δ S Γin e' t' eps' Γout hd
+      induction hd using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+      | var _ _ Γpre Γpost _ _ =>
+          intro hΓ _heq
+          -- Γpre ++ [(x,t)] ++ Γpost = [] is impossible
+          rcases Γpre with _ | _ <;> simp_all
+      | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+          intro hΓ heq
+          exact ih hΓ heq
+      | _ =>
+          first
+            | (intro _ heq; cases heq)
+            | exact True.intro
   | abs x tv body => exact Or.inl (IsValue.abs x tv body)
   | unit => exact Or.inl IsValue.unit
   | loc ell => exact Or.inl (IsValue.loc ell)
