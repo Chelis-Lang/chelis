@@ -1457,13 +1457,18 @@ pub unsafe extern "C" fn chelis_tensor_from_value_list(
 ) -> *mut chelis_tensor {
     let len = chelis_list_len(list) as c_int;
     let shape = [len];
+    // The C backend stores raw f32 floats into `out->data` regardless of
+    // the incoming list tag, so the allocation must match that byte layout.
+    // Previously this returned a CHELIS_F64-dtyped tensor that was written
+    // as f32, corrupting every subsequent reader (most visibly as `-nan`
+    // or `inf` from `Std.Nn.Gelu.forward` / `Std.Nn.RmsNorm.forward`).
     let dtype = if !list.is_null()
         && !(*list).items.is_empty()
         && (*list).items[0].tag == chelis_value_tag::CHELIS_VALUE_INT64
     {
         CHELIS_I32
     } else {
-        CHELIS_F64
+        CHELIS_F32
     };
     let out = chelis_alloc(1, shape.as_ptr(), dtype);
     if !list.is_null() {

@@ -15,6 +15,8 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     out.push(String::new());
     append_tensor_print_helper(&mut out);
     out.push(String::new());
+    append_uniform_sample_helper(&mut out);
+    out.push(String::new());
     let header = emit_host_header(program);
     if !header.is_empty() {
         out.push(header);
@@ -50,6 +52,22 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     out.join("\n")
 }
 
+fn append_uniform_sample_helper(out: &mut Vec<String>) {
+    out.push(
+        "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {"
+            .to_string(),
+    );
+    out.push("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    x ^= x >> 30;".to_string());
+    out.push("    x *= 0xBF58476D1CE4E5B9ULL;".to_string());
+    out.push("    x ^= x >> 27;".to_string());
+    out.push("    x *= 0x94D049BB133111EBULL;".to_string());
+    out.push("    x ^= x >> 31;".to_string());
+    out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
+    out.push("    return low + (high - low) * (float)unit;".to_string());
+    out.push("}".to_string());
+}
+
 fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("static void chelis_print_tensor_stdout(const chelis_tensor* t) {".to_string());
     out.push("    printf(\"tensor(shape=[\");".to_string());
@@ -65,7 +83,7 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("        if (fabs(value - round(value)) < 1e-9) {".to_string());
     out.push("            printf(\"%.1f\", value);".to_string());
     out.push("        } else {".to_string());
-    out.push("            printf(\"%g\", value);".to_string());
+    out.push("            printf(\"%.16g\", value);".to_string());
     out.push("        }".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"])\");".to_string());
@@ -158,8 +176,25 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
     }
 
     let helper_src = CEmitter::emit_dag(&helper.dag, helper_name);
+    // The CEmitter prepends a `static inline float chelis_uniform_sample_f32`
+    // prelude to every DAG it emits so that a standalone-emitted kernel
+    // stays self-contained. When multiple helpers get concatenated into a
+    // single `main.c` that duplicates the definition and gcc rejects the
+    // redefinition. We filter the prelude out here and rely on
+    // `emit_host_program` to emit exactly one copy at file scope.
+    let mut skipping_uniform_prelude = false;
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
+            continue;
+        }
+        if line.contains("chelis_uniform_sample_f32(uint64_t seed") {
+            skipping_uniform_prelude = true;
+            continue;
+        }
+        if skipping_uniform_prelude {
+            if line == "}" {
+                skipping_uniform_prelude = false;
+            }
             continue;
         }
         if line.is_empty() && out.last().is_some_and(|last| last.is_empty()) {
@@ -935,6 +970,7 @@ impl HostEmitter {
             "and" => format!("{} && {}", arg_vars[0].0, arg_vars[1].0),
             "or" => format!("{} || {}", arg_vars[0].0, arg_vars[1].0),
             "not" => format!("!{}", arg_vars[0].0),
+            "neg" => format!("-({})", arg_vars[0].0),
             "string_concat" => {
                 format!("chelis_string_concat({}, {})", arg_vars[0].0, arg_vars[1].0)
             }
@@ -999,6 +1035,24 @@ impl HostEmitter {
             "rank" => format!("chelis_tensor_rank({})", arg_vars[0].0),
             "shape" => format!("chelis_tensor_shape({}, {})", arg_vars[0].0, arg_vars[1].0),
             "numel" => format!("chelis_tensor_numel({})", arg_vars[0].0),
+            // Scalar math — these run on host `double` values in lowered
+            // closures (e.g. the per-element GELU / RMSNorm map bodies).
+            // The RISC DAG variants of these ops are handled separately in
+            // `emit.rs`, but when a Surf `def` body is routed through the
+            // host interpreter, we need the libm names directly.
+            "sqrt" => format!("sqrt({})", arg_vars[0].0),
+            "exp" => format!("exp({})", arg_vars[0].0),
+            "log" => format!("log({})", arg_vars[0].0),
+            "sin" => format!("sin({})", arg_vars[0].0),
+            "cos" => format!("cos({})", arg_vars[0].0),
+            "tanh" => format!("tanh({})", arg_vars[0].0),
+            "pow" => format!("pow({}, {})", arg_vars[0].0, arg_vars[1].0),
+            "abs" => match arg_vars[0].1 {
+                HostType::Int64 => format!("llabs({})", arg_vars[0].0),
+                _ => format!("fabs({})", arg_vars[0].0),
+            },
+            "min" => format!("fmin({}, {})", arg_vars[0].0, arg_vars[1].0),
+            "max" => format!("fmax({}, {})", arg_vars[0].0, arg_vars[1].0),
             other => format!("/* unsupported builtin {other} */ 0"),
         };
         self.lines
@@ -1693,7 +1747,7 @@ impl HostEmitter {
             )),
             HostType::Float64 => self
                 .lines
-                .push(format!("{}printf(\"%g\\n\", {});", self.indent, value)),
+                .push(format!("{}printf(\"%.16g\\n\", {});", self.indent, value)),
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\\n\", {} ? \"true\" : \"false\");",
                 self.indent, value
@@ -1741,7 +1795,7 @@ impl HostEmitter {
             )),
             HostType::Float64 => self
                 .lines
-                .push(format!("{}printf(\"%g\", {});", self.indent, value)),
+                .push(format!("{}printf(\"%.16g\", {});", self.indent, value)),
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\", {} ? \"true\" : \"false\");",
                 self.indent, value

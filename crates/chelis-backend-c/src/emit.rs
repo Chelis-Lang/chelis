@@ -36,6 +36,14 @@ impl CEmitter {
     ) -> String {
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
+        // Some Surf signatures surface anonymous (Named("", None)) axes into
+        // the lowered DAG (e.g. a rank-1 tensor parameter whose dim has no
+        // declared name). These would emit `int  = inputs[0]->shape[0];` and
+        // `(int[]){ }` shape literals, neither of which compiles. Rewrite
+        // empty dim names to a stable synthesized identifier before the
+        // emitter walks the DAG.
+        let dag_owned = Self::rename_anonymous_dims(dag);
+        let dag = &dag_owned;
 
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
         let mut e = CEmitter {
@@ -168,6 +176,42 @@ impl CEmitter {
         e.indent = 0;
         e.line("}");
         e.lines.join("\n")
+    }
+
+    fn rename_anonymous_dims(dag: &Dag) -> Dag {
+        use chelis_ir::dag::DimInfo;
+        fn is_anon(name: &str) -> bool {
+            name.is_empty() || name == "*"
+        }
+        fn rewrite_dim(dim: &DimInfo) -> DimInfo {
+            match dim {
+                DimInfo::Named(name, size) if is_anon(name) => {
+                    DimInfo::Named("_anon_dim".to_string(), *size)
+                }
+                other => other.clone(),
+            }
+        }
+        let mut out = dag.clone();
+        // DAG exposes no `nodes_mut`; rewrite by round-tripping replace_node.
+        let ids: Vec<_> = out.nodes().iter().map(|n| n.id).collect();
+        for id in ids {
+            if let Some(node) = out.get(id) {
+                let needs = node
+                    .output_type
+                    .dims
+                    .iter()
+                    .any(|d| matches!(d, DimInfo::Named(name, _) if is_anon(name)));
+                if !needs {
+                    continue;
+                }
+                let mut new_ty = node.output_type.clone();
+                new_ty.dims = new_ty.dims.iter().map(rewrite_dim).collect();
+                let op = node.op.clone();
+                let inputs = node.inputs.clone();
+                out.replace_node(id, op, inputs, new_ty);
+            }
+        }
+        out
     }
 
     fn emit_node(&mut self, node: &DagNode, dag: &Dag) {

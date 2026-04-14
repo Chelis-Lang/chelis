@@ -238,13 +238,25 @@ fn lower_host_program(
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
-        if lowered_names.get(name).copied().unwrap_or(false) {
-            continue;
-        }
         let Some(body) = kids.get(1) else {
             continue;
         };
         let ty_expr = lookup_declared_type_expr(program, name);
+        // Pure-tensor top-level function defs are normally lowered to the
+        // DAG. But when the program also has host-lane bindings (i.e. some
+        // def is NOT DAG-lowerable), downstream host-lane callers still
+        // need a real C function symbol for the wrapper. In that case,
+        // emit a HostFunction wrapper alongside the DAG lowering. For
+        // pure-DAG programs (every def lowered) the legacy skip path is
+        // preserved so the DAG backend paths (C and HIP) continue to own
+        // emission.
+        let is_fn_body = matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
+        let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
+        let skip_for_lowered = lowered_names.get(name).copied().unwrap_or(false)
+            && !(is_fn_body && has_any_host_lane_def);
+        if skip_for_lowered {
+            continue;
+        }
         if let Some(function) = lower_host_function(name, body, ty_expr, program) {
             host.functions.push(function);
         } else {
@@ -314,7 +326,21 @@ fn lower_host_function(
     }
 
     let mut tensor_helpers = Vec::new();
-    let host_body = lower_host_expr(kids.get(1)?, program, &scope, &mut tensor_helpers);
+    let body_expr = kids.get(1)?;
+    // If the declared return type is a tensor, the body must produce a
+    // tensor even when downstream type-metadata annotations are missing
+    // from the reef'd deep AST. Force the body through the tensor-helper
+    // path in that case so that pure-tensor wrapper defs like
+    // `Std.Tensor.Reduce.min` get a real C function symbol rather than a
+    // fallthrough `HostExpr::Builtin` with an "unsupported builtin"
+    // placeholder (Phase 3j-pre Batch 5b bug 4).
+    let host_body = if let HostType::Tensor(expected) = ret_ty.clone()
+        && !should_keep_tensor_expr_in_host_lane(body_expr)
+    {
+        lower_tensor_helper_call(body_expr, program, &scope, &mut tensor_helpers, expected)
+    } else {
+        lower_host_expr(body_expr, program, &scope, &mut tensor_helpers)
+    };
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty == HostType::Unknown {
         host_expr_type(&host_body)
@@ -328,6 +354,62 @@ fn lower_host_function(
         body: host_body,
         tensor_helpers,
     })
+}
+
+/// Force-lower an expression through the tensor-helper path using an
+/// explicit expected tensor type hint. This is used by
+/// `lower_host_function` so that pure-tensor wrapper function bodies get a
+/// real C function definition even when downstream type metadata is
+/// missing on the reef'd deep AST's `app` nodes.
+fn lower_tensor_helper_call(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected: TensorType,
+) -> HostExpr {
+    if let Expr::List(list, _) = expr
+        && tag(list) == Some("var")
+        && let Some(name) = children(list).first().and_then(symbol_name)
+    {
+        return HostExpr::Var(name.to_string(), HostType::Tensor(expected));
+    }
+    let helper_index = tensor_helpers.len();
+    let helper_name = format!("__host_tensor_helper_{helper_index}");
+    let dag = crate::lower::lower_subexpr_program(
+        expr,
+        collect_tensor_scope(scope),
+        program.type_env().clone(),
+        collect_program_defs(program.exprs()),
+    );
+    let inputs = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.op {
+            crate::RiscOp::Load { name } => Some(HostTensorInput {
+                name: name.clone(),
+                ty: node.output_type.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let output = dag
+        .roots()
+        .first()
+        .and_then(|id| dag.get(*id))
+        .map(|node| node.output_type.clone())
+        .unwrap_or_else(|| expected.clone());
+    tensor_helpers.push(HostTensorHelper {
+        name: helper_name,
+        dag,
+        inputs,
+        output,
+    });
+    HostExpr::TensorCall {
+        helper: helper_index,
+        args: collect_tensor_args(expr, program, scope, tensor_helpers),
+        ty: HostType::Tensor(expected),
+    }
 }
 
 fn lower_host_expr(
@@ -537,6 +619,25 @@ fn lower_host_expr(
         }
         Expr::List(list, _) if tag(list) == Some("app") => {
             lower_app_host_expr(list, program, scope, tensor_helpers)
+        }
+        Expr::List(list, _) if tag(list) == Some("handle-effect") => {
+            // `with seed(...) { body }` and similar effect handlers are
+            // pure-result from the host emitter's perspective — the seed
+            // flows into random-op lowering at DAG-build time and the
+            // visible value is just `body`. Without this arm, the whole
+            // form fell through to `HostExpr::Unit`, which is why
+            // `kaiming_uniform` showed up as `()` in compiled output.
+            let kids = children(list);
+            // children(list) skips tag and metadata map, so for
+            // `(handle-effect {effect: random, ...} seed body)` kids[0] is
+            // the seed expression and kids[1] is the body. Some forms may
+            // omit the seed slot.
+            let body = kids.get(1).or_else(|| kids.first());
+            if let Some(body) = body {
+                lower_host_expr(body, program, scope, tensor_helpers)
+            } else {
+                HostExpr::Unit
+            }
         }
         Expr::MetaExpr(meta, _) => lower_host_expr(&meta.expr, program, scope, tensor_helpers),
         _ => HostExpr::Unit,

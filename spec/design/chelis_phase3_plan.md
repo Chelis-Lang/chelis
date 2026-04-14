@@ -918,9 +918,12 @@ check`/`chelis eval` with hand-computed exact reference values.
         seeded-Random handler returns `()` instead of a tensor in the
         C backend, so the result is not numerically usable.
       - `Std.Tensor.Reduce.{min, prod, argmax, argmin}` wrappers:
-        emitted as forward declarations only — the C backend does not
-        generate definitions, so the link fails with implicit
-        declarations and integer-to-pointer assignments.
+        **(fixed in Batch 5b.)** The host-lane lowerer now force-routes
+        pure-tensor wrapper function bodies through the tensor-helper
+        path using the declared return type, so pure-tensor wrapper
+        defs (including the four reduction wrappers plus the previously
+        also-broken `Std.Nn.Linear.forward` pure-tensor path) emit a
+        real C function definition and link successfully.
       - `Std.Nn.Attention.scaled_dot_product_attention` and friends:
         importing the module pulls in two duplicated definitions of
         `chelis_uniform_sample_f32` into the generated `main.c`,
