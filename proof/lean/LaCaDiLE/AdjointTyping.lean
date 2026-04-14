@@ -430,22 +430,18 @@ private theorem adjoint_typed_aux
       -- Bridge the effect row via `subEff`.
       exact HasType.subEff Delta Sigma Gamma_s Gamma_s' _ _ _ _
         h_letpair (subEff_letpair_add epsSeed)
-  | Term.mul e1 e2 =>
-      -- The mul case follows the same structure but with an outer
-      -- tape layer (`a`, `aTape`, `b`, `bTape`), a forward `mul`
-      -- binding (`y`), and the add-shaped inner `letpair`/`letBind`
-      -- (`gA`, `gB`, `adjA`). Eight fresh names total, all at
-      -- counter `n`; inner recursion uses counter `n + 8`.
-      --
-      -- Closing this case cleanly requires replaying the freshness
-      -- + filter + typing plumbing from the `add` case at five
-      -- context-extension layers. That is mechanical but
-      -- significantly heavier than the `add` case. Status: parked
-      -- under the catch-all alongside `sum`, `expand`, `handle`;
-      -- see the phase doc for the follow-up task.
-      sorry
-  -- `sum`, `expand`, and `handle` are parked on separate Phase 1
-  -- infrastructure (tape extent mechanism, ClausesTypedDB).
+  -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all:
+  -- they all generate adjoint bodies whose typing requires structural
+  -- access to sub-term typings of `e` that the seed-polymorphic
+  -- helper does not carry. `mul`'s adjoint in particular emits
+  -- `copy e1` / `copy e2` at the head of its tape layer, so closing
+  -- it requires either extending `adjoint_typed_aux` with an
+  -- `e`-typing premise (and an inversion lemma for `Term.mul`) or
+  -- reshaping the adjoint transform to defer operand tapes. Both
+  -- approaches are outside the Wave-4 Track B scope; they line up
+  -- naturally with the Phase 1 T9 tape extent mechanism tracked for
+  -- `sum` / `expand` and with the ClausesTypedDB work tracked for
+  -- `handle`. Parked together under this catch-all.
   | _ => sorry
 termination_by sizeOf e
 
