@@ -256,17 +256,17 @@ theorem HasType.sum_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {d : Dim} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.sum e d) t eps Gamma2) :
-    ∃ ds, t = Typ.tensor (rem ds d) ∧
+    ∃ ds, t = Typ.tensor (rem ds d) ∧ d ∈ ds ∧
           HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 := by
   generalize heq : Term.sum e d = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | tsum _ _ _ _ _ ds _ _ h' _ _ =>
+  | tsum _ _ _ _ _ ds _ _ h' hmem _ =>
       cases heq
-      exact ⟨ds, rfl, h'⟩
+      exact ⟨ds, rfl, hmem, h'⟩
   | subEff Δ S Γ Γ' _ t' eps0 eps' _h_sub h_sub ih =>
-      obtain ⟨ds, hteq, h_inv⟩ := ih heq
-      refine ⟨ds, hteq, ?_⟩
+      obtain ⟨ds, hteq, hmem, h_inv⟩ := ih heq
+      refine ⟨ds, hteq, hmem, ?_⟩
       exact HasType.subEff Δ S Γ Γ' e (Typ.tensor ds) eps0 eps' h_inv h_sub
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
@@ -537,7 +537,7 @@ theorem preservation
   | tsum s ell ellOut w d hlook hfresh =>
       -- sum_inv gives ds with t = tensor (rem ds d); loc_inv gives
       -- storeTypLookup Sigma ell = some (tensor ds) + Gamma = [].
-      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.sum_inv h_typ
+      obtain ⟨ds, htEq, _hmem, h_loc_e⟩ := HasType.sum_inv h_typ
       obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (rem ds d)), ?_, ?_⟩
@@ -679,6 +679,50 @@ theorem plug_preserves_typing
   | hole =>
       -- plug hole e = e; directly apply the inner-step hypothesis.
       simpa [plug] using h_inner h
+  | fst =>
+      -- plug fst e = Term.fst e.
+      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_pair
+      refine ⟨Sigma2, ?_, h_sub⟩
+      show HasType Delta Sigma2 Gamma (Term.fst e') t eps Gamma'
+      exact HasType.fst Delta Sigma2 Gamma Gamma' e' t t2 eps h_e'
+  | snd =>
+      have h' : HasType Delta Sigma Gamma (Term.snd e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_pair
+      refine ⟨Sigma2, ?_, h_sub⟩
+      show HasType Delta Sigma2 Gamma (Term.snd e') t eps Gamma'
+      exact HasType.snd Delta Sigma2 Gamma Gamma' e' t1 t eps h_e'
+  | copy =>
+      have h' : HasType Delta Sigma Gamma (Term.copy e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_inner_ds⟩ := HasType.copy_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_inner_ds
+      refine ⟨Sigma2, ?_, h_sub⟩
+      subst hteq
+      show HasType Delta Sigma2 Gamma (Term.copy e') (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) eps Gamma'
+      exact HasType.copy Delta Sigma2 Gamma Gamma' e' ds eps h_e'
+  | sum d =>
+      have h' : HasType Delta Sigma Gamma (Term.sum e d) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, hmem, h_inner_ds⟩ := HasType.sum_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_inner_ds
+      refine ⟨Sigma2, ?_, h_sub⟩
+      subst hteq
+      show HasType Delta Sigma2 Gamma (Term.sum e' d) (Typ.tensor (rem ds d)) eps Gamma'
+      exact HasType.tsum Delta Sigma2 Gamma Gamma' e' ds d eps h_e' hmem
+  | expand d =>
+      have h' : HasType Delta Sigma Gamma (Term.expand e d) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_inner_ds⟩ := HasType.expand_inv h'
+      obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_inner_ds
+      refine ⟨Sigma2, ?_, h_sub⟩
+      subst hteq
+      show HasType Delta Sigma2 Gamma (Term.expand e' d) (Typ.tensor (ins ds d)) eps Gamma'
+      exact HasType.texpand Delta Sigma2 Gamma Gamma' e' ds d eps h_e'
   | _ => sorry
 
 end LaCaDiLE
