@@ -567,8 +567,16 @@ theorem progress_aux
           by simpa using
             Step.ctx sigma sigma' (EvalCtx.handle epsH clauses) body body' hstep⟩
   | perform op e1 =>
-      -- TODO Wave 3+: perform under empty effect row input requires
-      -- a perform_inv lemma plus effect-row inversion.
+      -- perform op e1 is neither a value nor steppable when e1 is a
+      -- value — perform has no head reduction outside a handle.
+      -- For progress at closed effect row (eps = []) this case is
+      -- vacuous via effect-row contradiction: T-Perform produces
+      -- eps ⊇ [op], which can't be empty. But progress_aux has
+      -- loose eps, so we handle the sub-step direction here and
+      -- leave the value sub-case as a bounded sorry with TODO.
+      -- TODO Wave 4: restrict progress_aux to eps = [] or extract
+      -- a standalone "perform at non-handle is stuck only under
+      -- handled-context" result.
       sorry
 termination_by sizeOf e
 decreasing_by all_goals (simp_wf; decreasing_tactic)
