@@ -89,3 +89,16 @@ class TestStampShell:
         rewritten = stamp_shell(src, dst, "nautilus", "coral")
         rewritten_names = {p.name for p in rewritten}
         assert rewritten_names == {"reef.toml", "core.ch", "README.md", "AGENTS.md"}
+
+    def test_excludes_phase_spec_files(self, tmp_path: Path):
+        src = _make_fake_nautilus(tmp_path)
+        (src / "spec").mkdir()
+        (src / "spec" / "phase3j.md").write_text("# Phase 3j — Nautilus\nnautilus body\n")
+        (src / "spec" / "shared_notes.md").write_text("not a phase file\n")
+        dst = tmp_path / "coral"
+        stamp_shell(src, dst, "nautilus", "coral")
+
+        # phase3j.md must not be copied — each shell owns its own phase spec
+        assert not (dst / "spec" / "phase3j.md").exists()
+        # non-phase files in spec/ are still copied verbatim
+        assert (dst / "spec" / "shared_notes.md").read_text() == "not a phase file\n"

@@ -12,7 +12,9 @@ it:
 Both lowercase (`nautilus`) and capitalized (`Nautilus`) forms are
 swapped. Every other file — license, gitignore, CI workflow, agent-skill
 copies, command wrappers — is copied verbatim. The `.git/` directory is
-excluded.
+excluded. `spec/phase*.md` files are also excluded: each shell owns its
+own phase spec and must write it fresh rather than inheriting the
+source shell's.
 
 Usage:
     stamp-shell --src ../nautilus --dst ../coral \\
@@ -46,8 +48,14 @@ def stamp_shell(src: Path, dst: Path, old: str, new: str) -> list[Path]:
     if not (src / "reef.toml").is_file():
         raise FileNotFoundError(f"source is not a shell repo: {src}")
 
-    def _ignore(_dir: str, names: list[str]) -> list[str]:
-        return [n for n in names if n == ".git"]
+    def _ignore(dir_path: str, names: list[str]) -> list[str]:
+        skip = [n for n in names if n == ".git"]
+        # Do not copy phase-spec files: each shell owns its own phase spec
+        # and silently inheriting the source shell's spec would be wrong.
+        # The operator must write the destination spec fresh.
+        if Path(dir_path).name == "spec":
+            skip.extend(n for n in names if n.startswith("phase") and n.endswith(".md"))
+        return skip
 
     shutil.copytree(src, dst, symlinks=True, ignore=_ignore)
 
