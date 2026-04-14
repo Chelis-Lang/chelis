@@ -37,20 +37,25 @@ theorem value_preserves_closed_context
   -- each enforce Γ_out = Γ_in = [].
   sorry
 
+/-- Store typing well-formedness: every location maps to a tensor
+    type. Holds for every Sigma reachable from an initially-empty
+    store via the Preservation cases. -/
+def StoreTypTensorOnly (Sigma : StoreTyp) : Prop :=
+  ∀ ell t, storeTypLookup Sigma ell = some t → ∃ ds, t = Typ.tensor ds
+
 /-- Canonical forms: a value of arrow type is a literal abstraction.
-    Wave 2 caveat: loc-of-arrow-type is the pathological case (a
-    location storing an arrow type). We use a `StoreTypTensorOnly`
-    premise to rule it out. -/
+    Wave 3 TODO: mirrors canonical_forms_tensor but needs an extra
+    StoreTypTensorOnly premise to rule out loc-of-arrow (loc case),
+    plus a cleaner abs-case pattern that doesn't trip on Lean's
+    dependent elimination of the abs constructor's internal type
+    parameter t1. -/
 theorem canonical_forms_arrow
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {v : Term} {t1 t2 : Typ} {eps eps' : EffectRow}
+    (_h_wf : StoreTypTensorOnly Sigma)
     (_h : HasType Delta Sigma Gamma v (Typ.arrow t1 t2 eps) eps' Gamma')
     (_hv : IsValue v) :
     ∃ x body, v = Term.abs x t1 body := by
-  -- TODO Wave 3: mirrors canonical_forms_tensor but needs
-  -- StoreTypTensorOnly to dispatch the loc case (a loc with arrow
-  -- type is uninhabited under the invariant). The abs/unit/pair
-  -- cases close via equation contradiction on type shape.
   sorry
 
 /-- Canonical forms: a value of tensor type is a runtime location.
