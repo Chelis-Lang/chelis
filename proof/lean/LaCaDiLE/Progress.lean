@@ -521,7 +521,7 @@ theorem progress_aux
                 e2 e2' hstep⟩
       · exact Or.inr ⟨sigma', Term.mul e1' e2,
           by simpa using Step.ctx sigma sigma' (EvalCtx.mulL e2) e1 e1' hstep⟩
-  | sum e1 i =>
+  | sum e1 d =>
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.sum_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
@@ -530,10 +530,10 @@ theorem progress_aux
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
         exact Or.inr ⟨_, _,
-          Step.tsum sigma ell (storeFreshLoc sigma) w i hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.sum e1' i,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.sum i) e1 e1' hstep⟩
-  | expand e1 i k =>
+          Step.tsum sigma ell (storeFreshLoc sigma) w d hw rfl⟩
+      · exact Or.inr ⟨sigma', Term.sum e1' d,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.sum d) e1 e1' hstep⟩
+  | expand e1 d =>
       obtain ⟨ds, _hteq, h_inner⟩ := HasType.expand_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩
@@ -542,9 +542,9 @@ theorem progress_aux
         obtain ⟨hlk, _⟩ := HasType.loc_inv h_inner
         obtain ⟨w, hw⟩ := storeWf_lookup_witness h_store_wf hlk
         exact Or.inr ⟨_, _,
-          Step.texpand sigma ell (storeFreshLoc sigma) w i k hw rfl⟩
-      · exact Or.inr ⟨sigma', Term.expand e1' i k,
-          by simpa using Step.ctx sigma sigma' (EvalCtx.expand i k) e1 e1' hstep⟩
+          Step.texpand sigma ell (storeFreshLoc sigma) w d hw rfl⟩
+      · exact Or.inr ⟨sigma', Term.expand e1' d,
+          by simpa using Step.ctx sigma sigma' (EvalCtx.expand d) e1 e1' hstep⟩
   | uniformLike e1 lo hi =>
       obtain ⟨ds, eps0, _hteq, h_inner⟩ := HasType.uniformLike_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.tensor ds) Gamma' eps0 h_inner

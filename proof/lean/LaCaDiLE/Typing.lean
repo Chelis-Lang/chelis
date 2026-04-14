@@ -180,26 +180,30 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
       HasType Delta Sigma Gamma1 (Term.mul e1 e2) (Typ.tensor ds) (EffectRow.union eps1 eps2) Gamma3
 
   -- T-Sum.
-  -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂    0 ≤ i < |d̄|
+  -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂    d ∈ d̄
   --        ─────────────────────────────────────────────────
-  --        Δ; Γ₁ ⊢ sum(e, i) : tensor[rem(d̄, i)] ! ε ⊣ Γ₂
+  --        Δ; Γ₁ ⊢ sum(e, d) : tensor[rem(d̄, d)] ! ε ⊣ Γ₂
+  -- Stage 1 refactor: positional index `i` replaced by named
+  -- dimension `d`; membership premise replaces the old `i < |d̄|`.
   | tsum
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
-      (e : Term) (ds : DimList) (i : Nat) (eps : EffectRow) :
+      (e : Term) (ds : DimList) (d : Dim) (eps : EffectRow) :
       HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 →
-      i < ds.length →
-      HasType Delta Sigma Gamma1 (Term.sum e i) (Typ.tensor (rem ds i)) eps Gamma2
+      d ∈ ds →
+      HasType Delta Sigma Gamma1 (Term.sum e d) (Typ.tensor (rem ds d)) eps Gamma2
 
   -- T-Expand.
-  -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂    0 ≤ i ≤ |d̄|
+  -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂
   --        ─────────────────────────────────────────────────
-  --        Δ; Γ₁ ⊢ expand(e, i, k) : tensor[ins(d̄, i, k)] ! ε ⊣ Γ₂
+  --        Δ; Γ₁ ⊢ expand(e, d) : tensor[ins(d̄, d)] ! ε ⊣ Γ₂
+  -- Stage 1 refactor: positional `(i, k)` replaced by named
+  -- dimension `d`; for `Dim.lit k` the extent `k` is carried by
+  -- `d` itself.
   | texpand
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
-      (e : Term) (ds : DimList) (i k : Nat) (eps : EffectRow) :
+      (e : Term) (ds : DimList) (d : Dim) (eps : EffectRow) :
       HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 →
-      i ≤ ds.length →
-      HasType Delta Sigma Gamma1 (Term.expand e i k) (Typ.tensor (ins ds i k)) eps Gamma2
+      HasType Delta Sigma Gamma1 (Term.expand e d) (Typ.tensor (ins ds d)) eps Gamma2
 
   -- T-UniformLike.
   -- Paper: Δ; Γ₁ ⊢ e : tensor[d̄] ! ε ⊣ Γ₂
@@ -510,7 +514,7 @@ theorem has_type_linear_shrinks
   | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
       intro z hz; exact ih1 z (ih2 z hz)
   | tsum _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
-  | texpand _ _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
+  | texpand _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
   | uniformLike _ _ _ _ _ _ _ _ _ _ ih => intro z hz; exact ih z hz
   | perform _De _Si _G1 _G2 _op _e _tA _tR _eps _h _hM ih =>
       intro z hz; exact ih z hz

@@ -100,13 +100,12 @@ def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
                                          (Term.var (tapeName "b"))))
                 (adjoint e2 x (Term.mul (Term.var "gB")
                                          (Term.var (tapeName "a"))))))))
-  | Term.sum e i =>
-      -- Backward for sum is expand at the same axis. The extent
-      -- placeholder 0 is replaced in Phase 2 T9 when the shape tape
-      -- ships (subsumes P8).
-      adjoint e x (Term.expand gSeed i 0)
-  | Term.expand e i _k =>
-      adjoint e x (Term.sum gSeed i)
+  | Term.sum e d =>
+      -- Backward for sum is expand at the same dim `d` (Stage 1:
+      -- dimensions are now named, so extent comes along with `d`).
+      adjoint e x (Term.expand gSeed d)
+  | Term.expand e d =>
+      adjoint e x (Term.sum gSeed d)
   | Term.uniformLike e _ _ =>
       -- `uniform_like` is rejected by T-Grad's DiffCompat premise, so
       -- this case is vacuous — but we structurally recurse anyway to

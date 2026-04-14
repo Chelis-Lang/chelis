@@ -53,26 +53,26 @@ private theorem linearity_soundness_aux
       have h_wf2 := StoreWf.remove ell2 h_wf1
       exact StoreWf.extend_fresh ellOut
         (tensorOpPlaceholder w1 w2) (Typ.tensor w1.shape) h_wf2
-  | tsum s ell ellOut w i hlook hfresh =>
+  | tsum s ell ellOut w d hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (rem w.shape i)), ?_⟩
+                (Typ.tensor (rem w.shape d)), ?_⟩
       have h_isSome : (storeLookup s ell).isSome := by
         rw [hlook]; rfl
       have hne : ell ≠ ellOut := by
         rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
       exact StoreWf.remove_extend ell ellOut
-        { shape := rem w.shape i, data := w.data }
-        (Typ.tensor (rem w.shape i)) h_wf hfresh hne
-  | texpand s ell ellOut w i k hlook hfresh =>
+        { shape := rem w.shape d, data := w.data }
+        (Typ.tensor (rem w.shape d)) h_wf hfresh hne
+  | texpand s ell ellOut w d hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (ins w.shape i k)), ?_⟩
+                (Typ.tensor (ins w.shape d)), ?_⟩
       have h_isSome : (storeLookup s ell).isSome := by
         rw [hlook]; rfl
       have hne : ell ≠ ellOut := by
         rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
       exact StoreWf.remove_extend ell ellOut
-        { shape := ins w.shape i k, data := w.data }
-        (Typ.tensor (ins w.shape i k)) h_wf hfresh hne
+        { shape := ins w.shape d, data := w.data }
+        (Typ.tensor (ins w.shape d)) h_wf hfresh hne
   | tuniformLike s ell ellOut w lo hi hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor w.shape), ?_⟩

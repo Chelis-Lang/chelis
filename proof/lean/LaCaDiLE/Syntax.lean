@@ -22,22 +22,19 @@ inductive Dim where
 /-- A dimension list is an ordered sequence of dimensions (`d̄` in the paper). -/
 abbrev DimList := List Dim
 
-/-- Insert a literal extent `k` at position `i` in a dimension list.
-    Paper notation: `ins(d̄, i, k)`. Used by T-Expand and E-Expand. -/
-def ins (ds : DimList) (i : Nat) (k : Nat) : DimList :=
-  let dNew := Dim.lit k
-  match i, ds with
-  | 0, rest => dNew :: rest
-  | Nat.succ _, [] => [dNew]
-  | Nat.succ n, d :: rest => d :: ins rest n k
+/-- Insert a dimension `d` into a dimension list. Stage 1 refactor:
+    `ins` now takes a `Dim` argument instead of a `(position, extent)`
+    pair. Semantics: prepend. Stage 2 will switch `DimList` to a
+    multiset representation; at that point the prepend order becomes
+    irrelevant. Paper notation: `ins(d̄, d)`. Used by T-Expand and
+    E-Expand. -/
+def ins (ds : DimList) (d : Dim) : DimList := d :: ds
 
-/-- Remove the dimension at position `i`. Paper notation: `rem(d̄, i)`.
-    Used by T-Sum and E-Sum. -/
-def rem (ds : DimList) (i : Nat) : DimList :=
-  match i, ds with
-  | _, [] => []
-  | 0, _ :: rest => rest
-  | Nat.succ n, d :: rest => d :: rem rest n
+/-- Remove a dimension `d` from a dimension list. Stage 1 refactor:
+    `rem` now takes a `Dim` argument instead of a positional index.
+    Semantics: `List.erase` — remove the first occurrence by equality.
+    Paper notation: `rem(d̄, d)`. Used by T-Sum and E-Sum. -/
+def rem (ds : DimList) (d : Dim) : DimList := ds.erase d
 
 /-! ## Effect rows and capabilities -/
 
@@ -222,8 +219,8 @@ inductive Term where
   | const       (v : Float) (ds : DimList)
   | add         (e1 : Term) (e2 : Term)
   | mul         (e1 : Term) (e2 : Term)
-  | sum         (e : Term) (i : Nat)
-  | expand      (e : Term) (i : Nat) (k : Nat)
+  | sum         (e : Term) (d : Dim)
+  | expand      (e : Term) (d : Dim)
   | uniformLike (e : Term) (lo : Float) (hi : Float)
   -- AD / vectorization transforms (restricted to literal abstractions per T-Grad)
   | grad    (x : String) (t : Typ) (tOut : Typ) (body : Term)
@@ -263,11 +260,11 @@ def addDimTerm (d : Dim) : Term → Term
   | Term.const v ds => Term.const v (d :: ds)
   | Term.add e1 e2 => Term.add (addDimTerm d e1) (addDimTerm d e2)
   | Term.mul e1 e2 => Term.mul (addDimTerm d e1) (addDimTerm d e2)
-  -- shift axis indices for reductions / expansions: the new batch
-  -- dimension is prepended at index 0, so every existing axis shifts
-  -- up by 1. `sum` and `expand` operate on the shifted axis.
-  | Term.sum e i => Term.sum (addDimTerm d e) (i + 1)
-  | Term.expand e i k => Term.expand (addDimTerm d e) (i + 1) k
+  -- Stage 1 refactor: `sum`/`expand` now reference dimensions by
+  -- name, not by positional index. The new batch dim `d` is prepended
+  -- at the type level but the reduced/expanded axis is unchanged.
+  | Term.sum e d' => Term.sum (addDimTerm d e) d'
+  | Term.expand e d' => Term.expand (addDimTerm d e) d'
   | Term.uniformLike e lo hi => Term.uniformLike (addDimTerm d e) lo hi
   | Term.grad x t tOut body =>
       Term.grad x (addDim d t) (addDim d tOut) (addDimTerm d body)
@@ -315,7 +312,7 @@ def freeVars : Term → List String
   | Term.add e1 e2 => freeVars e1 ++ freeVars e2
   | Term.mul e1 e2 => freeVars e1 ++ freeVars e2
   | Term.sum e _ => freeVars e
-  | Term.expand e _ _ => freeVars e
+  | Term.expand e _ => freeVars e
   | Term.uniformLike e _ _ => freeVars e
   | Term.grad x _ _ body => (freeVars body).filter (· != x)
   | Term.vmap x _ body => (freeVars body).filter (· != x)
@@ -361,7 +358,7 @@ def boundVars : Term → List String
   | Term.add e1 e2 => boundVars e1 ++ boundVars e2
   | Term.mul e1 e2 => boundVars e1 ++ boundVars e2
   | Term.sum e _ => boundVars e
-  | Term.expand e _ _ => boundVars e
+  | Term.expand e _ => boundVars e
   | Term.uniformLike e _ _ => boundVars e
   | Term.grad x _ _ body => x :: boundVars body
   | Term.vmap x _ body => x :: boundVars body

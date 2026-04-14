@@ -110,7 +110,7 @@ theorem subst_notFree
   | Term.sum e _ =>
       simp only [freeVars] at h
       simp [subst, subst_notFree e v x h]
-  | Term.expand e _ _ =>
+  | Term.expand e _ =>
       simp only [freeVars] at h
       simp [subst, subst_notFree e v x h]
   | Term.uniformLike e _ _ =>
@@ -326,14 +326,14 @@ theorem freshInTerm_snd {y : String} {e : Term}
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩
 
-theorem freshInTerm_sum {y : String} {e : Term} {i : Nat}
-    (h : freshInTerm y (Term.sum e i)) : freshInTerm y e := by
+theorem freshInTerm_sum {y : String} {e : Term} {d : Dim}
+    (h : freshInTerm y (Term.sum e d)) : freshInTerm y e := by
   rcases h with ⟨hf, hb⟩
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩
 
-theorem freshInTerm_expand {y : String} {e : Term} {i k : Nat}
-    (h : freshInTerm y (Term.expand e i k)) : freshInTerm y e := by
+theorem freshInTerm_expand {y : String} {e : Term} {d : Dim}
+    (h : freshInTerm y (Term.expand e d)) : freshInTerm y e := by
   rcases h with ⟨hf, hb⟩
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩
@@ -889,19 +889,19 @@ theorem weakening_insert
     refine ⟨G3p, G3q, hG3, ?_⟩
     exact HasType.tmul Delta' Sigma' _ _ _ e1 e2 ds eps1 eps2 h1' h2'
   case tsum =>
-    intro Delta' Sigma' G1 G2 e' ds i eps' _h hi ih
+    intro Delta' Sigma' G1 G2 e' ds d eps' _h hmem ih
     intro Gm_pre Gm_post hsplit hfp hfq hft
     have hfe := freshInTerm_sum hft
     obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
     refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.tsum Delta' Sigma' _ _ e' ds i eps' h' hi
+    exact HasType.tsum Delta' Sigma' _ _ e' ds d eps' h' hmem
   case texpand =>
-    intro Delta' Sigma' G1 G2 e' ds i k eps' _h hi ih
+    intro Delta' Sigma' G1 G2 e' ds d eps' _h ih
     intro Gm_pre Gm_post hsplit hfp hfq hft
     have hfe := freshInTerm_expand hft
     obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
     refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.texpand Delta' Sigma' _ _ e' ds i k eps' h' hi
+    exact HasType.texpand Delta' Sigma' _ _ e' ds d eps' h'
   case uniformLike =>
     intro Delta' Sigma' G1 G2 e' ds lo hi eps' _h ih
     intro Gm_pre Gm_post hsplit hfp hfq hft

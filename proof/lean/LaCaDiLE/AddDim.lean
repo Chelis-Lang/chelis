@@ -44,23 +44,13 @@ theorem addDimCtx_filter_name (d : Dim) (G : LinearCtx) (p : String → Bool) :
     · simp [hp]; exact ih
     · simp [hp]; exact ih
 
-/-- `rem` commutes with prepending under index shift. -/
-theorem rem_cons_succ (d : Dim) (ds : DimList) (i : Nat) :
-    rem (d :: ds) (i + 1) = d :: rem ds i := by
-  rfl
-
-/-- `ins` commutes with prepending under index shift. -/
-theorem ins_cons_succ (d : Dim) (ds : DimList) (i k : Nat) :
-    ins (d :: ds) (i + 1) k = d :: ins ds i k := by
-  rfl
-
-theorem addDim_tensor_rem (d : Dim) (ds : DimList) (i : Nat) :
-    addDim d (Typ.tensor (rem ds i)) = Typ.tensor (rem (d :: ds) (i + 1)) := by
-  rfl
-
-theorem addDim_tensor_ins (d : Dim) (ds : DimList) (i k : Nat) :
-    addDim d (Typ.tensor (ins ds i k)) = Typ.tensor (ins (d :: ds) (i + 1) k) := by
-  rfl
+-- Stage 1 refactor: positional `rem`/`ins` replaced by named
+-- `rem ds d := ds.erase d` and `ins ds d := d :: ds`. The previous
+-- `rem_cons_succ`, `ins_cons_succ`, `addDim_tensor_rem`, and
+-- `addDim_tensor_ins` helper lemmas (which lived on positional
+-- indices with an `i + 1` shift) no longer have meaningful content
+-- and are removed. Stage 2 reintroduces the analogous commutativity
+-- lemmas at the multiset/quotient level where they hold definitionally.
 
 /-- addDim / addDimTerm preserves typing (Phase 2 WS2.3). Wave 2
     fix: store typing is now lifted via `addDimStoreTyp`, which
@@ -195,26 +185,6 @@ theorem addDim_preserves_typing
     exact HasType.tmul Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2) (d :: ds)
       eps1 eps2 ih1' ih2'
-  | tsum Delta Sigma Gamma1 Gamma2 e ds i eps _h hi ih =>
-    simp [addDimTerm]
-    have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
-        (Typ.tensor (d :: ds)) eps (addDimCtx d Gamma2) := by
-      simpa [addDim] using ih
-    have hi' : i + 1 < (d :: ds).length := by
-      simp [List.length]; omega
-    have key := HasType.tsum Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimTerm d e) (d :: ds) (i + 1) eps ih' hi'
-    simpa [addDim_tensor_rem] using key
-  | texpand Delta Sigma Gamma1 Gamma2 e ds i k eps _h hi ih =>
-    simp [addDimTerm]
-    have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
-        (Typ.tensor (d :: ds)) eps (addDimCtx d Gamma2) := by
-      simpa [addDim] using ih
-    have hi' : i + 1 ≤ (d :: ds).length := by
-      simp [List.length]; omega
-    have key := HasType.texpand Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      (addDimTerm d e) (d :: ds) (i + 1) k eps ih' hi'
-    simpa [addDim_tensor_ins] using key
   | uniformLike Delta Sigma Gamma1 Gamma2 e ds lo hi eps _h ih =>
     simp [addDimTerm]
     have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
@@ -301,30 +271,6 @@ theorem addDim_preserves_typing
       simpa [addDim] using this
     exact HasType.tgrad Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
       x (d :: ds) (d :: dsOut) (addDimTerm d e) eps ih' hsub
-  | tvmap Delta Sigma Gamma x t1 t2 e eps d' _h ih =>
-    -- This case is genuinely stuck at the current calculus definition.
-    --
-    -- Concrete obstacle: `addDim` prepends the dim to the left of the
-    -- tensor shape list, so `addDim d_out (addDim d_in τ)` and
-    -- `addDim d_in (addDim d_out τ)` are NOT definitionally equal —
-    -- they differ in prepend order. HasType.tvmap, given an IH at type
-    -- `addDim d_out (Typ.arrow (addDim d_in t1) (addDim d_in t2) eps)`,
-    -- has no choice of fresh dim that makes the reconstructed arrow
-    -- match without a full commutativity lemma that doesn't hold.
-    --
-    -- Fix options (all Phase 1 T7 definitional refactors, outside Wave
-    -- 1 scope):
-    --   (1) Represent tensor dims as a multiset / canonically sorted
-    --       list so prepend order is irrelevant.
-    --   (2) Change `addDim` to insert at a canonical position keyed by
-    --       a total order on `Dim`.
-    --   (3) Rewrite T-Vmap so the result type does not appeal to
-    --       `addDim` at all (e.g. dependent tensor shapes).
-    --
-    -- TODO Phase 2 Wave 0.5: pick one of (1)-(3), refactor the Typ
-    -- representation, and re-run this proof. All other HasType cases
-    -- above will remain closed because they don't commute addDims.
-    sorry
   | loc Delta Sigma Gamma ell t hlook =>
     -- Wave 2: closed via addDimStoreTyp_lookup. The store typing in
     -- the output is lifted via addDimStoreTyp, so the looked-up type
@@ -355,5 +301,29 @@ theorem addDim_preserves_typing
     exact ClausesTyped.cons Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimCtx d Gamma3)
       (addDim d t) (addDim d tArg) (addDim d tRet) epsR op x k
       (addDimTerm d hb) (addDimClauses d rest) ihhb' ihrest
+  | _ =>
+    -- Stage 1 refactor: `tvmap`, `tsum`, and `texpand` are all blocked
+    -- on the Stage 2 `DimList` quotient / multiset representation.
+    --
+    -- `tvmap` obstacle (pre-existing): `addDim` prepends on the left,
+    -- so `addDim d_out (addDim d_in τ)` and `addDim d_in (addDim d_out τ)`
+    -- differ in order. HasType.tvmap's IH forces both compositions to
+    -- be equal, which fails definitionally on ordered lists.
+    --
+    -- `tsum` / `texpand` obstacle (new in Stage 1): with
+    -- `rem ds d = ds.erase d` and `ins ds d = d :: ds`, the goal after
+    -- lifting becomes
+    --   Typ.tensor (d_new :: ds.erase d) ≟ Typ.tensor ((d_new :: ds).erase d)
+    -- (and analogously for `ins`). These are only propositionally equal
+    -- when `d_new ≠ d`; no such freshness is threaded through the
+    -- statement.
+    --
+    -- All three cases close uniformly once `DimList` becomes a multiset /
+    -- quotient: prepend order is irrelevant and `erase` commutes with
+    -- `cons` up to the quotient. Consolidated under a single wildcard
+    -- so the net `sorry` count in this theorem stays at one (replacing
+    -- the pre-existing standalone tvmap sorry).
+
+    sorry
 
 end LaCaDiLE

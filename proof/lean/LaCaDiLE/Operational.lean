@@ -46,8 +46,8 @@ def subst (target : Term) (v : Term) (x : String) : Term :=
   | Term.const c ds => Term.const c ds
   | Term.add e1 e2 => Term.add (subst e1 v x) (subst e2 v x)
   | Term.mul e1 e2 => Term.mul (subst e1 v x) (subst e2 v x)
-  | Term.sum e i => Term.sum (subst e v x) i
-  | Term.expand e i k => Term.expand (subst e v x) i k
+  | Term.sum e d => Term.sum (subst e v x) d
+  | Term.expand e d => Term.expand (subst e v x) d
   | Term.uniformLike e lo hi => Term.uniformLike (subst e v x) lo hi
   | Term.grad y t tOut body =>
       if y = x then Term.grad y t tOut body
@@ -104,8 +104,8 @@ inductive EvalCtx where
   | addR       (v1 : Term)                          : EvalCtx
   | mulL       (e2 : Term)                          : EvalCtx
   | mulR       (v1 : Term)                          : EvalCtx
-  | sum        (i : Nat)                            : EvalCtx
-  | expand     (i k : Nat)                          : EvalCtx
+  | sum        (d : Dim)                            : EvalCtx
+  | expand     (d : Dim)                            : EvalCtx
   | uniformLike (lo hi : Float)                     : EvalCtx
   | handle     (epsH : EffectRow)
                (clauses : List (EffectLabel × String × String × Term))
@@ -130,8 +130,8 @@ def plug : EvalCtx → Term → Term
   | EvalCtx.addR v1, e             => Term.add v1 e
   | EvalCtx.mulL e2, e             => Term.mul e e2
   | EvalCtx.mulR v1, e             => Term.mul v1 e
-  | EvalCtx.sum i, e               => Term.sum e i
-  | EvalCtx.expand i k, e          => Term.expand e i k
+  | EvalCtx.sum d, e               => Term.sum e d
+  | EvalCtx.expand d, e            => Term.expand e d
   | EvalCtx.uniformLike lo hi, e   => Term.uniformLike e lo hi
   | EvalCtx.handle epsH clauses, e => Term.handle epsH e clauses
   | EvalCtx.perform op, e          => Term.perform op e
@@ -219,24 +219,24 @@ inductive Step : Config → Config → Prop
                         ellOut (tensorOpPlaceholder w1 w2),
             Term.loc ellOut⟩
 
-  -- E-Sum: sum(ℓ, i)  ↦  fresh ℓ' with the reduced tensor; operand freed
+  -- E-Sum: sum(ℓ, d)  ↦  fresh ℓ' with the reduced tensor; operand freed
   | tsum
-      (sigma : Store) (ell ellOut : Loc) (w : TensorVal) (i : Nat) :
+      (sigma : Store) (ell ellOut : Loc) (w : TensorVal) (d : Dim) :
       storeLookup sigma ell = some w →
       ellOut = storeFreshLoc sigma →
-      Step ⟨sigma, Term.sum (Term.loc ell) i⟩
+      Step ⟨sigma, Term.sum (Term.loc ell) d⟩
            ⟨storeExtend (storeRemove sigma ell) ellOut
-                        { shape := rem w.shape i, data := w.data },
+                        { shape := rem w.shape d, data := w.data },
             Term.loc ellOut⟩
 
-  -- E-Expand: expand(ℓ, i, k)  ↦  fresh ℓ' with the dim-inserted tensor
+  -- E-Expand: expand(ℓ, d)  ↦  fresh ℓ' with the dim-inserted tensor
   | texpand
-      (sigma : Store) (ell ellOut : Loc) (w : TensorVal) (i k : Nat) :
+      (sigma : Store) (ell ellOut : Loc) (w : TensorVal) (d : Dim) :
       storeLookup sigma ell = some w →
       ellOut = storeFreshLoc sigma →
-      Step ⟨sigma, Term.expand (Term.loc ell) i k⟩
+      Step ⟨sigma, Term.expand (Term.loc ell) d⟩
            ⟨storeExtend (storeRemove sigma ell) ellOut
-                        { shape := ins w.shape i k, data := w.data },
+                        { shape := ins w.shape d, data := w.data },
             Term.loc ellOut⟩
 
   -- E-UniformLike: uniform_like(ℓ, lo, hi)  ↦  fresh ℓ' with random data
