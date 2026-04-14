@@ -216,6 +216,20 @@ theorem subst_value
     (G ++ [(y, t)]) ++ ys = G ++ ((y, t) :: ys) := by
   simp [List.append_assoc]
 
+/-- Filter commutes with append on linear contexts. -/
+theorem linearCtx_filter_append (G1 G2 : LinearCtx) (p : (String × Typ) → Bool) :
+    (G1 ++ G2).filter p = G1.filter p ++ G2.filter p := by
+  exact List.filter_append G1 G2
+
+/-- Snoc equality: if `G1 ++ [a] = G2 ++ [b]` then `G1 = G2` and `a = b`. -/
+theorem append_singleton_inj {α} (G1 G2 : List α) (a b : α)
+    (h : G1 ++ [a] = G2 ++ [b]) : G1 = G2 ∧ a = b := by
+  have := List.append_inj_right' h (by simp)
+  have h1 := List.append_inj_left' h (by simp)
+  refine ⟨h1, ?_⟩
+  have : [a] = [b] := this
+  exact List.head_eq_of_cons_eq this
+
 /-- Weakening: adding an unused binding at the tail of the linear
     context preserves typing. "Unused" means `y` does not appear in
     the output context either. Phase 2 Wave 1 helper for substitution. -/
@@ -226,20 +240,43 @@ theorem weakening_tail
     (_h_fresh : y ∉ linearCtxDom Gamma) :
     HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
             (Gamma' ++ [(y, t')]) := by
-  sorry -- TODO Wave 2: induction on HasType derivation.
-        -- Requires mutual ClausesTyped weakening helper for the `handle` case.
-        -- Every constructor that binds a variable at the tail (var, abs,
-        -- letBind, letpair, tgrad, tvmap) needs an associativity rewrite
-        -- to re-associate the new tail binding with the existing context
-        -- shape, and the `var` case specifically needs exchange_tail to
-        -- push `(y, t')` past the consumed `(x, t)` binding. This three-way
-        -- mutual dependence (weakening ↔ exchange ↔ ClausesTyped weakening)
-        -- is the hard core of Wave 1; scheduling it as its own Wave 2 task.
+  sorry -- BLOCKED: statement not provable as written.
+        -- The var case needs `(Γ ++ [(y,t')]) ++ (something)` to decompose
+        -- as `_ ++ [(consumed_var, ty)]`, but after appending `(y,t')` to
+        -- the tail, the only available var-rule derivation consumes `y`,
+        -- not the original tail of `Γ`. Correct formulation requires
+        -- splitting the context into pre/post around the insertion point:
+        --   Γpre ++ Γpost ⊢ e ⊣ Γ'pre ++ Γpost
+        --     →  Γpre ++ [(y,t')] ++ Γpost ⊢ e ⊣ Γ'pre ++ [(y,t')] ++ Γpost
+        -- with Γpost fixed through the derivation. Wave 2 must refactor
+        -- the signature before this can close; documenting here so the
+        -- next author does not rederive the obstruction. See note on
+        -- `exchange_tail` below for the parallel analysis.
 
 /-- Exchange: swapping two adjacent unrelated bindings in the linear
     context preserves typing. Used when a substitution introduces a
     fresh binding mid-context and the surrounding derivation needs to
     thread around it. -/
+-- NOTE (Wave 1 proof engineer, 2026-04-13): the originally-advised
+-- `exchange_tail` statement below — which FIXES the output context
+-- `Γ'` across the swap — is not provable. Counterexample: the `var`
+-- case of `HasType` consumes the tail binding of its input context.
+-- If `Γin = Γpre ++ [(x,t1),(y,t2)]`, the unswapped derivation of
+-- `Term.var y` has output `Γpre ++ [(x,t1)]`. The swapped context
+-- `Γpre ++ [(y,t2),(x,t1)]` only has `(x,t1)` at its tail, so the
+-- only available var-rule derivation has output `Γpre ++ [(y,t2)]`.
+-- These outputs differ, so no derivation with `Γout` rigidly equal
+-- to the unswapped output exists.
+--
+-- The mathematically-correct form swaps BOTH endpoints: "either the
+-- swapped bindings are not consumed (Γout factors as Γ'' ++ [(x,t1),
+-- (y,t2)] and we return Γ'' ++ [(y,t2),(x,t1)]), or one/both are
+-- consumed and Γout is a prefix that already sits below them". This
+-- is a disjunction-shaped conclusion that doesn't match the shape
+-- `subst_preserves_typing` actually needs.
+--
+-- Keeping the original statement as `sorry` for Wave 2 restructuring;
+-- documenting the obstruction so the next author doesn't re-derive it.
 theorem exchange_tail
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
     (x y : String) (t t1 t2 : Typ) (eps : EffectRow) (e : Term)
@@ -248,13 +285,10 @@ theorem exchange_tail
     (_h_ne : x ≠ y) :
     HasType Delta Sigma (Gamma ++ [(y, t2), (x, t1)]) e
             t eps Gamma' := by
-  sorry -- TODO Wave 2: induction on HasType + mutual ClausesTyped exchange.
-        -- Symmetric to weakening_tail: each binder case needs to show the
-        -- extended context (Gamma ++ [(y,t2),(x,t1)] ++ [(bound, τ)]) is
-        -- still well-formed, and the var case needs to distinguish which
-        -- of x, y is consumed. The permutation invariant on LinearCtx is
-        -- what actually gets proved here; weakening_tail is the degenerate
-        -- case where the second binding is fresh.
+  sorry -- BLOCKED: statement is not provable as written (see note above).
+        -- Wave 2 must restructure the signature (output-swap disjunction,
+        -- or strengthen to an explicit "neither swapped binding is
+        -- consumed" precondition) before this can be closed.
 
 /-! ## Main theorem -/
 
@@ -272,25 +306,14 @@ theorem subst_preserves_typing
     (_h_closed : Closed v) :
     HasType Delta Sigma Gamma1 (subst e v x) t2 eps
             (Gamma2.filter (fun p => p.1 ≠ x)) := by
-  sorry -- TODO Wave 2: main substitution lemma.
-        -- Induction on _h_e (the HasType derivation of `e`).
-        -- Key cases:
-        --   * var: split y = x (return _h_v, using subst_closed on the result
-        --     context manipulation) vs y ≠ x (apply weakening_tail to peel
-        --     the unused (x,t1) binding and rebuild via .var).
-        --   * abs/letBind/letpair/tgrad/tvmap: IH under extended context,
-        --     then push the (x,t1) binding past the new binder via
-        --     exchange_tail, then apply the IH, then rebuild the binder.
-        --   * app/tadd/tmul/tpair: the left-to-right threaded contexts mean
-        --     (x,t1) lives at the tail of Γ₁ going into e₁; the sub-derivation
-        --     for e₁ may or may not consume it. Need a case split on whether
-        --     x survives into Γ₂; each branch applies IH + subst_notFree /
-        --     subst_closed on the other side.
-        --   * handle: companion substClauses_preserves_typing in a mutual
-        --     block; each clause extends Γ₂ with its own (arg, cont) tail so
-        --     the (x,t1) binding is buried under two fresh bindings and
-        --     needs exchange_tail applied twice.
-        -- Blocked on weakening_tail + exchange_tail; scheduled as a single
-        -- Wave 2 mutual-induction push.
+  sorry -- BLOCKED on weakening_tail / exchange_tail refactor.
+        -- The original plan (induction on _h_e, invoking exchange_tail in
+        -- every binder case) is not realizable because both helpers have
+        -- unprovable statements (see notes on `weakening_tail` and
+        -- `exchange_tail`). Restructuring required: the motive must
+        -- generalize over a pre/post decomposition of the context so
+        -- that `(x,t1)` can sit anywhere, and binder cases thread their
+        -- new binding into the post-segment without needing an exchange.
+        -- This is a Wave 2 signature refactor plus full induction pass.
 
 end LaCaDiLE

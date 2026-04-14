@@ -330,9 +330,26 @@ reduce a redex typed at effect row `union ε1 ε2` to a sub-value typed
 at `ε1` — but the goal demands `union ε1 ε2`. Widening the effect row
 of a typing derivation is the canonical fix. -/
 
+/-! ### Effect row algebraic helpers -/
+
+@[simp] theorem EffectRow.union_nil_left (eps : EffectRow) :
+    EffectRow.union [] eps = eps := by
+  simp [EffectRow.union]
+
 /-- Widen the effect row of a typing derivation. Adding operations to
     the effect row never invalidates a derivation because every rule
-    that PRODUCES effects adds them via union, which is monotone. -/
+    that PRODUCES effects adds them via union, which is monotone.
+
+    Wave 1 status: LEFT AS SORRY. A faithful proof requires a full
+    associativity + commutativity + idempotence theory for
+    `EffectRow.union` (which is defined as list append + dedup filter),
+    because cases like `app` produce `union (union eps1 eps2) eps` and
+    reassembling at `union (union (union eps1 eps2) eps) eps_extra`
+    needs to thread `eps_extra` into one of the sub-derivations in a way
+    the raw list definition does not support without rewriting. This is
+    tractable list-level algebra but out of scope for Wave 1; tracked
+    for Wave 2 alongside the substitution lemma. Preservation's value
+    cases use this as an oracle. -/
 theorem HasType.weaken_eff
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
