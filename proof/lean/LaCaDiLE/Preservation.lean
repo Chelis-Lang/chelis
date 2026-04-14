@@ -764,6 +764,87 @@ theorem hasType_store_weaken
     exact ClausesTyped.cons Δ Sigma' Γ2 Γ3 tr tArg tRet epsR op x k hb rest
       (ih_hb hs) (ih_rest hs)
 
+/-- Companion to `hasType_store_weaken`: weakens a `ClausesTyped`
+    derivation under a monotone store-typing extension. Proved by a
+    24-case term-mode `@HasType.rec` call that mirrors the HasType
+    weakening proof (every constructor rebuilds at `Sigma'`). -/
+theorem clausesTyped_store_weaken
+    {Delta : CapCtx} {Sigma Sigma' : StoreTyp} {Gamma2 Gamma3 : LinearCtx}
+    {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls)
+    (hsub : StoreTypSub Sigma Sigma') :
+    ClausesTyped Delta Sigma' Gamma2 Gamma3 t epsR cls := by
+  refine
+    @ClausesTyped.rec
+      (fun Δ_ S_ Γ_ e_ t_ ε_ Γ'_ _ =>
+        StoreTypSub S_ Sigma' → HasType Δ_ Sigma' Γ_ e_ t_ ε_ Γ'_)
+      (fun Δ_ S_ Γ2_ Γ3_ t_ εR_ cls_ _ =>
+        StoreTypSub S_ Sigma' → ClausesTyped Δ_ Sigma' Γ2_ Γ3_ t_ εR_ cls_)
+      ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+      Delta Sigma Gamma2 Gamma3 t epsR cls h hsub
+  -- All 24 cases: 22 HasType cases then nil/cons. Each is the same
+  -- structural re-application used in `hasType_store_weaken`.
+  case _ => intro Δ _ Γpre Γpost x tv hs
+            exact HasType.var Δ Sigma' Γpre Γpost x tv
+  case _ => intro Δ _ Γ hs
+            exact HasType.unit Δ Sigma' Γ
+  case _ => intro Δ _ Γ1 Γ2 x t1 t2 epsB body _h_body ih hs
+            exact HasType.abs Δ Sigma' Γ1 Γ2 x t1 t2 epsB body (ih hs)
+  case _ => intro Δ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 epsF eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.app Δ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 epsF eps1 eps2
+              (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.letBind Δ Sigma' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2
+              (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 e0 ds ep _h ih hs
+            exact HasType.copy Δ Sigma' Γ1 Γ2 e0 ds ep (ih hs)
+  case _ => intro Δ _ Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.letpair Δ Sigma' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr
+              eps1 eps2 (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.tpair Δ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2
+              (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 e0 t1 t2 ep _h ih hs
+            exact HasType.fst Δ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hs)
+  case _ => intro Δ _ Γ1 Γ2 e0 t1 t2 ep _h ih hs
+            exact HasType.snd Δ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hs)
+  case _ => intro Δ _ Γ v ds hs
+            exact HasType.const Δ Sigma' Γ v ds
+  case _ => intro Δ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.tadd Δ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+              (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 hs
+            exact HasType.tmul Δ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+              (ih1 hs) (ih2 hs)
+  case _ => intro Δ _ Γ1 Γ2 e0 ds d ep _h hmem ih hs
+            exact HasType.tsum Δ Sigma' Γ1 Γ2 e0 ds d ep (ih hs) hmem
+  case _ => intro Δ _ Γ1 Γ2 e0 ds d ep _h ih hs
+            exact HasType.texpand Δ Sigma' Γ1 Γ2 e0 ds d ep (ih hs)
+  case _ => intro Δ _ Γ1 Γ2 e0 ds lo hi ep _h ih hs
+            exact HasType.uniformLike Δ Sigma' Γ1 Γ2 e0 ds lo hi ep (ih hs)
+  case _ => intro Δ _ Γ1 Γ2 op e0 tArg tRet ep _h hmatch ih hs
+            exact HasType.perform Δ Sigma' Γ1 Γ2 op e0 tArg tRet ep
+              (ih hs) hmatch
+  case _ => intro Δ _ Γ1 Γ2 Γ3 body clauses tr epsH epsB _hb hHsubB hClIn
+                  hClCov _hcls ih_body ih_cls hs
+            exact HasType.handle Δ Sigma' Γ1 Γ2 Γ3 body clauses tr epsH epsB
+              (ih_body hs) hHsubB hClIn hClCov (ih_cls hs)
+  case _ => intro Δ _ Γ x ds dsOut e0 ep _h hsubEff ih hs
+            exact HasType.tgrad Δ Sigma' Γ x ds dsOut e0 ep (ih hs) hsubEff
+  case _ => intro Δ _ Γ x t1 t2 e0 ep d _h ih hs
+            exact HasType.tvmap Δ Sigma' Γ x t1 t2 e0 ep d (ih hs)
+  case _ => intro Δ _ Γ ell tv hlook hs
+            exact HasType.loc Δ Sigma' Γ ell tv (hs ell tv hlook)
+  case _ => intro Δ _ Γ Γ'' e0 tv eps0 eps1 _h hSub ih hs
+            exact HasType.subEff Δ Sigma' Γ Γ'' e0 tv eps0 eps1 (ih hs) hSub
+  case _ => intro Δ _ Γ2 tr epsR hs
+            exact ClausesTyped.nil Δ Sigma' Γ2 tr epsR
+  case _ => intro Δ _ Γ2 Γ3 tr tArg tRet epsR op x k hb rest _hhb _hrest
+                  ih_hb ih_rest hs
+            exact ClausesTyped.cons Δ Sigma' Γ2 Γ3 tr tArg tRet epsR op x k
+              hb rest (ih_hb hs) (ih_rest hs)
+
 /-- Plug-local app inversion: Preservation's sibling file Progress.lean
     depends on Preservation, so app_inv / letBind_inv / letpair_inv are
     defined there. We re-derive the shapes we need here under
@@ -774,19 +855,22 @@ theorem HasType.plug_app_inv
     (h : HasType Delta Sigma Gamma1 (Term.app e1 e2) t eps Gamma3) :
     ∃ Gamma2 t1 epsBody eps1 eps2,
       HasType Delta Sigma Gamma1 e1 (Typ.arrow t1 t epsBody) eps1 Gamma2 ∧
-      HasType Delta Sigma Gamma2 e2 t1 eps2 Gamma3 := by
+      HasType Delta Sigma Gamma2 e2 t1 eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps := by
   generalize heq : Term.app e1 e2 = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | app _ _ _ Γ2 _ _ _ t1 _ epsBody eps1 eps2 h1 h2 _ _ =>
       cases heq
-      exact ⟨Γ2, t1, epsBody, eps1, eps2, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
+      exact ⟨Γ2, t1, epsBody, eps1, eps2, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, t1, epsBody, eps1, eps2, h1, h2, hwit⟩ := ih heq
+      exact ⟨Γ2, t1, epsBody, eps1, eps2, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
-/-- Plug-local letBind inversion. -/
+/-- Plug-local letBind inversion with SubEffRow witness. -/
 theorem HasType.plug_letBind_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
     {x : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
@@ -794,19 +878,22 @@ theorem HasType.plug_letBind_inv
     ∃ Gamma2 Gamma3 t1 eps1 eps2,
       Gamma_out = Gamma3.filter (fun p => p.1 ≠ x) ∧
       HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
-      HasType Delta Sigma (Gamma2 ++ [(x, t1)]) e2 t eps2 Gamma3 := by
+      HasType Delta Sigma (Gamma2 ++ [(x, t1)]) e2 t eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
   generalize heq : Term.letBind x e1 e2 = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ eps1 eps2 h1 h2 _ _ =>
       cases heq
-      exact ⟨Γ2, Γ3, t1, eps1, eps2, rfl, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, rfl, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, Γ3, t1, eps1, eps2, hfilt, h1, h2, hwit⟩ := ih heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, hfilt, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
-/-- Plug-local letpair inversion. -/
+/-- Plug-local letpair inversion with SubEffRow witness. -/
 theorem HasType.plug_letpair_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
     {x y : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
@@ -814,15 +901,87 @@ theorem HasType.plug_letpair_inv
     ∃ Gamma2 Gamma3 t1 t2 eps1 eps2,
       Gamma_out = Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y) ∧
       HasType Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 ∧
-      HasType Delta Sigma (Gamma2 ++ [(x, t1), (y, t2)]) e2 t eps2 Gamma3 := by
+      HasType Delta Sigma (Gamma2 ++ [(x, t1), (y, t2)]) e2 t eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
   generalize heq : Term.letpair x y e1 e2 = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1' t2' _ eps1' eps2' h1 h2 _ _ =>
       cases heq
-      exact ⟨Γ2, Γ3, t1', t2', eps1', eps2', rfl, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
+      exact ⟨Γ2, Γ3, t1', t2', eps1', eps2', rfl, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, Γ3, t1', t2', eps1', eps2', hfilt, h1, h2, hwit⟩ := ih heq
+      exact ⟨Γ2, Γ3, t1', t2', eps1', eps2', hfilt, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Plug-local pair inversion (no pair-type assumption). -/
+theorem HasType.plug_pair_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) t eps Gamma3) :
+    ∃ Gamma2 t1 t2 eps1 eps2,
+      t = Typ.pair t1 t2 ∧
+      HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.pair e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tpair _ _ _ Γ2 _ _ _ t1 t2 eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, t1, t2, eps1, eps2, rfl, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, t1, t2, eps1, eps2, ht, h1, h2, hwit⟩ := ih heq
+      exact ⟨Γ2, t1, t2, eps1, eps2, ht, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Plug-local add inversion with SubEffRow witness. -/
+theorem HasType.plug_add_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.add e1 e2) t eps Gamma3) :
+    ∃ ds Gamma2 eps1 eps2,
+      t = Typ.tensor ds ∧
+      HasType Delta Sigma Gamma1 e1 (Typ.tensor ds) eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 (Typ.tensor ds) eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.add e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tadd _ _ _ Γ2 _ _ _ ds eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨ds, Γ2, eps1, eps2, rfl, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨ds, Γ2, eps1, eps2, ht, h1, h2, hwit⟩ := ih heq
+      exact ⟨ds, Γ2, eps1, eps2, ht, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Plug-local mul inversion with SubEffRow witness. -/
+theorem HasType.plug_mul_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.mul e1 e2) t eps Gamma3) :
+    ∃ ds Gamma2 eps1 eps2,
+      t = Typ.tensor ds ∧
+      HasType Delta Sigma Gamma1 e1 (Typ.tensor ds) eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 (Typ.tensor ds) eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.mul e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tmul _ _ _ Γ2 _ _ _ ds eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨ds, Γ2, eps1, eps2, rfl, h1, h2, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨ds, Γ2, eps1, eps2, ht, h1, h2, hwit⟩ := ih heq
+      exact ⟨ds, Γ2, eps1, eps2, ht, h1, h2,
+             fun op hop => hSub op (hwit op hop)⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -962,6 +1121,194 @@ theorem plug_preserves_typing
                      (EffectRow.union eps0 [EffectLabel.random]) Gamma' :=
         HasType.uniformLike Delta Sigma2 Gamma Gamma' e' ds lo hi eps0 h_e'
       exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
-  | _ => sorry
+  | appL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.app e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 Γmid e2 t1 eps2 Gamma' :=
+        hasType_store_weaken h_e2 h_sub
+      have h_raw : HasType Delta Sigma2 Gamma (Term.app e' e2) t
+                     (EffectRow.union (EffectRow.union eps1 eps2) epsBody)
+                     Gamma' :=
+        HasType.app Delta Sigma2 Gamma Γmid Gamma' e' e2 t1 t
+          epsBody eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | appR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.app v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      obtain ⟨Sigma2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_v1' : HasType Delta Sigma2 Gamma v1 (Typ.arrow t1 t epsBody)
+                     eps1 Γmid :=
+        hasType_store_weaken h_v1 h_sub
+      have h_raw : HasType Delta Sigma2 Gamma (Term.app v1 e') t
+                     (EffectRow.union (EffectRow.union eps1 eps2) epsBody)
+                     Gamma' :=
+        HasType.app Delta Sigma2 Gamma Γmid Gamma' v1 e' t1 t
+          epsBody eps1 eps2 h_v1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | letBind x e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.letBind x e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, eps1, eps2, hΓout, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_letBind_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 (Γmid ++ [(x, t1)]) e2 t eps2 Γ3 :=
+        hasType_store_weaken h_e2 h_sub
+      subst hΓout
+      have h_raw : HasType Delta Sigma2 Gamma (Term.letBind x e' e2) t
+                     (EffectRow.union eps1 eps2)
+                     (Γ3.filter (fun p => p.1 ≠ x)) :=
+        HasType.letBind Delta Sigma2 Gamma Γmid Γ3 x e' e2 t1 t
+          eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | letpair x y e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.letpair x y e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, t2, eps1, eps2, hΓout, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_letpair_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 (Γmid ++ [(x, t1), (y, t2)])
+                     e2 t eps2 Γ3 :=
+        hasType_store_weaken h_e2 h_sub
+      subst hΓout
+      have h_raw : HasType Delta Sigma2 Gamma (Term.letpair x y e' e2) t
+                     (EffectRow.union eps1 eps2)
+                     (Γ3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y)) :=
+        HasType.letpair Delta Sigma2 Gamma Γmid Γ3 x y e' e2 t1 t2 t
+          eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | pairL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.pair e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 Γmid e2 t2 eps2 Gamma' :=
+        hasType_store_weaken h_e2 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.pair e' e2)
+                     (Typ.pair t1 t2)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tpair Delta Sigma2 Gamma Γmid Gamma' e' e2 t1 t2
+          eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | pairR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.pair v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      obtain ⟨Sigma2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_v1' : HasType Delta Sigma2 Gamma v1 t1 eps1 Γmid :=
+        hasType_store_weaken h_v1 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.pair v1 e')
+                     (Typ.pair t1 t2)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tpair Delta Sigma2 Gamma Γmid Gamma' v1 e' t1 t2
+          eps1 eps2 h_v1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | addL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.add e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 Γmid e2 (Typ.tensor ds) eps2 Gamma' :=
+        hasType_store_weaken h_e2 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.add e' e2)
+                     (Typ.tensor ds)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tadd Delta Sigma2 Gamma Γmid Gamma' e' e2 ds
+          eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | addR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.add v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      obtain ⟨Sigma2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_v1' : HasType Delta Sigma2 Gamma v1 (Typ.tensor ds) eps1 Γmid :=
+        hasType_store_weaken h_v1 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.add v1 e')
+                     (Typ.tensor ds)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tadd Delta Sigma2 Gamma Γmid Gamma' v1 e' ds
+          eps1 eps2 h_v1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | mulL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.mul e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      obtain ⟨Sigma2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_e2' : HasType Delta Sigma2 Γmid e2 (Typ.tensor ds) eps2 Gamma' :=
+        hasType_store_weaken h_e2 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.mul e' e2)
+                     (Typ.tensor ds)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tmul Delta Sigma2 Gamma Γmid Gamma' e' e2 ds
+          eps1 eps2 h_e1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | mulR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.mul v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      obtain ⟨Sigma2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_v1' : HasType Delta Sigma2 Gamma v1 (Typ.tensor ds) eps1 Γmid :=
+        hasType_store_weaken h_v1 h_sub
+      subst hteq
+      have h_raw : HasType Delta Sigma2 Gamma (Term.mul v1 e')
+                     (Typ.tensor ds)
+                     (EffectRow.union eps1 eps2) Gamma' :=
+        HasType.tmul Delta Sigma2 Gamma Γmid Gamma' v1 e' ds
+          eps1 eps2 h_v1' h_e2'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | perform op =>
+      have h' : HasType Delta Sigma Gamma (Term.perform op e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨tArg, eps0, h_arg, hmatch, hsub_eps⟩ := HasType.perform_inv h'
+      obtain ⟨Sigma2, h_arg', h_sub⟩ := h_inner h_arg
+      refine ⟨Sigma2, ?_, h_sub⟩
+      have h_raw : HasType Delta Sigma2 Gamma (Term.perform op e') t
+                     (EffectRow.union [op] eps0) Gamma' :=
+        HasType.perform Delta Sigma2 Gamma Gamma' op e' tArg t eps0
+          h_arg' hmatch
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
+  | handle epsH clauses =>
+      have h' : HasType Delta Sigma Gamma (Term.handle epsH e clauses)
+                  t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨Γmid, epsB, hb, hHsubB, hClIn, hClCov, hcls, hsub_eps⟩ :=
+        HasType.handle_inv_strong h'
+      obtain ⟨Sigma2, hb', h_sub⟩ := h_inner hb
+      refine ⟨Sigma2, ?_, h_sub⟩
+      -- Weaken the clauses via clausesTyped_store_weaken.
+      have hcls' : ClausesTyped Delta Sigma2 Γmid Gamma' t
+                     (EffectRow.removeOps epsB epsH) clauses :=
+        clausesTyped_store_weaken hcls h_sub
+      have h_raw : HasType Delta Sigma2 Gamma
+                     (Term.handle epsH e' clauses) t
+                     (EffectRow.removeOps epsB epsH) Gamma' :=
+        HasType.handle Delta Sigma2 Gamma Γmid Gamma' e' clauses t
+          epsH epsB hb' hHsubB hClIn hClCov hcls'
+      exact HasType.subEff _ _ _ _ _ _ _ _ h_raw hsub_eps
 
 end LaCaDiLE
