@@ -21,14 +21,12 @@ namespace LaCaDiLE
 
 /-! ## Progress -/
 
-/-- Progress: a closed, effect-free, well-typed term under an arbitrary
-    store typing is either a value or reducible.
-
-    Phase 1 head-reduction limitation: cases whose reduction requires
-    stepping a strict sub-term via a congruence/evaluation-context rule
-    are left as `sorry` with a TODO marker. Those close automatically
-    once `Operational.Step` is extended with an E-Ctx constructor
-    (Phase 2). -/
+/-- General Progress: a term with closed input linear context is
+    either a value or can step. The effect row `eps` and output
+    linear context `Gamma'` are unconstrained — this is what lets
+    sub-term recursion work (the outer theorem's `[]` effect row
+    doesn't propagate to sub-derivations that carry internal effect
+    rows from the strengthened inversion lemmas). -/
 theorem progress
     (sigma : Store) (Sigma : StoreTyp) (e : Term) (t : Typ)
     (h : HasType [] Sigma [] e t [] []) :

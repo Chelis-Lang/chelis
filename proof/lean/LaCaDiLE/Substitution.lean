@@ -240,18 +240,29 @@ theorem weakening_tail
     (_h_fresh : y ∉ linearCtxDom Gamma) :
     HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
             (Gamma' ++ [(y, t')]) := by
-  sorry -- BLOCKED: statement not provable as written.
-        -- The var case needs `(Γ ++ [(y,t')]) ++ (something)` to decompose
-        -- as `_ ++ [(consumed_var, ty)]`, but after appending `(y,t')` to
-        -- the tail, the only available var-rule derivation consumes `y`,
-        -- not the original tail of `Γ`. Correct formulation requires
-        -- splitting the context into pre/post around the insertion point:
-        --   Γpre ++ Γpost ⊢ e ⊣ Γ'pre ++ Γpost
-        --     →  Γpre ++ [(y,t')] ++ Γpost ⊢ e ⊣ Γ'pre ++ [(y,t')] ++ Γpost
-        -- with Γpost fixed through the derivation. Wave 2 must refactor
-        -- the signature before this can close; documenting here so the
-        -- next author does not rederive the obstruction. See note on
-        -- `exchange_tail` below for the parallel analysis.
+  -- Wave 1 status (2026-04-13): the Wave 0.5 generalization of T-Var
+  -- removes the *original* obstruction (y can be consumed from a
+  -- middle position), but a deeper one survives: the abs/letBind/
+  -- letpair/grad/vmap cases have an inner derivation in
+  -- `Γ1 ++ [(x,t1)]`. Naive induction yields an IH at
+  -- `Γ1 ++ [(x,t1)] ++ [(y,t')]`, but the binder rule needs the
+  -- inner input to end in `[(x,t1)]` — i.e. we need
+  -- `Γ1 ++ [(y,t')] ++ [(x,t1)]`, which differs by an adjacent
+  -- swap. Closing that swap requires either:
+  --   (a) a position-indexed weakening helper whose motive carries a
+  --       Γpre/Γpost decomposition (so the inserted binding lands
+  --       *before* the binder's tail entry), OR
+  --   (b) a structural exchange lemma usable mid-derivation (not the
+  --       outer-shape `exchange_tail` below — that one has its own
+  --       obstruction).
+  -- A second snag: option (a) needs a stronger freshness premise
+  -- (`y` fresh w.r.t. all binders of `e`, not just the surface
+  -- context), because otherwise an internal `var` could consume the
+  -- inserted binding instead of the intended original one.
+  -- Wave 2 work item: strengthen the signature to `y ∉ binders(e) ∪
+  -- linearCtxDom Γ ∪ linearCtxDom Γ'`, then prove a position-indexed
+  -- `weakening_insert` and derive `weakening_tail` as `Γpost = []`.
+  sorry
 
 /-- Exchange: swapping two adjacent unrelated bindings in the linear
     context preserves typing. Used when a substitution introduces a
