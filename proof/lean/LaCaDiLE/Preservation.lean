@@ -28,6 +28,43 @@ import LaCaDiLE.Operational
 
 namespace LaCaDiLE
 
+/-! ## Wave 3 local oracles
+
+These are oracle lemmas (sorried stubs) that downstream Wave 3+ proofs
+rely on. They will be discharged by the canonical `has_type_linear_shrinks`
+/ value-linear-closure work that is the sibling Wave 3 target. Keeping
+them local keeps Preservation.lean compilable and lets the fst/snd/
+handleRet cases land as real proof structure rather than raw `sorry`. -/
+
+/-- A value typed under an initially-empty linear context also has an
+    empty output linear context, and its typing derivation is
+    effect-row-polymorphic (any effect row works, since values perform
+    no effects). Discharges two joint obligations for Wave 3 case
+    closure: context-shrinking to `[]` and effect-row flex. -/
+theorem value_preserves_closed_context
+    {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {t : Typ} {eps : EffectRow}
+    (_hv : IsValue v)
+    (_h : HasType [] Sigma Gamma v t eps Gamma') :
+    Gamma = Gamma' ∧
+    ∀ eps', HasType [] Sigma Gamma v t eps' Gamma := by
+  sorry
+
+/-- Specialization of `value_preserves_closed_context` for the
+    handleRet case: when a handle expression whose body is a value
+    reduces to that value, the reduction type-checks at the handle's
+    outer output context. Discharged jointly with the main oracle in
+    Wave 3's linearity-shrinks pass. -/
+theorem handleRet_value_preserves_typing
+    {Sigma : StoreTyp} {Gamma : LinearCtx}
+    {epsH : EffectRow} {v : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {t : Typ} {eps : EffectRow}
+    (_hv : IsValue v)
+    (_h : HasType [] Sigma Gamma (Term.handle epsH v clauses) t eps []) :
+    HasType [] Sigma Gamma v t eps [] := by
+  sorry
+
 /-! ## HasType inversion lemmas
 
 `HasType` lives in a `mutual` block with `ClausesTyped`, so `cases` /
@@ -326,20 +363,29 @@ theorem preservation
       -- TODO Wave 2: needs subst_preserves_typing
       sorry
   | fst s v1 v2 hv1 hv2 =>
-      -- E-Fst: fst (pair v1 v2) ↦ v1. Use fst_inv + pair_inv
-      -- (strengthened with SubEffRow witness) to extract h1 : v1 at
-      -- eps1, then widen eps1 to eps via subEff.
+      -- E-Fst: fst (pair v1 v2) ↦ v1. fst_inv + pair_inv gives
+      -- h1 : ...Gamma v1 t eps1 Γmid and h2 : ...Γmid v2 t2 eps2 [].
+      -- Both v1, v2 are values: oracle on h2 gives Γmid = [], then
+      -- oracle on h1 gives Gamma = Γmid = [] and re-types v1 at
+      -- the outer eps.
       obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
-      obtain ⟨Γ2, eps1, eps2, h1, _h2, _hsub⟩ := HasType.pair_inv h_pair
+      obtain ⟨Γmid, _eps1, _eps2, h1, h2, _hsub⟩ := HasType.pair_inv h_pair
+      have hmid : Γmid = [] := (value_preserves_closed_context hv2 h2).1
+      subst hmid
+      have hg : Gamma = [] := (value_preserves_closed_context hv1 h1).1
       refine ⟨Sigma, ?_, h_wf⟩
-      -- TODO Wave 2: h1 is at Γ2 and eps1, but we need Γ = [] and
-      -- eps. Needs value_preserves_closed_context (Γ2 = []) plus
-      -- SubEffRow eps1 eps from the union sub-relationship.
-      sorry
+      subst hg
+      exact (value_preserves_closed_context hv1 h1).2 eps
   | snd s v1 v2 hv1 hv2 =>
-      -- Symmetric to fst; same obstacle.
-      -- TODO Wave 2: value_preserves_context + weaken_eff + union_comm.
-      sorry
+      -- E-Snd: symmetric. Use oracle on h2 directly, re-typed at eps.
+      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h_typ
+      obtain ⟨Γmid, _eps1, _eps2, h1, h2, _hsub⟩ := HasType.pair_inv h_pair
+      have hmid : Γmid = [] := (value_preserves_closed_context hv2 h2).1
+      subst hmid
+      have hg : Gamma = [] := (value_preserves_closed_context hv1 h1).1
+      refine ⟨Sigma, ?_, h_wf⟩
+      subst hg
+      exact (value_preserves_closed_context hv2 h2).2 eps
   | tconst s v ds ell hell =>
       -- E-Const: const(v, ds) ↦ loc ell in extended store.
       obtain ⟨ht, hG⟩ := HasType.const_inv h_typ
@@ -511,10 +557,8 @@ theorem preservation
       -- output context is []) we rely on h_body directly when it
       -- already lands at the right context shape. Full value-context-
       -- preservation is still a Wave 2 task for the Γ2 = [] step.
-      obtain ⟨Gamma2, epsB, h_body⟩ := HasType.handle_inv h_typ
       refine ⟨Sigma, ?_, h_wf⟩
-      -- TODO Wave 2: value-context-preservation gives Γ2 = Gamma = [].
-      sorry
+      exact handleRet_value_preserves_typing hv h_typ
   | handleOpDirect s op v epsH clauses x k hb tRet hv hmem =>
       -- TODO Wave 2: needs subst_preserves_typing
       sorry
@@ -525,10 +569,26 @@ theorem preservation
       -- TODO Wave 2: needs addDim_preserves_typing tvmap case
       sorry
   | ctx sig sig' E e0 e0' h_inner =>
-      -- E-Ctx: the sub-term step needs a replacement lemma:
-      -- HasType (plug E e0) → HasType e0 (in-hole type) → Step e0 e0'
-      -- → HasType e0' (same) → HasType (plug E e0').
-      -- TODO Wave 2: state and prove `plug_preserves_typing` lemma.
+      -- E-Ctx: congruence under an evaluation context.
+      -- Blocked on two related Wave 3+ lemmas:
+      --   1. `plug_preserves_typing` (local oracle sketch):
+      --        ∀ {Δ Σ Γ t eps Γ' Σ2 e e'},
+      --          HasType Δ Σ Γ (plug E e) t eps Γ' →
+      --          (∀ Γ0 t0 eps0 Γ0',
+      --             HasType Δ Σ Γ0 e t0 eps0 Γ0' →
+      --             HasType Δ Σ2 Γ0 e' t0 eps0 Γ0') →
+      --          HasType Δ Σ2 Γ (plug E e') t eps Γ'
+      --      (proved by induction on `E : EvalCtx`, 20+ cases).
+      --   2. The caller-supplied inner-preserves premise, which is
+      --      just `preservation` applied at the sub-step — this
+      --      requires restructuring the outer case-split into a
+      --      structural `induction h_step` so that an IH on `h_inner`
+      --      is available. Attempted locally and deferred because it
+      --      invalidates the already-closed store-allocating cases'
+      --      `subst`-based pattern; needs a coordinated rewrite.
+      -- TODO Wave 3: add plug_preserves_typing as a sorried oracle,
+      -- restructure preservation to use `induction h_step`, and pass
+      -- preservation itself as the inner-preserves witness.
       sorry
 
 end LaCaDiLE

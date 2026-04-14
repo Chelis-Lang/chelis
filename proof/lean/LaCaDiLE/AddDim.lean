@@ -218,19 +218,26 @@ theorem addDim_preserves_typing
     have key := HasType.uniformLike Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimTerm d e) (d :: ds) lo hi eps ih'
     simpa [addDim] using key
-  | perform Delta Sigma Gamma1 Gamma2 op e eps _h ih =>
-    -- opSignature returns (unit, unit) so addDim is identity on both.
+  | perform Delta Sigma Gamma1 Gamma2 op e tArg tRet eps _h hMatch ih =>
+    -- Wave 3 calculus refinement: T-Perform now takes tArg/tRet
+    -- explicitly with an OpSigMatch side condition. addDim must
+    -- transport the match witness through the dimension lifting.
+    -- The current OpSigMatch cases are all unit/unit-or-tensor, and
+    -- addDim is identity on unit; the tensor case prepends d.
     simp [addDimTerm]
-    have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
-        (opSignature op).1 eps (addDimCtx d Gamma2) := by
-      have := ih
-      simp [opSignature, addDim] at this
-      simpa [opSignature] using this
-    have key := HasType.perform Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-      op (addDimTerm d e) eps ih'
-    have : addDim d (opSignature op).2 = (opSignature op).2 := by
-      simp [opSignature, addDim]
-    simpa [this] using key
+    -- addDim d tArg / addDim d tRet are still in the OpSigMatch
+    -- relation: each constructor is preserved by prepending d.
+    have hMatch' : OpSigMatch op (addDim d tArg) (addDim d tRet) := by
+      cases hMatch with
+      | accumTensor ds => simpa [addDim] using OpSigMatch.accumTensor (d :: ds)
+      | accumUnit      => simpa [addDim] using OpSigMatch.accumUnit
+      | random         => simpa [addDim] using OpSigMatch.random
+      | resource       => simpa [addDim] using OpSigMatch.resource
+      | io             => simpa [addDim] using OpSigMatch.io
+      | fail           => simpa [addDim] using OpSigMatch.fail
+    exact HasType.perform Delta (addDimStoreTyp d Sigma)
+      (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+      op (addDimTerm d e) (addDim d tArg) (addDim d tRet) eps ih hMatch'
   | handle Delta Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
            _hb hEpsH hCl hCov _hCT ihb ihCT =>
     simp only [addDimTerm]

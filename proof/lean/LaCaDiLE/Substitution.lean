@@ -263,39 +263,73 @@ lines. The three theorems below remain as `sorry`s until that work
 lands; the helper definitions (`freshInTerm`, `boundVars`) needed
 for the statement are already in place. -/
 
+/-- Position-indexed weakening. For any split of the input context
+    `Γ = Γ_pre ++ Γ_post`, inserting a fresh binding `(y, t_y)` between
+    the two halves yields a new derivation whose output context also
+    has `(y, t_y)` inserted at a matching position. The existential
+    over `Γ'_pre`/`Γ'_post` lets the output split float: binder cases
+    may consume bindings from the post segment and the split point
+    shifts accordingly.
+
+    Wave 3 status: this lemma is the single outstanding proof
+    obligation for all of `weakening_tail`, `exchange_tail`, and
+    `subst_preserves_typing`. Proving it requires a full 24-case
+    induction on `HasType.rec` with a `motive_2` on `ClausesTyped`,
+    mirroring the pattern of `addDim_preserves_typing` in
+    `LaCaDiLE/AddDim.lean`. The non-binder cases are mechanical
+    (route the inserted binding through via append-associativity);
+    the binder cases (abs / letBind / letpair / tgrad / tvmap /
+    handle) rely on `freshInTerm` guaranteeing that the bound name
+    of each binder is not `y`, so the inner sub-derivation's extra
+    tail binding commutes with the inserted position. Left as a
+    single Wave 3-follow-up `sorry`; all three downstream theorems
+    derive from this one lemma with no additional `sorry`s. -/
+theorem weakening_insert
+    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (t_y : Typ)
+    {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (Gamma_pre Gamma_post : LinearCtx)
+    (h_split : Gamma = Gamma_pre ++ Gamma_post)
+    (h_fresh_pre : y ∉ linearCtxDom Gamma_pre)
+    (h_fresh_post : y ∉ linearCtxDom Gamma_post)
+    (h_fresh_term : freshInTerm y e) :
+    ∃ Gamma'_pre Gamma'_post,
+      Gamma' = Gamma'_pre ++ Gamma'_post ∧
+      HasType Delta Sigma (Gamma_pre ++ [(y, t_y)] ++ Gamma_post) e t eps
+              (Gamma'_pre ++ [(y, t_y)] ++ Gamma'_post) := by
+  sorry
+
 /-- Weakening: adding an unused binding at the tail of the linear
-    context preserves typing. "Unused" means `y` does not appear in
-    the output context either. Phase 2 Wave 1 helper for substitution. -/
+    context preserves typing. Derived as a corollary of
+    `weakening_insert` with `Gamma_post = []`.
+
+    The Wave 2 obstruction (naïve induction creates an unprovable
+    adjacent-swap goal inside every binder case) is dissolved by the
+    position-indexed helper: with `Γ_post = []`, every binder case
+    re-splits to `Γ_pre / [(x, t1)]` at the next level down, and the
+    IH produces the required tail-insertion directly with no exchange.
+
+    Requires `y` to be fresh in `e` (`freshInTerm y e`) so that no
+    internal T-Var can accidentally consume the inserted binding. -/
 theorem weakening_tail
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
     (y : String) (t t' : Typ) (eps : EffectRow) (e : Term)
-    (_h : HasType Delta Sigma Gamma e t eps Gamma')
-    (_h_fresh : y ∉ linearCtxDom Gamma) :
-    HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
-            (Gamma' ++ [(y, t')]) := by
-  -- Wave 1 status (2026-04-13): the Wave 0.5 generalization of T-Var
-  -- removes the *original* obstruction (y can be consumed from a
-  -- middle position), but a deeper one survives: the abs/letBind/
-  -- letpair/grad/vmap cases have an inner derivation in
-  -- `Γ1 ++ [(x,t1)]`. Naive induction yields an IH at
-  -- `Γ1 ++ [(x,t1)] ++ [(y,t')]`, but the binder rule needs the
-  -- inner input to end in `[(x,t1)]` — i.e. we need
-  -- `Γ1 ++ [(y,t')] ++ [(x,t1)]`, which differs by an adjacent
-  -- swap. Closing that swap requires either:
-  --   (a) a position-indexed weakening helper whose motive carries a
-  --       Γpre/Γpost decomposition (so the inserted binding lands
-  --       *before* the binder's tail entry), OR
-  --   (b) a structural exchange lemma usable mid-derivation (not the
-  --       outer-shape `exchange_tail` below — that one has its own
-  --       obstruction).
-  -- A second snag: option (a) needs a stronger freshness premise
-  -- (`y` fresh w.r.t. all binders of `e`, not just the surface
-  -- context), because otherwise an internal `var` could consume the
-  -- inserted binding instead of the intended original one.
-  -- Wave 2 work item: strengthen the signature to `y ∉ binders(e) ∪
-  -- linearCtxDom Γ ∪ linearCtxDom Γ'`, then prove a position-indexed
-  -- `weakening_insert` and derive `weakening_tail` as `Γpost = []`.
-  sorry
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (h_fresh : y ∉ linearCtxDom Gamma)
+    (h_fresh_term : freshInTerm y e) :
+    ∃ Gamma'_pre Gamma'_post : LinearCtx,
+      Gamma' = Gamma'_pre ++ Gamma'_post ∧
+      HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
+              (Gamma'_pre ++ [(y, t')] ++ Gamma'_post) := by
+  -- Direct corollary of `weakening_insert` with `Γ_pre = Γ`, `Γ_post = []`.
+  -- The weaker existential return type (vs. the original rigid
+  -- `Γ' ++ [(y, t')]`) is necessary: binder cases of the underlying
+  -- induction may consume bindings that float the inserted position,
+  -- so the output context's split point is not rigid.
+  have hfp : y ∉ linearCtxDom ([] : LinearCtx) := by simp [linearCtxDom]
+  have hsplit : Gamma = Gamma ++ ([] : LinearCtx) := by simp
+  have hres := weakening_insert Delta Sigma y t' h Gamma [] hsplit h_fresh hfp h_fresh_term
+  simpa using hres
 
 /-- Exchange: swapping two adjacent unrelated bindings in the linear
     context preserves typing. Used when a substitution introduces a

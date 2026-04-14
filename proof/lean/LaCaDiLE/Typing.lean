@@ -215,9 +215,10 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
   -- the signature table per-operation without touching this rule.
   | perform
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
-      (op : EffectLabel) (e : Term) (eps : EffectRow) :
-      HasType Delta Sigma Gamma1 e (opSignature op).1 eps Gamma2 →
-      HasType Delta Sigma Gamma1 (Term.perform op e) (opSignature op).2
+      (op : EffectLabel) (e : Term) (tArg tRet : Typ) (eps : EffectRow) :
+      HasType Delta Sigma Gamma1 e tArg eps Gamma2 →
+      OpSigMatch op tArg tRet →
+      HasType Delta Sigma Gamma1 (Term.perform op e) tRet
               (EffectRow.union [op] eps) Gamma2
 
   -- T-Handle (multi-clause, Wave 0 P5).

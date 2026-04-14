@@ -154,6 +154,33 @@ def addDim (d : Dim) : Typ → Typ
 def opSignature (_op : EffectLabel) : Typ × Typ :=
   (Typ.unit, Typ.unit)
 
+/-- Wave 3 calculus refinement: a relational signature for effect
+    operations. `OpSigMatch op tArg tRet` says that the operation `op`
+    can be performed on an argument of type `tArg` producing a result
+    of type `tRet`. The default cases match the original
+    `opSignature`-based behavior; the `accum` case is polymorphic over
+    tensor shapes so that the adjoint transformation can emit
+    `perform accum gSeed` with `gSeed : tensor[ds]`.
+
+    This is the calculus change unblocking `adjoint_preserves_typing`
+    (Wave 2 WS2.2): the old `opSignature accum = (unit, unit)` made
+    `perform accum gSeed` ill-typed whenever `gSeed` was a tensor. The
+    `accumTensor` constructor below allows accum to take any
+    `tensor[ds]` argument and produce `unit`. -/
+inductive OpSigMatch : EffectLabel → Typ → Typ → Prop where
+  | accumTensor (ds : DimList) :
+      OpSigMatch EffectLabel.accum (Typ.tensor ds) Typ.unit
+  | accumUnit :
+      OpSigMatch EffectLabel.accum Typ.unit Typ.unit
+  | random :
+      OpSigMatch EffectLabel.random Typ.unit Typ.unit
+  | resource :
+      OpSigMatch EffectLabel.resource Typ.unit Typ.unit
+  | io :
+      OpSigMatch EffectLabel.io Typ.unit Typ.unit
+  | fail :
+      OpSigMatch EffectLabel.fail Typ.unit Typ.unit
+
 /-! ## Locations and tensor values -/
 
 /-- Store locations. Phase 1 uses `Nat`; uniqueness of fresh locations is a
