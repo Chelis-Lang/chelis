@@ -110,6 +110,22 @@ theorem DimList.erase_cons_comm
       simp [List.erase_cons, hEq]
     rw [hSkip]
 
+/-- Consing a dim preserves membership of every other dim. Needed to
+    transport the `dIn ∈ ds` premise of T-Sum through the `addDim` lift
+    into `dIn ∈ DimList.cons d_new ds`. -/
+theorem DimList.mem_cons_of_mem
+    (d_new d_inner : Dim) (ds : DimList) (h : d_inner ∈ ds) :
+    d_inner ∈ DimList.cons d_new ds := by
+  have hMem : DimList.mem d_inner ds := h
+  show DimList.mem d_inner (DimList.cons d_new ds)
+  refine Quotient.inductionOn ds
+    (motive := fun ds =>
+      DimList.mem d_inner ds → DimList.mem d_inner (DimList.cons d_new ds)) ?_ hMem
+  intro l hmem
+  have hmem' : d_inner ∈ l := by simpa [DimList.mem] using hmem
+  show DimList.mem d_inner (DimList.mk (d_new :: l))
+  simpa [DimList.mem, DimList.mk] using (List.Mem.tail d_new hmem')
+
 /-- `addDim` is commutative in its dimension argument. This is the fact
     that unlocks the `tvmap` case of `addDim_preserves_typing`: inside
     a vmap, lifting through the outer batch dim `d_new` and the inner
@@ -374,29 +390,61 @@ theorem addDim_preserves_typing
     exact ClausesTyped.cons Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimCtx d Gamma3)
       (addDim d t) (addDim d tArg) (addDim d tRet) epsR op x k
       (addDimTerm d hb) (addDimClauses d rest) ihhb' ihrest
-  | _ =>
-    -- Stage 1 refactor: `tvmap`, `tsum`, and `texpand` are all blocked
-    -- on the Stage 2 `DimList` quotient / multiset representation.
-    --
-    -- `tvmap` obstacle (pre-existing): `addDim` prepends on the left,
-    -- so `addDim d_out (addDim d_in τ)` and `addDim d_in (addDim d_out τ)`
-    -- differ in order. HasType.tvmap's IH forces both compositions to
-    -- be equal, which fails definitionally on ordered lists.
-    --
-    -- `tsum` / `texpand` obstacle (new in Stage 1): with
-    -- `rem ds d = ds.erase d` and `ins ds d = DimList.cons d ds`, the goal after
-    -- lifting becomes
-    --   Typ.tensor (d_new :: ds.erase d) ≟ Typ.tensor ((d_new :: ds).erase d)
-    -- (and analogously for `ins`). These are only propositionally equal
-    -- when `d_new ≠ d`; no such freshness is threaded through the
-    -- statement.
-    --
-    -- All three cases close uniformly once `DimList` becomes a multiset /
-    -- quotient: prepend order is irrelevant and `erase` commutes with
-    -- `cons` up to the quotient. Consolidated under a single wildcard
-    -- so the net `sorry` count in this theorem stays at one (replacing
-    -- the pre-existing standalone tvmap sorry).
-
-    sorry
+  | tvmap Delta Sigma Gamma x t1 t2 e eps dIn _h ih =>
+    -- Stage 2 closes tvmap via `addDim_comm`: the outer lift by `d`
+    -- and the inner vmap lift by `dIn` commute, because both prepend
+    -- to the same (now multiset-valued) tensor shape.
+    simp only [addDimTerm, addDim]
+    -- IH has type:
+    --   HasType ... (addDimCtx d (Gamma ++ [(x, t1)])) (addDimTerm d e)
+    --               (addDim d t2) eps (addDimCtx d Gamma)
+    -- = HasType ... (addDimCtx d Gamma ++ [(x, addDim d t1)]) ... (addDim d t2) ... .
+    have ih' : HasType Delta (addDimStoreTyp d Sigma)
+        (addDimCtx d Gamma ++ [(x, addDim d t1)]) (addDimTerm d e) (addDim d t2) eps
+        (addDimCtx d Gamma) := by
+      have := ih
+      rw [addDimCtx_append, addDimCtx_singleton] at this
+      exact this
+    -- Apply `HasType.tvmap` reusing `dIn` as the fresh-for-the-outer-vmap dim.
+    -- The constructor produces
+    --   Typ.arrow (addDim dIn (addDim d t1)) (addDim dIn (addDim d t2)) eps
+    -- and the goal needs
+    --   Typ.arrow (addDim d (addDim dIn t1)) (addDim d (addDim dIn t2)) eps.
+    -- Those are equal by two applications of `addDim_comm`.
+    have key := HasType.tvmap Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
+                  x (addDim d t1) (addDim d t2) (addDimTerm d e) eps dIn ih'
+    simpa [addDim_comm d dIn t1, addDim_comm d dIn t2] using key
+  | tsum Delta Sigma Gamma1 Gamma2 e ds dIn eps _h hMem ih =>
+    -- Stage 2 closes tsum via `DimList.erase_cons_comm`: consing
+    -- the outer batch dim `d` commutes with erasing the summed-over
+    -- `dIn` because T-Sum's premise gives us `dIn ∈ ds`.
+    simp only [addDimTerm, addDim]
+    -- Membership lifts through the cons.
+    have hMem' : dIn ∈ DimList.cons d ds :=
+      DimList.mem_cons_of_mem d dIn ds hMem
+    -- Apply T-Sum on the lifted input type (DimList.cons d ds).
+    have key := HasType.tsum Delta (addDimStoreTyp d Sigma)
+                  (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+                  (addDimTerm d e) (DimList.cons d ds) dIn eps ih hMem'
+    -- Rewrite `rem (DimList.cons d ds) dIn` to `DimList.cons d (rem ds dIn)`.
+    have hEr : rem (DimList.cons d ds) dIn = DimList.cons d (rem ds dIn) := by
+      simpa [rem] using DimList.erase_cons_comm d dIn ds hMem
+    rw [hEr] at key
+    exact key
+  | texpand Delta Sigma Gamma1 Gamma2 e ds dIn eps _h ih =>
+    -- Stage 2 closes texpand via `DimList.cons_comm`: the batch dim
+    -- `d` and the internal expand dim `dIn` commute unconditionally
+    -- on the multiset quotient.
+    simp only [addDimTerm, addDim]
+    have key := HasType.texpand Delta (addDimStoreTyp d Sigma)
+                  (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+                  (addDimTerm d e) (DimList.cons d ds) dIn eps ih
+    -- `ins (DimList.cons d ds) dIn = DimList.cons dIn (DimList.cons d ds)
+    --                              = DimList.cons d (DimList.cons dIn ds)
+    --                              = DimList.cons d (ins ds dIn)`.
+    have hSwap : ins (DimList.cons d ds) dIn = DimList.cons d (ins ds dIn) := by
+      simp [ins, DimList.cons_comm dIn d ds]
+    rw [hSwap] at key
+    exact key
 
 end LaCaDiLE
