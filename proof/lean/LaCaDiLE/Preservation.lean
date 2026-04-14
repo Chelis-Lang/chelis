@@ -160,23 +160,8 @@ theorem StoreWf.extend_fresh
     (_h_wf : StoreWf sigma Sigma)
     (_h_fresh : ell = storeFreshLoc sigma) :
     StoreWf (storeExtend sigma ell w) (storeTypExtend Sigma ell t) := by
-  -- TODO Wave 2: list-level lookup reasoning for storeFreshLoc.
-  sorry
-
-/-- StoreTyp removal companion to `storeRemove`. -/
-def storeTypRemove (Sigma : StoreTyp) (ell : Loc) : StoreTyp :=
-  Sigma.filter (fun p => p.1 ≠ ell)
-
-/-- Remove-then-extend variant for single-location consume steps
-    (tsum, texpand, tuniformLike). -/
-theorem StoreWf.remove_extend
-    {sigma : Store} {Sigma : StoreTyp}
-    (ellIn ellOut : Loc) (w : TensorVal) (tIn tOut : Typ)
-    (_h_wf : StoreWf sigma Sigma)
-    (_h_in : storeTypLookup Sigma ellIn = some tIn)
-    (_h_fresh : ellOut = storeFreshLoc sigma) :
-    StoreWf (storeExtend (storeRemove sigma ellIn) ellOut w)
-            (storeTypExtend (storeTypRemove Sigma ellIn) ellOut tOut) := by
+  -- TODO Wave 2: `List.find?`/`Option.map` level reasoning over
+  -- `storeFreshLoc`. Two sub-goals symmetric up to Option.isSome bridging.
   sorry
 
 theorem storeTypLookup_extend_other
@@ -193,7 +178,7 @@ theorem storeTypLookup_extend_other
 theorem storeTypLookup_extend_self
     (Sigma : StoreTyp) (ell : Loc) (t : Typ) :
     storeTypLookup (storeTypExtend Sigma ell t) ell = some t := by
-  simp [storeTypLookup, storeTypExtend, List.find?]
+  simp [storeTypLookup, storeTypExtend]
 
 theorem HasType.handle_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
@@ -298,12 +283,7 @@ theorem preservation
       -- TODO Wave 2: same as tadd.
       sorry
   | tsum s ell ellOut w i hlook hfresh =>
-      -- E-Sum: sum(loc ell, i) ↦ loc ellOut at tensor[rem ds i].
-      obtain ⟨ds, htEq, h_e⟩ := HasType.sum_inv h_typ
-      -- Need source ell typed at tensor[ds] in Sigma, via HasType.loc inversion.
-      -- Also need StoreWf.remove_extend. Both depend on reasoning we've
-      -- encapsulated as helper sorries.
-      -- TODO Wave 2: finish once helpers are closed and loc_inv is available.
+      -- TODO Wave 2: needs StoreWf.remove_extend lemma.
       sorry
   | texpand s ell ellOut w i k hlook hfresh =>
       -- TODO Wave 2: parallel to tsum.
