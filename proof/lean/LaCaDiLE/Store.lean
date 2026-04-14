@@ -57,6 +57,66 @@ def StoreTypSub (Sigma Sigma' : StoreTyp) : Prop :=
   ∀ ell t, storeTypLookup Sigma ell = some t →
            storeTypLookup Sigma' ell = some t
 
+/-! ## Freshness -/
+
+/-- `List.foldl max` is ≥ its seed. -/
+private theorem foldl_max_ge_seed :
+    ∀ (l : List Nat) (s : Nat), s ≤ l.foldl max s := by
+  intro l
+  induction l with
+  | nil => intro s; exact Nat.le_refl _
+  | cons hd tl ih =>
+    intro s
+    show s ≤ (hd :: tl).foldl max s
+    simp only [List.foldl_cons]
+    have h_step : s ≤ max s hd := Nat.le_max_left _ _
+    have h_ih : max s hd ≤ tl.foldl max (max s hd) := ih _
+    exact Nat.le_trans h_step h_ih
+
+/-- Every element of a list is ≤ its `foldl max`. -/
+private theorem le_foldl_max :
+    ∀ (l : List Nat) (k : Nat) (x : Nat), x ∈ l → x ≤ l.foldl max k := by
+  intro l
+  induction l with
+  | nil => intro _ _ hm; cases hm
+  | cons hd tl ih =>
+    intro k x hmem
+    simp only [List.mem_cons] at hmem
+    rcases hmem with heq | hmem_tl
+    · subst heq
+      show x ≤ (x :: tl).foldl max k
+      simp only [List.foldl_cons]
+      have h1 : max k x ≤ tl.foldl max (max k x) := foldl_max_ge_seed tl _
+      have h2 : x ≤ max k x := Nat.le_max_right _ _
+      exact Nat.le_trans h2 h1
+    · show x ≤ (hd :: tl).foldl max k
+      simp only [List.foldl_cons]
+      exact ih _ _ hmem_tl
+
+/-- Freshness: `storeFreshLoc sigma ≠ any live location`. -/
+theorem storeFreshLoc_ne (sigma : Store) (ell : Loc)
+    (h : (storeLookup sigma ell).isSome) :
+    ell ≠ storeFreshLoc sigma := by
+  -- First: ell ∈ (sigma.map Prod.fst)
+  have hMem : ell ∈ sigma.map Prod.fst := by
+    induction sigma with
+    | nil => simp [storeLookup, List.find?] at h
+    | cons hd tl ih =>
+      simp only [List.map_cons, List.mem_cons]
+      by_cases hHd : hd.1 = ell
+      · left; exact hHd.symm
+      · right
+        apply ih
+        simp only [storeLookup, List.find?, hHd, decide_false,
+                   Bool.false_eq_true, ite_false] at h
+        exact h
+  -- Then: ell ≤ foldl max 0, so ell < foldl max 0 + 1, so ell ≠ fresh.
+  have hLe : ell ≤ (sigma.map Prod.fst).foldl max 0 :=
+    le_foldl_max _ 0 ell hMem
+  have hLt : ell < (sigma.map Prod.fst).foldl max 0 + 1 :=
+    Nat.lt_succ_of_le hLe
+  exact Nat.ne_of_lt hLt
+
 /-! ## StoreWf extension lemmas (available to both LinearitySoundness
     and Preservation). -/
 

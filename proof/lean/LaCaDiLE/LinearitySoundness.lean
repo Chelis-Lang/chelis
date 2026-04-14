@@ -42,37 +42,45 @@ theorem linearity_soundness
   | handleOpDirect => exact ⟨Sigma, h_wf⟩
   | tgrad => exact ⟨Sigma, h_wf⟩
   | tvmap => exact ⟨Sigma, h_wf⟩
-  | tconst sigma_in v ds ell hell =>
+  | tconst s v ds ell hell =>
       refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_⟩
       exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf hell
-  | copy sigma_in ell ellNew w _hlook hfresh =>
+  | copy s ell ellNew w _hlook hfresh =>
       refine ⟨storeTypExtend Sigma ellNew (Typ.tensor w.shape), ?_⟩
       exact StoreWf.extend_fresh ellNew w (Typ.tensor w.shape) h_wf hfresh
-  | tadd sigma_in ell1 ell2 ellOut w1 w2 _ _ _ =>
+  | tadd s ell1 ell2 ellOut w1 w2 _ _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-remove-extend
-  | tmul sigma_in ell1 ell2 ellOut w1 w2 _ _ _ =>
+  | tmul s ell1 ell2 ellOut w1 w2 _ _ _ =>
       refine ⟨storeTypExtend Sigma ellOut (Typ.tensor w1.shape), ?_⟩
       sorry -- TODO Wave 5: StoreWf for remove-remove-extend
-  | tsum sigma_in ell ellOut w i _hlook hfresh =>
+  | tsum s ell ellOut w i hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (rem w.shape i)), ?_⟩
-      -- Wave 2 TODO: prove ell ≠ ellOut from hfresh + h_wf (ell live → ≠ fresh).
-      have hne : ell ≠ ellOut := by sorry
+      have h_isSome : (storeLookup sigma ell).isSome := by
+        rw [hlook]; rfl
+      have hne : ell ≠ ellOut := by
+        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := rem w.shape i, data := w.data }
         (Typ.tensor (rem w.shape i)) h_wf hfresh hne
-  | texpand sigma_in ell ellOut w i k _hlook hfresh =>
+  | texpand s ell ellOut w i k hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor (ins w.shape i k)), ?_⟩
-      have hne : ell ≠ ellOut := by sorry
+      have h_isSome : (storeLookup sigma ell).isSome := by
+        rw [hlook]; rfl
+      have hne : ell ≠ ellOut := by
+        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := ins w.shape i k, data := w.data }
         (Typ.tensor (ins w.shape i k)) h_wf hfresh hne
-  | tuniformLike sigma_in ell ellOut w lo hi _hlook hfresh =>
+  | tuniformLike s ell ellOut w lo hi hlook hfresh =>
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
                 (Typ.tensor w.shape), ?_⟩
-      have hne : ell ≠ ellOut := by sorry
+      have h_isSome : (storeLookup sigma ell).isSome := by
+        rw [hlook]; rfl
+      have hne : ell ≠ ellOut := by
+        rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
       exact StoreWf.remove_extend ell ellOut
         { shape := w.shape, data := lo }
         (Typ.tensor w.shape) h_wf hfresh hne
