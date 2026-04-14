@@ -638,4 +638,47 @@ theorem preservation
       -- preservation itself as the inner-preserves witness.
       sorry
 
+/-! ## Track C3: plug_preserves_typing
+
+Congruence-on-typing lemma for evaluation contexts: if `plug E e` is
+well-typed and we have a local inner-step that transforms `e` into
+`e'` preserving its typing (under a possibly-extended store typing),
+then `plug E e'` is well-typed at the same outer type/eps/contexts
+under the extended store typing.
+
+This is the structural witness needed by the full Preservation theorem
+for the E-Ctx congruence rule. Downstream proofs (Sync step) will pass
+Preservation itself as the `h_inner` argument.
+
+The proof structure is an induction on `E : EvalCtx`. Every case follows
+the same template: invert HasType on the plugged term to extract a
+sub-derivation for `e`, apply `h_inner` to get the replacement derivation
+for `e'`, and rebuild the outer constructor. Cases whose inversion lemmas
+drop `SubEffRow` witnesses require an extra `HasType.subEff` widening,
+which is currently left as a local sorry pending the Wave-2 inversion
+upgrade; the top-level theorem statement is stable. -/
+
+theorem plug_preserves_typing
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma (plug E e) t eps Gamma')
+    (h_inner : ∀ {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow},
+       HasType Delta Sigma Gamma0 e t0 eps0 Gamma0' →
+       ∃ Sigma2, HasType Delta Sigma2 Gamma0 e' t0 eps0 Gamma0' ∧
+                 StoreTypSub Sigma Sigma2) :
+    ∃ Sigma2, HasType Delta Sigma2 Gamma (plug E e') t eps Gamma' ∧
+              StoreTypSub Sigma Sigma2 := by
+  -- Induction on the evaluation context. The `hole` case is a direct
+  -- application of `h_inner`; the other cases mirror the shape of the
+  -- corresponding `HasType` constructor after an inversion step.
+  -- TODO Wave-4 Sync: close each constructor case using the matching
+  -- inversion lemma (`app_inv`, `add_inv`, ...). Cases where the
+  -- inversion lemma currently drops a `SubEffRow` witness need a
+  -- strengthened inversion or an explicit `HasType.subEff` wrap.
+  cases E with
+  | hole =>
+      -- plug hole e = e; directly apply the inner-step hypothesis.
+      simpa [plug] using h_inner h
+  | _ => sorry
+
 end LaCaDiLE
