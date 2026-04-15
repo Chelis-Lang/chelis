@@ -1265,15 +1265,18 @@ private theorem weakening_head2_db
               (some t_new1 :: some t_new2 :: Γ) := weakening_head_db h1
   exact h2
 
-/-! ## Substitution obligation — remaining Wave 5f work
+/-! ## Substitution obligation — Wave 5f finding and refined plan
 
-Wave 5e landed the tail-rebase metatheory:
-`tail_rebase_db` (+ clauses partner), `pure_context_rebase_db`, and
-the `weakening_head2_db` two-slot variant. These are the structural
-prerequisites for `subst_preserves_typing_db`, which remains as Wave
-5f work.
+Wave 5e landed the tail-rebase metatheory (`tail_rebase_db` +
+clauses partner, `pure_context_rebase_db`, `weakening_head2_db`).
+Wave 5f attempted to close `subst_preserves_typing_db` directly
+against the statement proposed in the Wave 5e plan and discovered
+that the natural statement is not strong enough to support the
+induction on `h_e`. This doc block records the obstruction, the
+refined statement that Wave 5g will prove, and why each helper is
+still the right shape.
 
-Under Option C the target statement is:
+**Natural statement (not directly provable by induction).**
 
 ```lean
 theorem subst_preserves_typing_db
@@ -1286,49 +1289,117 @@ theorem subst_preserves_typing_db
     HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
 ```
 
-**Status after Wave 5e.** The following structural prerequisites are
-landed in this file:
+This is the TOP-LEVEL statement — slot `j` starts live (`some t_v`)
+and ends dead (`none`). But consider the `app` case:
+
+```
+h1 : HasTypeDB … (Γ.insertAt j (some t_v)) e1 (arrow t1 t2 eps) eps1 Γ_mid
+h2 : HasTypeDB … Γ_mid e2 t1 eps2 (Γ.insertAt j none)
+```
+
+`live_slot_monotone` on `h1` says `Γ_mid[j]?` is either
+`some (some t_v)` (e1 did NOT consume slot j) or `some none` (e1 did).
+
+- If e1 consumed j, then `h2`'s INPUT has slot j already dead — the
+  statement "input has some t_v at j, output has none at j" does
+  NOT apply to `h2`, so the inductive hypothesis is not usable.
+- If e1 did not consume j, then `h1`'s OUTPUT has slot j still live
+  — so the statement does not apply to `h1` either.
+
+Exactly one of h1, h2 consumes slot j; the other leaves it live.
+Neither recursive call fits the top-level shape. The statement must
+be generalized to allow either endpoint of the slot state.
+
+**Refined generalized statement (Wave 5g target).**
+
+```lean
+theorem subst_preserves_typing_db_gen
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Γ_e_in Γ_e_out : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (h_e : HasTypeDB Delta Sigma Γ_e_in e t eps Γ_e_out)
+    (j : Nat)
+    {Γ_in Γ_out : LinearCtxDB}
+    {slot_in slot_out : Option Typ}
+    (hin  : Γ_e_in  = Γ_in.insertAt  j slot_in)
+    (hout : Γ_e_out = Γ_out.insertAt j slot_out)
+    (hslots : (slot_in = some t_v ∧ slot_out = some t_v)
+            ∨ (slot_in = some t_v ∧ slot_out = none)
+            ∨ (slot_in = none     ∧ slot_out = none))
+    (h_v : HasTypeDB Delta Sigma Γ_in v t_v [] Γ_in) :
+    HasTypeDB Delta Sigma Γ_in (substDBAux j v e) t eps Γ_out
+```
+
+Three admissible slot trajectories:
+1. live→live  — slot j never consumed along this sub-derivation
+2. live→dead  — slot j consumed exactly here
+3. dead→dead  — slot j was already consumed before this sub-derivation
+
+(`dead→live` is impossible: `none_monotone` forbids it.)
+
+Top-level caller uses trajectory 2 with `Γ_in = Γ_out = Γ`. In the
+`app` case, split on `Γ_mid[j]?` via `live_slot_monotone`:
+- live at midpoint: h1 is live→live, h2 is live→dead.
+- dead at midpoint: h1 is live→dead, h2 is dead→dead.
+
+For dead→dead, every `var j` reference is impossible (would require
+`some (some _)`), so `substDBAux j v e` may shift var indices but
+never substitutes `v`; the `var` case with `i > j` handles the
+shift-down. `h_v` is still needed only as a lift-free premise;
+`pure_context_rebase_db` moves it across equal-length contexts
+(length preservation of `Γ_e_in = Γ_e_out` via `insertAt` length).
+
+**Closure requirements for Wave 5g.**
+
+The generalized mutual block needs the `hin`, `hout`, `hslots`
+equalities threaded as DATA (not `subst`'d) so Lean's structural
+termination checker can see `h_e` as the decreasing argument — same
+discipline proven out by `tail_rebase_db` in Wave 5e. Every case
+pattern-matches on `h_e` (NOT `cases h_e`), preserving pattern
+variables for the termination argument.
+
+Cases outline (all against `h_e` pattern):
+- `var`: `i = j` forces `slot_in = some t_v`, reduces to `h_v` after
+  `pure_context_rebase_db` from `Γ_in` to `Γ_out` (length match via
+  `insertAt`). `i < j` and `i > j` rebuild the var rule with shifted
+  index and `getElem?_insertAt_lt/gt`.
+- Leaf cases (`unit`, `const`, `loc`, `tunit`): slot state preserved;
+  `hslots` choices 1 and 3 both supported (trajectory 2 impossible
+  because no consumption).
+- Single-binder cases (`abs`, `letBind`, `grad`, `vmap`): recurse at
+  `j+1` with lifted `h_v` via `weakening_head_db`. Use
+  `insertAt_cons_succ` to align contexts.
+- `letpair` and clause bodies: recurse at `j+2` with `weakening_head2_db`.
+- Two-child rules (`app`, `tpair`, `tadd`, `tmul`, `letBind`):
+  `live_slot_monotone h1 j` gives the midpoint slot state. Case-split
+  and feed each half the correct `hslots` disjunct. For the dead-on-
+  entry recursive call, rehome `h_v` to the new base via
+  `pure_context_rebase_db` (equal lengths from `length_preservation`).
+- `handle`: mutual with clauses partner; each clause body uses the
+  `j+2` recursion shape.
+- `subEff`: just recurse on the body.
+
+**Wave 5f deliverable.** None of this lands real code. Wave 5f
+is a planning refinement: a correct generalized statement and the
+explicit obstruction analysis above. Wave 5g will execute the proof
+against the refined statement.
+
+**Status of prerequisites (all landed before Wave 5f).**
 
 - `hasTypeDB_length_preservation` (+ clauses partner) — Wave 5b.
 - `hasTypeDB_none_monotone` (+ clauses partner) — Wave 5c.
-- `hasTypeDB_live_slot_monotone` (+ clauses partner) — Wave 5d prep.
+- `hasTypeDB_live_slot_monotone` (+ clauses partner) — Wave 5d.
 - `LinearCtxDB.getElem?_append_lt/ge`, `set_append_lt/ge`,
   `getElem?_append_tail` — pure append bookkeeping.
 - `hasTypeDB_tail_pre_length_eq` — pre lengths match across tails.
 - `hasTypeDB_tail_through_middle` — the none/live-slot sandwich.
-- `tail_rebase_db` (+ clauses partner) — Wave 5e. Structural match on
-  `HasTypeDB` via `termination_by structural h`. Shape equalities
-  `hin, hout` threaded as explicit parameters (subst would break
-  structural recursion by erasing pattern vars).
-- `pure_context_rebase_db` — Wave 5e. Trivial specialization at
-  `pre = pre' = []`.
-- `weakening_head_db` (Wave 5a) and `weakening_head2_db` (Wave 5e) —
-  head extension of pure value derivations for binder / clause-body
-  recursive calls.
+- `tail_rebase_db` (+ clauses partner) — Wave 5e.
+- `pure_context_rebase_db` — Wave 5e.
+- `weakening_head_db` (Wave 5a) and `weakening_head2_db` (Wave 5e).
 
-**Residual Wave 5f work.** With the Wave 5e helpers in place, the
-remaining proof obligation is `subst_preserves_typing_db` (+ clauses
-partner) as a mutual block, structural match on `h_e`:
-- `var`: three-way split on `i` vs `j`, using
-  `getElem?_insertAt_eq` + `set_insertAt_eq` + `pure_context_rebase_db`
-  for `i = j` and adjusted var rule for `i ≠ j`.
-- Leaf/binder cases: `unit`, `const`, `loc` trivial; `abs`,
-  `letBind`, `letpair`, `tgrad`, `tvmap` recurse with
-  `weakening_head_db` / `weakening_head2_db` on `h_v` under the
-  lifted value.
-- Multi-context cases (`app`, `letBind`, `letpair`, `tpair`, `tadd`,
-  `tmul`, `handle`): use `hasTypeDB_tail_through_middle` to extract
-  `Γ_mid = Γ_mid.take j ++ Γ.insertAt j none`-ish shape, then recurse
-  on each half. The RHS half may need `tail_rebase_db` to re-home
-  `h_v` over the intermediate base.
-- `handle` additionally invokes the mutual
-  `subst_preserves_typing_clauses_db` partner.
-
-Wave 5c lands none-monotonicity. Wave 5d prep lands live-slot
-monotonicity, append bookkeeping, and the tail-through-middle
-sandwich. Wave 5e lands tail-rebase proper, the rebase corollary,
-and the two-slot head-weakening helper. Wave 5f will land
-`subst_preserves_typing_db` itself and bridge named ↔ DB so the two
-named sorries in `Substitution.lean` can close against DB results. -/
+Wave 5g will land `subst_preserves_typing_db_gen` (+ clauses partner)
+as a mutual block with `termination_by structural h_e`, then derive
+the top-level `subst_preserves_typing_db` specialization as a
+trajectory-2 corollary. -/
 
 end LaCaDiLE
