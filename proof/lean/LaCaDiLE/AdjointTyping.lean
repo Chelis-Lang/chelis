@@ -506,18 +506,39 @@ private theorem adjoint_typed_aux
       -- Bridge the effect row via `subEff`.
       exact HasType.subEff Delta Sigma Gamma_s Gamma_s' _ _ _ _
         h_letpair (subEff_letpair_add epsSeed)
-  -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all:
-  -- they all generate adjoint bodies whose typing requires structural
-  -- access to sub-term typings of `e` that the seed-polymorphic
-  -- helper does not carry. `mul`'s adjoint in particular emits
-  -- `copy e1` / `copy e2` at the head of its tape layer, so closing
-  -- it requires either extending `adjoint_typed_aux` with an
-  -- `e`-typing premise (and an inversion lemma for `Term.mul`) or
-  -- reshaping the adjoint transform to defer operand tapes. Both
-  -- approaches are outside the Wave-4 Track B scope; they line up
-  -- naturally with the Phase 1 T9 tape extent mechanism tracked for
-  -- `sum` / `expand` and with the ClausesTypedDB work tracked for
-  -- `handle`. Parked together under this catch-all.
+  -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all.
+  --
+  -- `mul` scaffolding landed: `AdjointMulTyped` is now threaded
+  -- through `adjoint_typed_aux` as an operand-typing premise, and
+  -- every existing case (leaves, 12 vestigial structural cases,
+  -- `add`) destructures the predicate via `unfold` and passes the
+  -- appropriate sub-predicate to its recursive calls.
+  --
+  -- The remaining obstruction is *linear-context alignment*. The
+  -- adjoint transform for `Term.mul e1 e2` emits
+  --
+  --     letpair a aTape (copy e1)
+  --       (letpair b bTape (copy e2)
+  --         (letBind y (mul (var a) (var b))
+  --           (letpair gA gB (copy gSeed)
+  --             (letBind adjA <rec e1 ...> <rec e2 ...>))))
+  --
+  -- so the outer `copy e1` tape must type *in the adjoint's current
+  -- linear context* `Γ_s`, then `copy e2` from the threaded mid
+  -- context, and only afterward does `copy gSeed` run (consuming the
+  -- seed binder). `AdjointMulTyped`'s mul case supplies an existential
+  -- typing chain `Γ1 → Γ2 → Γ3` for `e1`/`e2` at `tensor dsE` — but
+  -- those linear contexts are abstract; they are *not* guaranteed to
+  -- be `Γ_s` / `Γ_s' minus gSeed consumption`. A generic
+  -- linear-context rebasing lemma (or the universally-quantified
+  -- form `∀ Γ_s Γ_s', ∃ Γmid ...`) is needed to connect `h_e_muls`
+  -- to the adjoint's concrete `Γ_s → Γ_s'` threading. That lemma is
+  -- a linearity-discipline deliverable that belongs alongside
+  -- `has_type_linear_shrinks` in Wave 3+, not inside this file.
+  --
+  -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work;
+  -- `handle` remains on ClausesTypedDB. All four cases park under
+  -- this catch-all.
   | _ => sorry
 termination_by sizeOf e
 
