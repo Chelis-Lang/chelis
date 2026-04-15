@@ -113,12 +113,19 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       -- Sub-adjoints sequenced via `letBind` (see `add` note).
       -- Eight fresh names at this level (a, aTape, b, bTape, y,
       -- gA, gB, adjA), so inner calls use `n + 8`.
-      Term.letpair (freshName "a" n) (freshName "aTape" n) (Term.copy e1)
-        (Term.letpair (freshName "b" n) (freshName "bTape" n) (Term.copy e2)
-          (Term.letBind (freshName "y" n)
-            (Term.mul (Term.var (freshName "a" n))
-                      (Term.var (freshName "b" n)))
-            (Term.letpair (freshName "gA" n) (freshName "gB" n) (Term.copy gSeed)
+      --
+      -- Wave 5 reshape: `copy gSeed` hoisted to the outermost layer
+      -- so the seed's Γ_s → Γ_s' threading aligns with the linear
+      -- context the outer letpair expects. `copy gSeed`, `copy e1`,
+      -- `copy e2`, and the forward `mul a b` act on independent
+      -- values, so reordering is semantically equivalent and
+      -- preserves linear consumption.
+      Term.letpair (freshName "gA" n) (freshName "gB" n) (Term.copy gSeed)
+        (Term.letpair (freshName "a" n) (freshName "aTape" n) (Term.copy e1)
+          (Term.letpair (freshName "b" n) (freshName "bTape" n) (Term.copy e2)
+            (Term.letBind (freshName "y" n)
+              (Term.mul (Term.var (freshName "a" n))
+                        (Term.var (freshName "b" n)))
               (Term.letBind (freshName "adjA" n)
                 (adjointFrom e1 x
                   (Term.mul (Term.var (freshName "gA" n))
