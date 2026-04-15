@@ -2215,8 +2215,63 @@ theorem subst_preserves_typing_db_gen
       simp only [substDBAux]
       exact HasTypeDB.perform Δ_ S_ Γ_in Γ_out op (substDBAux j v e_) tArg tRet eps_ hbody' hM
   | HasTypeDB.handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls => sorry
-  | HasTypeDB.tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub => sorry
-  | HasTypeDB.tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody => sorry
+  | HasTypeDB.tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub =>
+      -- tgrad is pure Γ → Γ. Γ_in = Γ_out via insertAt_inj.
+      -- Body runs under `diff :: Δ_`; recursion needs h_v cap-weakened.
+      have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      obtain ⟨hΓ, hs⟩ := subst_leaf_resolve (t_v := t_v) j heq hslots
+      subst hΓ
+      subst hs
+      have hin_body : some (Typ.tensor ds) :: Γ =
+          LinearCtxDB.insertAt (j + 1) slot_in (some (Typ.tensor ds) :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) slot_in (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      -- Cap-weaken h_v to (diff :: Δ_), then lift under the new binder.
+      have h_v_cap : HasTypeDB (Capability.diff :: Δ_) S_ Γ_in v t_v [] Γ_in :=
+        hasTypeDB_cap_weaken h_v Capability.diff
+      have h_v_cap_lifted :
+          HasTypeDB (Capability.diff :: Δ_) S_ (some (Typ.tensor ds) :: Γ_in)
+                    (lift v) t_v [] (some (Typ.tensor ds) :: Γ_in) :=
+        weakening_head_db h_v_cap
+      have hj_in_body : j + 1 ≤ (some (Typ.tensor ds) :: Γ_in).length := by
+        simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody (j + 1)
+        (some (Typ.tensor ds) :: Γ_in) (slot :: Γ_in) slot_in slot_in
+        hj_in_body hj_out_body hin_body hout_body hslots h_v_cap_lifted
+      simp only [substDBAux]
+      exact HasTypeDB.tgrad Δ_ S_ Γ_in slot ds dsOut
+        (substDBAux (j + 1) (lift v) body) eps_ hbody' hsub
+  | HasTypeDB.tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody =>
+      -- tvmap is a pure Γ → Γ rule. Γ_in = Γ_out and slot_in = slot_out
+      -- via insertAt_inj.
+      have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      obtain ⟨hΓ, hs⟩ := subst_leaf_resolve (t_v := t_v) j heq hslots
+      subst hΓ
+      subst hs
+      -- Now recurse on hbody at cutoff j+1 under the new head slot.
+      have hin_body : some t1 :: Γ =
+          LinearCtxDB.insertAt (j + 1) slot_in (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) slot_in (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have h_v_lifted :
+          HasTypeDB Δ_ S_ (some t1 :: Γ_in) (lift v) t_v []
+                    (some t1 :: Γ_in) :=
+        weakening_head_db h_v
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody (j + 1)
+        (some t1 :: Γ_in) (slot :: Γ_in) slot_in slot_in
+        hj_in_body hj_out_body hin_body hout_body hslots h_v_lifted
+      simp only [substDBAux]
+      exact HasTypeDB.tvmap Δ_ S_ Γ_in slot t1 t2
+        (substDBAux (j + 1) (lift v) body) eps_ d hbody'
   | HasTypeDB.loc Δ_ S_ Γ ell ti hlook =>
       have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
         hin.symm.trans hout
