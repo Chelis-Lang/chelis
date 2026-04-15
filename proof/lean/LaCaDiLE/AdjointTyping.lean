@@ -158,6 +158,51 @@ private theorem subEff_letpair_add (epsSeed : EffectRow) :
       (EffectRow.union [EffectLabel.accum] epsSeed) :=
   subEff_accum_accum_to_accum epsSeed
 
+/-- Structural predicate: every `Term.mul` sub-expression of `e` has
+    its two operands well-typed as `tensor dsE` in *some* linear
+    context chain. Threaded as the body-typing premise of
+    `adjoint_typed_aux`: the seed-polymorphic helper does not itself
+    carry a typing for `e`, so the `mul` case's recursive tape layer
+    (which emits `copy e1` / `copy e2`) needs external witnesses for
+    the operand typings. Structurally recursive on `Term` so Lean's
+    termination checker accepts it; each constructor case recurses
+    into the sub-terms the adjoint transform itself visits. The
+    `handle` case only tracks the body (clauses are parked with
+    `sum`/`expand`/`handle` in the catch-all). -/
+def AdjointMulTyped (Delta : CapCtx) (Sigma : StoreTyp) (dsE : DimList) :
+    Term → Prop
+  | Term.var _           => True
+  | Term.const _ _       => True
+  | Term.unit            => True
+  | Term.loc _           => True
+  | Term.abs _ _ body    => AdjointMulTyped Delta Sigma dsE body
+  | Term.app e1 e2       =>
+      AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
+  | Term.letBind _ e1 e2 =>
+      AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
+  | Term.copy e          => AdjointMulTyped Delta Sigma dsE e
+  | Term.letpair _ _ e1 e2 =>
+      AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
+  | Term.pair e1 e2      =>
+      AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
+  | Term.fst e           => AdjointMulTyped Delta Sigma dsE e
+  | Term.snd e           => AdjointMulTyped Delta Sigma dsE e
+  | Term.add e1 e2       =>
+      AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
+  | Term.mul e1 e2       =>
+      (∃ Γ1 Γ2 Γ3 eps1 eps2,
+         HasType Delta Sigma Γ1 e1 (Typ.tensor dsE) eps1 Γ2 ∧
+         HasType Delta Sigma Γ2 e2 (Typ.tensor dsE) eps2 Γ3) ∧
+      AdjointMulTyped Delta Sigma dsE e1 ∧
+      AdjointMulTyped Delta Sigma dsE e2
+  | Term.sum e _         => AdjointMulTyped Delta Sigma dsE e
+  | Term.expand e _      => AdjointMulTyped Delta Sigma dsE e
+  | Term.uniformLike e _ _ => AdjointMulTyped Delta Sigma dsE e
+  | Term.grad _ _ _ body => AdjointMulTyped Delta Sigma dsE body
+  | Term.vmap _ _ body   => AdjointMulTyped Delta Sigma dsE body
+  | Term.handle _ body _ => AdjointMulTyped Delta Sigma dsE body
+  | Term.perform _ e     => AdjointMulTyped Delta Sigma dsE e
+
 /-- Seed-polymorphic helper for `adjoint_preserves_typing`. The proof
     depends on the seed's typing, the structural shape of `e`, and
     the freshness of adjoint counter-indexed names at counters ≥ `n`.
@@ -170,6 +215,7 @@ private theorem adjoint_typed_aux
     (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
     (e : Term) (gSeed : Term)
     (h_seed : HasType Delta Sigma Gamma_s gSeed (Typ.tensor dsE) epsSeed Gamma_s')
+    (h_e : AdjointMulTyped Delta Sigma dsE e)
     (h_fresh_s : AdjointNamesFresh n Gamma_s)
     (h_fresh_s' : AdjointNamesFresh n Gamma_s') :
     HasType Delta Sigma Gamma_s (adjointFrom e x gSeed n) Typ.unit
@@ -194,58 +240,88 @@ private theorem adjoint_typed_aux
   | Term.loc _ =>
       simp only [adjointFrom]; exact leaf_perform
   -- Vestigial Phase-1 structural cases: adjoint recurses on a single
-  -- sub-term with the same seed and counter.
+  -- sub-term with the same seed and counter. `h_e` is destructured
+  -- via `AdjointMulTyped`'s structural unfolding on the outer shape.
   | Term.letBind _ e1 _ =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e.1)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.letpair _ _ e1 _ =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e.1)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.pair e1 _ =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e.1)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.fst e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.snd e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.copy e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.abs _ _ e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.app e1 _ =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e.1)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.grad _ _ _ e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.vmap _ _ e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.perform _ e1 =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   | Term.uniformLike e1 _ _ =>
       simp only [adjointFrom]
+      have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
+        (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
+              h_seed h_e1 h_fresh_s h_fresh_s'
   -- Real adjoint cases (add, mul).
   | Term.add e1 e2 =>
       simp only [adjointFrom]
+      have h_e_add : AdjointMulTyped Delta Sigma dsE e1 ∧
+                     AdjointMulTyped Delta Sigma dsE e2 := by
+        unfold AdjointMulTyped at h_e; exact h_e
+      have h_e1 := h_e_add.1
+      have h_e2 := h_e_add.2
       -- Abbreviate the fresh names via local `let`s.
       let gA : String := freshName "gA" n
       let gB : String := freshName "gB" n
@@ -312,7 +388,7 @@ private theorem adjoint_typed_aux
         adjoint_typed_aux Delta Sigma
           (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
           (Gamma_s' ++ [(gB, Typ.tensor dsE)])
-          dsE [] x (n + 3) e1 (Term.var gA) h_var_gA
+          dsE [] x (n + 3) e1 (Term.var gA) h_var_gA h_e1
           h_fresh_gAB_added h_fresh_gB_added
       -- Seed witness for inner recursion on e2: T-Var on gB with
       -- pre = Γ_s' and post = []. But we need the context to also
@@ -354,7 +430,7 @@ private theorem adjoint_typed_aux
         adjoint_typed_aux Delta Sigma
           (Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)])
           (Gamma_s' ++ [(adjA, Typ.unit)])
-          dsE [] x (n + 3) e2 (Term.var gB) h_var_gB
+          dsE [] x (n + 3) e2 (Term.var gB) h_var_gB h_e2
           h_fresh_gBadjA_added h_fresh_adjA_added
       -- T-LetBind: adjA = adjoint e1 in adjoint e2.
       have h_letBind :
@@ -460,6 +536,7 @@ theorem adjoint_preserves_typing
     (h_e : HasType (Capability.diff :: Delta) Sigma
                    (Gamma ++ [(x, Typ.tensor ds)])
                    e (Typ.tensor dsOut) eps Gamma)
+    (h_e_muls : AdjointMulTyped (Capability.diff :: Delta) Sigma dsOut e)
     (h_compat : subsetEffRow eps DiffCompat = true)
     (h_fresh_full : AdjointNamesFresh 0
         (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)]))
@@ -482,7 +559,7 @@ theorem adjoint_preserves_typing
     adjoint_typed_aux (Capability.diff :: Delta) Sigma
       (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
       (Gamma ++ [(x, Typ.tensor ds)])
-      dsOut [] x 0 e (Term.var gs) hvar_gs h_fresh_full h_fresh_small
+      dsOut [] x 0 e (Term.var gs) hvar_gs h_e_muls h_fresh_full h_fresh_small
   -- `adjoint` is `adjointFrom ... 0`; unfold.
   show HasType _ _ _ (adjointFrom e x (Term.var gs) 0) _ _ _
   -- Helper: `union [accum] [] = [accum]`. Goal: `union eps [accum]`.
