@@ -1265,16 +1265,59 @@ private theorem weakening_head2_db
               (some t_new1 :: some t_new2 :: Γ) := weakening_head_db h1
   exact h2
 
-/-! ## Substitution obligation — Wave 5f finding and refined plan
+/-! ## Midpoint decomposition helper for `insertAt`
+
+Given a derivation whose input context is `Γ_base.insertAt j s_in`
+and output is `Γ_base.insertAt j s_out`, multi-child rules expose a
+middle context `Γ_mid` that is NOT a priori of `insertAt` shape. The
+helper below gives `Γ_mid = (Γ_mid.eraseIdx j).insertAt j slot_mid`
+whenever `Γ_mid[j]? = some slot_mid`, which together with length
+preservation and the monotonicity lemmas lets us push recursion
+through multi-child cases without leaving `insertAt` form. -/
+
+theorem LinearCtxDB.insertAt_eraseIdx
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (hj : Γ[j]? = some s) :
+    LinearCtxDB.insertAt j s (Γ.eraseIdx j) = Γ := by
+  induction j generalizing Γ with
+  | zero =>
+    cases Γ with
+    | nil => simp at hj
+    | cons x xs =>
+      simp only [List.getElem?_cons_zero, Option.some.injEq] at hj
+      subst hj
+      rfl
+  | succ k ih =>
+    cases Γ with
+    | nil => simp at hj
+    | cons x xs =>
+      have hj' : xs[k]? = some s := by simpa using hj
+      simp only [List.eraseIdx_cons_succ, LinearCtxDB.insertAt, ih xs hj']
+
+theorem LinearCtxDB.eraseIdx_insertAt
+    (Γ : LinearCtxDB) (j : Nat) (s : Option Typ) (hj : j ≤ Γ.length) :
+    (LinearCtxDB.insertAt j s Γ).eraseIdx j = Γ := by
+  induction j generalizing Γ with
+  | zero => rfl
+  | succ k ih =>
+    cases Γ with
+    | nil => exact absurd hj (by simp)
+    | cons x xs =>
+      have hk : k ≤ xs.length := Nat.le_of_succ_le_succ hj
+      simp only [LinearCtxDB.insertAt, List.eraseIdx_cons_succ, ih xs hk]
+
+/-! ## Substitution obligation — Wave 5g landing
 
 Wave 5e landed the tail-rebase metatheory (`tail_rebase_db` +
 clauses partner, `pure_context_rebase_db`, `weakening_head2_db`).
-Wave 5f attempted to close `subst_preserves_typing_db` directly
-against the statement proposed in the Wave 5e plan and discovered
-that the natural statement is not strong enough to support the
-induction on `h_e`. This doc block records the obstruction, the
-refined statement that Wave 5g will prove, and why each helper is
-still the right shape.
+Wave 5f refined the target statement: the natural
+`subst_preserves_typing_db` shape (input `insertAt j (some t_v)`,
+output `insertAt j none`) is NOT directly provable because
+multi-child rules expose sub-derivations whose slot-j endpoints have
+a different trajectory. The theorem below is the generalized form,
+parameterized by explicit `slot_in`/`slot_out`, which Wave 5g
+executes as a mutual structural induction threaded with the
+equalities `hin`/`hout`/`hslots` as data (same discipline as
+`tail_rebase_db`).
 
 **Natural statement (not directly provable by induction).**
 
