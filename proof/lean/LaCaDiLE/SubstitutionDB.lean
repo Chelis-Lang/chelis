@@ -1965,7 +1965,29 @@ theorem subst_preserves_typing_db_gen
       simp only [substDBAux]
       exact HasTypeDB.abs Δ_ S_ Γ_in Γ_out slot t1 t2 eps_
         (substDBAux (j + 1) (lift v) body) hbody'
-  | HasTypeDB.app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 =>
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 (Typ.arrow t1 t2 eps_) eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 t1 eps2
+                    (Γ_out.insertAt j slot_out) := by
+        rw [← h_Γ2_eq]; exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 j
+        Γ_mid_base Γ_out slot_mid slot_out hj_mid hj_out h_Γ2_eq hout h23_traj h_v_mid
+      simp only [substDBAux]
+      exact HasTypeDB.app Δ_ S_ Γ_in Γ_mid_base Γ_out
+        (substDBAux j v e1) (substDBAux j v e2) t1 t2 eps_ eps1 eps2 h1' h2'
   | HasTypeDB.letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 => sorry
   | HasTypeDB.copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody =>
       have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
@@ -1973,7 +1995,36 @@ theorem subst_preserves_typing_db_gen
       simp only [substDBAux]
       exact HasTypeDB.copy Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds eps_ hbody'
   | HasTypeDB.letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 => sorry
-  | HasTypeDB.tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 =>
+      -- h1 : Γ1 → Γ2, h2 : Γ2 → Γ3
+      -- hin : Γ1 = Γ_in.insertAt j slot_in
+      -- hout : Γ3 = Γ_out.insertAt j slot_out
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      -- Apply decomp_h1 to the shape-normalized h1.
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 t1 eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      -- Shape-normalize h2 against the midpoint and output.
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 t2 eps2
+                    (Γ_out.insertAt j slot_out) := by
+        rw [← h_Γ2_eq]; exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      -- Recursive calls on the original h1, h2 (preserving termination
+      -- structurally). Pass the decomposition equalities as data.
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 j
+        Γ_mid_base Γ_out slot_mid slot_out hj_mid hj_out h_Γ2_eq hout h23_traj h_v_mid
+      simp only [substDBAux]
+      exact HasTypeDB.tpair Δ_ S_ Γ_in Γ_mid_base Γ_out
+        (substDBAux j v e1) (substDBAux j v e2) t1 t2 eps1 eps2 h1' h2'
   | HasTypeDB.fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody =>
       have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
         Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
@@ -1991,8 +2042,52 @@ theorem subst_preserves_typing_db_gen
       subst hΓ
       simp only [substDBAux]
       exact HasTypeDB.const Δ_ S_ Γ_in v_ ds
-  | HasTypeDB.tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 => sorry
-  | HasTypeDB.tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 =>
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 (Typ.tensor ds) eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j slot_out) := by
+        rw [← h_Γ2_eq]; exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 j
+        Γ_mid_base Γ_out slot_mid slot_out hj_mid hj_out h_Γ2_eq hout h23_traj h_v_mid
+      simp only [substDBAux]
+      exact HasTypeDB.tadd Δ_ S_ Γ_in Γ_mid_base Γ_out
+        (substDBAux j v e1) (substDBAux j v e2) ds eps1 eps2 h1' h2'
+  | HasTypeDB.tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 =>
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 (Typ.tensor ds) eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j slot_out) := by
+        rw [← h_Γ2_eq]; exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 j
+        Γ_mid_base Γ_out slot_mid slot_out hj_mid hj_out h_Γ2_eq hout h23_traj h_v_mid
+      simp only [substDBAux]
+      exact HasTypeDB.tmul Δ_ S_ Γ_in Γ_mid_base Γ_out
+        (substDBAux j v e1) (substDBAux j v e2) ds eps1 eps2 h1' h2'
   | HasTypeDB.tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' =>
       have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
         Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
