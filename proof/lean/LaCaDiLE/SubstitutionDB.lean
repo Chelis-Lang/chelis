@@ -1568,4 +1568,83 @@ theorem subst_leaf_resolve
     Γ_in = Γ_out ∧ slot_in = slot_out :=
   LinearCtxDB.insertAt_inj j heq
 
+/-- Var-case closure for the generalized substitution theorem.
+    Standalone form: given the var rule's premises in insertAt shape
+    and a trajectory, produce the substituted derivation. The
+    eventual mutual `subst_preserves_typing_db_gen`'s var case is a
+    one-line delegation to this lemma. -/
+theorem subst_preserves_typing_db_var
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_in Γ_out : LinearCtxDB}
+    {v : TermDB} {t_v : Typ}
+    (i j : Nat) (ti : Typ)
+    (slot_in slot_out : Option Typ)
+    (hj_in : j ≤ Γ_in.length)
+    (_hj_out : j ≤ Γ_out.length)
+    (hlook : (Γ_in.insertAt j slot_in)[i]? = some (some ti))
+    (hout : (Γ_in.insertAt j slot_in).set i none = Γ_out.insertAt j slot_out)
+    (hslots : (slot_in = some t_v ∧ slot_out = some t_v) ∨
+              (slot_in = some t_v ∧ slot_out = none) ∨
+              (slot_in = none ∧ slot_out = none))
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in) :
+    HasTypeDB Δ S Γ_in (substDBAux j v (TermDB.var i)) ti [] Γ_out := by
+  have hi_lt_len : i < Γ_in.length + 1 := by
+    have := (List.getElem?_eq_some_iff.mp hlook).1
+    rw [LinearCtxDB.length_insertAt] at this
+    exact this
+  rcases Nat.lt_trichotomy i j with hij | hij | hij
+  · -- i < j
+    by_cases hiΓ : i < Γ_in.length
+    · rw [substDBAux_var_lt _ hij]
+      have hlook_base : Γ_in[i]? = some (some ti) := by
+        rw [← LinearCtxDB.getElem?_insertAt_lt Γ_in j slot_in i hij hiΓ]
+        exact hlook
+      have hset :
+          (LinearCtxDB.insertAt j slot_in Γ_in).set i none =
+          LinearCtxDB.insertAt j slot_in (Γ_in.set i none) :=
+        LinearCtxDB.set_insertAt_lt Γ_in j slot_in i none hij hiΓ
+      rw [hset] at hout
+      obtain ⟨hbase, _hslot⟩ := LinearCtxDB.insertAt_inj j hout
+      rw [← hbase]
+      exact HasTypeDB.var Δ S Γ_in i ti hlook_base
+    · exfalso
+      have hi_eq : i = Γ_in.length := Nat.le_antisymm
+        (Nat.lt_succ_iff.mp hi_lt_len) (Nat.le_of_not_lt hiΓ)
+      omega
+  · -- i = j: the substituting case
+    subst hij
+    rw [LinearCtxDB.getElem?_insertAt_eq Γ_in i slot_in hj_in] at hlook
+    have hslot_eq : slot_in = some ti := by
+      simp at hlook; exact hlook
+    subst hslot_eq
+    rw [LinearCtxDB.set_insertAt_eq Γ_in i (some ti) none hj_in] at hout
+    obtain ⟨hbase, hs_eq⟩ := LinearCtxDB.insertAt_inj i hout
+    subst hbase
+    rcases hslots with ⟨_, h1b⟩ | ⟨h2a, _⟩ | ⟨h3a, _⟩
+    · rw [← hs_eq] at h1b; cases h1b
+    · have : ti = t_v := by injection h2a with hti
+      subst this
+      rw [substDBAux_var_eq]
+      exact h_v
+    · cases h3a
+  · -- j < i
+    have him1 : j ≤ i - 1 := by omega
+    have hi_eq : i - 1 + 1 = i := by omega
+    have hlook_base : Γ_in[i - 1]? = some (some ti) := by
+      have := LinearCtxDB.getElem?_insertAt_gt Γ_in j slot_in (i - 1) him1
+      rw [hi_eq] at this
+      rw [← this]
+      exact hlook
+    have hset :
+        (LinearCtxDB.insertAt j slot_in Γ_in).set i none =
+        LinearCtxDB.insertAt j slot_in (Γ_in.set (i - 1) none) := by
+      have := LinearCtxDB.set_insertAt_gt Γ_in j slot_in (i - 1) none him1
+      rw [hi_eq] at this
+      exact this
+    rw [hset] at hout
+    obtain ⟨hbase, _hslot⟩ := LinearCtxDB.insertAt_inj j hout
+    rw [← hbase]
+    rw [substDBAux_var_gt _ hij]
+    exact HasTypeDB.var Δ S Γ_in (i - 1) ti hlook_base
+
 end LaCaDiLE
