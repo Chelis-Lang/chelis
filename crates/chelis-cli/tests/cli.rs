@@ -774,6 +774,62 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
 }
 
 #[test]
+fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
+    // Regression guard for Nautilus benchmark ask: when `chelis build` produces a
+    // self-contained binary (top-level `result = ...` triggers main emission), any
+    // user-defined `def` in the same TU should be marked `static inline` so -O2
+    // cross-call inlining kicks in without LTO / -Wl,-Bsymbolic on the downstream
+    // shell. Object-mode builds (no main) keep external linkage.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("inline_helpers.ch");
+    let out_dir = dir.path().join("inline-helpers-build-out");
+    write_file(
+        &path,
+        "def combine(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = add(a, b)\n\
+         result = combine((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32]), \
+         (to_tensor([10.0, 20.0, 30.0, 40.0]) : tensor[4, f32]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let c_src = fs::read_to_string(out_dir.join("inline_helpers.c")).expect("read generated C");
+    assert!(
+        c_src.contains("static inline chelis_tensor* combine("),
+        "expected combine() to be emitted as `static inline` in self-contained binary, got:\n{c_src}"
+    );
+    assert!(
+        c_src.contains("int main("),
+        "expected generated C to emit main(), got:\n{c_src}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "inline_helpers.c", "inline_helpers");
+    assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("inline_helpers"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(run_output.status.success());
+    let actual = String::from_utf8(run_output.stdout).expect("stdout utf8");
+    assert!(
+        actual.contains("11.0")
+            && actual.contains("22.0")
+            && actual.contains("33.0")
+            && actual.contains("44.0"),
+        "combine should elementwise-add both operands; got: {actual}"
+    );
+}
+
+#[test]
 fn check_rejects_literal_dimension_mismatch() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("literal_dim_mismatch.ch");
@@ -890,7 +946,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1818,7 +1874,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1895,7 +1951,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1937,7 +1993,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Common"
 "#,
     );
@@ -1956,7 +2012,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1997,7 +2053,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Common"
 "#,
     );
@@ -2047,7 +2103,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.4"
+compiler = "=0.1.5"
 module_prefix = "Demo"
 
 [dependencies]

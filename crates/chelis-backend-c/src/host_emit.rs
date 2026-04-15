@@ -19,7 +19,14 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     out.push(String::new());
     append_tensor_math_helpers(&mut out);
     out.push(String::new());
-    let header = emit_host_header(program);
+    // When the program is a self-contained binary (has globals → `main` is emitted in the
+    // same translation unit), user-defined host functions can be marked `static inline` so
+    // the compiler can inline scalar helpers across calls under `-O2` / `-fPIC` without
+    // requiring the downstream shell to supply `-flto -Wl,-Bsymbolic`. Object-mode builds
+    // (no main) keep external linkage so the exported symbols remain callable from the
+    // linker.
+    let internal_linkage = !program.globals.is_empty();
+    let header = emit_host_header_with_linkage(program, internal_linkage);
     if !header.is_empty() {
         out.push(header);
         out.push(String::new());
@@ -43,7 +50,7 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     for function in &program.functions {
-        emit_function(&mut out, function);
+        emit_function(&mut out, function, internal_linkage);
         out.push(String::new());
     }
 
@@ -151,6 +158,15 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
 }
 
 pub fn emit_host_header(program: &HostProgram) -> String {
+    emit_host_header_with_linkage(program, false)
+}
+
+fn emit_host_header_with_linkage(program: &HostProgram, internal_linkage: bool) -> String {
+    let prefix = if internal_linkage {
+        "static inline "
+    } else {
+        ""
+    };
     program
         .functions
         .iter()
@@ -162,7 +178,7 @@ pub fn emit_host_header(program: &HostProgram) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "{} {}({});",
+                "{prefix}{} {}({});",
                 c_type(&function.ret_ty),
                 function.name,
                 params
@@ -234,15 +250,20 @@ fn identity_helper_input(
     }
 }
 
-fn emit_function(out: &mut Vec<String>, function: &HostFunction) {
+fn emit_function(out: &mut Vec<String>, function: &HostFunction, internal_linkage: bool) {
     let params = function
         .params
         .iter()
         .map(|param| c_decl(&param.ty, &param.name))
         .collect::<Vec<_>>()
         .join(", ");
+    let prefix = if internal_linkage {
+        "static inline "
+    } else {
+        ""
+    };
     out.push(format!(
-        "{} {}({}) {{",
+        "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty),
         function.name,
         params
