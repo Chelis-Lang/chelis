@@ -1248,6 +1248,23 @@ theorem pure_context_rebase_db
   have := tail_rebase_db h_v [] [] Γ_old Γ_new (by simp) (by simp) h_len
   simpa using this
 
+/-! ## Two-slot head weakening
+
+For `letpair` and handler-clause bodies, the substituted value needs
+to be lifted under two fresh slots rather than one. Two iterations
+of `weakening_insert_db` at cutoff 0 give the expected shape. -/
+private theorem weakening_head2_db
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {v : TermDB} {t_v t_new1 t_new2 : Typ}
+    (h : HasTypeDB Δ S Γ v t_v [] Γ) :
+    HasTypeDB Δ S (some t_new1 :: some t_new2 :: Γ) (lift (lift v)) t_v []
+              (some t_new1 :: some t_new2 :: Γ) := by
+  have h1 : HasTypeDB Δ S (some t_new2 :: Γ) (lift v) t_v [] (some t_new2 :: Γ) :=
+    weakening_head_db h
+  have h2 : HasTypeDB Δ S (some t_new1 :: some t_new2 :: Γ) (lift (lift v)) t_v []
+              (some t_new1 :: some t_new2 :: Γ) := weakening_head_db h1
+  exact h2
+
 /-! ## Substitution obligation — doc block for Wave 5c → 5d
 
 Under Option C the target statement is:
