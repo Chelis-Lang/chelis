@@ -1265,7 +1265,13 @@ private theorem weakening_head2_db
               (some t_new1 :: some t_new2 :: Γ) := weakening_head_db h1
   exact h2
 
-/-! ## Substitution obligation — doc block for Wave 5c → 5d
+/-! ## Substitution obligation — remaining Wave 5f work
+
+Wave 5e landed the tail-rebase metatheory:
+`tail_rebase_db` (+ clauses partner), `pure_context_rebase_db`, and
+the `weakening_head2_db` two-slot variant. These are the structural
+prerequisites for `subst_preserves_typing_db`, which remains as Wave
+5f work.
 
 Under Option C the target statement is:
 
@@ -1280,89 +1286,49 @@ theorem subst_preserves_typing_db
     HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
 ```
 
-**Status after Wave 5d prep.** The following structural
-prerequisites are now landed in this file:
+**Status after Wave 5e.** The following structural prerequisites are
+landed in this file:
 
 - `hasTypeDB_length_preservation` (+ clauses partner) — Wave 5b.
 - `hasTypeDB_none_monotone` (+ clauses partner) — Wave 5c.
 - `hasTypeDB_live_slot_monotone` (+ clauses partner) — Wave 5d prep.
-  Strengthens none-monotonicity with the matching direction: if
-  an input slot is `some (some t)`, the output slot is either
-  `some (some t)` (unchanged) or `some none` (consumed). No rule
-  rewrites a live slot to a differently-typed live slot.
 - `LinearCtxDB.getElem?_append_lt/ge`, `set_append_lt/ge`,
   `getElem?_append_tail` — pure append bookkeeping.
 - `hasTypeDB_tail_pre_length_eq` — pre lengths match across tails.
-- `hasTypeDB_tail_through_middle` — the none/live-slot sandwich:
-  along a derivation `(pre ++ Γ_old) → Γ_mid → (pre' ++ Γ_old)`,
-  the intermediate's drop-past-prefix equals `Γ_old` verbatim.
-  Consumption of a live tail slot anywhere in `Γ_mid` would
-  propagate `none` to the output through `h2`'s monotonicity,
-  contradicting the intact output tail.
+- `hasTypeDB_tail_through_middle` — the none/live-slot sandwich.
+- `tail_rebase_db` (+ clauses partner) — Wave 5e. Structural match on
+  `HasTypeDB` via `termination_by structural h`. Shape equalities
+  `hin, hout` threaded as explicit parameters (subst would break
+  structural recursion by erasing pattern vars).
+- `pure_context_rebase_db` — Wave 5e. Trivial specialization at
+  `pre = pre' = []`.
+- `weakening_head_db` (Wave 5a) and `weakening_head2_db` (Wave 5e) —
+  head extension of pure value derivations for binder / clause-body
+  recursive calls.
 
-**Refined obstruction analysis.** During Wave 5c the originally-
-proposed `pure_context_rebase_db` lemma was shown to be unprovable
-by direct structural induction on a pure `Γ → Γ` derivation.
-Counter-example: the abs case has body derivation
-`(some t1 :: Γ) → (slot :: Γ)` which is *not* itself of the
-`Γ' → Γ'` pure shape, so the induction hypothesis does not apply to
-the body. The same failure recurs in every binder case and in
-every multi-context case where the intermediate context Γ_mid is
-only known to length-match, not to equal, the endpoints.
-
-The correct generalization is a **tail-rebase** lemma:
-
-```lean
-theorem tail_rebase_db :
-    Γ_old.length = Γ_new.length →
-    HasTypeDB Δ Σ (pre ++ Γ_old) e t eps (pre' ++ Γ_old) →
-    HasTypeDB Δ Σ (pre ++ Γ_new) e t eps (pre' ++ Γ_new)
-```
-
-`pure_context_rebase_db` is the specialization at `pre = pre' = []`.
-This reformulation is sound because, along any derivation whose
-endpoints both end in `Γ_old`, no slot of `Γ_old` can have been
-consumed anywhere in the middle: consumption at position
-`pre.length + k` would push `(pre ++ Γ_old)[pre.length + k]?` from
-`some (some t)` to `some none`, and `hasTypeDB_none_monotone` would
-then force the output at that position to still be `some none`,
-contradicting `(pre' ++ Γ_old)[pre.length + k]? = some (some t')`.
-
-**Remaining Wave 5e work.** With the Wave 5d prep helpers landed,
-the residual proof obligations reduce to three tactical theorems:
-
-1. `tail_rebase_db` (mutual with `tail_rebase_clauses_db`) — proved
-   by structural match on the derivation. The foundation is in
-   place: `hasTypeDB_tail_through_middle` handles every multi-
-   context rule (`app`, `letBind`, `letpair`, `tpair`, `tadd`,
-   `tmul`, `handle`) by giving
-   `Γ_mid = Γ_mid.take pre.length ++ Γ_old`, and binder rules
-   (`abs`, `letBind`, `letpair`, `tgrad`, `tvmap`) extend the
-   prefix via `(slot :: pre) ++ Γ_old = slot :: (pre ++ Γ_old)`
-   re-association. The var case splits on `i < pre.length`
-   (substitute in the prefix via `set_append_lt` +
-   `getElem?_append_lt`) vs `i ≥ pre.length` (vacuous by
-   `set` + `getElem?_append_ge` — the output at position `i`
-   would be `some none`, but by the append-right equation it must
-   equal the live `Γ_old` slot, contradiction).
-2. `pure_context_rebase_db` — `pre = pre' = []` specialization of
-   `tail_rebase_db`, trivial by `List.nil_append`.
-3. `subst_preserves_typing_db` (+ clauses partner) — pattern-match
-   on `h_e`:
-   - `var`: three-way split on `i` vs `j`, using
-     `getElem?_insertAt_eq` + `set_insertAt_eq` + `h_v`.
-   - Leaf/binder cases: `unit`, `const`, `loc` trivial; `abs`,
-     `letBind`, `letpair`, `tgrad`, `tvmap` recurse with
-     `weakening_head_db` (and its two-slot variant for letpair /
-     clause bodies).
-   - Multi-context cases: use `tail_rebase_db` to re-home `h_v`
-     over the intermediate base provided by
-     `hasTypeDB_tail_through_middle`.
+**Residual Wave 5f work.** With the Wave 5e helpers in place, the
+remaining proof obligation is `subst_preserves_typing_db` (+ clauses
+partner) as a mutual block, structural match on `h_e`:
+- `var`: three-way split on `i` vs `j`, using
+  `getElem?_insertAt_eq` + `set_insertAt_eq` + `pure_context_rebase_db`
+  for `i = j` and adjusted var rule for `i ≠ j`.
+- Leaf/binder cases: `unit`, `const`, `loc` trivial; `abs`,
+  `letBind`, `letpair`, `tgrad`, `tvmap` recurse with
+  `weakening_head_db` / `weakening_head2_db` on `h_v` under the
+  lifted value.
+- Multi-context cases (`app`, `letBind`, `letpair`, `tpair`, `tadd`,
+  `tmul`, `handle`): use `hasTypeDB_tail_through_middle` to extract
+  `Γ_mid = Γ_mid.take j ++ Γ.insertAt j none`-ish shape, then recurse
+  on each half. The RHS half may need `tail_rebase_db` to re-home
+  `h_v` over the intermediate base.
+- `handle` additionally invokes the mutual
+  `subst_preserves_typing_clauses_db` partner.
 
 Wave 5c lands none-monotonicity. Wave 5d prep lands live-slot
 monotonicity, append bookkeeping, and the tail-through-middle
 sandwich. Wave 5e lands tail-rebase proper, the rebase corollary,
-and subst itself, and bridges named ↔ DB so the two named sorries
-in `Substitution.lean` can close against DB results. -/
+and the two-slot head-weakening helper. Wave 5f will land
+`subst_preserves_typing_db` itself and bridge named ↔ DB so the two
+named sorries in `Substitution.lean` can close against DB results. -/
 
 end LaCaDiLE
