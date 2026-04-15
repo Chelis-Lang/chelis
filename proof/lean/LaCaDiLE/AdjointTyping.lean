@@ -508,33 +508,46 @@ private theorem adjoint_typed_aux
         h_letpair (subEff_letpair_add epsSeed)
   -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all.
   --
-  -- `mul` scaffolding landed: `AdjointMulTyped` is now threaded
-  -- through `adjoint_typed_aux` as an operand-typing premise, and
-  -- every existing case (leaves, 12 vestigial structural cases,
-  -- `add`) destructures the predicate via `unfold` and passes the
-  -- appropriate sub-predicate to its recursive calls.
+  -- Wave 5 Track B: `AdjointTransform` reshaped the `mul` case so
+  -- `copy gSeed` is the outermost letpair (before any operand tape
+  -- layer). That aligns the seed's Γ_s → Γ_s' threading with the
+  -- outer derivation — the originally-identified blocker. The
+  -- reshape is semantically equivalent (copy gSeed, copy e1, copy e2,
+  -- mul a b all commute as pure values on disjoint bindings).
   --
-  -- The remaining obstruction is *linear-context alignment*. The
-  -- adjoint transform for `Term.mul e1 e2` emits
+  -- Two structural obstacles remain for closing the `mul` case,
+  -- neither of which is surmountable without touching files outside
+  -- this one:
   --
-  --     letpair a aTape (copy e1)
-  --       (letpair b bTape (copy e2)
-  --         (letBind y (mul (var a) (var b))
-  --           (letpair gA gB (copy gSeed)
-  --             (letBind adjA <rec e1 ...> <rec e2 ...>))))
+  --  (i) Operand rebasing. `AdjointMulTyped.mul` supplies an
+  --      existential typing chain `Γ1 → Γ2 → Γ3` for `e1`/`e2` at
+  --      `tensor dsE`. After the reshape, the operand tape layers
+  --      `copy e1` / `copy e2` must type at the adjoint's extended
+  --      linear context (`Γ_s' ++ [(gA,τ),(gB,τ)]` and deeper), which
+  --      is not the existential `Γ1` the predicate supplies.
+  --      Strengthening the predicate to `∀ Γ, ∃ Γ' eps, ...` would
+  --      close the rebasing — but it would also require the caller
+  --      to supply a no-consumption witness, and the effect rows
+  --      become existential, reintroducing obstacle (ii).
   --
-  -- so the outer `copy e1` tape must type *in the adjoint's current
-  -- linear context* `Γ_s`, then `copy e2` from the threaded mid
-  -- context, and only afterward does `copy gSeed` run (consuming the
-  -- seed binder). `AdjointMulTyped`'s mul case supplies an existential
-  -- typing chain `Γ1 → Γ2 → Γ3` for `e1`/`e2` at `tensor dsE` — but
-  -- those linear contexts are abstract; they are *not* guaranteed to
-  -- be `Γ_s` / `Γ_s' minus gSeed consumption`. A generic
-  -- linear-context rebasing lemma (or the universally-quantified
-  -- form `∀ Γ_s Γ_s', ∃ Γmid ...`) is needed to connect `h_e_muls`
-  -- to the adjoint's concrete `Γ_s → Γ_s'` threading. That lemma is
-  -- a linearity-discipline deliverable that belongs alongside
-  -- `has_type_linear_shrinks` in Wave 3+, not inside this file.
+  -- (ii) Effect-row bridging. The nested letpair/letBind chain
+  --      produces a compound row `union epsSeed (union eps_e1 (union
+  --      eps_e2 (... accum ... accum ...)))` where `eps_e1`, `eps_e2`
+  --      come from the operand typings. To bridge via `subEff` to
+  --      the target `union [accum] epsSeed`, the operand effect rows
+  --      must be empty (or subsumed by `epsSeed`). That cannot be
+  --      derived from `AdjointMulTyped` without adding a purity
+  --      premise to the predicate. The purity premise, in turn, is
+  --      too strong for realistic user programs that use `copy` /
+  --      `perform` on operands.
+  --
+  -- A sound path forward is the `weakening_insert` lemma in
+  -- `Substitution.lean` (currently sorry-blocked). With that lemma,
+  -- the operand rebasing collapses to linear weakening over the
+  -- predicate's existential chain, and the effect rows pass through
+  -- without modification. That work is a Wave 3 linearity-discipline
+  -- deliverable and belongs alongside `has_type_linear_shrinks`, not
+  -- inside this file.
   --
   -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work;
   -- `handle` remains on ClausesTypedDB. All four cases park under
