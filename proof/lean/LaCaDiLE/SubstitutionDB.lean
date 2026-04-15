@@ -1506,5 +1506,66 @@ theorem subst_var_case_gt
   rw [hv, ← hbase]
   exact HasTypeDB.var Δ S Γ_in (i - 1) ti hlook_base_in
 
+/-! ## insertAt injectivity + leaf resolution for the gen theorem -/
+
+/-- `LinearCtxDB.insertAt` is unconditionally injective on both the
+    context and the inserted slot. Structural induction on `j` with
+    case analysis on the list spines. -/
+theorem LinearCtxDB.insertAt_inj
+    (j : Nat) {Γ₁ Γ₂ : LinearCtxDB} {s₁ s₂ : Option Typ}
+    (h : Γ₁.insertAt j s₁ = Γ₂.insertAt j s₂) :
+    Γ₁ = Γ₂ ∧ s₁ = s₂ := by
+  induction j generalizing Γ₁ Γ₂ with
+  | zero =>
+    simp only [LinearCtxDB.insertAt_zero] at h
+    exact ⟨(List.cons.inj h).2, (List.cons.inj h).1⟩
+  | succ k ih =>
+    cases Γ₁ with
+    | nil =>
+      cases Γ₂ with
+      | nil =>
+        simp only [LinearCtxDB.insertAt_nil_succ] at h
+        exact ⟨rfl, (List.cons.inj h).1⟩
+      | cons y ys =>
+        simp only [LinearCtxDB.insertAt_nil_succ,
+                   LinearCtxDB.insertAt_cons_succ] at h
+        have h1 := (List.cons.inj h).1
+        have h2 := (List.cons.inj h).2
+        subst h1
+        have hlen := congrArg List.length h2
+        rw [LinearCtxDB.length_insertAt] at hlen
+        simp at hlen
+    | cons x xs =>
+      cases Γ₂ with
+      | nil =>
+        simp only [LinearCtxDB.insertAt_nil_succ,
+                   LinearCtxDB.insertAt_cons_succ] at h
+        have h1 := (List.cons.inj h).1
+        have h2 := (List.cons.inj h).2
+        subst h1
+        have hlen := congrArg List.length h2
+        rw [LinearCtxDB.length_insertAt] at hlen
+        simp at hlen
+      | cons y ys =>
+        simp only [LinearCtxDB.insertAt_cons_succ] at h
+        have h1 := (List.cons.inj h).1
+        have h2 := (List.cons.inj h).2
+        subst h1
+        obtain ⟨hxs, hs⟩ := ih h2
+        subst hxs
+        exact ⟨rfl, hs⟩
+
+/-- For pure leaf constructors (Γ → Γ, e.g. `unit`, `const`, `loc`),
+    the gen theorem's `hin`/`hout` premises imply equal contexts and
+    equal slots. Direct corollary of `insertAt_inj`. -/
+theorem subst_leaf_resolve
+    {Γ_in Γ_out : LinearCtxDB} {slot_in slot_out : Option Typ}
+    {t_v : Typ} (j : Nat)
+    (heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out)
+    (_hslots : (slot_in = some t_v ∧ slot_out = some t_v) ∨
+               (slot_in = some t_v ∧ slot_out = none) ∨
+               (slot_in = none ∧ slot_out = none)) :
+    Γ_in = Γ_out ∧ slot_in = slot_out :=
+  LinearCtxDB.insertAt_inj j heq
 
 end LaCaDiLE
