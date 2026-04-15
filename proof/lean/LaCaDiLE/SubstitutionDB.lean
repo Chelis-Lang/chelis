@@ -1233,6 +1233,21 @@ theorem tail_rebase_clauses_db
 termination_by structural h
 end
 
+/-- Corollary: if a pure derivation holds over `Γ_old`, it also holds
+    over any equal-length `Γ_new`. This is the `pre = pre' = []`
+    specialization of `tail_rebase_db`. Used by
+    `subst_preserves_typing_db` to rehome value derivations across
+    intermediate contexts. -/
+theorem pure_context_rebase_db
+    {Δ : CapCtx} {S : StoreTyp}
+    {v : TermDB} {t_v : Typ}
+    {Γ_old Γ_new : LinearCtxDB}
+    (h_v : HasTypeDB Δ S Γ_old v t_v [] Γ_old)
+    (h_len : Γ_old.length = Γ_new.length) :
+    HasTypeDB Δ S Γ_new v t_v [] Γ_new := by
+  have := tail_rebase_db h_v [] [] Γ_old Γ_new (by simp) (by simp) h_len
+  simpa using this
+
 /-! ## Substitution obligation — doc block for Wave 5c → 5d
 
 Under Option C the target statement is:
