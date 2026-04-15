@@ -1647,6 +1647,113 @@ theorem subst_preserves_typing_db_var
     rw [substDBAux_var_gt _ hij]
     exact HasTypeDB.var Δ S Γ_in (i - 1) ti hlook_base
 
+/-! ## Multi-context decomposition helper (Wave 5i)
+
+Given a sub-derivation `h1` whose input context is
+`Γ_in.insertAt j slot_in` and whose output is some `Γ_mid`, this
+helper decomposes `Γ_mid` into its own insertAt shape
+`Γ_mid_base.insertAt j slot_mid`, determines the slot trajectory
+`slot_in → slot_mid`, and provides the bounds needed to recurse
+on `h1` via `subst_preserves_typing_db_gen`. The multi-context
+constructors (`app`, `tpair`, `tadd`, `tmul`, `letBind`, `letpair`)
+use this helper to thread each sub-derivation through the gen
+theorem without duplicating the same bookkeeping 6 times. -/
+theorem subst_multi_decomp_h1
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_in Γ_mid : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    {t_v : Typ} {slot_in : Option Typ}
+    (j : Nat)
+    (hj_in : j ≤ Γ_in.length)
+    (h1 : HasTypeDB Δ S (Γ_in.insertAt j slot_in) e t eps Γ_mid)
+    (h_slot_in : slot_in = some t_v ∨ slot_in = none) :
+    ∃ (Γ_mid_base : LinearCtxDB) (slot_mid : Option Typ),
+      Γ_mid = Γ_mid_base.insertAt j slot_mid ∧
+      Γ_mid_base.length = Γ_in.length ∧
+      j ≤ Γ_mid_base.length ∧
+      -- Sub-trajectory from slot_in to slot_mid
+      ((slot_in = some t_v ∧ slot_mid = some t_v) ∨
+       (slot_in = some t_v ∧ slot_mid = none) ∨
+       (slot_in = none ∧ slot_mid = none)) := by
+  have hlen : Γ_mid.length = Γ_in.length + 1 := by
+    have := hasTypeDB_length_preservation h1
+    rw [LinearCtxDB.length_insertAt] at this
+    omega
+  have hj_Γmid : j < Γ_mid.length := by omega
+  -- Look up slot_mid := Γ_mid[j]
+  rcases h_slot_in with h_live | h_dead
+  · -- slot_in = some t_v: use live_slot_monotone on h1 at position j
+    have hlook_in : (Γ_in.insertAt j slot_in)[j]? = some (some t_v) := by
+      rw [LinearCtxDB.getElem?_insertAt_eq Γ_in j slot_in hj_in, h_live]
+    have hmono := hasTypeDB_live_slot_monotone h1 j t_v hlook_in
+    rcases hmono with hmid_live | hmid_dead
+    · -- Γ_mid[j]? = some (some t_v): trajectory 1 (live→live)
+      refine ⟨Γ_mid.eraseIdx j, some t_v, ?_, ?_, ?_, Or.inl ⟨h_live, rfl⟩⟩
+      · exact (LinearCtxDB.insertAt_eraseIdx Γ_mid j (some t_v) hmid_live).symm
+      · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+      · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+    · -- Γ_mid[j]? = some none: trajectory 2 (live→dead) for h1
+      refine ⟨Γ_mid.eraseIdx j, none, ?_, ?_, ?_, Or.inr (Or.inl ⟨h_live, rfl⟩)⟩
+      · exact (LinearCtxDB.insertAt_eraseIdx Γ_mid j none hmid_dead).symm
+      · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+      · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+  · -- slot_in = none: use none_monotone on h1 at position j
+    have hlook_in : (Γ_in.insertAt j slot_in)[j]? = some none := by
+      rw [LinearCtxDB.getElem?_insertAt_eq Γ_in j slot_in hj_in, h_dead]
+    have hmid_none := hasTypeDB_none_monotone h1 j hlook_in
+    refine ⟨Γ_mid.eraseIdx j, none, ?_, ?_, ?_, Or.inr (Or.inr ⟨h_dead, rfl⟩)⟩
+    · exact (LinearCtxDB.insertAt_eraseIdx Γ_mid j none hmid_none).symm
+    · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+    · rw [List.length_eraseIdx_of_lt hj_Γmid]; omega
+
+/-- Complementary helper: given `h2` and `slot_mid`, derive `h2`'s
+    sub-trajectory from `slot_mid` to `slot_out`. This is inline
+    monotonicity — dead→live is impossible so h2 constrains the
+    trajectory directly from its input slot. -/
+theorem subst_multi_decomp_h2
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_mid_base Γ_out : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    {t_v : Typ} {slot_mid slot_out : Option Typ}
+    (j : Nat)
+    (hj_mid : j ≤ Γ_mid_base.length)
+    (hj_out : j ≤ Γ_out.length)
+    (h2 : HasTypeDB Δ S (Γ_mid_base.insertAt j slot_mid) e t eps
+                   (Γ_out.insertAt j slot_out))
+    (h_mid : slot_mid = some t_v ∨ slot_mid = none) :
+    -- slot_mid's trajectory to slot_out: live→live, live→dead, or dead→dead
+    (slot_mid = some t_v ∧ slot_out = some t_v) ∨
+    (slot_mid = some t_v ∧ slot_out = none) ∨
+    (slot_mid = none ∧ slot_out = none) := by
+  rcases h_mid with h_live | h_dead
+  · -- slot_mid = some t_v; look up slot_out via live_slot_monotone
+    have hlook_mid : (Γ_mid_base.insertAt j slot_mid)[j]? = some (some t_v) := by
+      rw [LinearCtxDB.getElem?_insertAt_eq Γ_mid_base j slot_mid hj_mid, h_live]
+    have hmono := hasTypeDB_live_slot_monotone h2 j t_v hlook_mid
+    have hlook_out :
+        (Γ_out.insertAt j slot_out)[j]? = some slot_out :=
+      LinearCtxDB.getElem?_insertAt_eq Γ_out j slot_out hj_out
+    rcases hmono with h_out_live | h_out_dead
+    · left
+      refine ⟨h_live, ?_⟩
+      rw [hlook_out] at h_out_live
+      exact Option.some.inj h_out_live
+    · right; left
+      refine ⟨h_live, ?_⟩
+      rw [hlook_out] at h_out_dead
+      exact Option.some.inj h_out_dead
+  · -- slot_mid = none; look up slot_out via none_monotone
+    have hlook_mid : (Γ_mid_base.insertAt j slot_mid)[j]? = some none := by
+      rw [LinearCtxDB.getElem?_insertAt_eq Γ_mid_base j slot_mid hj_mid, h_dead]
+    have hmono := hasTypeDB_none_monotone h2 j hlook_mid
+    right; right
+    refine ⟨h_dead, ?_⟩
+    have hlook_out :
+        (Γ_out.insertAt j slot_out)[j]? = some slot_out :=
+      LinearCtxDB.getElem?_insertAt_eq Γ_out j slot_out hj_out
+    rw [hlook_out] at hmono
+    exact Option.some.inj hmono
+
 /-! ## Generalized substitution theorem (Wave 5h mutual checkpoint)
 
 This mutual block is the Wave 5h checkpoint: 14 of 24 cases are
