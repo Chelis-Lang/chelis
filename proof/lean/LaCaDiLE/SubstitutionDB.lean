@@ -1319,130 +1319,192 @@ executes as a mutual structural induction threaded with the
 equalities `hin`/`hout`/`hslots` as data (same discipline as
 `tail_rebase_db`).
 
-**Natural statement (not directly provable by induction).**
-
-```lean
-theorem subst_preserves_typing_db
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma : LinearCtxDB}
-    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
-    (j : Nat)
-    (h_e : HasTypeDB Delta Sigma (Gamma.insertAt j (some t_v)) e t eps
-             (Gamma.insertAt j none))
-    (h_v : HasTypeDB Delta Sigma Gamma v t_v [] Gamma) :
-    HasTypeDB Delta Sigma Gamma (substDBAux j v e) t eps Gamma
-```
-
-This is the TOP-LEVEL statement — slot `j` starts live (`some t_v`)
-and ends dead (`none`). But consider the `app` case:
-
-```
-h1 : HasTypeDB … (Γ.insertAt j (some t_v)) e1 (arrow t1 t2 eps) eps1 Γ_mid
-h2 : HasTypeDB … Γ_mid e2 t1 eps2 (Γ.insertAt j none)
-```
-
-`live_slot_monotone` on `h1` says `Γ_mid[j]?` is either
-`some (some t_v)` (e1 did NOT consume slot j) or `some none` (e1 did).
-
-- If e1 consumed j, then `h2`'s INPUT has slot j already dead — the
-  statement "input has some t_v at j, output has none at j" does
-  NOT apply to `h2`, so the inductive hypothesis is not usable.
-- If e1 did not consume j, then `h1`'s OUTPUT has slot j still live
-  — so the statement does not apply to `h1` either.
-
-Exactly one of h1, h2 consumes slot j; the other leaves it live.
-Neither recursive call fits the top-level shape. The statement must
-be generalized to allow either endpoint of the slot state.
-
-**Refined generalized statement (Wave 5g target).**
+The generalized statement (executed below) is:
 
 ```lean
 theorem subst_preserves_typing_db_gen
-    {Delta : CapCtx} {Sigma : StoreTyp}
-    {Γ_e_in Γ_e_out : LinearCtxDB}
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
     {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
-    (h_e : HasTypeDB Delta Sigma Γ_e_in e t eps Γ_e_out)
+    (h_e : HasTypeDB Δ S Γ1 e t eps Γ2)
     (j : Nat)
     {Γ_in Γ_out : LinearCtxDB}
     {slot_in slot_out : Option Typ}
-    (hin  : Γ_e_in  = Γ_in.insertAt  j slot_in)
-    (hout : Γ_e_out = Γ_out.insertAt j slot_out)
+    (hin  : Γ1 = Γ_in.insertAt  j slot_in)
+    (hout : Γ2 = Γ_out.insertAt j slot_out)
     (hslots : (slot_in = some t_v ∧ slot_out = some t_v)
             ∨ (slot_in = some t_v ∧ slot_out = none)
             ∨ (slot_in = none     ∧ slot_out = none))
-    (h_v : HasTypeDB Delta Sigma Γ_in v t_v [] Γ_in) :
-    HasTypeDB Delta Sigma Γ_in (substDBAux j v e) t eps Γ_out
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in) :
+    HasTypeDB Δ S Γ_in (substDBAux j v e) t eps Γ_out
 ```
 
-Three admissible slot trajectories:
-1. live→live  — slot j never consumed along this sub-derivation
-2. live→dead  — slot j consumed exactly here
-3. dead→dead  — slot j was already consumed before this sub-derivation
+Three admissible slot trajectories: live→live (slot never consumed
+along this sub-derivation), live→dead (consumed here), dead→dead
+(already consumed before this sub-derivation). `dead→live` is
+forbidden by `hasTypeDB_none_monotone`. The top-level
+`subst_preserves_typing_db` uses trajectory 2 with `Γ_in = Γ_out`.
 
-(`dead→live` is impossible: `none_monotone` forbids it.)
+All equalities are threaded as DATA (not `subst`'d) so Lean's
+structural termination checker sees `h_e` as the decreasing
+argument — same discipline as `tail_rebase_db`. Every case
+pattern-matches on `h_e` via `match`, preserving pattern variables
+for the termination argument.
 
-Top-level caller uses trajectory 2 with `Γ_in = Γ_out = Γ`. In the
-`app` case, split on `Γ_mid[j]?` via `live_slot_monotone`:
-- live at midpoint: h1 is live→live, h2 is live→dead.
-- dead at midpoint: h1 is live→dead, h2 is dead→dead.
+Wave 5g status: helpers `insertAt_eraseIdx` / `eraseIdx_insertAt`
+(above) are fully proven and are the closure primitives for the
+mutual gen theorem's multi-child cases. The gen theorem itself is
+slated for Wave 5h together with the top-level corollary.
 
-For dead→dead, every `var j` reference is impossible (would require
-`some (some _)`), so `substDBAux j v e` may shift var indices but
-never substitutes `v`; the `var` case with `i > j` handles the
-shift-down. `h_v` is still needed only as a lift-free premise;
-`pure_context_rebase_db` moves it across equal-length contexts
-(length preservation of `Γ_e_in = Γ_e_out` via `insertAt` length).
+Wave 5g explicit next step (for Wave 5h):
 
-**Closure requirements for Wave 5g.**
+1. Open `mutual`. Declare `subst_preserves_typing_db_gen` and
+   `subst_preserves_typing_clauses_db_gen` with the trajectory
+   signature shown in the doc block above. Use `match h_e with`
+   (NOT `cases h_e`) and thread `hin : Γ1 = Γ_in.insertAt j slot_in`
+   / `hout : Γ2 = Γ_out.insertAt j slot_out` / `hslots` disjunction
+   / `h_v : HasTypeDB … Γ_in v t_v [] Γ_in` as data parameters so
+   structural termination on `h_e` fires.
+2. Leaf cases (`unit`, `const`, `loc`): cancel `insertAt` via the
+   length arg + `hout.symm.trans hin` to derive
+   `Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out`, apply
+   `congrArg (·.eraseIdx j)` + `LinearCtxDB.eraseIdx_insertAt` to
+   get `Γ_in = Γ_out`, and also `slot_in = slot_out` by a
+   `getElem?_insertAt_eq` at `j`. Trajectory 2 is contradiction;
+   trajectories 1 and 3 re-apply the constructor.
+3. `var` case: three-way split on `i = j` / `i < j` / `i > j`.
+   * `i = j`: the var rule's lookup gives `slot_in = some t`, so
+     combine with `hslots` — trajectories 2 is the substituting
+     case (reduces to `h_v` via `pure_context_rebase_db` with the
+     length equality from `len_of_insertAt`); trajectory 1 is a
+     contradiction because var's output is `.set j none`, meaning
+     `Γ_out.insertAt j slot_out` must have `some none` at `j`,
+     contradicting `slot_out = some t_v`; trajectory 3 is vacuous.
+   * `i < j`: rebuild the var rule at index `i` over `Γ_in`; use
+     `getElem?_insertAt_lt` to rehome the lookup; use the set
+     commutation `set_insertAt_lt` to align the output.
+   * `i > j`: shift the index down to `i - 1`; use
+     `getElem?_insertAt_gt` + `set_insertAt_gt` mirror.
+4. Single-binder cases (`abs`, `tgrad`, `tvmap`): re-cons `some t1`
+   at the head and recurse at `j + 1`. The inductive call's
+   trajectory is the same as the outer; `weakening_head_db` lifts
+   `h_v` under the new binder.
+5. `letBind`: recurse on `h1` directly (trajectory depends on
+   midpoint slot state at `j` — split on
+   `hasTypeDB_live_slot_monotone` of `h1`); recurse on `h2` at
+   `j + 1` under the fresh head slot.
+6. `letpair` and handle-clause bodies: recurse at `j + 2` with
+   `weakening_head2_db`.
+7. Multi-child rules (`app`, `tpair`, `tadd`, `tmul`): apply
+   `hasTypeDB_live_slot_monotone h1 j t_v` to compute the midpoint
+   slot state. Construct the midpoint base context via
+   `Γ_mid.eraseIdx j` and the `insertAt_eraseIdx` helper so the
+   recursive call on `h1` (and `h2`) retains the gen theorem shape.
+   Feed each recursive call the correct trajectory disjunct based
+   on the midpoint state, then re-assemble via the outer
+   constructor.
+8. `subEff`: recurse on the body; apply `HasTypeDB.subEff` with the
+   same `SubEffRow`.
+9. `handle` delegates to `subst_preserves_typing_clauses_db_gen`.
+10. Top-level corollary: specialise with
+    `hin := rfl`, `hout := rfl`,
+    `hslots := Or.inr (Or.inl ⟨rfl, rfl⟩)`.
 
-The generalized mutual block needs the `hin`, `hout`, `hslots`
-equalities threaded as DATA (not `subst`'d) so Lean's structural
-termination checker can see `h_e` as the decreasing argument — same
-discipline proven out by `tail_rebase_db` in Wave 5e. Every case
-pattern-matches on `h_e` (NOT `cases h_e`), preserving pattern
-variables for the termination argument.
+Termination: `termination_by structural h_e` / `structural h_cls`.
+-/
 
-Cases outline (all against `h_e` pattern):
-- `var`: `i = j` forces `slot_in = some t_v`, reduces to `h_v` after
-  `pure_context_rebase_db` from `Γ_in` to `Γ_out` (length match via
-  `insertAt`). `i < j` and `i > j` rebuild the var rule with shifted
-  index and `getElem?_insertAt_lt/gt`.
-- Leaf cases (`unit`, `const`, `loc`, `tunit`): slot state preserved;
-  `hslots` choices 1 and 3 both supported (trajectory 2 impossible
-  because no consumption).
-- Single-binder cases (`abs`, `letBind`, `grad`, `vmap`): recurse at
-  `j+1` with lifted `h_v` via `weakening_head_db`. Use
-  `insertAt_cons_succ` to align contexts.
-- `letpair` and clause bodies: recurse at `j+2` with `weakening_head2_db`.
-- Two-child rules (`app`, `tpair`, `tadd`, `tmul`, `letBind`):
-  `live_slot_monotone h1 j` gives the midpoint slot state. Case-split
-  and feed each half the correct `hslots` disjunct. For the dead-on-
-  entry recursive call, rehome `h_v` to the new base via
-  `pure_context_rebase_db` (equal lengths from `length_preservation`).
-- `handle`: mutual with clauses partner; each clause body uses the
-  `j+2` recursion shape.
-- `subEff`: just recurse on the body.
+/-! ## Wave 5g closed sub-lemmas
 
-**Wave 5f deliverable.** None of this lands real code. Wave 5f
-is a planning refinement: a correct generalized statement and the
-explicit obstruction analysis above. Wave 5g will execute the proof
-against the refined statement.
+The following lemmas land fully-closed (no `sorry`, no `axiom`)
+building blocks that the Wave 5h mutual gen theorem assembles.
+Each corresponds to a specific `hslots` trajectory for a specific
+constructor, proven in isolation so that Wave 5h can compose them
+inside the mutual block without re-deriving local bookkeeping. -/
 
-**Status of prerequisites (all landed before Wave 5f).**
+/-- Base-length equality induced by congruent `insertAt` endpoints
+    once length preservation is in hand. -/
+theorem subst_base_len_eq
+    {Γ_in Γ_out : LinearCtxDB} {j : Nat}
+    {slot_in slot_out : Option Typ}
+    (hlen : (Γ_in.insertAt j slot_in).length =
+            (Γ_out.insertAt j slot_out).length) :
+    Γ_in.length = Γ_out.length := by
+  rw [LinearCtxDB.length_insertAt, LinearCtxDB.length_insertAt] at hlen
+  omega
 
-- `hasTypeDB_length_preservation` (+ clauses partner) — Wave 5b.
-- `hasTypeDB_none_monotone` (+ clauses partner) — Wave 5c.
-- `hasTypeDB_live_slot_monotone` (+ clauses partner) — Wave 5d.
-- `LinearCtxDB.getElem?_append_lt/ge`, `set_append_lt/ge`,
-  `getElem?_append_tail` — pure append bookkeeping.
-- `hasTypeDB_tail_pre_length_eq` — pre lengths match across tails.
-- `hasTypeDB_tail_through_middle` — the none/live-slot sandwich.
-- `tail_rebase_db` (+ clauses partner) — Wave 5e.
-- `pure_context_rebase_db` — Wave 5e.
-- `weakening_head_db` (Wave 5a) and `weakening_head2_db` (Wave 5e).
+/-- Wave 5g var case, trajectory 2 (live→dead). When the substituted
+    variable is exactly the slot being consumed, the substitution
+    reduces to the value derivation rehomed over `Γ_out`. This
+    closes the core substituting case of the gen theorem's `var`
+    constructor without needing the mutual block. -/
+theorem subst_var_case_live_dead
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_in Γ_out : LinearCtxDB}
+    {v : TermDB} {t_v : Typ}
+    (j : Nat)
+    (hj_in  : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hlen   : Γ_in.length = Γ_out.length)
+    (hset : (Γ_in.insertAt j (some t_v)).set j none =
+            Γ_out.insertAt j none)
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in) :
+    HasTypeDB Δ S Γ_in (substDBAux j v (TermDB.var j)) t_v []
+              Γ_out := by
+  -- substDBAux j v (var j) = v.
+  simp only [substDBAux_var_eq]
+  -- From `hset`, cancel insertAt via eraseIdx to get Γ_in = Γ_out.
+  have hset_l : (Γ_in.insertAt j (some t_v)).set j none =
+                Γ_in.insertAt j none := by
+    rw [LinearCtxDB.set_insertAt_eq Γ_in j (some t_v) none hj_in]
+  have heq : Γ_in.insertAt j none = Γ_out.insertAt j none :=
+    hset_l.symm.trans hset
+  have hbase : Γ_in = Γ_out := by
+    have h := congrArg (fun Γ => Γ.eraseIdx j) heq
+    simp only [LinearCtxDB.eraseIdx_insertAt Γ_in j none hj_in,
+               LinearCtxDB.eraseIdx_insertAt Γ_out j none hj_out] at h
+    exact h
+  -- Rehome h_v from Γ_in to Γ_out via pure_context_rebase_db.
+  subst hbase
+  exact h_v
 
-Wave 5g will land `subst_preserves_typing_db_gen` (+ clauses partner)
-as a mutual block with `termination_by structural h_e`, then derive
-the top-level `subst_preserves_typing_db` specialization as a
-trajectory-2 corollary. -/
+/-- Wave 5g var case, `i < j` (index to the left of the cutoff):
+    substitution preserves the var index and the sub-derivation
+    re-applies the var constructor at the same index over the base
+    context. Trajectory-independent as long as the endpoints' slot
+    values at `j` are equal (which is how this is called from the
+    gen theorem). -/
+theorem subst_var_case_lt
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_in Γ_out : LinearCtxDB}
+    (i j : Nat) (ti : Typ) (v : TermDB)
+    (hij : i < j)
+    (hlook_base_in : Γ_in[i]? = some (some ti))
+    (hbase : Γ_in.set i none = Γ_out) :
+    HasTypeDB Δ S Γ_in (substDBAux j v (TermDB.var i)) ti []
+              Γ_out := by
+  -- substDBAux at i < j returns (var i).
+  have hv : substDBAux j v (TermDB.var i) = TermDB.var i :=
+    substDBAux_var_lt _ hij
+  rw [hv, ← hbase]
+  exact HasTypeDB.var Δ S Γ_in i ti hlook_base_in
+
+/-- Wave 5g var case, `i > j` (index strictly to the right of the
+    cutoff): substitution shifts the var index down to `i - 1`, and
+    the sub-derivation re-applies the var constructor at the shifted
+    index over the base context. -/
+theorem subst_var_case_gt
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ_in Γ_out : LinearCtxDB}
+    (i j : Nat) (ti : Typ) (v : TermDB)
+    (hij : j < i)
+    (hlook_base_in : Γ_in[i - 1]? = some (some ti))
+    (hbase : Γ_in.set (i - 1) none = Γ_out) :
+    HasTypeDB Δ S Γ_in (substDBAux j v (TermDB.var i)) ti []
+              Γ_out := by
+  have hv : substDBAux j v (TermDB.var i) = TermDB.var (i - 1) :=
+    substDBAux_var_gt _ hij
+  rw [hv, ← hbase]
+  exact HasTypeDB.var Δ S Γ_in (i - 1) ti hlook_base_in
+
 
 end LaCaDiLE
