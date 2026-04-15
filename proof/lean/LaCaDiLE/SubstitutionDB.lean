@@ -1988,13 +1988,119 @@ theorem subst_preserves_typing_db_gen
       simp only [substDBAux]
       exact HasTypeDB.app Δ_ S_ Γ_in Γ_mid_base Γ_out
         (substDBAux j v e1) (substDBAux j v e2) t1 t2 eps_ eps1 eps2 h1' h2'
-  | HasTypeDB.letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 =>
+      -- h1 : Γ1 → Γ2 (no binder), h2 : (some t1 :: Γ2) → (slot :: Γ3)
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      -- Decompose Γ2 via h1.
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 t1 eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      -- h2's input is (some t1 :: Γ2) and output is (slot :: Γ3).
+      -- After shape-normalization: (some t1 :: Γ_mid_base.insertAt j slot_mid) → (slot :: Γ_out.insertAt j slot_out).
+      -- Which is (some t1 :: Γ_mid_base).insertAt (j+1) slot_mid → (slot :: Γ_out).insertAt (j+1) slot_out.
+      have h2_shape :
+          HasTypeDB Δ_ S_
+            (LinearCtxDB.insertAt (j + 1) slot_mid (some t1 :: Γ_mid_base))
+            e2 t2 eps2
+            (LinearCtxDB.insertAt (j + 1) slot_out (slot :: Γ_out)) := by
+        rw [LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← h_Γ2_eq]
+        exact hout ▸ h2
+      have h23_traj_body :
+          (slot_mid = some t_v ∧ slot_out = some t_v) ∨
+          (slot_mid = some t_v ∧ slot_out = none) ∨
+          (slot_mid = none ∧ slot_out = none) := by
+        have hj_mid_body : j + 1 ≤ (some t1 :: Γ_mid_base).length := by
+          simp; omega
+        have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+        exact subst_multi_decomp_h2 (t_v := t_v) (j + 1) hj_mid_body hj_out_body
+          h2_shape h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have h_v_mid_lifted :
+          HasTypeDB Δ_ S_ (some t1 :: Γ_mid_base) (lift v) t_v []
+                    (some t1 :: Γ_mid_base) :=
+        weakening_head_db h_v_mid
+      -- Recurse on h1 with h12 trajectory.
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      -- Recurse on h2 at cutoff j+1 with the binder-extended base.
+      have hin_body : some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) slot_mid (some t1 :: Γ_mid_base) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+      have hout_body : slot :: Γ3 =
+          LinearCtxDB.insertAt (j + 1) slot_out (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_mid_body : j + 1 ≤ (some t1 :: Γ_mid_base).length := by
+        simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 (j + 1)
+        (some t1 :: Γ_mid_base) (slot :: Γ_out) slot_mid slot_out
+        hj_mid_body hj_out_body hin_body hout_body h23_traj_body h_v_mid_lifted
+      simp only [substDBAux]
+      exact HasTypeDB.letBind Δ_ S_ Γ_in Γ_mid_base Γ_out slot
+        (substDBAux j v e1) (substDBAux (j + 1) (lift v) e2) t1 t2 eps1 eps2 h1' h2'
   | HasTypeDB.copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody =>
       have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
         Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
       simp only [substDBAux]
       exact HasTypeDB.copy Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds eps_ hbody'
-  | HasTypeDB.letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 =>
+      -- h1 : Γ1 → Γ2
+      -- h2 : (some t2 :: some t1 :: Γ2) → (slot1 :: slot2 :: Γ3)
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      have h1_shape :
+          HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) e1 (Typ.pair t1 t2) eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      -- h2's input is (some t2 :: some t1 :: Γ2) and output is (slot1 :: slot2 :: Γ3).
+      -- After shape-normalization the insertAt cutoff becomes j+2.
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have h_v_mid_lifted2 :
+          HasTypeDB Δ_ S_ (some t2 :: some t1 :: Γ_mid_base) (lift (lift v)) t_v []
+                    (some t2 :: some t1 :: Γ_mid_base) :=
+        weakening_head_db (weakening_head_db h_v_mid)
+      have h1' := subst_preserves_typing_db_gen (t_v := t_v) h1 j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have hin_body : some t2 :: some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 2) slot_mid (some t2 :: some t1 :: Γ_mid_base) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← h_Γ2_eq]
+      have hout_body : slot1 :: slot2 :: Γ3 =
+          LinearCtxDB.insertAt (j + 2) slot_out (slot1 :: slot2 :: Γ_out) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hout]
+      have hj_mid_body : j + 2 ≤ (some t2 :: some t1 :: Γ_mid_base).length := by
+        simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have h2_shape :
+          HasTypeDB Δ_ S_
+            (LinearCtxDB.insertAt (j + 2) slot_mid (some t2 :: some t1 :: Γ_mid_base))
+            e2 t_ eps2
+            (LinearCtxDB.insertAt (j + 2) slot_out (slot1 :: slot2 :: Γ_out)) :=
+        hin_body ▸ hout_body ▸ h2
+      have h23_traj_body := subst_multi_decomp_h2 (t_v := t_v) (j + 2)
+        hj_mid_body hj_out_body h2_shape h_slot_mid
+      have h2' := subst_preserves_typing_db_gen (t_v := t_v) h2 (j + 2)
+        (some t2 :: some t1 :: Γ_mid_base) (slot1 :: slot2 :: Γ_out)
+        slot_mid slot_out hj_mid_body hj_out_body hin_body hout_body
+        h23_traj_body h_v_mid_lifted2
+      simp only [substDBAux]
+      exact HasTypeDB.letpair Δ_ S_ Γ_in Γ_mid_base Γ_out slot1 slot2
+        (substDBAux j v e1) (substDBAux (j + 2) (lift (lift v)) e2)
+        t1 t2 t_ eps1 eps2 h1' h2'
   | HasTypeDB.tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 =>
       -- h1 : Γ1 → Γ2, h2 : Γ2 → Γ3
       -- hin : Γ1 = Γ_in.insertAt j slot_in
