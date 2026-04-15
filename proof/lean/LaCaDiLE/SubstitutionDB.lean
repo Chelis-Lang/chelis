@@ -821,6 +821,418 @@ theorem hasTypeDB_tail_through_middle
 
 
 
+/-! ## Tail-rebase (Wave 5e)
+
+`tail_rebase_db` rebases a derivation whose input and output contexts
+share a common tail `Γ_old` onto a different tail `Γ_new` of equal
+length. Proved by structural induction on the derivation via `match`,
+with the shape constraints threaded as explicit equalities so that
+each rule-case can `subst` them before doing local bookkeeping. -/
+
+mutual
+
+theorem tail_rebase_db
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB} {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (pre pre' Γ_old Γ_new : LinearCtxDB)
+    (hin : Γ1 = pre ++ Γ_old) (hout : Γ2 = pre' ++ Γ_old)
+    (h_len : Γ_old.length = Γ_new.length) :
+    HasTypeDB Δ S (pre ++ Γ_new) e t eps (pre' ++ Γ_new) := by
+  match h with
+  | HasTypeDB.var Δ_ S_ Γ i ti hlook =>
+    subst hin
+    -- Output of var rule: (pre ++ Γ_old).set i none = pre' ++ Γ_old.
+    by_cases hip : i < pre.length
+    · -- Var in the prefix: substitute via set_append_lt.
+      have hiΓ : i < (pre ++ Γ_old).length := by
+        rw [List.length_append]; exact Nat.lt_of_lt_of_le hip (Nat.le_add_right _ _)
+      have hlook_pre : pre[i]? = some (some ti) := by
+        rw [← LinearCtxDB.getElem?_append_lt pre Γ_old i hip]; exact hlook
+      -- Cancel the tail in hout.
+      have hout_pre : pre.set i none = pre' := by
+        rw [LinearCtxDB.set_append_lt pre Γ_old i none hip] at hout
+        exact List.append_cancel_right hout
+      -- Target: HasTypeDB ... (pre ++ Γ_new) (var i) ti [] (pre' ++ Γ_new).
+      have hget_new : (pre ++ Γ_new)[i]? = some (some ti) := by
+        rw [LinearCtxDB.getElem?_append_lt pre Γ_new i hip]; exact hlook_pre
+      have hset_new : (pre ++ Γ_new).set i none = pre' ++ Γ_new := by
+        rw [LinearCtxDB.set_append_lt pre Γ_new i none hip, hout_pre]
+      have := HasTypeDB.var Δ_ S_ (pre ++ Γ_new) i ti hget_new
+      rw [hset_new] at this
+      exact this
+    · -- Var in the tail: contradiction.
+      have hip : pre.length ≤ i := Nat.le_of_not_lt hip
+      exfalso
+      -- At position i, (pre ++ Γ_old)[i]? = some (some ti); the var rule
+      -- sets it to none; but the output must also equal (pre' ++ Γ_old),
+      -- which at position i is live (Γ_old[i - pre.length]? = some ti,
+      -- using pre.length = pre'.length from length preservation).
+      have hlen_pp : pre.length = pre'.length := by
+        have h0 := hasTypeDB_length_preservation
+          (HasTypeDB.var Δ_ S_ (pre ++ Γ_old) i ti hlook)
+        rw [hout, List.length_append, List.length_append] at h0
+        exact Nat.add_right_cancel h0
+      -- LHS at i: ((pre ++ Γ_old).set i none)[i]? = some none.
+      have hlt_len : i < (pre ++ Γ_old).length := by
+        rcases hg : (pre ++ Γ_old)[i]? with _ | s
+        · rw [hg] at hlook; cases hlook
+        · exact (List.getElem?_eq_some_iff.mp hg).1
+      have hlhs : ((pre ++ Γ_old).set i none)[i]? = some none :=
+        List.getElem?_set_self hlt_len
+      -- RHS at i: (pre' ++ Γ_old)[i]? = Γ_old[i - pre'.length]? = Γ_old[i - pre.length]?.
+      have hip' : pre'.length ≤ i := hlen_pp ▸ hip
+      have hrhs : (pre' ++ Γ_old)[i]? = Γ_old[i - pre.length]? := by
+        rw [LinearCtxDB.getElem?_append_ge pre' Γ_old i hip', hlen_pp]
+      -- Γ_old[i - pre.length]? = some (some ti) from hlook.
+      have htail : Γ_old[i - pre.length]? = some (some ti) := by
+        rw [← LinearCtxDB.getElem?_append_ge pre Γ_old i hip]; exact hlook
+      -- Now ((pre ++ Γ_old).set i none)[i]? = (pre' ++ Γ_old)[i]? from hout.
+      have heq : ((pre ++ Γ_old).set i none)[i]? = (pre' ++ Γ_old)[i]? := by
+        rw [hout]
+      rw [hlhs, hrhs, htail] at heq
+      cases heq
+  | HasTypeDB.unit Δ_ S_ Γ =>
+    have hpp : pre = pre' := List.append_cancel_right (hin.symm.trans hout)
+    rw [hpp]
+    exact HasTypeDB.unit Δ_ S_ (pre' ++ Γ_new)
+  | HasTypeDB.abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody =>
+    -- Γ1 = pre ++ Γ_old, Γ2 = pre' ++ Γ_old, from hin/hout.
+    -- body: some t1 :: Γ1 → slot :: Γ2.
+    have hin' : some t1 :: Γ1 = (some t1 :: pre) ++ Γ_old := by
+      simp [hin, List.cons_append]
+    have hout' : slot :: Γ2 = (slot :: pre') ++ Γ_old := by
+      simp [hout, List.cons_append]
+    have ihb := tail_rebase_db hbody (some t1 :: pre) (slot :: pre') Γ_old Γ_new hin' hout' h_len
+    -- Peel: (slot :: pre') ++ Γ_new = slot :: (pre' ++ Γ_new); likewise input.
+    simp [List.cons_append] at ihb
+    exact HasTypeDB.abs Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) slot t1 t2 eps_ body ihb
+  | HasTypeDB.app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 epsA eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 (Typ.arrow t1 t2 epsA) eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ Γ2 e2 t1 eps2 (pre' ++ Γ_old) := hout ▸ h2
+    have hmid := hasTypeDB_tail_through_middle h1_shape h2_shape
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hmid] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have h2' := tail_rebase_db h2 (Γ2.take pre.length) pre' Γ_old Γ_new hΓ2 hout h_len
+    exact HasTypeDB.app Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) e1 e2 t1 t2 epsA eps1 eps2 h1' h2'
+  | HasTypeDB.letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 t1 eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ (some t1 :: Γ2) e2 t2 eps2 ((slot :: pre') ++ Γ_old) := by
+      have h2' : HasTypeDB Δ_ S_ (some t1 :: Γ2) e2 t2 eps2 (slot :: (pre' ++ Γ_old)) := hout ▸ h2
+      simpa [List.cons_append] using h2' 
+    -- h1 endpoints: (pre ++ Γ_old) → Γ2. h2_shape endpoints: (some t1 :: Γ2) → (slot :: pre') ++ Γ_old.
+    -- tail_through_middle needs matching append shapes on both endpoints of a *single* derivation,
+    -- but here h2 starts at `some t1 :: Γ2`, not at a shape involving Γ_old directly. Use none/live
+    -- monotonicity directly on h2 to force Γ2.drop pre.length = Γ_old.
+    -- Actually: consider the composite view. Build h2' whose INPUT is (some t1 :: pre) ++ Γ_old form
+    -- requires showing Γ2 = pm ++ Γ_old. We use hasTypeDB_tail_through_middle on the pair
+    -- (h1, h2_under_cons) where h2_under_cons starts at (some t1 :: Γ2). Re-shape:
+    -- h1 : pre ++ Γ_old → Γ2 means with prefix `pre`. h2 : (some t1 :: Γ2) → (slot :: pre') ++ Γ_old
+    -- means with prefix `slot :: pre'`. For tail_through_middle we need the middle
+    -- context of h1 (=Γ2) to equal the input of h2 (=some t1 :: Γ2). They differ by one
+    -- head slot. Workaround: we really need `Γ2.drop pre.length = Γ_old` directly.
+    have hΓ2_drop : Γ2.drop pre.length = Γ_old := by
+      -- Use the fact that h2 has input (some t1 :: Γ2) and output (slot :: pre' ++ Γ_old).
+      -- Apply hasTypeDB_tail_through_middle where the first derivation is h1 with prefix pre
+      -- and the second is h2 viewed with prefix (slot :: pre')... but the types don't align.
+      -- Alternative: append `some t1 :: ` to everything and use a manual sandwich.
+      -- We'll do the sandwich inline using monotone lemmas.
+      apply List.ext_getElem?
+      intro k
+      by_cases hk : k < Γ_old.length
+      · have hdrop_k : (Γ2.drop pre.length)[k]? = Γ2[pre.length + k]? := by
+          rw [List.getElem?_drop]
+        rw [hdrop_k]
+        have hin_k : (pre ++ Γ_old)[pre.length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail pre Γ_old k
+        have hout_k : ((slot :: pre') ++ Γ_old)[(slot :: pre').length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail (slot :: pre') Γ_old k
+        have hlp1 := hasTypeDB_length_preservation h1_shape
+        have hlp2 := hasTypeDB_length_preservation h2_shape
+        have hlen_eq : pre.length = pre'.length := by
+          simp [List.length_append] at hlp1 hlp2
+          -- pre.len + old.len = Γ2.len; 1 + Γ2.len = 1 + pre'.len + old.len → Γ2.len = pre'.len + old.len.
+          -- So pre.len + old.len = pre'.len + old.len → pre.len = pre'.len.
+          omega
+        rcases hg : Γ_old[k]? with _ | ⟨_ | ti⟩
+        · exfalso; rw [List.getElem?_eq_none_iff] at hg; omega
+        · -- Γ_old[k]? = some none
+          have hin_none : (pre ++ Γ_old)[pre.length + k]? = some none := hin_k.trans hg
+          exact hasTypeDB_none_monotone h1_shape (pre.length + k) hin_none
+        · -- Γ_old[k]? = some (some ti)
+          have hin_live : (pre ++ Γ_old)[pre.length + k]? = some (some ti) := hin_k.trans hg
+          rcases hasTypeDB_live_slot_monotone h1_shape (pre.length + k) ti hin_live with hmid_live | hmid_none
+          · exact hmid_live
+          · exfalso
+            have hcons : (some t1 :: Γ2)[(pre.length + k) + 1]? = some none := by
+              simp [hmid_none]
+            have hout_none := hasTypeDB_none_monotone h2_shape ((pre.length + k) + 1) hcons
+            have hidx : (slot :: pre').length + k = (pre.length + k) + 1 := by
+              simp [List.length_cons]; omega
+            rw [← hidx] at hout_none
+            rw [hout_k] at hout_none
+            rw [hg] at hout_none
+            cases hout_none
+      · have hdrop_len : (Γ2.drop pre.length).length = Γ_old.length := by
+          have hlp1 := hasTypeDB_length_preservation h1_shape
+          rw [List.length_drop]
+          simp [List.length_append] at hlp1; omega
+        have h1none : Γ_old[k]? = none := by
+          rw [List.getElem?_eq_none_iff]; omega
+        have h2none : (Γ2.drop pre.length)[k]? = none := by
+          rw [List.getElem?_eq_none_iff, hdrop_len]; omega
+        rw [h1none, h2none]
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hΓ2_drop] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    -- For h2, reshape via the hout-rewritten version.
+    have hin2 : some t1 :: Γ2 = (some t1 :: Γ2.take pre.length) ++ Γ_old := by
+      rw [List.cons_append, ← hΓ2]
+    have hout2 : slot :: Γ3 = (slot :: pre') ++ Γ_old := by
+      rw [hout]; simp [List.cons_append]
+    have h2' := tail_rebase_db h2 (some t1 :: Γ2.take pre.length) (slot :: pre') Γ_old Γ_new hin2 hout2 h_len
+    -- Reshape result of h2' back into head-cons form.
+    simp [List.cons_append] at h2'
+    exact HasTypeDB.letBind Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) slot e1 e2 t1 t2 eps1 eps2 h1' h2'
+  | HasTypeDB.copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.copy Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ ds eps_ ih
+  | HasTypeDB.letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 tR eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 (Typ.pair t1 t2) eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ (some t2 :: some t1 :: Γ2) e2 tR eps2
+                              ((slot1 :: slot2 :: pre') ++ Γ_old) := by
+      have h2' : HasTypeDB Δ_ S_ (some t2 :: some t1 :: Γ2) e2 tR eps2
+                             (slot1 :: slot2 :: (pre' ++ Γ_old)) := hout ▸ h2
+      simpa [List.cons_append] using h2'
+    have hΓ2_drop : Γ2.drop pre.length = Γ_old := by
+      apply List.ext_getElem?
+      intro k
+      by_cases hk : k < Γ_old.length
+      · have hdrop_k : (Γ2.drop pre.length)[k]? = Γ2[pre.length + k]? := by
+          rw [List.getElem?_drop]
+        rw [hdrop_k]
+        have hin_k : (pre ++ Γ_old)[pre.length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail pre Γ_old k
+        have hout_k : ((slot1 :: slot2 :: pre') ++ Γ_old)[(slot1 :: slot2 :: pre').length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail (slot1 :: slot2 :: pre') Γ_old k
+        have hlp1 := hasTypeDB_length_preservation h1_shape
+        have hlp2 := hasTypeDB_length_preservation h2_shape
+        have hlen_eq : pre.length = pre'.length := by
+          simp [List.length_append] at hlp1 hlp2; omega
+        rcases hg : Γ_old[k]? with _ | ⟨_ | ti⟩
+        · exfalso; rw [List.getElem?_eq_none_iff] at hg; omega
+        · have hin_none : (pre ++ Γ_old)[pre.length + k]? = some none := hin_k.trans hg
+          exact hasTypeDB_none_monotone h1_shape (pre.length + k) hin_none
+        · have hin_live : (pre ++ Γ_old)[pre.length + k]? = some (some ti) := hin_k.trans hg
+          rcases hasTypeDB_live_slot_monotone h1_shape (pre.length + k) ti hin_live with hmid_live | hmid_none
+          · exact hmid_live
+          · exfalso
+            have hcons : (some t2 :: some t1 :: Γ2)[(pre.length + k) + 2]? = some none := by
+              simp [hmid_none]
+            have hout_none := hasTypeDB_none_monotone h2_shape ((pre.length + k) + 2) hcons
+            have hidx : (slot1 :: slot2 :: pre').length + k = (pre.length + k) + 2 := by
+              simp [List.length_cons]; omega
+            rw [← hidx] at hout_none
+            rw [hout_k] at hout_none
+            rw [hg] at hout_none
+            cases hout_none
+      · have hdrop_len : (Γ2.drop pre.length).length = Γ_old.length := by
+          have hlp1 := hasTypeDB_length_preservation h1_shape
+          rw [List.length_drop]
+          simp [List.length_append] at hlp1; omega
+        have h1none : Γ_old[k]? = none := by
+          rw [List.getElem?_eq_none_iff]; omega
+        have h2none : (Γ2.drop pre.length)[k]? = none := by
+          rw [List.getElem?_eq_none_iff, hdrop_len]; omega
+        rw [h1none, h2none]
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hΓ2_drop] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have hin2 : some t2 :: some t1 :: Γ2 = (some t2 :: some t1 :: Γ2.take pre.length) ++ Γ_old := by
+      rw [List.cons_append, List.cons_append, ← hΓ2]
+    have hout2 : slot1 :: slot2 :: Γ3 = (slot1 :: slot2 :: pre') ++ Γ_old := by
+      rw [hout]; simp [List.cons_append]
+    have h2' := tail_rebase_db h2 (some t2 :: some t1 :: Γ2.take pre.length)
+                  (slot1 :: slot2 :: pre') Γ_old Γ_new hin2 hout2 h_len
+    simp [List.cons_append] at h2'
+    exact HasTypeDB.letpair Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) slot1 slot2 e1 e2 t1 t2 tR eps1 eps2 h1' h2'
+  | HasTypeDB.tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 t1 eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ Γ2 e2 t2 eps2 (pre' ++ Γ_old) := hout ▸ h2
+    have hmid := hasTypeDB_tail_through_middle h1_shape h2_shape
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hmid] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have h2' := tail_rebase_db h2 (Γ2.take pre.length) pre' Γ_old Γ_new hΓ2 hout h_len
+    exact HasTypeDB.tpair Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) e1 e2 t1 t2 eps1 eps2 h1' h2'
+  | HasTypeDB.fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.fst Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ t1 t2 eps_ ih
+  | HasTypeDB.snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.snd Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ t1 t2 eps_ ih
+  | HasTypeDB.const Δ_ S_ Γ v_ ds =>
+    have hpp : pre = pre' := List.append_cancel_right (hin.symm.trans hout)
+    rw [hpp]
+    exact HasTypeDB.const Δ_ S_ (pre' ++ Γ_new) v_ ds
+  | HasTypeDB.tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ Γ2 e2 (Typ.tensor ds) eps2 (pre' ++ Γ_old) := hout ▸ h2
+    have hmid := hasTypeDB_tail_through_middle h1_shape h2_shape
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hmid] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have h2' := tail_rebase_db h2 (Γ2.take pre.length) pre' Γ_old Γ_new hΓ2 hout h_len
+    exact HasTypeDB.tadd Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) e1 e2 ds eps1 eps2 h1' h2'
+  | HasTypeDB.tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 =>
+    have h1_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+    have h2_shape : HasTypeDB Δ_ S_ Γ2 e2 (Typ.tensor ds) eps2 (pre' ++ Γ_old) := hout ▸ h2
+    have hmid := hasTypeDB_tail_through_middle h1_shape h2_shape
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hmid] at this; exact this.symm
+    have h1' := tail_rebase_db h1 pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have h2' := tail_rebase_db h2 (Γ2.take pre.length) pre' Γ_old Γ_new hΓ2 hout h_len
+    exact HasTypeDB.tmul Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) e1 e2 ds eps1 eps2 h1' h2'
+  | HasTypeDB.tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' _ =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.tsum Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ ds i eps_ ih ds' True.intro
+  | HasTypeDB.texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' _ =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.texpand Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ ds i k eps_ ih ds' True.intro
+  | HasTypeDB.uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.uniformLike Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ ds lo hi eps_ ih
+  | HasTypeDB.perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.perform Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) op e_ tArg tRet eps_ ih hM
+  | HasTypeDB.handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls =>
+    have hb_shape : HasTypeDB Δ_ S_ (pre ++ Γ_old) body ty epsB Γ2 := hin ▸ hb
+    have hcls_shape : ClausesTypedDB Δ_ S_ Γ2 (pre' ++ Γ_old) ty (EffectRow.removeOps epsB epsH) clauses := hout ▸ hcls
+    -- Use tail_through_middle via an artificial continuation: we need
+    -- Γ2.drop pre.length = Γ_old. We have h1 = hb and from hcls
+    -- (a ClausesTypedDB) we get length and monotonicity. Use length +
+    -- clauses monotone.
+    have hΓ2_drop : Γ2.drop pre.length = Γ_old := by
+      apply List.ext_getElem?
+      intro k
+      by_cases hk : k < Γ_old.length
+      · have hdrop_k : (Γ2.drop pre.length)[k]? = Γ2[pre.length + k]? := by
+          rw [List.getElem?_drop]
+        rw [hdrop_k]
+        have hin_k : (pre ++ Γ_old)[pre.length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail pre Γ_old k
+        have hout_k : (pre' ++ Γ_old)[pre'.length + k]? = Γ_old[k]? :=
+          LinearCtxDB.getElem?_append_tail pre' Γ_old k
+        have hlp1 := hasTypeDB_length_preservation hb_shape
+        have hlp2 := hasTypeDB_length_preservation_clauses hcls_shape
+        have hlen_eq : pre.length = pre'.length := by
+          simp [List.length_append] at hlp1 hlp2; omega
+        rcases hg : Γ_old[k]? with _ | ⟨_ | ti⟩
+        · exfalso; rw [List.getElem?_eq_none_iff] at hg; omega
+        · have hin_none : (pre ++ Γ_old)[pre.length + k]? = some none := hin_k.trans hg
+          exact hasTypeDB_none_monotone hb_shape (pre.length + k) hin_none
+        · have hin_live : (pre ++ Γ_old)[pre.length + k]? = some (some ti) := hin_k.trans hg
+          rcases hasTypeDB_live_slot_monotone hb_shape (pre.length + k) ti hin_live with hmid_live | hmid_none
+          · exact hmid_live
+          · exfalso
+            have hout_none := hasTypeDB_none_monotone_clauses hcls_shape (pre.length + k) hmid_none
+            have hidx : pre'.length + k = pre.length + k := by omega
+            rw [← hidx] at hout_none
+            rw [hout_k] at hout_none
+            rw [hg] at hout_none
+            cases hout_none
+      · have hdrop_len : (Γ2.drop pre.length).length = Γ_old.length := by
+          have hlp1 := hasTypeDB_length_preservation hb_shape
+          rw [List.length_drop]
+          simp [List.length_append] at hlp1; omega
+        have h1none : Γ_old[k]? = none := by
+          rw [List.getElem?_eq_none_iff]; omega
+        have h2none : (Γ2.drop pre.length)[k]? = none := by
+          rw [List.getElem?_eq_none_iff, hdrop_len]; omega
+        rw [h1none, h2none]
+    have hΓ2 : Γ2 = Γ2.take pre.length ++ Γ_old := by
+      have := List.take_append_drop pre.length Γ2
+      rw [hΓ2_drop] at this; exact this.symm
+    have hb' := tail_rebase_db hb pre (Γ2.take pre.length) Γ_old Γ_new hin hΓ2 h_len
+    have hcls' := tail_rebase_clauses_db hcls (Γ2.take pre.length) pre' Γ_old Γ_new hΓ2 hout h_len
+    exact HasTypeDB.handle Δ_ S_ (pre ++ Γ_new) (Γ2.take pre.length ++ Γ_new)
+            (pre' ++ Γ_new) body clauses ty epsH epsB hb' hSubsH hClsH hCover hcls'
+  | HasTypeDB.tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub =>
+    have hpp : pre = pre' := List.append_cancel_right (hin.symm.trans hout)
+    have hin_b : some (Typ.tensor ds) :: Γ =
+                 (some (Typ.tensor ds) :: pre) ++ Γ_old := by
+      rw [hin]; simp [List.cons_append]
+    have hout_b : slot :: Γ = (slot :: pre) ++ Γ_old := by
+      rw [hin]; simp [List.cons_append]
+    have ihb := tail_rebase_db hbody (some (Typ.tensor ds) :: pre) (slot :: pre)
+                  Γ_old Γ_new hin_b hout_b h_len
+    simp [List.cons_append] at ihb
+    subst hpp
+    exact HasTypeDB.tgrad Δ_ S_ (pre ++ Γ_new) slot ds dsOut body eps_ ihb hsub
+  | HasTypeDB.tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody =>
+    have hpp : pre = pre' := List.append_cancel_right (hin.symm.trans hout)
+    have hin_b : some t1 :: Γ = (some t1 :: pre) ++ Γ_old := by
+      rw [hin]; simp [List.cons_append]
+    have hout_b : slot :: Γ = (slot :: pre) ++ Γ_old := by
+      rw [hin]; simp [List.cons_append]
+    have ihb := tail_rebase_db hbody (some t1 :: pre) (slot :: pre) Γ_old Γ_new hin_b hout_b h_len
+    simp [List.cons_append] at ihb
+    subst hpp
+    exact HasTypeDB.tvmap Δ_ S_ (pre ++ Γ_new) slot t1 t2 body eps_ d ihb
+  | HasTypeDB.loc Δ_ S_ Γ ell ty hlook =>
+    have hpp : pre = pre' := List.append_cancel_right (hin.symm.trans hout)
+    rw [hpp]
+    exact HasTypeDB.loc Δ_ S_ (pre' ++ Γ_new) ell ty hlook
+  | HasTypeDB.subEff Δ_ S_ Γ Γ' e_ ty eps_ eps'_ hbody hSub =>
+    have ih := tail_rebase_db hbody pre pre' Γ_old Γ_new hin hout h_len
+    exact HasTypeDB.subEff Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) e_ ty eps_ eps'_ ih hSub
+termination_by structural h
+
+theorem tail_rebase_clauses_db
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ2 Γ3 : LinearCtxDB} {ty : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Δ S Γ2 Γ3 ty epsR cls)
+    (pre pre' Γ_old Γ_new : LinearCtxDB)
+    (hin : Γ2 = pre ++ Γ_old) (hout : Γ3 = pre' ++ Γ_old)
+    (h_len : Γ_old.length = Γ_new.length) :
+    ClausesTypedDB Δ S (pre ++ Γ_new) (pre' ++ Γ_new) ty epsR cls := by
+  match h with
+  | ClausesTypedDB.nil Δ_ S_ Γ_ ty_ epsR_ =>
+    subst hin
+    have : pre = pre' := List.append_cancel_right hout
+    subst this
+    exact ClausesTypedDB.nil Δ_ S_ (pre ++ Γ_new) ty_ epsR_
+  | ClausesTypedDB.cons Δ_ S_ Γ2_ Γ3_ slot1 slot2 ty_ tArg tRet epsR_ op hb rest hbody hrest =>
+    -- Γ2_ = pre ++ Γ_old, Γ3_ = pre' ++ Γ_old from hin/hout.
+    have hin_b : some (Typ.arrow tRet ty_ epsR_) :: some tArg :: Γ2_ =
+                 (some (Typ.arrow tRet ty_ epsR_) :: some tArg :: pre) ++ Γ_old := by
+      rw [hin]; simp [List.cons_append]
+    have hout_b : slot1 :: slot2 :: Γ3_ = (slot1 :: slot2 :: pre') ++ Γ_old := by
+      rw [hout]; simp [List.cons_append]
+    have ihb := tail_rebase_db hbody
+      (some (Typ.arrow tRet ty_ epsR_) :: some tArg :: pre)
+      (slot1 :: slot2 :: pre') Γ_old Γ_new hin_b hout_b h_len
+    have ihr := tail_rebase_clauses_db hrest pre pre' Γ_old Γ_new hin hout h_len
+    simp [List.cons_append] at ihb
+    exact ClausesTypedDB.cons Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) slot1 slot2
+            ty_ tArg tRet epsR_ op hb rest ihb ihr
+termination_by structural h
+end
+
 /-! ## Substitution obligation — doc block for Wave 5c → 5d
 
 Under Option C the target statement is:
