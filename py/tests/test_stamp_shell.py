@@ -19,7 +19,7 @@ def _make_fake_nautilus(root: Path) -> Path:
     (src / "reef.toml").write_text(
         '[package]\nname = "nautilus"\n'
         'version = "0.0.0"\n'
-        'compiler = "=0.1.3"\n'
+        'compiler = "=0.1.4"\n'
         'module_prefix = "Nautilus"\n'
     )
     (src / "src/core.ch").write_text(

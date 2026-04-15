@@ -2144,13 +2144,14 @@ fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option
 }
 
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
-    full_name == short_name
-        || full_name
-            .rsplit_once("__")
-            .is_some_and(|(_, tail)| tail == short_name)
-        || full_name
-            .rsplit_once('.')
-            .is_some_and(|(_, tail)| tail == short_name)
+    full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
+}
+
+fn terminal_name(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
 }
 
 fn find_top_level_sig_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
@@ -2404,8 +2405,28 @@ fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
 fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
     let arg_tys = args.iter().map(host_expr_type).collect::<Vec<_>>();
     match name {
-        "add" | "sub" | "mul" | "div" | "neg" => {
-            if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
+        "tuple-get" => match (arg_tys.first(), args.get(1)) {
+            (Some(HostType::Tuple(items)), Some(HostExpr::Int(index))) => items
+                .get(*index as usize)
+                .cloned()
+                .or(Some(HostType::Unknown)),
+            _ => Some(HostType::Unknown),
+        },
+        _ => infer_builtin_host_type_from_arg_tys(name, &arg_tys),
+    }
+}
+
+fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Option<HostType> {
+    let tensor_arg = arg_tys.iter().find_map(|ty| match ty {
+        HostType::Tensor(tensor_ty) => Some(tensor_ty.clone()),
+        _ => None,
+    });
+    match name {
+        "add" | "sub" | "mul" | "div" | "neg" | "exp" | "log" | "sin" | "sqrt" | "relu"
+        | "sigmoid" | "max_elem" | "min_elem" => {
+            if let Some(tensor_ty) = tensor_arg {
+                Some(HostType::Tensor(tensor_ty))
+            } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
                 Some(HostType::Float64)
             } else {
                 Some(HostType::Int64)
@@ -2470,13 +2491,7 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
             ])),
             _ => Some(HostType::Unknown),
         },
-        "tuple-get" => match (arg_tys.first(), args.get(1)) {
-            (Some(HostType::Tuple(items)), Some(HostExpr::Int(index))) => items
-                .get(*index as usize)
-                .cloned()
-                .or(Some(HostType::Unknown)),
-            _ => Some(HostType::Unknown),
-        },
+        "tuple-get" => Some(HostType::Unknown),
         "take" | "drop" => match arg_tys.first() {
             Some(HostType::List(inner)) => Some(HostType::List(Box::new((**inner).clone()))),
             _ => Some(HostType::Unknown),

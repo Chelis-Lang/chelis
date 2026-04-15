@@ -167,6 +167,14 @@ fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::proc
     cmd.status().expect("gcc should run")
 }
 
+fn gcc_compile_generated(out_dir: &Path, source: &str) -> std::process::ExitStatus {
+    StdCommand::new("gcc")
+        .current_dir(out_dir)
+        .args(["-O2", "-fopenmp", "-I.", "-c", source])
+        .status()
+        .expect("gcc should run")
+}
+
 fn hipcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
     StdCommand::new("hipcc")
         .current_dir(out_dir)
@@ -333,7 +341,7 @@ fn eval_rejects_unbound_runtime_names() {
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing required input"));
+        .stderr(predicate::str::contains("unbound variable: input"));
 }
 
 #[test]
@@ -716,6 +724,151 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
     assert_eq!(run_output.stdout, eval_stdout);
 }
 
+#[test]
+fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("top_level_tensor_add.ch");
+    let out_dir = dir.path().join("top-level-tensor-add-build-out");
+    write_file(
+        &path,
+        "result = add((to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f32]), \
+         (to_tensor([10.0, 20.0, 30.0, 40.0]) : tensor[4, f32]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status = gcc_link_generated(&out_dir, "top_level_tensor_add.c", "top_level_tensor_add");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("top_level_tensor_add"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let expected_value = String::from_utf8(eval_stdout).expect("eval stdout utf8");
+    let actual = String::from_utf8(run_output.stdout).expect("run stdout utf8");
+    assert_eq!(actual, format!("result = {expected_value}"));
+}
+
+#[test]
+fn check_rejects_literal_dimension_mismatch() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("literal_dim_mismatch.ch");
+    write_file(
+        &path,
+        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+    );
+
+    let json = run_json_check(&path);
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch"),
+        "expected DimensionMismatch in check output, got {json}"
+    );
+    assert_eq!(
+        json["unresolved_names"]
+            .as_array()
+            .expect("unresolved_names array")
+            .len(),
+        0,
+        "{json}"
+    );
+}
+
+#[test]
+fn check_rejects_unresolved_function_names() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unresolved_name.ch");
+    write_file(
+        &path,
+        "def probe(x: f32) -> f32 = sub(x, cos(x))\n\
+         def main() -> f32 = probe(cast(1.0, f32))\n",
+    );
+
+    let json = run_json_check(&path);
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "UnboundVariable"),
+        "expected UnboundVariable in check output, got {json}"
+    );
+    assert!(
+        json["unresolved_names"]
+            .as_array()
+            .expect("unresolved_names array")
+            .iter()
+            .any(|name| name == "cos"),
+        "expected unresolved_names to include cos, got {json}"
+    );
+}
+
+#[test]
+fn build_c_nested_float_builtins_do_not_emit_int_temps() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_float_builtins.ch");
+    let out_dir = dir.path().join("nested-float-build-out");
+    write_file(
+        &path,
+        "def bad(x: f32) -> f32 = exp(neg(mul(x, x)))\n\
+         def main() -> f32 = bad(cast(1.5, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("nested_float_builtins.c")).expect("generated c");
+    assert!(
+        !source.contains("int __arg"),
+        "expected float-valued builtin temps to avoid int declarations:\n{source}"
+    );
+    assert!(
+        source.contains("double __arg"),
+        "expected generated host C to use double temps:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "nested_float_builtins.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
 fn assert_reef_std_embedding_builds_to_valid_c() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -737,7 +890,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1665,7 +1818,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1742,7 +1895,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1784,7 +1937,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Common"
 "#,
     );
@@ -1803,7 +1956,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1844,7 +1997,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Common"
 "#,
     );
@@ -1894,7 +2047,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.3"
+compiler = "=0.1.4"
 module_prefix = "Demo"
 
 [dependencies]

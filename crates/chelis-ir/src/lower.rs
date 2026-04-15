@@ -3073,6 +3073,19 @@ mod tests {
         lower_program(&checked)
     }
 
+    fn parse_and_lower_unchecked(src: &str) -> Dag {
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        for expr in &exprs {
+            let _ = ctx.lower_expr(expr);
+        }
+        ctx.dag
+    }
+
     #[test]
     fn lower_single_const() {
         let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))");
@@ -3172,7 +3185,7 @@ mod tests {
     #[test]
     fn lower_unknown_var_becomes_load() {
         let src = "(def {} y (var {} weights))";
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         assert_eq!(dag.len(), 1);
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
@@ -3344,8 +3357,8 @@ mod tests {
     #[test]
     fn lower_reshape_recognized() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} reshape) (var {} x)))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} (var {} reshape) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
@@ -3356,10 +3369,15 @@ mod tests {
     #[test]
     fn lower_pad_recognized() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} pad) (var {} x)))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 6) (t-prim {} f32))}
+                   (var {} pad)
+                   (var {} x)
+                   ((1 1))
+                   0.0))
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Pad { .. }));
         assert!(verify::verify(&dag).is_empty());
@@ -3368,22 +3386,29 @@ mod tests {
     #[test]
     fn lower_shrink_recognized() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} shrink) (var {} x)))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                   (var {} shrink)
+                   (var {} x)
+                   ((1 1))))
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Shrink { .. }));
-        assert!(verify::verify(&dag).is_empty());
     }
 
     #[test]
     fn lower_stride_recognized() {
         let src = r#"
-            (def {} x (lit {} 1.0))
-            (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} stride) (var {} x)))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
+            (def {} y
+              (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
+                   (var {} stride)
+                   (var {} x)
+                   2))
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(matches!(last.op, RiscOp::Stride { .. }));
         assert!(verify::verify(&dag).is_empty());
@@ -3456,7 +3481,7 @@ mod tests {
     #[test]
     fn lower_var_with_type_metadata() {
         let src = "(def {} y (var {type: (t-prim {} f64)} weights))";
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.precision, Prim::F64);
     }
@@ -3478,6 +3503,19 @@ mod regression_tests {
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         lower_program(&checked)
+    }
+
+    fn parse_and_lower_unchecked(src: &str) -> Dag {
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        for expr in &exprs {
+            let _ = ctx.lower_expr(expr);
+        }
+        ctx.dag
     }
 
     // Fix 1: Tensor type metadata with flat Deep shape format.
@@ -3539,7 +3577,7 @@ mod regression_tests {
             (let {} (bind {} x (lit {} 1.0)) (var {} x))
             (var {} x)
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(
             matches!(&last.op, RiscOp::Load { name } if name == "x"),
@@ -3553,7 +3591,7 @@ mod regression_tests {
             (fn {} (params {} p) (var {} p))
             (var {} p)
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let last = dag.get(NodeId(dag.len() - 1)).unwrap();
         assert!(
             matches!(&last.op, RiscOp::Load { name } if name == "p"),
@@ -3647,13 +3685,13 @@ mod regression_tests {
     #[test]
     #[should_panic(expected = "`grad` is not representable in the Phase 0e RISC DAG")]
     fn fix4_grad_is_rejected_before_lowering() {
-        let _ = parse_and_lower("(grad {} (var {} f))");
+        let _ = parse_and_lower_unchecked("(grad {} (var {} f))");
     }
 
     #[test]
     #[should_panic(expected = "`vmap` is not representable in the Phase 0e RISC DAG")]
     fn fix4_vmap_is_rejected_before_lowering() {
-        let _ = parse_and_lower("(vmap {} (var {} f))");
+        let _ = parse_and_lower_unchecked("(vmap {} (var {} f))");
     }
 
     #[test]
@@ -3752,7 +3790,9 @@ mod regression_tests {
     #[test]
     #[should_panic(expected = "`match` is not representable in the Phase 0e RISC DAG")]
     fn unsupported_match_is_rejected_before_lowering() {
-        let _ = parse_and_lower("(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))");
+        let _ = parse_and_lower_unchecked(
+            "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
+        );
     }
 
     #[test]

@@ -235,6 +235,18 @@ impl AdtRegistry {
         None
     }
 
+    /// Look up an imported or qualified constructor by its unique terminal segment.
+    pub fn lookup_variant_terminal_unique(&self, ctor_name: &str) -> Option<(&str, &VariantInfo)> {
+        let mut matches = self.defs.iter().flat_map(|(adt_name, def)| {
+            def.variants.iter().filter_map(move |variant| {
+                terminal_name_matches(&variant.name, ctor_name)
+                    .then_some((adt_name.as_str(), variant))
+            })
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     /// Register a type alias: `typealias Name[params] = Type`.
     pub fn register_alias(
         &mut self,
@@ -283,6 +295,17 @@ fn get_tag(list: &deep::List) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
+}
+
+fn terminal_name(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
 }
 
 /// Helper: get children (elements after tag and metadata) from a Deep List.

@@ -144,13 +144,47 @@ pub fn infer_phase0e_program(exprs: &[deep::Expr]) -> InferResult {
     result
 }
 
-fn infer_phase0e_program_with_env(exprs: &[deep::Expr], _type_env: &Phase0eTypeEnv) -> InferResult {
-    let mut result = infer_program(exprs);
-    result
-        .errors
-        .retain(|error| !matches!(error.kind, CheckErrorKind::UnboundVariable));
+fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEnv) -> InferResult {
+    let (mut env, mut vg) = builtins::builtin_env();
+    let mut subst = Subst::new();
+    let mut adt_reg = AdtRegistry::new();
+    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
+    let mut errors = Vec::new();
+    let mut typed_nodes = 0;
+    let mut total_nodes = 0;
+
+    for expr in exprs {
+        collect_declarations(
+            expr,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &mut adt_reg,
+            &mut errors,
+        );
+    }
+
+    for (name, ty_expr) in type_env {
+        let ty = deep_type_to_resolved_type(ty_expr, &mut vg, &adt_reg, &mut HashMap::new());
+        let scheme = env.generalize(&ty, &subst);
+        env.bind(name.clone(), scheme);
+    }
+
+    for expr in exprs {
+        infer_top_level(
+            expr,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &adt_reg,
+            &mut errors,
+            &mut typed_nodes,
+            &mut total_nodes,
+        );
+    }
+
     for warning in chelis_deep::validate::validate(exprs) {
-        result.errors.push(CheckError::new(
+        errors.push(CheckError::new(
             match warning.kind {
                 chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
                 _ => CheckErrorKind::Other,
@@ -159,7 +193,12 @@ fn infer_phase0e_program_with_env(exprs: &[deep::Expr], _type_env: &Phase0eTypeE
             vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
         ));
     }
-    result
+
+    InferResult {
+        errors,
+        typed_nodes,
+        total_nodes,
+    }
 }
 
 type Phase0eTypeEnv = HashMap<String, deep::Expr>;
@@ -2179,7 +2218,10 @@ fn infer_var(
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-        if let Some(scheme) = env.lookup(name) {
+        if let Some(scheme) = env
+            .lookup(name)
+            .or_else(|| env.lookup_terminal_unique(name))
+        {
             let scheme = scheme.clone();
             let ty = env.instantiate(&scheme, vg);
             subst.apply(&ty)
@@ -2287,15 +2329,16 @@ fn infer_app(
             .lookup_variant(fname)
             .map(|_| fname.clone())
             .or_else(|| {
-                fname
-                    .rsplit("__")
-                    .next()
-                    .and_then(|suffix| adt_reg.lookup_variant(suffix).map(|_| suffix.to_string()))
+                adt_reg
+                    .lookup_variant_terminal_unique(fname)
+                    .map(|(_, variant)| variant.name.clone())
             })
     });
 
     if let Some(ref fname) = ctor_lookup_name
-        && let Some((_adt_name, variant)) = adt_reg.lookup_variant(fname)
+        && let Some((_adt_name, variant)) = adt_reg
+            .lookup_variant(fname)
+            .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
         && !variant.fields.is_empty()
         && variant
             .fields
@@ -5957,7 +6000,10 @@ fn pattern_bindings(
                     covered_variants.push(ctor_name.to_string());
 
                     // Look up constructor in env and decompose
-                    if let Some(scheme) = env.lookup(ctor_name) {
+                    if let Some(scheme) = env
+                        .lookup(ctor_name)
+                        .or_else(|| env.lookup_terminal_unique(ctor_name))
+                    {
                         let scheme = scheme.clone();
                         let ctor_ty = env.instantiate(&scheme, vg);
                         // Unify the result of the constructor with scrutinee type
@@ -6017,7 +6063,9 @@ fn pattern_bindings(
                     covered_variants.push(ctor_name.to_string());
 
                     // Look up variant in ADT registry to get field types
-                    let variant_info = adt_reg.lookup_variant(ctor_name);
+                    let variant_info = adt_reg
+                        .lookup_variant(ctor_name)
+                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
                     let declared_fields: std::collections::HashMap<&str, &Type> = variant_info
                         .map(|(_, vi)| {
                             vi.fields
@@ -7909,6 +7957,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn phase0e_literal_dimension_mismatch_surfaces_error() {
+        let decls = chelis_surf::parser::parse_str(
+            "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
+             def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+        let result = infer_phase0e_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "expected phase0e inference to preserve literal dimension mismatches, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn phase0e_preserves_unresolved_name_errors() {
+        let decls = chelis_surf::parser::parse_str(
+            "def probe(x: f32) -> f32 = sub(x, cos(x))\n\
+             def main() -> f32 = probe(cast(1.0, f32))\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+        let result = infer_phase0e_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            "expected phase0e inference to preserve unresolved-name errors, got {:?}",
+            result.errors
+        );
+
+        let report = crate::fitness::check_phase0e_program(&exprs);
+        assert!(
+            report.unresolved_names.contains(&"cos".to_string()),
+            "expected phase0e fitness report to include unresolved cos, got {:?}",
+            report.unresolved_names
+        );
+    }
+
+    #[test]
+    fn phase0e_resolves_unique_terminal_constructor_names() {
+        let decls = chelis_surf::parser::parse_str(
+            "type KVCache[a] = | KVCache(List[a])\n\
+             def keep_cache[p](cache: Option[KVCache[p]]) -> KVCache[p] =\n\
+               match cache with {\n\
+                 | Some(value) => value\n\
+                 | None => Pkg__chelis__std__Std__Nn__Generate__KVCache([])\n\
+               }\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+        let result = infer_phase0e_program(&exprs);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            "expected qualified constructor names to resolve by unique terminal match, got {:?}",
+            result.errors
+        );
+    }
+
     // Fix 8: typed params in Deep
     #[test]
     fn fix8_typed_params() {
@@ -8207,11 +8326,11 @@ def projection(
         let checked = checked_surf(
             r#"
 def pack_heads(
-  q: tensor[batch, seq, hidden, f32],
-  k: tensor[batch, seq, hidden, f32]
+  q: tensor[batch, seq, 2, f32],
+  k: tensor[batch, seq, 2, f32]
 ) -> tensor[batch, seq, *, f32] = {
   packed = concat([q, k], 2)
-  pieces = split(packed, 2, [hidden, hidden])
+  pieces = split(packed, 2, [2, 2])
   concat(pieces, 2)
 }
 "#,
@@ -8225,9 +8344,9 @@ def pack_heads(
             r#"
 def summarize(x: tensor[batch, hidden, hidden, f32]) -> (tensor[batch, hidden, f32], tensor[batch, hidden, int64], tensor[batch, f32]) = {
   diag = diagonal(x, 1, 2)
-  pair = sort(diag, 1)
-  values = tuple-get(pair, 0)
-  indices = tuple-get(pair, 1)
+  sorted = sort(diag, 1)
+  values = sorted.0
+  indices = sorted.1
   total = trace(x, 1, 2)
   (values, indices, total)
 }

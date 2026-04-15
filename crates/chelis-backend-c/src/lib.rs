@@ -785,6 +785,52 @@ int main(void) {{
     }
 
     #[test]
+    fn numerical_tensor_add_is_elementwise_with_runtime_inputs() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
+        dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
+
+        let outputs = compile_and_run_input_cases(
+            &dag,
+            "test_tensor_add",
+            CodegenOptions::default(),
+            &[vec![
+                TestInput::new("x", &[4], &[1.0, 2.0, 3.0, 4.0]),
+                TestInput::new("y", &[4], &[10.0, 20.0, 30.0, 40.0]),
+            ]],
+        );
+
+        assert_eq!(outputs, vec!["11.000000 22.000000 33.000000 44.000000"]);
+    }
+
+    #[test]
+    fn numerical_tensor_mul_is_elementwise_with_runtime_inputs() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
+        dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4));
+
+        let outputs = compile_and_run_input_cases(
+            &dag,
+            "test_tensor_mul",
+            CodegenOptions::default(),
+            &[vec![
+                TestInput::new("x", &[4], &[1.5, 2.0, 3.0, 4.0]),
+                TestInput::new("y", &[4], &[10.0, 20.0, 30.0, 40.0]),
+            ]],
+        );
+
+        assert_eq!(outputs, vec!["15.000000 40.000000 90.000000 160.000000"]);
+    }
+
+    #[test]
     fn numerical_add_const() {
         if !gcc_available() {
             return;

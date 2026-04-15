@@ -21,6 +21,16 @@ impl Env {
         self.bindings.get(name)
     }
 
+    /// Look up an imported or qualified name by its unique terminal segment.
+    pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
+        let mut matches = self
+            .bindings
+            .iter()
+            .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
         self.bindings.insert(name, scheme);
@@ -87,6 +97,17 @@ impl Env {
             body: ty,
         }
     }
+}
+
+fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+    full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
+}
+
+fn terminal_name(name: &str) -> &str {
+    name.rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(name)
 }
 
 /// Collect all free type variables in a type.

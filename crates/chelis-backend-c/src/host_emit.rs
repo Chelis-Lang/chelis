@@ -17,6 +17,8 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     out.push(String::new());
     append_uniform_sample_helper(&mut out);
     out.push(String::new());
+    append_tensor_math_helpers(&mut out);
+    out.push(String::new());
     let header = emit_host_header(program);
     if !header.is_empty() {
         out.push(header);
@@ -65,6 +67,15 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push("    x ^= x >> 31;".to_string());
     out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
     out.push("    return low + (high - low) * (float)unit;".to_string());
+    out.push("}".to_string());
+}
+
+fn append_tensor_math_helpers(out: &mut Vec<String>) {
+    out.push("static inline float chelis_host_relu_f32(float x) {".to_string());
+    out.push("    return fmaxf(0.0f, x);".to_string());
+    out.push("}".to_string());
+    out.push("static inline float chelis_host_sigmoid_f32(float x) {".to_string());
+    out.push("    return 1.0f / (1.0f + expf(-x));".to_string());
     out.push("}".to_string());
 }
 
@@ -567,6 +578,132 @@ impl HostEmitter {
             })
             .collect::<Vec<_>>();
 
+        if let HostType::Tensor(_) = ty {
+            match name {
+                "add"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "+",
+                    );
+                    return;
+                }
+                "sub"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "-",
+                    );
+                    return;
+                }
+                "mul"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "*",
+                    );
+                    return;
+                }
+                "div"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "/",
+                    );
+                    return;
+                }
+                "max_elem"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "fmaxf",
+                    );
+                    return;
+                }
+                "min_elem"
+                    if matches!(
+                        (&arg_vars[0].1, &arg_vars[1].1),
+                        (HostType::Tensor(_), HostType::Tensor(_))
+                    ) =>
+                {
+                    self.assign_tensor_binary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        &arg_vars[1].0,
+                        "fminf",
+                    );
+                    return;
+                }
+                "neg" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "-");
+                    return;
+                }
+                "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
+                    return;
+                }
+                "log" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "logf");
+                    return;
+                }
+                "sin" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sinf");
+                    return;
+                }
+                "sqrt" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "sqrtf");
+                    return;
+                }
+                "relu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_relu_f32",
+                    );
+                    return;
+                }
+                "sigmoid" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_sigmoid_f32",
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match name {
             "Some" => {
                 self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1);
@@ -1060,6 +1197,124 @@ impl HostEmitter {
         if matches!(ty, HostType::Unit) {
             self.lines.push(format!("{}{target} = 0;", self.indent));
         }
+    }
+
+    fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int i = 0; i < {target}->size; i++) {{",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {target}->data[i] = {lhs}->data[idx_lhs] {op} {rhs}->data[idx_rhs];",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+    }
+
+    fn assign_tensor_binary_func_elementwise(
+        &mut self,
+        target: &str,
+        lhs: &str,
+        rhs: &str,
+        func: &str,
+    ) {
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int i = 0; i < {target}->size; i++) {{",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {target}->data[i] = {func}({lhs}->data[idx_lhs], {rhs}->data[idx_rhs]);",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+    }
+
+    fn assign_tensor_unary_elementwise(&mut self, target: &str, input: &str, op: &str) {
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int i = 0; i < {target}->size; i++) {{",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {target}->data[i] = {op}{input}->data[idx];",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+    }
+
+    fn assign_tensor_unary_func_elementwise(&mut self, target: &str, input: &str, func: &str) {
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}for (int i = 0; i < {target}->size; i++) {{",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}    int indices[CHELIS_MAX_DIM];", self.indent));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    {target}->data[i] = {func}({input}->data[idx]);",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
     }
 
     fn assign_tensor_call(

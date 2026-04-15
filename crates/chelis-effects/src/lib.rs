@@ -874,7 +874,10 @@ totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), x
         let decls = parse_surf(
             r#"
 def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
-xs: List[tensor[f32]] = [(x1 : tensor[f32]), (x2 : tensor[f32])]
+xs: List[tensor[f32]] = [
+  trace(pad_sequences_to([[1.0]], cast(1, int64), cast(0.0, f32)), 0, 1),
+  trace(pad_sequences_to([[2.0]], cast(1, int64), cast(0.0, f32)), 0, 1)
+]
 buckets = partition(keep, xs)
 "#,
         )
@@ -915,7 +918,10 @@ ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
         let decls = parse_surf(
             r#"
 def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-xs: List[tensor[8, f32]] = [(x1 : tensor[8, f32]), (x2 : tensor[8, f32])]
+xs: List[tensor[8, f32]] = [
+  (to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) : tensor[8, f32]),
+  (to_tensor([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]) : tensor[8, f32])
+]
 ys = map(step, xs)
 "#,
         )
