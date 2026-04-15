@@ -1,0 +1,149 @@
+mutual
+
+theorem subst_preserves_typing_db_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (slot_in slot_out : Option Typ)
+    (hin : Γ1 = Γ_in.insertAt j slot_in)
+    (hout : Γ2 = Γ_out.insertAt j slot_out)
+    (hslots : (slot_in = some t_v ∧ slot_out = some t_v) ∨
+              (slot_in = some t_v ∧ slot_out = none) ∨
+              (slot_in = none ∧ slot_out = none))
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in) :
+    HasTypeDB Δ S Γ_in (substDBAux j v e) t eps Γ_out := by
+  match h with
+  | HasTypeDB.var Δ_ S_ Γ i ti hlook => sorry
+  | HasTypeDB.unit Δ_ S_ Γ =>
+      have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      obtain ⟨hΓ, _⟩ := subst_leaf_resolve (t_v := t_v) j heq hslots
+      subst hΓ
+      simp only [substDBAux]
+      exact HasTypeDB.unit Δ_ S_ Γ_in
+  | HasTypeDB.abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody =>
+      -- Body: HasTypeDB Δ S (some t1 :: Γ1) body t2 eps (slot :: Γ2).
+      -- Recurse at cutoff j+1 with base (some t1 :: Γ_in) / (slot :: Γ_out).
+      have hin_body : some t1 :: Γ1 =
+          LinearCtxDB.insertAt (j + 1) slot_in (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) slot_out (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have h_v_lifted :
+          HasTypeDB Δ_ S_ (some t1 :: Γ_in) (lift v) t_v []
+                    (some t1 :: Γ_in) :=
+        weakening_head_db h_v
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody (j + 1)
+        (some t1 :: Γ_in) (slot :: Γ_out) slot_in slot_out
+        hin_body hout_body hslots h_v_lifted
+      -- hbody' : HasTypeDB Δ_ S_ (some t1 :: Γ_in)
+      --              (substDBAux (j+1) (lift v) body) t2 eps_ (slot :: Γ_out)
+      simp only [substDBAux]
+      exact HasTypeDB.abs Δ_ S_ Γ_in Γ_out slot t1 t2 eps_
+        (substDBAux (j + 1) (lift v) body) hbody'
+  | HasTypeDB.app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.copy Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds eps_ hbody'
+  | HasTypeDB.letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.fst Δ_ S_ Γ_in Γ_out (substDBAux j v e_) t1 t2 eps_ hbody'
+  | HasTypeDB.snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.snd Δ_ S_ Γ_in Γ_out (substDBAux j v e_) t1 t2 eps_ hbody'
+  | HasTypeDB.const Δ_ S_ Γ v_ ds =>
+      have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      obtain ⟨hΓ, _⟩ := subst_leaf_resolve (t_v := t_v) j heq hslots
+      subst hΓ
+      simp only [substDBAux]
+      exact HasTypeDB.const Δ_ S_ Γ_in v_ ds
+  | HasTypeDB.tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 =>
+      -- Γ1 = Γ_in.insertAt j slot_in, Γ3 = Γ_out.insertAt j slot_out.
+      -- Γ2 is existentially bound; decompose via length preservation +
+      -- monotonicity at position j.
+      subst hin
+      subst hout
+      -- Γ2.length = (Γ_in.insertAt j slot_in).length = Γ_in.length + 1
+      have hlen1 : Γ2.length = Γ_in.length + 1 := by
+        have := hasTypeDB_length_preservation h1
+        rw [LinearCtxDB.length_insertAt] at this; omega
+      have hlen2 : Γ2.length = Γ_out.length + 1 := by
+        have := hasTypeDB_length_preservation h2
+        rw [LinearCtxDB.length_insertAt] at this; omega
+      -- Define Γ2_base and use insertAt_eraseIdx to decompose.
+      -- Need j < Γ2.length (equivalently j ≤ Γ_in.length) to use the helper.
+      -- For now, assume j is within range via the structural hypothesis
+      -- and handle the overflow case with a fallback.
+      sorry
+  | HasTypeDB.tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 => sorry
+  | HasTypeDB.tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.tsum Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds i eps_ hbody' ds' hds'
+  | HasTypeDB.texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' hds' =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.texpand Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds i k eps_ hbody' ds' hds'
+  | HasTypeDB.uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.uniformLike Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ds lo hi eps_ hbody'
+  | HasTypeDB.perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      simp only [substDBAux]
+      exact HasTypeDB.perform Δ_ S_ Γ_in Γ_out op (substDBAux j v e_) tArg tRet eps_ hbody' hM
+  | HasTypeDB.handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls => sorry
+  | HasTypeDB.tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub => sorry
+  | HasTypeDB.tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody => sorry
+  | HasTypeDB.loc Δ_ S_ Γ ell ti hlook =>
+      have heq : Γ_in.insertAt j slot_in = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      obtain ⟨hΓ, _⟩ := subst_leaf_resolve (t_v := t_v) j heq hslots
+      subst hΓ
+      simp only [substDBAux]
+      exact HasTypeDB.loc Δ_ S_ Γ_in ell ti hlook
+  | HasTypeDB.subEff Δ_ S_ Γ Γ' e_ ti eps_ eps'_ hbody hSub =>
+      have hbody' := subst_preserves_typing_db_gen (t_v := t_v) hbody j
+        Γ_in Γ_out slot_in slot_out hin hout hslots h_v
+      exact HasTypeDB.subEff Δ_ S_ Γ_in Γ_out (substDBAux j v e_) ti eps_ eps'_
+        hbody' hSub
+
+theorem subst_preserves_typing_clauses_db_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {cls : List (EffectLabel × TermDB)}
+    {v : TermDB} {t t_v : Typ} {epsR : EffectRow}
+    (h_cls : ClausesTypedDB Δ S Γ1 Γ2 t epsR cls)
+    (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (slot_in slot_out : Option Typ)
+    (hin : Γ1 = Γ_in.insertAt j slot_in)
+    (hout : Γ2 = Γ_out.insertAt j slot_out)
+    (hslots : (slot_in = some t_v ∧ slot_out = some t_v) ∨
+              (slot_in = some t_v ∧ slot_out = none) ∨
+              (slot_in = none ∧ slot_out = none))
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in) :
+    ClausesTypedDB Δ S Γ_in Γ_out t epsR (substClausesDBAux j v cls) := by
+  match h_cls with
+  | ClausesTypedDB.nil Δ_ S_ Γ ty epsR_ => sorry
+  | ClausesTypedDB.cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hb_typ hrest => sorry
+
+end
