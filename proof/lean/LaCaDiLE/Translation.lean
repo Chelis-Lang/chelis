@@ -146,6 +146,24 @@ end
 def envOfCtx (Γ : LinearCtx) : List String :=
   (Γ.map Prod.fst).reverse
 
+@[simp] theorem envOfCtx_nil : envOfCtx [] = [] := rfl
+
+theorem envOfCtx_append_singleton (Γ : LinearCtx) (x : String) (t : Typ) :
+    envOfCtx (Γ ++ [(x, t)]) = x :: envOfCtx Γ := by
+  simp [envOfCtx, List.map_append, List.reverse_append]
+
+theorem envOfCtx_append_pair (Γ : LinearCtx) (x y : String) (t1 t2 : Typ) :
+    envOfCtx (Γ ++ [(x, t1), (y, t2)]) = y :: x :: envOfCtx Γ := by
+  simp [envOfCtx, List.map_append, List.reverse_append]
+
+theorem envIndex_zero (x : String) (rest : List String) :
+    envIndex (x :: rest) x = 0 := by
+  simp [envIndex]
+
+theorem envIndex_cons_ne (x y : String) (rest : List String) (h : x ≠ y) :
+    envIndex (y :: rest) x = envIndex rest x + 1 := by
+  simp [envIndex, h]
+
 /-! ## Forward typing preservation (Wave 5p)
 
 The main theorem `hasType_to_hasTypeDB` maps a named `HasType`
