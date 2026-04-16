@@ -1265,9 +1265,41 @@ theorem plug_preserves_typing
       exact HasType.subEff _ _ _ _ _ _ _ _
         (HasType.tmul _ S2 _ Γmid _ v1 _ ds eps1 eps2 h_e1' h_e2')
         hsub_eps
-  | letBind x e2 => sorry
-  | letpair x y e2 => sorry
-  | handle epsH clauses => sorry
+  | letBind x e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, eps1, eps2, slot, h_e1, h_e2, hΓout, hsub_eps⟩ :=
+        HasType.plug_letBind_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      subst hΓout
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.letBind _ S2 _ Γmid _ x e' e2 t1 _ eps1 eps2 slot h_e1' h_e2')
+        hsub_eps
+  | letpair x y e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, t2, eps1, eps2, slotX, slotY,
+              h_e1, h_e2, hΓout, hsub_eps⟩ :=
+        HasType.plug_letpair_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      subst hΓout
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.letpair _ S2 _ Γmid _ x y e' e2 t1 t2 _ eps1 eps2
+          slotX slotY h_e1' h_e2')
+        hsub_eps
+  | handle epsH clauses =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, epsB, hb, hHsubB, hClIn, hClCov, hcls, hsub_eps⟩ :=
+        HasType.handle_inv_strong h'
+      obtain ⟨S2, hb', h_sub⟩ := h_inner hb
+      refine ⟨S2, ?_, h_sub⟩
+      have hcls' := clausesTyped_store_weaken hcls h_sub
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.handle _ S2 _ Γmid _ e' clauses _ epsH epsB
+          hb' hHsubB hClIn hClCov hcls')
+        hsub_eps
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
