@@ -1151,7 +1151,123 @@ theorem plug_preserves_typing
       obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
       subst hteq
       exact ⟨S2, HasType.copy _ S2 _ _ _ ds _ h_e', h_sub⟩
-  | _ => sorry
+  | sum d =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, hteq, _hmem, h_e⟩ := HasType.sum_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      subst hteq
+      exact ⟨S2, HasType.tsum _ S2 _ _ _ ds d _ h_e' _hmem, h_sub⟩
+  | expand d =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.expand_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      subst hteq
+      exact ⟨S2, HasType.texpand _ S2 _ _ _ ds d _ h_e', h_sub⟩
+  | uniformLike lo hi =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, eps0, hteq, h_e, hsub_eps⟩ := HasType.uniformLike_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      subst hteq
+      refine ⟨S2, ?_, h_sub⟩
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.uniformLike _ S2 _ _ _ ds lo hi eps0 h_e') hsub_eps
+  | perform op =>
+      have h' := by simpa [plug] using h
+      obtain ⟨tArg, eps0, h_e, hmatch, hwit⟩ := HasType.perform_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      refine ⟨S2, ?_, h_sub⟩
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.perform _ S2 _ _ op _ tArg _ eps0 h_e' hmatch)
+        (fun op' hop' => hwit op' hop')
+  | appL e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.app _ S2 _ Γmid _ _ e2 t1 _ epsBody eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | appR v1 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      obtain ⟨S2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e1' := hasType_store_weaken h_e1 h_sub
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.app _ S2 _ Γmid _ v1 _ t1 _ epsBody eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | pairL e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tpair _ S2 _ Γmid _ _ e2 t1 t2 eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | pairR v1 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      obtain ⟨S2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e1' := hasType_store_weaken h_e1 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tpair _ S2 _ Γmid _ v1 _ t1 t2 eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | addL e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tadd _ S2 _ Γmid _ _ e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | addR v1 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      obtain ⟨S2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e1' := hasType_store_weaken h_e1 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tadd _ S2 _ Γmid _ v1 _ ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | mulL e2 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      obtain ⟨S2, h_e1', h_sub⟩ := h_inner h_e1
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e2' := hasType_store_weaken h_e2 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tmul _ S2 _ Γmid _ _ e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | mulR v1 =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      obtain ⟨S2, h_e2', h_sub⟩ := h_inner h_e2
+      refine ⟨S2, ?_, h_sub⟩
+      have h_e1' := hasType_store_weaken h_e1 h_sub
+      subst hteq
+      exact HasType.subEff _ _ _ _ _ _ _ _
+        (HasType.tmul _ S2 _ Γmid _ v1 _ ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | letBind x e2 => sorry
+  | letpair x y e2 => sorry
+  | handle epsH clauses => sorry
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
