@@ -212,12 +212,13 @@ theorem hasType_names_preserved
   | perform _ _ _ _ _ _ _ _ _ _ _ ih => exact ih
   | handle _ _ _ _ _ _ _ _ _ _ h_body _ _ _ _ ih_body ih_clauses =>
       exact ih_body.trans ih_clauses
-  | tgrad => sorry
-  | tvmap => sorry
+  | tgrad _ _ _ _ _ _ _ _ _ _ _ _ => rfl
+  | tvmap _ _ _ _ _ _ _ _ _ _ _ => rfl
   | loc _ _ _ _ _ _ => rfl
   | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
   | nil _ _ _ _ _ => rfl
-  | cons => sorry
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _h_body _h_rest _ih_body ih_rest =>
+      exact ih_rest
 
 theorem hasType_envOfCtx_eq
     {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
@@ -407,6 +408,15 @@ theorem hasType_to_hasTypeDB
         obtain ⟨cl, hmem, hcl_eq⟩ := hCover op hop
         obtain ⟨hb', hmem'⟩ := exists_subst_of_clausesToDB cl hmem
         exact ⟨(cl.1, hb'), hmem', hcl_eq⟩
-  | var => sorry
+  | var Δ' S' Γpre Γpost x t_ =>
+      -- The var case requires showing that envIndex finds x at position
+      -- |Γpost| in the reversed name list, which corresponds to the
+      -- position of the (some t_) entry in ctxToDB. This holds when
+      -- x ∉ names(Γpost) (linearity/uniqueness of names in context).
+      -- Full closure requires a NoDup premise or a proof that HasType
+      -- derivations only inhabit contexts with unique names. Sorry'd
+      -- pending that premise; the rest of the translation chain
+      -- (subst_preserves_typing corollary) works modulo this case.
+      sorry
 
 end LaCaDiLE
