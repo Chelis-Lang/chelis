@@ -1,15 +1,18 @@
 # Phase 3j-pre — Compiler Release Infrastructure
 
-Status: active (shipping `v0.1.0`).
+Status: shipped through `v0.1.7`.
 
 This document describes how the Chelis compiler binary is released and how
 downstream shells (Nautilus, Coral, and any future domain packages) should
 pin a toolchain version.
 
-## Scope of `v0.1.0`
+As of April 16, 2026, `v0.1.7` is the current Chelis compiler release and the
+exact compiler pin used by the first downstream shell release,
+`Nautilus v0.1.0`.
 
-`v0.1.0` is the first tagged release of the Chelis compiler. It ships the
-Phase 3j-pre surface:
+## Scope of the `v0.1.x` line
+
+The `v0.1.x` line is the shipped Phase 3j-pre compiler surface:
 
 - `chelis` CLI (`chelis-cli`) with `fmt`, `check`, `eval`, `build`, `deep`,
   `surf`, and `tide` subcommands as documented in the Phase 0–3j-pre specs.
@@ -50,7 +53,7 @@ section is needed in the root `Cargo.toml`.
 
 ## Platform Scope
 
-`v0.1.0` supports **Linux x86_64 only**. macOS (x86_64 and aarch64) and
+The `v0.1.x` line supports **Linux x86_64 only**. macOS (x86_64 and aarch64) and
 Linux aarch64 are explicit non-goals for this phase. When those platforms
 are added, the expectation is:
 
@@ -69,26 +72,33 @@ pin an exact compiler version in their `reef.toml`:
 
 ```toml
 [toolchain]
-compiler = "=0.1.0"
+compiler = "=0.1.7"
 ```
 
 Meaning:
 
-- `=0.1.0` is an exact match. Until Chelis stabilizes its surface,
+- `=0.1.7` is an exact match. Until Chelis stabilizes its surface,
   downstream shells should prefer exact pins over caret or tilde ranges.
 - `reef` resolves the pin by downloading the matching tarball from the
   GitHub Releases page of `Chelis-Lang/chelis`:
-  `https://github.com/Chelis-Lang/chelis/releases/download/v0.1.2/chelis-v0.1.2-linux-x86_64.tar.gz`
+  `https://github.com/Chelis-Lang/chelis/releases/download/v0.1.7/chelis-v0.1.7-linux-x86_64.tar.gz`
 - The `.sha256` sibling file is the expected checksum.
 
 When a shell needs a newer compiler surface, it should bump its pin in a
 dedicated change set that also runs its own acceptance oracle against the
 new compiler.
 
+Current downstream state:
+
+- `Nautilus v0.1.0` is published and pins `chelis = "=0.1.7"`.
+- `v0.1.7` is the first Chelis release after the host-helper repeated-input
+  dedup fix and the stable tuple extraction ABI helpers landed, which cleared
+  the last documented core blockers for Nautilus `v0.1.0`.
+
 ## Versioning Policy
 
 - The tag name and `workspace.package.version` in the root `Cargo.toml`
-  must agree. `v0.1.0` corresponds to `version = "0.1.0"` in
+  must agree. `v0.1.7` corresponds to `version = "0.1.7"` in
   `Cargo.toml`.
 - Until `v1.0.0`, minor bumps may include breaking surface changes.
   Downstream shells should respond with exact-pin bumps, not range

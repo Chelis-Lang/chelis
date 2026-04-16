@@ -561,6 +561,9 @@ hand-written adjoint rules for SVD, Cholesky, solve, QR, and eig (same pattern
 `torch.linalg` uses). `Nautilus.Signal` ships as a typed stub (blocked by complex
 numbers, Phase 5f).
 
+Status update: `Nautilus v0.1.0` is now published as the first downstream shell
+release, using `chelis v0.1.7`.
+
 Modules ship in three priority tiers.
 
 **P0 — ship first:**

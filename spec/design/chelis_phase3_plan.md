@@ -987,6 +987,10 @@ needs both a positive numerical test and a negative shape/type test.
 
 ## 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
+**Status:** shipped in the downstream Nautilus repo. `Nautilus v0.1.0` is
+published, and `chelis v0.1.7` is the compiler release that cleared the last
+documented core blockers for that first shell release.
+
 **Goal:** A reef package providing the numerical methods that sit between raw tensor
 primitives and domain applications. The scipy competitor for Chelis — `scipy.stats` +
 `scipy.optimize` + `scipy.integrate` + `scipy.linalg` + `scipy.special` under one shell.
@@ -1068,17 +1072,18 @@ adjoint tier.
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli phase3j_nautilus_oracle -- --exact` — builds `nautilus` from
-source, imports it in a consumer, runs a pipeline that (1) samples data from a
-distribution, (2) computes an SVD and verifies reconstruction, (3) fits an ODE,
-(4) computes a confidence interval, and (5) checks `grad` through a LinAlg op matches
-finite differences.
+The authoritative ship signal for `3j` is the downstream Nautilus release gate:
+the green Nautilus `main` CI that produced the published `v0.1.0` release
+(tagged at commit `20c5553`). Chelis no longer treats an unimplemented
+monorepo `phase3j_nautilus_oracle` placeholder as the completion oracle for
+this phase.
 
 ### Cross-Repo CI
 
-The `nautilus` shell builds and tests both in its own repo (on the `chelis-lang` org)
-and in the Chelis monorepo integration run. A green nautilus CI is a prerequisite for a
-green Chelis CI.
+Nautilus now validates in its own repository and release process. Chelis core
+changes that affect shell-facing compiler behavior should be revalidated against
+that downstream gate before a compiler release, but Nautilus is no longer a
+hypothetical future dependency here: it is a shipped consumer.
 
 **Effort:** large. `Nautilus.LinAlg` (nalgebra bridge + AD adjoints) and `Nautilus.Optim`
 (QP solver) are the bulk; stats, distributions, and special functions are straightforward.
