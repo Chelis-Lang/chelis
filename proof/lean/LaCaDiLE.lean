@@ -8,6 +8,7 @@ import LaCaDiLE.AdjointTransform
 import LaCaDiLE.StringHelpers
 import LaCaDiLE.SubstitutionDB
 import LaCaDiLE.TranslationDB
+import LaCaDiLE.Translation
 import LaCaDiLE.AdjointTyping
 import LaCaDiLE.AddDim
 import LaCaDiLE.Progress
