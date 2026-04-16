@@ -248,40 +248,26 @@ theorem HasType.letBind_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
     {x : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.letBind x e1 e2) t eps Gamma_out) :
-    ∃ Gamma2 Gamma3 t1 eps1 eps2,
-      Gamma_out = Gamma3.filter (fun p => p.1 ≠ x) ∧
+    ∃ (Gamma2 Gamma3 : LinearCtx) (t1 : Typ) (eps1 eps2 : EffectRow)
+      (slot : Option Typ),
       HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
-      HasType Delta Sigma (Gamma2 ++ [(x, t1)]) e2 t eps2 Gamma3 := by
-  generalize heq : Term.letBind x e1 e2 = e_in at h
-  induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ eps1 eps2 h1 h2 _ _ =>
-      cases heq
-      exact ⟨Γ2, Γ3, t1, eps1, eps2, rfl, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
-  | _ => (try cases heq) <;>
-         first | exact True.intro | (exfalso; contradiction)
+      HasType Delta Sigma (Gamma2 ++ [(x, some t1)]) e2 t eps2
+              (Gamma3 ++ [(x, slot)]) ∧
+      Gamma_out = Gamma3 := by
+  sorry
 
 /-- LetPair inversion. -/
 theorem HasType.letpair_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma_out : LinearCtx}
     {x y : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma1 (Term.letpair x y e1 e2) t eps Gamma_out) :
-    ∃ Gamma2 Gamma3 t1 t2 eps1 eps2,
-      Gamma_out = Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y) ∧
+    ∃ (Gamma2 Gamma3 : LinearCtx) (t1 t2 : Typ) (eps1 eps2 : EffectRow)
+      (slotX slotY : Option Typ),
       HasType Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 ∧
-      HasType Delta Sigma (Gamma2 ++ [(x, t1), (y, t2)]) e2 t eps2 Gamma3 := by
-  generalize heq : Term.letpair x y e1 e2 = e_in at h
-  induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1' t2' _ eps1' eps2' h1 h2 _ _ =>
-      cases heq
-      exact ⟨Γ2, Γ3, t1', t2', eps1', eps2', rfl, h1, h2⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
-  | _ => (try cases heq) <;>
-         first | exact True.intro | (exfalso; contradiction)
+      HasType Delta Sigma (Gamma2 ++ [(x, some t1), (y, some t2)]) e2 t eps2
+              (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
+      Gamma_out = Gamma3 := by
+  sorry
 
 /-- A location whose store-typing lookup succeeds is live in the store
     (via `StoreWf`). Used to produce the `TensorVal` witness that head
@@ -413,7 +399,7 @@ theorem stuck_bubbles
           have h' : HasType Delta Sigma Gamma
               (Term.letBind x (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
             simpa [multiPlug, plug] using h
-          obtain ⟨_, _, _, eps1, _, _, h1, _, hsub⟩ := HasType.plug_letBind_inv h'
+          obtain ⟨_, _, _, eps1, _, _, h1, _, _, hsub⟩ := HasType.plug_letBind_inv h'
           exact hsub op (union_mem_left _ _ op (ih hEs' h1))
       | copy =>
           have h' : HasType Delta Sigma Gamma
@@ -425,7 +411,7 @@ theorem stuck_bubbles
           have h' : HasType Delta Sigma Gamma
               (Term.letpair x y (multiPlug Es (Term.perform op v)) e2) t eps Gamma' := by
             simpa [multiPlug, plug] using h
-          obtain ⟨_, _, _, _, eps1, _, _, h1, _, hsub⟩ :=
+          obtain ⟨_, _, _, _, eps1, _, _, _, h1, _, _, hsub⟩ :=
             HasType.plug_letpair_inv h'
           exact hsub op (union_mem_left _ _ op (ih hEs' h1))
       | pairL e2 =>
@@ -688,7 +674,7 @@ theorem progress_aux
         rw [hrw]
         exact StuckOnPerform.mk (EvalCtx.copy :: Es) v hv ⟨trivial, hEs⟩
   | letpair x y e1 e2 =>
-      obtain ⟨Γmid, _Γ3, t1, t2, eps1, eps2, _hfilt, h1, _h2⟩ :=
+      obtain ⟨Γmid, _Γ3, t1, t2, eps1, eps2, _slotX, _slotY, h1, _h2, _hout⟩ :=
         HasType.letpair_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1
           (Typ.pair t1 t2) Γmid eps1 h1 with

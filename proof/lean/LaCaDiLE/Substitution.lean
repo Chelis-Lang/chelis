@@ -211,15 +211,10 @@ theorem subst_value
 /-! ### Context filter helpers for weakening/exchange -/
 
 /-- Appending a binding at the tail commutes with re-association. -/
-@[simp] theorem append_singleton_append (G : LinearCtx) (y : String) (t : Typ)
+@[simp] theorem append_singleton_append (G : LinearCtx) (y : String) (t : Option Typ)
     (ys : LinearCtx) :
     (G ++ [(y, t)]) ++ ys = G ++ ((y, t) :: ys) := by
   simp [List.append_assoc]
-
-/-- Filter commutes with append on linear contexts. -/
-theorem linearCtx_filter_append (G1 G2 : LinearCtx) (p : (String × Typ) → Bool) :
-    (G1 ++ G2).filter p = G1.filter p ++ G2.filter p := by
-  exact List.filter_append G1 G2
 
 /-- Snoc equality: if `G1 ++ [a] = G2 ++ [b]` then `G1 = G2` and `a = b`. -/
 theorem append_singleton_inj {α} (G1 G2 : List α) (a b : α)
@@ -510,9 +505,16 @@ theorem list_append_eq_split {α} :
       · exact Or.inr ⟨m, by simp [hac, hAm], hDm⟩
 
 /-- Position-indexed weakening. For any split of the input context
-    `Γ = Γ_pre ++ Γ_post`, inserting a fresh binding `(y, t_y)` between
-    the two halves yields a new derivation whose output context also
-    has `(y, t_y)` inserted at a matching position. -/
+    `Γ = Γ_pre ++ Γ_post`, inserting a fresh binding `(y, some t_y)`
+    between the two halves yields a new derivation whose output context
+    also has `(y, some t_y)` inserted at a matching position.
+
+    Tombstone refactor (LinearCtx = List (String × Option Typ)):
+    the motive and all case arms must thread `(y, some t_y)` through
+    context positions. The abs/letBind/letpair cases no longer produce
+    filter-based outputs — they strip a trailing `(x, slot)` instead.
+    Sorry'd cases are marked for rework in the de Bruijn substitution
+    wave. -/
 theorem weakening_insert
     (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (t_y : Typ)
     {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
@@ -523,544 +525,18 @@ theorem weakening_insert
       freshInTerm y e →
       ∃ Gamma'_pre Gamma'_post,
         Gamma' = Gamma'_pre ++ Gamma'_post ∧
-        HasType Delta Sigma (Gamma_pre ++ [(y, t_y)] ++ Gamma_post) e t eps
-                (Gamma'_pre ++ [(y, t_y)] ++ Gamma'_post) := by
-  refine HasType.rec
-    (motive_1 := fun Delta' Sigma' Gamma e t eps Gamma' _ =>
-      ∀ Gamma_pre Gamma_post,
-        Gamma = Gamma_pre ++ Gamma_post →
-        y ∉ linearCtxDom Gamma_pre → y ∉ linearCtxDom Gamma_post →
-        freshInTerm y e →
-        ∃ Gamma'_pre Gamma'_post,
-          Gamma' = Gamma'_pre ++ Gamma'_post ∧
-          HasType Delta' Sigma' (Gamma_pre ++ [(y, t_y)] ++ Gamma_post) e t eps
-                  (Gamma'_pre ++ [(y, t_y)] ++ Gamma'_post))
-    (motive_2 := fun Delta' Sigma' Gamma2 Gamma3 t epsR cls _ =>
-      ∀ Gamma2_pre Gamma2_post,
-        Gamma2 = Gamma2_pre ++ Gamma2_post →
-        y ∉ linearCtxDom Gamma2_pre → y ∉ linearCtxDom Gamma2_post →
-        (∀ cl ∈ cls, freshInTerm y cl.2.2.2) →
-        ∃ Gamma3_pre Gamma3_post,
-          Gamma3 = Gamma3_pre ++ Gamma3_post ∧
-          ClausesTyped Delta' Sigma'
-            (Gamma2_pre ++ [(y, t_y)] ++ Gamma2_post)
-            (Gamma3_pre ++ [(y, t_y)] ++ Gamma3_post) t epsR cls)
-    ?var ?unit ?abs ?app ?letBind ?copy ?letpair ?tpair ?fst ?snd ?const
-    ?tadd ?tmul ?tsum ?texpand ?uniformLike ?perform ?handle ?tgrad ?tvmap
-    ?loc ?subEff ?nil ?cons h
-  case var =>
-    intro Delta' Sigma' Gpre Gpost x t
-    intro Gm_pre Gm_post hsplit _hfp _hfq hft
-    have hyx : y ≠ x := freshInTerm_var hft
-    -- Gamma = Gpre ++ [(x,t)] ++ Gpost = Gm_pre ++ Gm_post.
-    have h1 : (Gpre ++ [(x, t)]) ++ Gpost = Gm_pre ++ Gm_post := by
-      -- hsplit : Gpre ++ [(x, t)] ++ Gpost = Gm_pre ++ Gm_post (up to assoc)
-      simpa [List.append_assoc] using hsplit
-    rcases list_append_eq_split (Gpre ++ [(x, t)]) Gpost Gm_pre Gm_post h1 with
-      ⟨m, hCm, hBm⟩ | ⟨m, hAm, hDm⟩
-    · -- Case A: (x,t) lives in Gm_pre (to the left of the split).
-      -- Gm_pre = Gpre ++ [(x,t)] ++ m, Gpost = m ++ Gm_post.
-      -- Output pre/post = (Gpre ++ m, Gm_post).
-      refine ⟨Gpre ++ m, Gm_post, ?_, ?_⟩
-      · -- Γ' = Gpre ++ Gpost = Gpre ++ m ++ Gm_post
-        rw [hBm]; simp [List.append_assoc]
-      · -- Build new var derivation with Γpre' = Gpre, Γpost' = m ++ [(y,t_y)] ++ Gm_post
-        have hvar := HasType.var Delta' Sigma' Gpre (m ++ [(y, t_y)] ++ Gm_post) x t
-        -- hvar input: Gpre ++ [(x,t)] ++ (m ++ [(y,t_y)] ++ Gm_post)
-        -- Our goal input: Gm_pre ++ [(y,t_y)] ++ Gm_post
-        -- These are equal because Gm_pre = Gpre ++ [(x,t)] ++ m.
-        have hin : Gm_pre ++ [(y, t_y)] ++ Gm_post =
-            Gpre ++ [(x, t)] ++ (m ++ [(y, t_y)] ++ Gm_post) := by
-          rw [hCm]; simp [List.append_assoc]
-        have hout : Gpre ++ m ++ [(y, t_y)] ++ Gm_post =
-            Gpre ++ (m ++ [(y, t_y)] ++ Gm_post) := by
-          simp [List.append_assoc]
-        rw [hin, hout]
-        exact hvar
-    · -- Case B: Gpre ++ [(x,t)] = Gm_pre ++ m, Gm_post = m ++ Gpost.
-      -- Split (Gpre, [(x,t)], Gm_pre, m) further.
-      rcases list_append_eq_split Gpre [(x, t)] Gm_pre m hAm with
-        ⟨m2, hGm_pre_eq, h_xt_eq⟩ | ⟨m2, hGpre_eq, hm_eq⟩
-      · -- m2 is a prefix of [(x,t)]. Since [(x,t)] has length 1,
-        -- either m2 = [] (then m = [(x,t)]) or m2 = [(x,t)] (then m = []).
-        cases m2 with
-        | nil =>
-          -- Gm_pre = Gpre, m = [(x,t)]. So Gm_post = [(x,t)] ++ Gpost.
-          simp only [List.append_nil] at hGm_pre_eq
-          simp only [List.nil_append] at h_xt_eq
-          -- hGm_pre_eq : Gm_pre = Gpre (Gm_pre was the LHS)
-          -- Use rw to avoid direction issues in subst.
-          rw [hGm_pre_eq] at *
-          -- h_xt_eq : [(x,t)] = m, i.e. m = [(x,t)] (flipped).
-          -- Goal pre/post: (Gpre, Gpost). Wait — the original Γ' = Gpre ++ Gpost.
-          refine ⟨Gpre, Gpost, rfl, ?_⟩
-          have hvar := HasType.var Delta' Sigma' (Gpre ++ [(y, t_y)]) Gpost x t
-          -- hvar input: (Gpre ++ [(y,t_y)]) ++ [(x,t)] ++ Gpost
-          --          = Gpre ++ [(y,t_y)] ++ [(x,t)] ++ Gpost
-          -- hvar output: (Gpre ++ [(y,t_y)]) ++ Gpost = Gpre ++ [(y,t_y)] ++ Gpost
-          -- Goal input: Gm_pre ++ [(y,t_y)] ++ Gm_post = Gpre ++ [(y,t_y)] ++ Gm_post
-          -- Goal output: Gpre ++ [(y,t_y)] ++ Gpost
-          have hm_val : m = [(x, t)] := h_xt_eq.symm
-          have hGm_post : Gm_post = [(x, t)] ++ Gpost := by rw [hDm, hm_val]
-          have hin : Gpre ++ [(y, t_y)] ++ Gm_post =
-              Gpre ++ [(y, t_y)] ++ [(x, t)] ++ Gpost := by
-            rw [hGm_post]; simp [List.append_assoc]
-          have hin2 : Gpre ++ [(y, t_y)] ++ [(x, t)] ++ Gpost =
-              Gpre ++ [(y, t_y)] ++ ([(x, t)] ++ Gpost) := by
-            simp [List.append_assoc]
-          rw [hin]
-          -- We want goal = HasType ... (Gpre ++ [(y,t_y)] ++ [(x,t)] ++ Gpost) (var x) t []
-          --                          (Gpre ++ [(y,t_y)] ++ Gpost)
-          -- hvar has input: (Gpre ++ [(y,t_y)]) ++ [(x,t)] ++ Gpost
-          --                = Gpre ++ [(y,t_y)] ++ [(x,t)] ++ Gpost (by assoc) ✓
-          -- output: (Gpre ++ [(y,t_y)]) ++ Gpost = Gpre ++ [(y,t_y)] ++ Gpost ✓
-          have hvar_rewrite : HasType Delta' Sigma'
-              (Gpre ++ [(y, t_y)] ++ [(x, t)] ++ Gpost) (Term.var x) t []
-              (Gpre ++ [(y, t_y)] ++ Gpost) := by
-            have := hvar
-            simp only [List.append_assoc] at this ⊢
-            exact this
-          exact hvar_rewrite
-        | cons hd rest =>
-          -- h_xt_eq : (hd :: rest) ++ m = [(x, t)].
-          -- hd :: (rest ++ m) = [(x, t)] forces hd = (x, t),
-          -- rest = [], m = []. So m2 = [(x, t)] which matches the
-          -- "x is the tail" shape. Close by destructuring.
-          simp only [List.cons_append] at h_xt_eq
-          -- h_xt_eq : hd :: (rest ++ m) = [(x, t)]
-          rcases List.cons_eq_cons.mp h_xt_eq with ⟨h_hd, h_rest_m⟩
-          -- h_hd : hd = (x, t), h_rest_m : rest ++ m = []
-          rcases List.append_eq_nil_iff.mp h_rest_m.symm with ⟨h_rest, h_m⟩
-          subst h_rest
-          subst h_m
-          subst h_hd
-          -- Now: hGm_pre_eq : Gm_pre = Gpre ++ [(x, t)], hDm : Gm_post = [] ++ Gpost = Gpost
-          simp only [List.append_nil, List.nil_append] at hGm_pre_eq hDm
-          rw [hGm_pre_eq, hDm] at *
-          -- Γ' = Gpre ++ Gpost. Choose Γ'_pre = Gpre, Γ'_post = Gpost.
-          refine ⟨Gpre, Gpost, rfl, ?_⟩
-          -- Build var at (Gpre ++ [(x, t)]) ++ [(y, t_y)] ++ Gpost.
-          have hvar := HasType.var Delta' Sigma' Gpre ([(y, t_y)] ++ Gpost) x t
-          -- hvar input: Gpre ++ [(x, t)] ++ ([(y, t_y)] ++ Gpost)
-          --           = Gpre ++ [(x, t)] ++ [(y, t_y)] ++ Gpost  (assoc)
-          -- hvar output: Gpre ++ ([(y, t_y)] ++ Gpost)
-          --            = Gpre ++ [(y, t_y)] ++ Gpost  (assoc)
-          have hin : (Gpre ++ [(x, t)]) ++ [(y, t_y)] ++ Gpost =
-              Gpre ++ [(x, t)] ++ ([(y, t_y)] ++ Gpost) := by
-            simp [List.append_assoc]
-          have hout : (Gpre ++ [(y, t_y)]) ++ Gpost =
-              Gpre ++ ([(y, t_y)] ++ Gpost) := by
-            simp [List.append_assoc]
-          rw [hin]
-          -- wait — the goal input may be in a different shape. Let me
-          -- just use `simpa` to clean up.
-          simpa [List.append_assoc] using hvar
-      · -- m = m2 ++ [(x,t)], Gpre = Gm_pre ++ m2.
-        -- Gm_post = m ++ Gpost = m2 ++ [(x,t)] ++ Gpost.
-        -- Γ' = Gpre ++ Gpost = Gm_pre ++ m2 ++ Gpost.
-        -- Choose Γ'_pre = Gm_pre, Γ'_post = m2 ++ Gpost.
-        refine ⟨Gm_pre, m2 ++ Gpost, ?_, ?_⟩
-        · rw [hGpre_eq]; simp [List.append_assoc]
-        · have hvar := HasType.var Delta' Sigma' (Gm_pre ++ [(y, t_y)] ++ m2) Gpost x t
-          have hin : Gm_pre ++ [(y, t_y)] ++ Gm_post =
-              Gm_pre ++ [(y, t_y)] ++ m2 ++ [(x, t)] ++ Gpost := by
-            rw [hDm, hm_eq]; simp [List.append_assoc]
-          have hout : Gm_pre ++ [(y, t_y)] ++ (m2 ++ Gpost) =
-              Gm_pre ++ [(y, t_y)] ++ m2 ++ Gpost := by simp [List.append_assoc]
-          rw [hin, hout]
-          have hvar_rewrite : HasType Delta' Sigma'
-              (Gm_pre ++ [(y, t_y)] ++ m2 ++ [(x, t)] ++ Gpost) (Term.var x) t []
-              (Gm_pre ++ [(y, t_y)] ++ m2 ++ Gpost) := by
-            have := hvar
-            simp only [List.append_assoc] at this ⊢
-            exact this
-          exact hvar_rewrite
-  case unit =>
-    intro Delta' Sigma' Gamma
-    intro Gm_pre Gm_post hsplit _ _ _
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    exact HasType.unit Delta' Sigma' _
-  case abs =>
-    intro Delta' Sigma' G1 G2 x t1 t2 eps' e' _hb ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hyx, hfe⟩ := freshInTerm_abs hft
-    -- Sub-derivation at G1 ++ [(x,t1)] = Gm_pre ++ (Gm_post ++ [(x,t1)])
-    have hsplit2 : G1 ++ [(x, t1)] = Gm_pre ++ (Gm_post ++ [(x, t1)]) := by
-      rw [hsplit]; simp [List.append_assoc]
-    have hfq2 : y ∉ linearCtxDom (Gm_post ++ [(x, t1)]) := by
-      simp [linearCtxDom, List.map_append] at *
-      exact ⟨hfq, fun he => hyx he⟩
-    obtain ⟨G2_pre, G2_post, hG2eq, hinner⟩ :=
-      ih Gm_pre (Gm_post ++ [(x, t1)]) hsplit2 hfp hfq2 hfe
-    -- hinner : HasType ... (Gm_pre ++ [(y,t_y)] ++ (Gm_post ++ [(x,t1)])) e' t2 eps'
-    --                     (G2_pre ++ [(y,t_y)] ++ G2_post)
-    -- Rewrite input to ((Gm_pre ++ [(y,t_y)] ++ Gm_post) ++ [(x,t1)])
-    have e1 : Gm_pre ++ [(y, t_y)] ++ (Gm_post ++ [(x, t1)]) =
-        (Gm_pre ++ [(y, t_y)] ++ Gm_post) ++ [(x, t1)] := by simp [List.append_assoc]
-    rw [e1] at hinner
-    have habs := HasType.abs Delta' Sigma' (Gm_pre ++ [(y, t_y)] ++ Gm_post) (G2_pre ++ [(y, t_y)] ++ G2_post)
-      x t1 t2 eps' e' hinner
-    -- habs output is ((G2_pre ++ [(y,t_y)] ++ G2_post).filter (fun p => p.1 ≠ x))
-    -- The original's output is (G2.filter (fun p => p.1 ≠ x))
-    -- with G2 = G2_pre ++ [(y,t_y)] ++ G2_post... wait, no.
-    -- hG2eq : G2 = G2_pre ++ G2_post. So original output = (G2_pre ++ G2_post).filter (...)
-    -- We want: Γ'_pre ++ [(y,t_y)] ++ Γ'_post = original output
-    --        = (G2_pre ++ G2_post).filter (p.1 ≠ x) = G2_pre.filter ++ G2_post.filter
-    -- The new habs output: ((G2_pre ++ [(y,t_y)] ++ G2_post).filter (p.1 ≠ x))
-    --                   = G2_pre.filter ++ [(y,t_y)].filter ++ G2_post.filter
-    -- Since y ≠ x, [(y,t_y)].filter (p.1 ≠ x) = [(y,t_y)]
-    refine ⟨G2_pre.filter (fun p => p.1 ≠ x), G2_post.filter (fun p => p.1 ≠ x), ?_, ?_⟩
-    · rw [hG2eq, List.filter_append]
-    · have hfilter_ins :
-        ((G2_pre ++ [(y, t_y)] ++ G2_post).filter (fun p => p.1 ≠ x)) =
-          G2_pre.filter (fun p => p.1 ≠ x) ++ [(y, t_y)] ++
-            G2_post.filter (fun p => p.1 ≠ x) := by
-        rw [List.filter_append, List.filter_append]
-        have : ([(y, t_y)] : LinearCtx).filter (fun p => p.1 ≠ x) = [(y, t_y)] := by
-          simp [List.filter, hyx]
-        rw [this]
-      rw [hfilter_ins] at habs
-      exact habs
-  case app =>
-    intro Delta' Sigma' G1 G2 G3 e1 e2 t1 t2 eps' eps1 eps2 h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hf1, hf2⟩ := freshInTerm_app hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    obtain ⟨G3p, G3q, hG3, h2'⟩ := ih2 G2p G2q rfl hfp2 hfq2 hf2
-    refine ⟨G3p, G3q, hG3, ?_⟩
-    exact HasType.app Delta' Sigma' _ _ _ e1 e2 t1 t2 eps' eps1 eps2 h1' h2'
-  case letBind =>
-    intro Delta' Sigma' G1 G2 G3 x e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hyx, hf1, hf2⟩ := freshInTerm_letBind hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := _h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2a⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    have hfq2 : y ∉ linearCtxDom (G2q ++ [(x, t1)]) := by
-      intro hh
-      simp only [linearCtxDom, List.map_append, List.map_cons, List.map_nil,
-        List.mem_append, List.mem_singleton, List.mem_cons, List.not_mem_nil,
-        or_false] at hh
-      rcases hh with h1 | h1
-      · exact hfq2a h1
-      · exact hyx h1
-    have hsplit2 : G2p ++ G2q ++ [(x, t1)] = G2p ++ (G2q ++ [(x, t1)]) := by
-      simp [List.append_assoc]
-    obtain ⟨G3p, G3q, hG3, h2'⟩ := ih2 G2p (G2q ++ [(x, t1)]) hsplit2 hfp2 hfq2 hf2
-    have e1eq : G2p ++ [(y, t_y)] ++ (G2q ++ [(x, t1)]) =
-        (G2p ++ [(y, t_y)] ++ G2q) ++ [(x, t1)] := by simp [List.append_assoc]
-    rw [e1eq] at h2'
-    have hlet := HasType.letBind Delta' Sigma' (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-      (G2p ++ [(y, t_y)] ++ G2q) (G3p ++ [(y, t_y)] ++ G3q)
-      x e1 e2 t1 t2 eps1 eps2 h1' h2'
-    refine ⟨G3p.filter (fun p => p.1 ≠ x), G3q.filter (fun p => p.1 ≠ x), ?_, ?_⟩
-    · rw [hG3, List.filter_append]
-    · have hfilter_ins :
-        ((G3p ++ [(y, t_y)] ++ G3q).filter (fun p => p.1 ≠ x)) =
-          G3p.filter (fun p => p.1 ≠ x) ++ [(y, t_y)] ++
-            G3q.filter (fun p => p.1 ≠ x) := by
-        rw [List.filter_append, List.filter_append]
-        have : ([(y, t_y)] : LinearCtx).filter (fun p => p.1 ≠ x) = [(y, t_y)] := by
-          simp [List.filter, hyx]
-        rw [this]
-      rw [hfilter_ins] at hlet
-      exact hlet
-  case copy =>
-    intro Delta' Sigma' G1 G2 e' t' eps' _h ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_copy hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.copy Delta' Sigma' _ _ e' t' eps' h'
-  case letpair =>
-    intro Delta' Sigma' G1 G2 G3 x yy e1 e2 t1 t2 t' eps1 eps2 _h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hya, hyb, hf1, hf2⟩ := freshInTerm_letpair hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := _h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2a⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    have hfq2 : y ∉ linearCtxDom (G2q ++ [(x, t1), (yy, t2)]) := by
-      intro hh
-      simp only [linearCtxDom, List.map_append, List.map_cons, List.map_nil,
-        List.mem_append, List.mem_cons, List.not_mem_nil, or_false] at hh
-      rcases hh with h1 | h1 | h1
-      · exact hfq2a h1
-      · exact hya h1
-      · exact hyb h1
-    have hsplit2 : G2p ++ G2q ++ [(x, t1), (yy, t2)] =
-        G2p ++ (G2q ++ [(x, t1), (yy, t2)]) := by simp [List.append_assoc]
-    obtain ⟨G3p, G3q, hG3, h2'⟩ :=
-      ih2 G2p (G2q ++ [(x, t1), (yy, t2)]) hsplit2 hfp2 hfq2 hf2
-    have e1eq : G2p ++ [(y, t_y)] ++ (G2q ++ [(x, t1), (yy, t2)]) =
-        (G2p ++ [(y, t_y)] ++ G2q) ++ [(x, t1), (yy, t2)] := by
-      simp [List.append_assoc]
-    rw [e1eq] at h2'
-    have hlp := HasType.letpair Delta' Sigma' (Gm_pre ++ [(y, t_y)] ++ Gm_post)
-      (G2p ++ [(y, t_y)] ++ G2q) (G3p ++ [(y, t_y)] ++ G3q)
-      x yy e1 e2 t1 t2 t' eps1 eps2 h1' h2'
-    refine ⟨G3p.filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy),
-            G3q.filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy), ?_, ?_⟩
-    · rw [hG3, List.filter_append]
-    · have hyxne : (y, t_y).1 ≠ x := hya
-      have hyyne : (y, t_y).1 ≠ yy := hyb
-      have hfilter_ins :
-        ((G3p ++ [(y, t_y)] ++ G3q).filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy)) =
-          G3p.filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy) ++ [(y, t_y)] ++
-            G3q.filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy) := by
-        rw [List.filter_append, List.filter_append]
-        have : ([(y, t_y)] : LinearCtx).filter (fun p => p.1 ≠ x ∧ p.1 ≠ yy) = [(y, t_y)] := by
-          simp [List.filter, hyxne, hyyne]
-        rw [this]
-      rw [hfilter_ins] at hlp
-      exact hlp
-  case tpair =>
-    intro Delta' Sigma' G1 G2 G3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hf1, hf2⟩ := freshInTerm_pair hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := _h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    obtain ⟨G3p, G3q, hG3, h2'⟩ := ih2 G2p G2q rfl hfp2 hfq2 hf2
-    refine ⟨G3p, G3q, hG3, ?_⟩
-    exact HasType.tpair Delta' Sigma' _ _ _ e1 e2 t1 t2 eps1 eps2 h1' h2'
-  case fst =>
-    intro Delta' Sigma' G1 G2 e' t1 t2 eps' _h ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_fst hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.fst Delta' Sigma' _ _ e' t1 t2 eps' h'
-  case snd =>
-    intro Delta' Sigma' G1 G2 e' t1 t2 eps' _h ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_snd hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.snd Delta' Sigma' _ _ e' t1 t2 eps' h'
-  case const =>
-    intro Delta' Sigma' Gamma v ds
-    intro Gm_pre Gm_post hsplit _ _ _
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    exact HasType.const Delta' Sigma' _ v ds
-  case tadd =>
-    intro Delta' Sigma' G1 G2 G3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hf1, hf2⟩ := freshInTerm_add hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := _h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    obtain ⟨G3p, G3q, hG3, h2'⟩ := ih2 G2p G2q rfl hfp2 hfq2 hf2
-    refine ⟨G3p, G3q, hG3, ?_⟩
-    exact HasType.tadd Delta' Sigma' _ _ _ e1 e2 ds eps1 eps2 h1' h2'
-  case tmul =>
-    intro Delta' Sigma' G1 G2 G3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨hf1, hf2⟩ := freshInTerm_mul hft
-    obtain ⟨G2p, G2q, hG2, h1'⟩ := ih1 Gm_pre Gm_post hsplit hfp hfq hf1
-    have h1s := by
-      have := _h1
-      rw [hsplit, hG2] at this
-      exact this
-    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split h1s hfp hfq
-    subst hG2
-    obtain ⟨G3p, G3q, hG3, h2'⟩ := ih2 G2p G2q rfl hfp2 hfq2 hf2
-    refine ⟨G3p, G3q, hG3, ?_⟩
-    exact HasType.tmul Delta' Sigma' _ _ _ e1 e2 ds eps1 eps2 h1' h2'
-  case tsum =>
-    intro Delta' Sigma' G1 G2 e' ds d eps' _h hmem ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_sum hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.tsum Delta' Sigma' _ _ e' ds d eps' h' hmem
-  case texpand =>
-    intro Delta' Sigma' G1 G2 e' ds d eps' _h ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_expand hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.texpand Delta' Sigma' _ _ e' ds d eps' h'
-  case uniformLike =>
-    intro Delta' Sigma' G1 G2 e' ds lo hi eps' _h ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_uniformLike hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.uniformLike Delta' Sigma' _ _ e' ds lo hi eps' h'
-  case perform =>
-    intro Delta' Sigma' G1 G2 op e' tArg tRet eps' _h hMatch ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    have hfe := freshInTerm_perform hft
-    obtain ⟨G2p, G2q, hG2, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hfe
-    refine ⟨G2p, G2q, hG2, ?_⟩
-    exact HasType.perform Delta' Sigma' _ _ op e' tArg tRet eps' h' hMatch
-  case handle =>
-    intro Delta' Sigma' G1 G2 G3 body clauses t epsH epsB
-           hb hEpsH hCl hCov hCT ihb ihCT
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    -- Body IH: weaken body typed Γ1 → Γ2 to insert (y, t_y).
-    have hfe_body : freshInTerm y body := freshInTerm_handle_body hft
-    obtain ⟨G2p, G2q, hG2eq, hbody'⟩ :=
-      ihb Gm_pre Gm_post hsplit hfp hfq hfe_body
-    -- Propagate freshness from Gm_pre/Gm_post (= Γ1) through to Γ2
-    -- via has_type_linear_shrinks on the original body derivation.
-    have hb_orig : HasType Delta' Sigma' (Gm_pre ++ Gm_post) body t epsB (G2p ++ G2q) := by
-      rw [← hsplit, ← hG2eq]; exact hb
-    obtain ⟨hfp2, hfq2⟩ := weakening_insert_shrink_split hb_orig hfp hfq
-    subst hG2eq
-    -- Clauses IH: weaken clauses typed Γ2 → Γ3 at split (G2p, G2q).
-    -- Need per-clause freshness hypothesis: ∀ cl ∈ clauses, freshInTerm y cl.2.2.2.
-    have hfClauses : ∀ cl ∈ clauses, freshInTerm y cl.2.2.2 := by
-      -- Generic helper via induction: freshInTerm y (handle eps body cls)
-      -- implies per-clause freshness.
-      have aux : ∀ (cls : List (EffectLabel × String × String × Term)),
-          freshInTerm y (Term.handle epsH body cls) →
-          ∀ cl ∈ cls, freshInTerm y cl.2.2.2 := by
-        intro cls
-        induction cls with
-        | nil => intro _ cl hc; exact absurd hc List.not_mem_nil
-        | cons c cs ih =>
-          intro hft' cl hc
-          match c with
-          | (op_c, x_c, k_c, hb_c) =>
-            have hcl' := freshInTerm_clauses_cons hft'
-            rcases List.mem_cons.mp hc with heq | htl
-            · subst heq; exact hcl'.2.2.1
-            · exact ih hcl'.2.2.2 cl htl
-      exact aux clauses hft
-    obtain ⟨G3p, G3q, hG3eq, hclauses'⟩ :=
-      ihCT G2p G2q rfl hfp2 hfq2 hfClauses
-    refine ⟨G3p, G3q, hG3eq, ?_⟩
-    exact HasType.handle Delta' Sigma' _ _ _ body clauses t epsH epsB
-      hbody' hEpsH hCl hCov hclauses'
-  case tgrad =>
-    intro Delta' Sigma' Gamma x ds dsOut e' eps' _h hsub ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    -- Inner derivation: Gamma ++ [(x, tensor ds)] → Gamma at extended Δ.
-    -- Split inner input as (Gm_pre, Gm_post ++ [(x, tensor ds)]).
-    -- The motive is Δ-polymorphic, so ih fires at Capability.diff :: Delta'.
-    have hyx : y ≠ x := by
-      -- y ∉ boundVars (Term.grad x _ _ e') = x :: boundVars e'
-      have := hft.2
-      simp [boundVars] at this
-      exact fun he => this.1 he
-    have hsplit2 : Gamma ++ [(x, Typ.tensor ds)] = Gm_pre ++ (Gm_post ++ [(x, Typ.tensor ds)]) := by
-      rw [hsplit]; simp [List.append_assoc]
-    have hfq2 : y ∉ linearCtxDom (Gm_post ++ [(x, Typ.tensor ds)]) := by
-      intro hy
-      simp only [linearCtxDom, List.map_append, List.map_cons,
-                 List.map_nil, List.mem_append, List.mem_cons,
-                 List.not_mem_nil, or_false] at hy
-      rcases hy with h1 | h1
-      · exact hfq h1
-      · exact hyx h1
-    have hfe : freshInTerm y e' := by
-      refine ⟨?_, ?_⟩
-      · -- y ∉ freeVars (grad x _ _ e') = (freeVars e').filter (· ≠ x)
-        have := hft.1
-        simp [freeVars] at this
-        intro hye
-        -- if y ∈ freeVars e', then (y ≠ x → y ∈ filtered) but y ≠ x
-        have : y ∈ (freeVars e').filter (· != x) := by
-          rw [List.mem_filter]
-          refine ⟨hye, ?_⟩
-          simp [hyx]
-        exact hft.1 this
-      · -- y ∉ boundVars (grad x _ _ e') = x :: boundVars e'
-        have := hft.2
-        simp [boundVars] at this
-        exact this.2
-    obtain ⟨G2_pre, G2_post, hG2eq, hinner⟩ :=
-      ih Gm_pre (Gm_post ++ [(x, Typ.tensor ds)]) hsplit2 hfp hfq2 hfe
-    -- hG2eq : Gamma = G2_pre ++ G2_post
-    -- hinner : HasType (cap.diff :: Delta') Sigma'
-    --          (Gm_pre ++ [(y, t_y)] ++ (Gm_post ++ [(x, tensor ds)]))
-    --          e' (tensor dsOut) eps'
-    --          (G2_pre ++ [(y, t_y)] ++ G2_post)
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    -- For tgrad to fire, its inner must be at
-    -- ((Gm_pre ++ [(y, t_y)] ++ Gm_post) ++ [(x, tensor ds)]) →
-    -- (Gm_pre ++ [(y, t_y)] ++ Gm_post).
-    -- This requires G2_pre = Gm_pre and G2_post = Gm_post.
-    -- In general the IH's split isn't guaranteed to match, but for
-    -- tgrad's input = output = Γ, applying the shrinks lemma gives
-    -- us that the inner's output equals its input minus the consumed
-    -- binder; since tgrad consumes (x, tensor ds) from the inner
-    -- tail, the output split mirrors the input split.
-    --
-    -- Formally hard to thread. Closed as internal sorry for Wave 4.
-    sorry
-  case tvmap =>
-    intro Delta' Sigma' Gamma x t1 t2 e' eps' d _h _ih
-    intro Gm_pre Gm_post hsplit _hfp _hfq _hft
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    sorry
-  case loc =>
-    intro Delta' Sigma' Gamma ell t' hlook
-    intro Gm_pre Gm_post hsplit _ _ _
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    exact HasType.loc Delta' Sigma' _ ell t' hlook
-  case subEff =>
-    intro Delta' Sigma' Gamma Gamma'' e' t' eps' eps'' _h hsub ih
-    intro Gm_pre Gm_post hsplit hfp hfq hft
-    obtain ⟨Gp, Gq, hGeq, h'⟩ := ih Gm_pre Gm_post hsplit hfp hfq hft
-    refine ⟨Gp, Gq, hGeq, ?_⟩
-    exact HasType.subEff Delta' Sigma' _ _ e' t' eps' eps'' h' hsub
-  case nil =>
-    intro Delta' Sigma' Gamma2 t' epsR
-    intro Gm_pre Gm_post hsplit _ _ _
-    refine ⟨Gm_pre, Gm_post, hsplit, ?_⟩
-    exact ClausesTyped.nil Delta' Sigma' _ t' epsR
-  case cons =>
-    intro _Delta' _Sigma' _Gamma2 _Gamma3 _t _tArg _tRet _epsR _op _x _k _hb _rest
-           _hHb _hRest _ihHb _ihRest
-    intro _Gm_pre _Gm_post _hsplit _hfp _hfq _hft
-    -- TODO (Wave 4): ClausesTyped.cons rigidity problem. The head-clause
-    -- HasType IH (motive_1) and the rest ClausesTyped IH (motive_2) each
-    -- return an existential output split of the common Γ3, but the
-    -- `ClausesTyped.cons` constructor needs BOTH derivations at the SAME
-    -- split. Without a choice/coherence lemma forcing the splits to
-    -- agree, we cannot rebuild the cons. Same structural obstruction as
-    -- tgrad/tvmap (input-output-identical shapes force a rigidity the
-    -- existential motive does not preserve). Deferred to motive
-    -- strengthening.
-    sorry
+        HasType Delta Sigma (Gamma_pre ++ [(y, some t_y)] ++ Gamma_post) e t eps
+                (Gamma'_pre ++ [(y, some t_y)] ++ Gamma'_post) := by
+  sorry
+  -- BLOCKED: tombstone refactor changes the output shape of every
+  -- binder case (abs/letBind/letpair strip a trailing slot instead of
+  -- filtering). The full induction proof needs rework against the new
+  -- HasType constructors. Deferred to de Bruijn substitution wave.
 
 
 /-- Weakening: adding an unused binding at the tail of the linear
     context preserves typing. Derived as a corollary of
-    `weakening_insert` with `Gamma_post = []`.
-
-    The Wave 2 obstruction (naïve induction creates an unprovable
-    adjacent-swap goal inside every binder case) is dissolved by the
-    position-indexed helper: with `Γ_post = []`, every binder case
-    re-splits to `Γ_pre / [(x, t1)]` at the next level down, and the
-    IH produces the required tail-insertion directly with no exchange.
-
-    Requires `y` to be fresh in `e` (`freshInTerm y e`) so that no
-    internal T-Var can accidentally consume the inserted binding. -/
+    `weakening_insert` with `Gamma_post = []`. -/
 theorem weakening_tail
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
     (y : String) (t t' : Typ) (eps : EffectRow) (e : Term)
@@ -1069,13 +545,8 @@ theorem weakening_tail
     (h_fresh_term : freshInTerm y e) :
     ∃ Gamma'_pre Gamma'_post : LinearCtx,
       Gamma' = Gamma'_pre ++ Gamma'_post ∧
-      HasType Delta Sigma (Gamma ++ [(y, t')]) e t eps
-              (Gamma'_pre ++ [(y, t')] ++ Gamma'_post) := by
-  -- Direct corollary of `weakening_insert` with `Γ_pre = Γ`, `Γ_post = []`.
-  -- The weaker existential return type (vs. the original rigid
-  -- `Γ' ++ [(y, t')]`) is necessary: binder cases of the underlying
-  -- induction may consume bindings that float the inserted position,
-  -- so the output context's split point is not rigid.
+      HasType Delta Sigma (Gamma ++ [(y, some t')]) e t eps
+              (Gamma'_pre ++ [(y, some t')] ++ Gamma'_post) := by
   have hfp : y ∉ linearCtxDom ([] : LinearCtx) := by simp [linearCtxDom]
   have hsplit : Gamma = Gamma ++ ([] : LinearCtx) := by simp
   have hres := weakening_insert Delta Sigma y t' h Gamma [] hsplit h_fresh hfp h_fresh_term
@@ -1090,28 +561,24 @@ theorem weakening_tail
 
 /-! ## Main theorem -/
 
-/-- Substitution preserves typing. The `Closed v` premise makes the
-    naive capture-unaware `subst` sound: since `v` has no free
-    variables, no binder inside `e` can capture anything from `v`.
-    Preservation discharges `Closed v` trivially because every term
-    substituted under reduction is a closed value. -/
+/-- Substitution preserves typing (tombstone semantics).
+
+    Under the tombstone refactor, the input context carries
+    `(x, some t1)` and the output context is whatever HasType produces
+    (with `x`'s slot potentially tombstoned to `none`). The `Closed v`
+    premise makes the naive capture-unaware `subst` sound. -/
 theorem subst_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
-    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, t1)]) e t2 eps Gamma2)
+    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
     (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
     (_h_closed : Closed v) :
-    HasType Delta Sigma Gamma1 (subst e v x) t2 eps
-            (Gamma2.filter (fun p => p.1 ≠ x)) := by
-  sorry -- BLOCKED on weakening_tail / exchange_tail refactor.
-        -- The original plan (induction on _h_e, invoking exchange_tail in
-        -- every binder case) is not realizable because both helpers have
-        -- unprovable statements (see notes on `weakening_tail` and
-        -- `exchange_tail`). Restructuring required: the motive must
-        -- generalize over a pre/post decomposition of the context so
-        -- that `(x,t1)` can sit anywhere, and binder cases thread their
-        -- new binding into the post-segment without needing an exchange.
-        -- This is a Wave 2 signature refactor plus full induction pass.
+    ∃ Gamma2' : LinearCtx,
+      HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
+  sorry -- BLOCKED on weakening_insert rework under tombstone semantics.
+        -- The output shape is no longer a simple filter; it depends on
+        -- how x's slot was consumed inside the derivation. Will be
+        -- reworked in the de Bruijn substitution wave.
 
 end LaCaDiLE

@@ -64,7 +64,7 @@ theorem AdjointNamesFresh.mono {n n' : Nat} {Γ : LinearCtx}
     `Γ_s'` with `(freshName b k, t)` when recursing on an inner
     sub-term at counter ≥ k+1. -/
 theorem AdjointNamesFresh.cons_freshName
-    {n k : Nat} {Γ : LinearCtx} {b : String} {t : Typ}
+    {n k : Nat} {Γ : LinearCtx} {b : String} {t : Option Typ}
     (h : AdjointNamesFresh n Γ)
     (hb_adj : b ∈ adjointBases) (hk : k < n) :
     AdjointNamesFresh n (Γ ++ [(freshName b k, t)]) := by
@@ -88,29 +88,19 @@ theorem AdjointNamesFresh.cons_freshName
   · exact hne_name hIn
 
 /-- `List.filter` by "name ≠ a" is a no-op when `a` is not in the
-    domain of `Γ`. Used to dispose of the `letpair`/`letBind` output
-    filters once freshness retires the newly-introduced binders. -/
+    domain of `Γ`. Obsolete after tombstone-style contexts; kept as
+    sorry for downstream references. -/
 theorem linearCtx_filter_fresh_eq (Γ : LinearCtx) (a : String)
     (h : a ∉ linearCtxDom Γ) :
     Γ.filter (fun p => p.1 ≠ a) = Γ := by
-  apply List.filter_eq_self.mpr
-  intro p hp
-  simp only [decide_eq_true_eq]
-  intro heq
-  apply h
-  simp only [linearCtxDom, List.mem_map]
-  exact ⟨p, hp, heq⟩
+  sorry
 
-/-- Same for the letpair filter `p.1 ≠ a ∧ p.1 ≠ b`. -/
+/-- Same for the letpair filter `p.1 ≠ a ∧ p.1 ≠ b`. Obsolete after
+    tombstone-style contexts. -/
 theorem linearCtx_filter_fresh_two_eq (Γ : LinearCtx) (a b : String)
     (ha : a ∉ linearCtxDom Γ) (hb : b ∉ linearCtxDom Γ) :
     Γ.filter (fun p => decide (p.1 ≠ a ∧ p.1 ≠ b)) = Γ := by
-  apply List.filter_eq_self.mpr
-  intro p hp
-  simp only [decide_eq_true_eq]
-  refine ⟨?_, ?_⟩ <;> intro heq
-  · exact ha (heq ▸ (by simp only [linearCtxDom, List.mem_map]; exact ⟨p, hp, rfl⟩))
-  · exact hb (heq ▸ (by simp only [linearCtxDom, List.mem_map]; exact ⟨p, hp, rfl⟩))
+  sorry
 
 /-- `SubEffRow` from `union eps [accum, accum]`-shaped rows back to
     `union [accum] eps`. Elementwise membership. -/
@@ -324,188 +314,12 @@ private theorem adjoint_typed_aux
       have h_e2 := h_e_add.2
       -- Abbreviate the fresh names via local `let`s.
       let gA : String := freshName "gA" n
-      let gB : String := freshName "gB" n
-      let adjA : String := freshName "adjA" n
-      -- Freshness facts we need out of h_fresh_s'.
-      have hgA_base : "gA" ∈ adjointBases := by simp [adjointBases]
-      have hgB_base : "gB" ∈ adjointBases := by simp [adjointBases]
-      have hadjA_base : "adjA" ∈ adjointBases := by simp [adjointBases]
-      have hgA_fresh_s' : gA ∉ linearCtxDom Gamma_s' :=
-        h_fresh_s' n (Nat.le_refl _) "gA" hgA_base
-      have hgB_fresh_s' : gB ∉ linearCtxDom Gamma_s' :=
-        h_fresh_s' n (Nat.le_refl _) "gB" hgB_base
-      have hadjA_fresh_s' : adjA ∉ linearCtxDom Gamma_s' :=
-        h_fresh_s' n (Nat.le_refl _) "adjA" hadjA_base
-      -- T-Copy: copy gSeed : tensor ds ⊗ tensor ds in Γ_s → Γ_s'.
-      have h_copy :
-          HasType Delta Sigma Gamma_s (Term.copy gSeed)
-            (Typ.pair (Typ.tensor dsE) (Typ.tensor dsE)) epsSeed Gamma_s' :=
-        HasType.copy Delta Sigma Gamma_s Gamma_s' gSeed dsE epsSeed h_seed
-      -- Seed witness for inner recursion on e1: T-Var on gA with
-      -- pre = Γ_s' and post = [(gB, tensor ds)].
-      have h_var_gA :
-          HasType Delta Sigma
-            (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
-            (Term.var gA) (Typ.tensor dsE) []
-            (Gamma_s' ++ [(gB, Typ.tensor dsE)]) := by
-        have h := HasType.var Delta Sigma Gamma_s'
-                    [(gB, Typ.tensor dsE)] gA (Typ.tensor dsE)
-        simpa using h
-      -- Freshness in the extended context for the inner call.
-      have hn_lt : n < n + 3 := by omega
-      have h_fresh_gB_added :
-          AdjointNamesFresh (n + 3) (Gamma_s' ++ [(gB, Typ.tensor dsE)]) := by
-        have hbase : AdjointNamesFresh (n + 3) Gamma_s' :=
-          h_fresh_s'.mono (by omega)
-        exact hbase.cons_freshName hgB_base hn_lt
-      have h_fresh_gAB_added :
-          AdjointNamesFresh (n + 3)
-            (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)]) := by
-        -- Extend twice: first add gA, then gB. But the actual form is
-        -- `Γ_s' ++ [(gA,_),(gB,_)]`. We rewrite as
-        -- `(Γ_s' ++ [(gA,_)]) ++ [(gB,_)]`.
-        have hbase : AdjointNamesFresh (n + 3) Gamma_s' :=
-          h_fresh_s'.mono (by omega)
-        have h1 : AdjointNamesFresh (n + 3) (Gamma_s' ++ [(gA, Typ.tensor dsE)]) :=
-          hbase.cons_freshName hgA_base hn_lt
-        have h2 : AdjointNamesFresh (n + 3)
-            ((Gamma_s' ++ [(gA, Typ.tensor dsE)]) ++ [(gB, Typ.tensor dsE)]) :=
-          h1.cons_freshName hgB_base hn_lt
-        -- Rewrite list associativity.
-        have hassoc :
-            (Gamma_s' ++ [(gA, Typ.tensor dsE)]) ++ [(gB, Typ.tensor dsE)]
-            = Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)] := by
-          simp
-        rw [hassoc] at h2
-        exact h2
-      -- IH on e1.
-      have h_adj_e1 :
-          HasType Delta Sigma
-            (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
-            (adjointFrom e1 x (Term.var gA) (n + 3)) Typ.unit
-            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-            (Gamma_s' ++ [(gB, Typ.tensor dsE)]) :=
-        adjoint_typed_aux Delta Sigma
-          (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
-          (Gamma_s' ++ [(gB, Typ.tensor dsE)])
-          dsE [] x (n + 3) e1 (Term.var gA) h_var_gA h_e1
-          h_fresh_gAB_added h_fresh_gB_added
-      -- Seed witness for inner recursion on e2: T-Var on gB with
-      -- pre = Γ_s' and post = []. But we need the context to also
-      -- carry the letBind binder (adjA, unit); so post = [(adjA, unit)].
-      have h_var_gB :
-          HasType Delta Sigma
-            (Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)])
-            (Term.var gB) (Typ.tensor dsE) []
-            (Gamma_s' ++ [(adjA, Typ.unit)]) := by
-        have h := HasType.var Delta Sigma Gamma_s'
-                    [(adjA, Typ.unit)] gB (Typ.tensor dsE)
-        simpa using h
-      have h_fresh_adjA_added :
-          AdjointNamesFresh (n + 3) (Gamma_s' ++ [(adjA, Typ.unit)]) := by
-        have hbase : AdjointNamesFresh (n + 3) Gamma_s' :=
-          h_fresh_s'.mono (by omega)
-        exact hbase.cons_freshName hadjA_base hn_lt
-      have h_fresh_gBadjA_added :
-          AdjointNamesFresh (n + 3)
-            (Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)]) := by
-        have hbase : AdjointNamesFresh (n + 3) Gamma_s' :=
-          h_fresh_s'.mono (by omega)
-        have h1 : AdjointNamesFresh (n + 3) (Gamma_s' ++ [(gB, Typ.tensor dsE)]) :=
-          hbase.cons_freshName hgB_base hn_lt
-        have h2 : AdjointNamesFresh (n + 3)
-            ((Gamma_s' ++ [(gB, Typ.tensor dsE)]) ++ [(adjA, Typ.unit)]) :=
-          h1.cons_freshName hadjA_base hn_lt
-        have hassoc :
-            (Gamma_s' ++ [(gB, Typ.tensor dsE)]) ++ [(adjA, Typ.unit)]
-            = Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)] := by simp
-        rw [hassoc] at h2
-        exact h2
-      have h_adj_e2 :
-          HasType Delta Sigma
-            (Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)])
-            (adjointFrom e2 x (Term.var gB) (n + 3)) Typ.unit
-            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-            (Gamma_s' ++ [(adjA, Typ.unit)]) :=
-        adjoint_typed_aux Delta Sigma
-          (Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)])
-          (Gamma_s' ++ [(adjA, Typ.unit)])
-          dsE [] x (n + 3) e2 (Term.var gB) h_var_gB h_e2
-          h_fresh_gBadjA_added h_fresh_adjA_added
-      -- T-LetBind: adjA = adjoint e1 in adjoint e2.
-      have h_letBind :
-          HasType Delta Sigma
-            (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
-            (Term.letBind adjA (adjointFrom e1 x (Term.var gA) (n + 3))
-                                (adjointFrom e2 x (Term.var gB) (n + 3)))
-            Typ.unit
-            (EffectRow.union
-              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-              (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
-            ((Gamma_s' ++ [(adjA, Typ.unit)]).filter (fun p => p.1 ≠ adjA)) := by
-        -- The T-Let rule places `(adjA, unit)` at the tail of the
-        -- context used to type e2. Our `h_adj_e2` already has that
-        -- shape via the var witness `h_var_gB`. We massage the
-        -- context on the e2 side so the constructor matches.
-        have h2' :
-            HasType Delta Sigma
-              ((Gamma_s' ++ [(gB, Typ.tensor dsE)]) ++ [(adjA, Typ.unit)])
-              (adjointFrom e2 x (Term.var gB) (n + 3)) Typ.unit
-              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-              (Gamma_s' ++ [(adjA, Typ.unit)]) := by
-          have hassoc :
-              (Gamma_s' ++ [(gB, Typ.tensor dsE)]) ++ [(adjA, Typ.unit)]
-              = Gamma_s' ++ [(gB, Typ.tensor dsE), (adjA, Typ.unit)] := by simp
-          rw [hassoc]; exact h_adj_e2
-        exact HasType.letBind Delta Sigma
-          (Gamma_s' ++ [(gA, Typ.tensor dsE), (gB, Typ.tensor dsE)])
-          (Gamma_s' ++ [(gB, Typ.tensor dsE)])
-          (Gamma_s' ++ [(adjA, Typ.unit)])
-          adjA (adjointFrom e1 x (Term.var gA) (n + 3))
-                (adjointFrom e2 x (Term.var gB) (n + 3))
-          Typ.unit Typ.unit
-          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-          h_adj_e1 h2'
-      -- Collapse the `filter ≠ adjA` over `Γ_s' ++ [(adjA, unit)]`.
-      have h_filter_adjA :
-          (Gamma_s' ++ [(adjA, Typ.unit)]).filter (fun p => p.1 ≠ adjA)
-            = Gamma_s' := by
-        rw [List.filter_append,
-            linearCtx_filter_fresh_eq Gamma_s' adjA hadjA_fresh_s']
-        simp
-      rw [h_filter_adjA] at h_letBind
-      -- T-LetPair: letpair gA gB (copy gSeed) (letBind adjA ...).
-      have h_letpair :
-          HasType Delta Sigma Gamma_s
-            (Term.letpair gA gB (Term.copy gSeed)
-              (Term.letBind adjA (adjointFrom e1 x (Term.var gA) (n + 3))
-                                  (adjointFrom e2 x (Term.var gB) (n + 3))))
-            Typ.unit
-            (EffectRow.union epsSeed
-              (EffectRow.union
-                (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-                (EffectRow.union [EffectLabel.accum] ([] : EffectRow))))
-            (Gamma_s'.filter (fun p => decide (p.1 ≠ gA ∧ p.1 ≠ gB))) :=
-        HasType.letpair Delta Sigma Gamma_s Gamma_s'
-          Gamma_s' gA gB
-          (Term.copy gSeed)
-          (Term.letBind adjA (adjointFrom e1 x (Term.var gA) (n + 3))
-                              (adjointFrom e2 x (Term.var gB) (n + 3)))
-          (Typ.tensor dsE) (Typ.tensor dsE) Typ.unit
-          epsSeed
-          (EffectRow.union
-            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-            (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
-          h_copy h_letBind
-      -- Collapse the outer `filter` over `Γ_s'`.
-      have h_filter_gAB :
-          Gamma_s'.filter (fun p => decide (p.1 ≠ gA ∧ p.1 ≠ gB)) = Gamma_s' :=
-        linearCtx_filter_fresh_two_eq Gamma_s' gA gB hgA_fresh_s' hgB_fresh_s'
-      rw [h_filter_gAB] at h_letpair
-      -- Bridge the effect row via `subEff`.
-      exact HasType.subEff Delta Sigma Gamma_s Gamma_s' _ _ _ _
-        h_letpair (subEff_letpair_add epsSeed)
+      -- Tombstone-style context refactor broke the add case's context
+      -- threading: T-Var now outputs tombstoned slots instead of removing
+      -- entries, and T-LetBind/T-LetPair output slot parameters instead
+      -- of filtering. The entire derivation chain needs restructuring.
+      -- Sorry until the tombstone-aware context lemmas are available.
+      sorry
   -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all.
   --
   -- Wave 5 Track B: `AdjointTransform` reshaped the `mul` case so
@@ -568,45 +382,23 @@ theorem adjoint_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
     (h_e : HasType (Capability.diff :: Delta) Sigma
-                   (Gamma ++ [(x, Typ.tensor ds)])
+                   (Gamma ++ [(x, some (Typ.tensor ds))])
                    e (Typ.tensor dsOut) eps Gamma)
     (h_e_muls : AdjointMulTyped (Capability.diff :: Delta) Sigma dsOut e)
     (h_compat : subsetEffRow eps DiffCompat = true)
     (h_fresh_full : AdjointNamesFresh 0
-        (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)]))
-    (h_fresh_small : AdjointNamesFresh 0 (Gamma ++ [(x, Typ.tensor ds)])) :
+        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
+    (h_fresh_small : AdjointNamesFresh 0 (Gamma ++ [(x, some (Typ.tensor ds))])) :
     HasType (Capability.diff :: Delta) Sigma
-            (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
             (adjoint e x (Term.var gs))
             Typ.unit
             (EffectRow.union eps [EffectLabel.accum])
-            (Gamma ++ [(x, Typ.tensor ds)]) := by
-  have hvar_gs :
-      HasType (Capability.diff :: Delta) Sigma
-        (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
-        (Term.var gs) (Typ.tensor dsOut) []
-        (Gamma ++ [(x, Typ.tensor ds)]) := by
-    have h := HasType.var (Capability.diff :: Delta) Sigma
-      (Gamma ++ [(x, Typ.tensor ds)]) [] gs (Typ.tensor dsOut)
-    simpa using h
-  have h_aux :=
-    adjoint_typed_aux (Capability.diff :: Delta) Sigma
-      (Gamma ++ [(x, Typ.tensor ds), (gs, Typ.tensor dsOut)])
-      (Gamma ++ [(x, Typ.tensor ds)])
-      dsOut [] x 0 e (Term.var gs) hvar_gs h_e_muls h_fresh_full h_fresh_small
-  -- `adjoint` is `adjointFrom ... 0`; unfold.
-  show HasType _ _ _ (adjointFrom e x (Term.var gs) 0) _ _ _
-  -- Helper: `union [accum] [] = [accum]`. Goal: `union eps [accum]`.
-  have hsub :
-      SubEffRow (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-                (EffectRow.union eps [EffectLabel.accum]) := by
-    intro op hmem
-    have hop : op = EffectLabel.accum := by
-      simpa [EffectRow.union] using hmem
-    subst hop
-    show EffectLabel.accum ∈ EffectRow.union eps [EffectLabel.accum]
-    simp [EffectRow.union, List.mem_append]
-    exact Classical.em _
-  exact HasType.subEff _ _ _ _ _ _ _ _ h_aux hsub
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
+  -- T-Var on gs now produces a tombstone (gs, none) instead of removing gs.
+  -- The output context shape changed, and the downstream reasoning about
+  -- effect bridging needs the tombstone-aware context chain. Sorry until
+  -- the tombstone lemmas are available.
+  sorry
 
 end LaCaDiLE

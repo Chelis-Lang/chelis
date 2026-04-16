@@ -55,12 +55,14 @@ def envIndex : List String → String → Nat
 /-- Context translation: reverse the named context (which puts new
     binders at the TAIL via `Γ ++ [(x,t)]`) so that the translated DB
     context has the innermost binder at position 0 (HEAD via
-    `some t :: Γ`). Then drop names and wrap each type as a live slot.
+    `some t :: Γ`). Then drop names.
 
-    This makes `ctxToDB (Γ ++ [(x,t)]) = some t :: ctxToDB Γ`, which
+    Under tombstone semantics `p.2 : Option Typ` is already the right
+    shape for `LinearCtxDB = List (Option Typ)` — no wrapping needed.
+    This makes `ctxToDB (Γ ++ [(x, ot)]) = ot :: ctxToDB Γ`, which
     aligns with HasTypeDB's binder convention. -/
 def ctxToDB (Γ : LinearCtx) : LinearCtxDB :=
-  (Γ.reverse).map (fun p => some p.2)
+  (Γ.reverse).map (fun p => p.2)
 
 @[simp] theorem ctxToDB_length (Γ : LinearCtx) :
     (ctxToDB Γ).length = Γ.length := by
@@ -68,12 +70,13 @@ def ctxToDB (Γ : LinearCtx) : LinearCtxDB :=
 
 @[simp] theorem ctxToDB_nil : ctxToDB [] = [] := rfl
 
-theorem ctxToDB_append_singleton (Γ : LinearCtx) (x : String) (t : Typ) :
-    ctxToDB (Γ ++ [(x, t)]) = some t :: ctxToDB Γ := by
+theorem ctxToDB_append_singleton (Γ : LinearCtx) (x : String) (ot : Option Typ) :
+    ctxToDB (Γ ++ [(x, ot)]) = ot :: ctxToDB Γ := by
   simp [ctxToDB, List.reverse_append, List.map_append, List.map_cons, List.map_nil]
 
-theorem ctxToDB_append_pair (Γ : LinearCtx) (x y : String) (t1 t2 : Typ) :
-    ctxToDB (Γ ++ [(x, t1), (y, t2)]) = some t2 :: some t1 :: ctxToDB Γ := by
+theorem ctxToDB_append_pair (Γ : LinearCtx) (x y : String)
+    (ot1 ot2 : Option Typ) :
+    ctxToDB (Γ ++ [(x, ot1), (y, ot2)]) = ot2 :: ot1 :: ctxToDB Γ := by
   simp [ctxToDB, List.reverse_append, List.map_append, List.map_cons, List.map_nil]
 
 mutual
@@ -148,12 +151,13 @@ def envOfCtx (Γ : LinearCtx) : List String :=
 
 @[simp] theorem envOfCtx_nil : envOfCtx [] = [] := rfl
 
-theorem envOfCtx_append_singleton (Γ : LinearCtx) (x : String) (t : Typ) :
-    envOfCtx (Γ ++ [(x, t)]) = x :: envOfCtx Γ := by
+theorem envOfCtx_append_singleton (Γ : LinearCtx) (x : String) (ot : Option Typ) :
+    envOfCtx (Γ ++ [(x, ot)]) = x :: envOfCtx Γ := by
   simp [envOfCtx, List.map_append, List.reverse_append]
 
-theorem envOfCtx_append_pair (Γ : LinearCtx) (x y : String) (t1 t2 : Typ) :
-    envOfCtx (Γ ++ [(x, t1), (y, t2)]) = y :: x :: envOfCtx Γ := by
+theorem envOfCtx_append_pair (Γ : LinearCtx) (x y : String)
+    (ot1 ot2 : Option Typ) :
+    envOfCtx (Γ ++ [(x, ot1), (y, ot2)]) = y :: x :: envOfCtx Γ := by
   simp [envOfCtx, List.map_append, List.reverse_append]
 
 theorem envIndex_zero (x : String) (rest : List String) :
@@ -163,6 +167,8 @@ theorem envIndex_zero (x : String) (rest : List String) :
 theorem envIndex_cons_ne (x y : String) (rest : List String) (h : x ≠ y) :
     envIndex (y :: rest) x = envIndex rest x + 1 := by
   simp [envIndex, h]
+
+-- hasType_to_hasTypeDB moved to after termToDB mutual block below
 
 /-! ## Forward typing preservation (Wave 5p)
 

@@ -602,9 +602,12 @@ structure Config where
 
 /-! ## Linear context and context splitting -/
 
-/-- Linear typing context. A list of (name, type) pairs; entries are consumed
-    by successful derivations and removed from the output context. -/
-abbrev LinearCtx := List (String × Typ)
+/-- Linear typing context. A list of named slots; live slots hold
+    `some t`, consumed (tombstoned) slots hold `none`. Variable
+    consumption marks a slot as `none` rather than removing it, keeping
+    the context length invariant across a derivation. This aligns with
+    `LinearCtxDB := List (Option Typ)`. -/
+abbrev LinearCtx := List (String × Option Typ)
 
 /-! ### Phase 2 scaffolding: context splitting
 

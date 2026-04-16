@@ -18,31 +18,28 @@ namespace LaCaDiLE
 
 /-- Lift `addDim d` over every type in a linear context. -/
 def addDimCtx (d : Dim) (Gamma : LinearCtx) : LinearCtx :=
-  Gamma.map (fun p => (p.1, addDim d p.2))
+  Gamma.map (fun p => (p.1, p.2.map (addDim d)))
 
 @[simp] theorem addDimCtx_nil (d : Dim) : addDimCtx d [] = [] := rfl
 
-@[simp] theorem addDimCtx_cons (d : Dim) (x : String) (t : Typ) (G : LinearCtx) :
-    addDimCtx d ((x, t) :: G) = (x, addDim d t) :: addDimCtx d G := rfl
+@[simp] theorem addDimCtx_cons (d : Dim) (x : String) (ot : Option Typ) (G : LinearCtx) :
+    addDimCtx d ((x, ot) :: G) = (x, ot.map (addDim d)) :: addDimCtx d G := rfl
 
 theorem addDimCtx_append (d : Dim) (G1 G2 : LinearCtx) :
     addDimCtx d (G1 ++ G2) = addDimCtx d G1 ++ addDimCtx d G2 := by
   simp [addDimCtx, List.map_append]
 
-theorem addDimCtx_singleton (d : Dim) (x : String) (t : Typ) :
-    addDimCtx d [(x, t)] = [(x, addDim d t)] := rfl
+theorem addDimCtx_singleton (d : Dim) (x : String) (ot : Option Typ) :
+    addDimCtx d [(x, ot)] = [(x, ot.map (addDim d))] := rfl
 
-/-- `addDimCtx` commutes with a name-only filter. -/
-theorem addDimCtx_filter_name (d : Dim) (G : LinearCtx) (p : String → Bool) :
-    (addDimCtx d G).filter (fun q => p q.1)
-      = addDimCtx d (G.filter (fun q => p q.1)) := by
-  induction G with
-  | nil => rfl
-  | cons hd tl ih =>
-    simp only [addDimCtx, List.map_cons, List.filter_cons]
-    by_cases hp : p hd.1
-    · simp [hp]; exact ih
-    · simp [hp]; exact ih
+@[simp] theorem addDimCtx_singleton_some (d : Dim) (x : String) (t : Typ) :
+    addDimCtx d [(x, some t)] = [(x, some (addDim d t))] := rfl
+
+@[simp] theorem addDimCtx_singleton_none (d : Dim) (x : String) :
+    addDimCtx d [(x, none)] = [(x, none)] := rfl
+
+-- addDimCtx_filter_name removed: LinearCtx refactor to Option Typ
+-- uses tombstone/tail-stripping instead of filtering.
 
 -- Stage 1 refactor: positional `rem`/`ins` replaced by named
 -- `rem ds d := ds.erase d` and `ins ds d := DimList.cons d ds`.
@@ -157,49 +154,39 @@ theorem addDim_preserves_typing
         (addDimCtx d Gamma2) (addDimCtx d Gamma3)
         (addDim d t) epsR (addDimClauses d cls)) with
   | var Delta Sigma Gamma_pre Gamma_post x t =>
-    -- Wave 0.5: var consumes from arbitrary position. Lift both
-    -- Gamma_pre and Gamma_post through addDimCtx, then re-apply T-Var
-    -- at the lifted split.
-    simp only [addDimTerm, addDim, addDimCtx_append, addDimCtx_singleton]
+    -- Tombstone semantics: var consumes from arbitrary position,
+    -- producing a `none` tombstone in the output.
+    simp only [addDimTerm, addDimCtx_append, addDimCtx_singleton_some,
+               addDimCtx_singleton_none]
     exact HasType.var Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma_pre)
       (addDimCtx d Gamma_post) x (addDim d t)
   | unit Delta Sigma Gamma =>
     simp [addDimTerm, addDim]
     exact HasType.unit Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
-  | abs Delta Sigma Gamma1 Gamma2 x t1 t2 eps e _h ih =>
+  | abs Delta Sigma Gamma1 Gamma2 x t1 t2 eps e slot _h ih =>
     simp only [addDimTerm]
     have ih' : HasType Delta (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma1 ++ [(x, addDim d t1)]) (addDimTerm d e) (addDim d t2) eps
-        (addDimCtx d Gamma2) := by
-      rw [← addDimCtx_singleton, ← addDimCtx_append]; exact ih
-    have key := HasType.abs Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
-                  x (addDim d t1) (addDim d t2) eps (addDimTerm d e) ih'
-    show HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) _ _ _
-            (addDimCtx d (Gamma2.filter (fun p => p.1 ≠ x)))
-    have hf : addDimCtx d (Gamma2.filter (fun p => p.1 ≠ x))
-            = (addDimCtx d Gamma2).filter (fun p => p.1 ≠ x) :=
-      (addDimCtx_filter_name d Gamma2 (fun y => decide (y ≠ x))).symm
-    rw [hf]; exact key
+        (addDimCtx d Gamma1 ++ [(x, some (addDim d t1))]) (addDimTerm d e) (addDim d t2) eps
+        (addDimCtx d Gamma2 ++ [(x, slot.map (addDim d))]) := by
+      rw [← addDimCtx_singleton_some, ← addDimCtx_append,
+          ← addDimCtx_singleton, ← addDimCtx_append]; exact ih
+    exact HasType.abs Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+                  x (addDim d t1) (addDim d t2) eps (addDimTerm d e) (slot.map (addDim d)) ih'
   | app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 eps eps1 eps2 _h1 _h2 ih1 ih2 =>
-    simp [addDimTerm, addDim]
+    simp [addDimTerm]
     exact HasType.app Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2)
       (addDim d t1) (addDim d t2) eps eps1 eps2 ih1 ih2
-  | letBind Delta Sigma Gamma1 Gamma2 Gamma3 x e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 =>
+  | letBind Delta Sigma Gamma1 Gamma2 Gamma3 x e1 e2 t1 t2 eps1 eps2 slot _h1 _h2 ih1 ih2 =>
     simp only [addDimTerm]
     have ih2' : HasType Delta (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma2 ++ [(x, addDim d t1)]) (addDimTerm d e2) (addDim d t2) eps2
-        (addDimCtx d Gamma3) := by
-      rw [← addDimCtx_singleton, ← addDimCtx_append]; exact ih2
-    have key := HasType.letBind Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+        (addDimCtx d Gamma2 ++ [(x, some (addDim d t1))]) (addDimTerm d e2) (addDim d t2) eps2
+        (addDimCtx d Gamma3 ++ [(x, slot.map (addDim d))]) := by
+      rw [← addDimCtx_singleton_some, ← addDimCtx_append,
+          ← addDimCtx_singleton, ← addDimCtx_append]; exact ih2
+    exact HasType.letBind Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimCtx d Gamma3) x (addDimTerm d e1) (addDimTerm d e2)
-      (addDim d t1) (addDim d t2) eps1 eps2 ih1 ih2'
-    show HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) _ _ _
-          (addDimCtx d (Gamma3.filter (fun p => p.1 ≠ x)))
-    have hf : addDimCtx d (Gamma3.filter (fun p => p.1 ≠ x))
-            = (addDimCtx d Gamma3).filter (fun p => p.1 ≠ x) :=
-      (addDimCtx_filter_name d Gamma3 (fun y => decide (y ≠ x))).symm
-    rw [hf]; exact key
+      (addDim d t1) (addDim d t2) eps1 eps2 (slot.map (addDim d)) ih1 ih2'
   | copy Delta Sigma Gamma1 Gamma2 e ds eps _h ih =>
     -- Wave 3: T-Copy now takes DimList; addDim prepends `d`.
     simp only [addDimTerm, addDim]
@@ -209,41 +196,36 @@ theorem addDim_preserves_typing
     exact HasType.copy Delta (addDimStoreTyp d Sigma)
       (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimTerm d e) (DimList.cons d ds) eps ih'
-  | letpair Delta Sigma Gamma1 Gamma2 Gamma3 x y e1 e2 t1 t2 t eps1 eps2 _h1 _h2 ih1 ih2 =>
+  | letpair Delta Sigma Gamma1 Gamma2 Gamma3 x y e1 e2 t1 t2 t eps1 eps2 slotX slotY _h1 _h2 ih1 ih2 =>
     simp only [addDimTerm]
     have ih1' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e1)
         (Typ.pair (addDim d t1) (addDim d t2)) eps1 (addDimCtx d Gamma2) := by
       simpa [addDim] using ih1
     have ih2'' : HasType Delta (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma2 ++ [(x, addDim d t1), (y, addDim d t2)])
-        (addDimTerm d e2) (addDim d t) eps2 (addDimCtx d Gamma3) := by
+        (addDimCtx d Gamma2 ++ [(x, some (addDim d t1)), (y, some (addDim d t2))])
+        (addDimTerm d e2) (addDim d t) eps2
+        (addDimCtx d Gamma3 ++ [(x, slotX.map (addDim d)), (y, slotY.map (addDim d))]) := by
       have := ih2
       rw [addDimCtx_append] at this
       simpa [addDimCtx, List.map] using this
-    have key := HasType.letpair Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
+    exact HasType.letpair Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimCtx d Gamma3) x y (addDimTerm d e1) (addDimTerm d e2)
-      (addDim d t1) (addDim d t2) (addDim d t) eps1 eps2 ih1' ih2''
-    show HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) _ (addDim d t)
-          (EffectRow.union eps1 eps2)
-          (addDimCtx d (Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y)))
-    have hf : addDimCtx d (Gamma3.filter (fun p => p.1 ≠ x ∧ p.1 ≠ y))
-            = (addDimCtx d Gamma3).filter (fun p => p.1 ≠ x ∧ p.1 ≠ y) :=
-      (addDimCtx_filter_name d Gamma3 (fun y_ => decide (y_ ≠ x ∧ y_ ≠ y))).symm
-    rw [hf]; exact key
+      (addDim d t1) (addDim d t2) (addDim d t) eps1 eps2
+      (slotX.map (addDim d)) (slotY.map (addDim d)) ih1' ih2''
   | tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 =>
     simp [addDimTerm, addDim]
     exact HasType.tpair Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimCtx d Gamma3) (addDimTerm d e1) (addDimTerm d e2)
       (addDim d t1) (addDim d t2) eps1 eps2 ih1 ih2
   | fst Delta Sigma Gamma1 Gamma2 e t1 t2 eps _h ih =>
-    simp [addDimTerm, addDim]
+    simp [addDimTerm]
     have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
         (Typ.pair (addDim d t1) (addDim d t2)) eps (addDimCtx d Gamma2) := by
       simpa [addDim] using ih
     exact HasType.fst Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       (addDimTerm d e) (addDim d t1) (addDim d t2) eps ih'
   | snd Delta Sigma Gamma1 Gamma2 e t1 t2 eps _h ih =>
-    simp [addDimTerm, addDim]
+    simp [addDimTerm]
     have ih' : HasType Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma1) (addDimTerm d e)
         (Typ.pair (addDim d t1) (addDim d t2)) eps (addDimCtx d Gamma2) := by
       simpa [addDim] using ih
@@ -350,16 +332,18 @@ theorem addDim_preserves_typing
         rcases hClauseCov clauses cl0 hcl0 with ⟨cl, hcl, heq2⟩
         exact ⟨cl, hcl, heq2.trans heq⟩)
       ihCT
-  | tgrad Delta Sigma Gamma x ds dsOut e eps _h hsub ih =>
+  | tgrad Delta Sigma Gamma x ds dsOut e eps slot _h hsub ih =>
     simp [addDimTerm, addDim]
     have ih' : HasType (Capability.diff :: Delta) (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma ++ [(x, Typ.tensor (DimList.cons d ds))]) (addDimTerm d e)
-        (Typ.tensor (DimList.cons d dsOut)) eps (addDimCtx d Gamma) := by
+        (addDimCtx d Gamma ++ [(x, some (Typ.tensor (DimList.cons d ds)))]) (addDimTerm d e)
+        (Typ.tensor (DimList.cons d dsOut)) eps
+        (addDimCtx d Gamma ++ [(x, slot.map (addDim d))]) := by
       have := ih
-      rw [addDimCtx_append, addDimCtx_singleton] at this
-      simpa [addDim] using this
+      simp only [addDimCtx_append, addDimCtx_singleton, addDim] at this
+      exact this
     exact HasType.tgrad Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
-      x (DimList.cons d ds) (DimList.cons d dsOut) (addDimTerm d e) eps ih' hsub
+      x (DimList.cons d ds) (DimList.cons d dsOut) (addDimTerm d e) eps
+      (slot.map (addDim d)) ih' hsub
   | loc Delta Sigma Gamma ell t hlook =>
     -- Wave 2: closed via addDimStoreTyp_lookup. The store typing in
     -- the output is lifted via addDimStoreTyp, so the looked-up type
@@ -378,41 +362,35 @@ theorem addDim_preserves_typing
     simp [addDimClauses]
     exact ClausesTyped.nil Delta (addDimStoreTyp d Sigma)
       (addDimCtx d Gamma2) (addDim d t) epsR
-  | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest _hhb _hrest ihhb ihrest =>
+  | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK _hhb _hrest ihhb ihrest =>
     simp [addDimClauses]
     have ihhb' : HasType Delta (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma2 ++ [(x, addDim d tArg),
-                                (k, Typ.arrow (addDim d tRet) (addDim d t) epsR)])
-        (addDimTerm d hb) (addDim d t) epsR (addDimCtx d Gamma3) := by
+        (addDimCtx d Gamma2 ++ [(x, some (addDim d tArg)),
+                                (k, some (Typ.arrow (addDim d tRet) (addDim d t) epsR))])
+        (addDimTerm d hb) (addDim d t) epsR
+        (addDimCtx d Gamma3 ++ [(x, slotX.map (addDim d)), (k, slotK.map (addDim d))]) := by
       have := ihhb
       rw [addDimCtx_append] at this
       simpa [addDimCtx, List.map, addDim] using this
     exact ClausesTyped.cons Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimCtx d Gamma3)
       (addDim d t) (addDim d tArg) (addDim d tRet) epsR op x k
-      (addDimTerm d hb) (addDimClauses d rest) ihhb' ihrest
-  | tvmap Delta Sigma Gamma x t1 t2 e eps dIn _h ih =>
+      (addDimTerm d hb) (addDimClauses d rest)
+      (slotX.map (addDim d)) (slotK.map (addDim d)) ihhb' ihrest
+  | tvmap Delta Sigma Gamma x t1 t2 e eps dIn slot _h ih =>
     -- Stage 2 closes tvmap via `addDim_comm`: the outer lift by `d`
     -- and the inner vmap lift by `dIn` commute, because both prepend
     -- to the same (now multiset-valued) tensor shape.
     simp only [addDimTerm, addDim]
-    -- IH has type:
-    --   HasType ... (addDimCtx d (Gamma ++ [(x, t1)])) (addDimTerm d e)
-    --               (addDim d t2) eps (addDimCtx d Gamma)
-    -- = HasType ... (addDimCtx d Gamma ++ [(x, addDim d t1)]) ... (addDim d t2) ... .
     have ih' : HasType Delta (addDimStoreTyp d Sigma)
-        (addDimCtx d Gamma ++ [(x, addDim d t1)]) (addDimTerm d e) (addDim d t2) eps
-        (addDimCtx d Gamma) := by
+        (addDimCtx d Gamma ++ [(x, some (addDim d t1))]) (addDimTerm d e) (addDim d t2) eps
+        (addDimCtx d Gamma ++ [(x, slot.map (addDim d))]) := by
       have := ih
-      rw [addDimCtx_append, addDimCtx_singleton] at this
+      simp only [addDimCtx_append, addDimCtx_singleton] at this
       exact this
     -- Apply `HasType.tvmap` reusing `dIn` as the fresh-for-the-outer-vmap dim.
-    -- The constructor produces
-    --   Typ.arrow (addDim dIn (addDim d t1)) (addDim dIn (addDim d t2)) eps
-    -- and the goal needs
-    --   Typ.arrow (addDim d (addDim dIn t1)) (addDim d (addDim dIn t2)) eps.
-    -- Those are equal by two applications of `addDim_comm`.
     have key := HasType.tvmap Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
-                  x (addDim d t1) (addDim d t2) (addDimTerm d e) eps dIn ih'
+                  x (addDim d t1) (addDim d t2) (addDimTerm d e) eps dIn
+                  (slot.map (addDim d)) ih'
     simpa [addDim_comm d dIn t1, addDim_comm d dIn t2] using key
   | tsum Delta Sigma Gamma1 Gamma2 e ds dIn eps _h hMem ih =>
     -- Stage 2 closes tsum via `DimList.erase_cons_comm`: consing
