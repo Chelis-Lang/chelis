@@ -433,14 +433,23 @@ theorem DomSub.trans {G1 G2 G3 : LinearCtx}
 
 theorem DomSub.append_left (G1 G2 : LinearCtx) :
     DomSub G1 (G1 ++ G2) := by
-  sorry
+  intro x hx
+  show x ∈ linearCtxDom (G1 ++ G2)
+  simp only [linearCtxDom, List.map_append, List.mem_append]
+  left; exact hx
 
-/-- Linear-context domain shrinks across every HasType derivation. -/
+/-- Linear-context domain is invariant across HasType derivations.
+    Under tombstone semantics, consumption only changes Option values
+    (some t → none), not names. So Γ.map Prod.fst = Γ'.map Prod.fst.
+    DomSub follows by rewriting. -/
 theorem has_type_linear_shrinks
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
     ∀ x, x ∈ linearCtxDom Gamma' → x ∈ linearCtxDom Gamma := by
+  -- Under tombstoning, linearCtxDom = map Prod.fst includes all names
+  -- (live and dead). Names are preserved by hasType_names_preserved
+  -- (proved in Translation.lean). Inline proof pending import refactor.
   sorry
 
 /-- Linear-context outputs are not merely domain subsets of inputs;
