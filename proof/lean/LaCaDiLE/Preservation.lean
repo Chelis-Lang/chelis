@@ -1132,7 +1132,26 @@ theorem plug_preserves_typing
        ∃ Sigma2, HasType Delta Sigma2 Gamma0 e' t0 eps0 Gamma0' ∧
                  StoreTypSub Sigma Sigma2) :
     ∃ Sigma2, HasType Delta Sigma2 Gamma (plug E e') t eps Gamma' ∧
-              StoreTypSub Sigma Sigma2 := by sorry
+              StoreTypSub Sigma Sigma2 := by
+  cases E with
+  | hole => simpa [plug] using h_inner h
+  | fst =>
+      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by simpa [plug] using h
+      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      exact ⟨S2, HasType.fst _ S2 _ _ _ _ t2 _ h_e', h_sub⟩
+  | snd =>
+      have h' := by simpa [plug] using h
+      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      exact ⟨S2, HasType.snd _ S2 _ _ _ t1 _ _ h_e', h_sub⟩
+  | copy =>
+      have h' := by simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
+      obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
+      subst hteq
+      exact ⟨S2, HasType.copy _ S2 _ _ _ ds _ h_e', h_sub⟩
+  | _ => sorry
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
