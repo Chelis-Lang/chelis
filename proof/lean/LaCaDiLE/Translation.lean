@@ -52,24 +52,29 @@ def envIndex : List String → String → Nat
   | [], _ => 0
   | y :: rest, x => if x = y then 0 else envIndex rest x + 1
 
-/-- Context translation: drop names, wrap each type as a live slot. -/
-def ctxToDB : LinearCtx → LinearCtxDB
-  | [] => []
-  | (_, t) :: rest => some t :: ctxToDB rest
+/-- Context translation: reverse the named context (which puts new
+    binders at the TAIL via `Γ ++ [(x,t)]`) so that the translated DB
+    context has the innermost binder at position 0 (HEAD via
+    `some t :: Γ`). Then drop names and wrap each type as a live slot.
+
+    This makes `ctxToDB (Γ ++ [(x,t)]) = some t :: ctxToDB Γ`, which
+    aligns with HasTypeDB's binder convention. -/
+def ctxToDB (Γ : LinearCtx) : LinearCtxDB :=
+  (Γ.reverse).map (fun p => some p.2)
 
 @[simp] theorem ctxToDB_length (Γ : LinearCtx) :
     (ctxToDB Γ).length = Γ.length := by
-  induction Γ with
-  | nil => rfl
-  | cons p rest ih =>
-    cases p with
-    | mk x t =>
-      simp [ctxToDB, ih]
+  simp [ctxToDB]
 
 @[simp] theorem ctxToDB_nil : ctxToDB [] = [] := rfl
 
-@[simp] theorem ctxToDB_cons (x : String) (t : Typ) (Γ : LinearCtx) :
-    ctxToDB ((x, t) :: Γ) = some t :: ctxToDB Γ := rfl
+theorem ctxToDB_append_singleton (Γ : LinearCtx) (x : String) (t : Typ) :
+    ctxToDB (Γ ++ [(x, t)]) = some t :: ctxToDB Γ := by
+  simp [ctxToDB, List.reverse_append, List.map_append, List.map_cons, List.map_nil]
+
+theorem ctxToDB_append_pair (Γ : LinearCtx) (x y : String) (t1 t2 : Typ) :
+    ctxToDB (Γ ++ [(x, t1), (y, t2)]) = some t2 :: some t1 :: ctxToDB Γ := by
+  simp [ctxToDB, List.reverse_append, List.map_append, List.map_cons, List.map_nil]
 
 mutual
 
@@ -133,5 +138,28 @@ end
     clausesToDB env ((op, xArg, kCont, body) :: rest) =
     (op, termToDB (kCont :: xArg :: env) body) :: clausesToDB env rest :=
   rfl
+
+/-! ## Naming environment extraction -/
+
+/-- Extract the name environment from a LinearCtx, reversed to match
+    the de Bruijn convention (innermost binder first). -/
+def envOfCtx (Γ : LinearCtx) : List String :=
+  (Γ.map Prod.fst).reverse
+
+/-! ## Forward typing preservation (Wave 5p)
+
+The main theorem `hasType_to_hasTypeDB` maps a named `HasType`
+derivation to a `HasTypeDB` derivation over the translated context
+and term. The induction is on the `HasType` derivation using the
+mutual recursor `HasType.rec` (with a motive_2 for clauses), and
+each case builds the corresponding `HasTypeDB` constructor. -/
+
+theorem hasType_to_hasTypeDB
+    {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Δ S Γ e t eps Γ') :
+    HasTypeDB Δ S (ctxToDB Γ) (termToDB (envOfCtx Γ) e)
+              t eps (ctxToDB Γ') := by
+  sorry
 
 end LaCaDiLE
