@@ -623,6 +623,7 @@ fn compiler_error(err: CompilerError) -> PyErr {
     ChelisError::new_err(format!("{}: {detail}", err.stage))
 }
 
+#[derive(Debug)]
 enum CompileAndLoadError {
     Compiler(CompilerError),
     Message(String),
@@ -664,8 +665,15 @@ fn run_compile_and_load_job(
     })?;
 
     write_generated_files_inner(&artifact_root, &artifact).map_err(CompileAndLoadError::Message)?;
-    let lib_path = compile_shared_library_inner(&artifact_root, &job.source_path, &artifact)
-        .map_err(CompileAndLoadError::Message)?;
+    let runtime_library =
+        stage_runtime_library_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
+    let lib_path = compile_shared_library_inner(
+        &artifact_root,
+        &job.source_path,
+        &artifact,
+        &runtime_library,
+    )
+    .map_err(CompileAndLoadError::Message)?;
     let manifest_path = lib_path.with_extension("json");
     let manifest = artifact_manifest_inner(&job.source_path, &source, &artifact);
     write_manifest_inner(&manifest_path, &manifest).map_err(CompileAndLoadError::Message)?;
@@ -733,10 +741,84 @@ fn write_generated_files_inner(
     Ok(())
 }
 
+fn find_runtime_library_inner() -> Result<PathBuf, String> {
+    const LIB_NAME: &str = "libchelis_runtime.a";
+    const LIB_PREFIX: &str = "libchelis_runtime";
+
+    fn find_in_dir(dir: &Path) -> Option<PathBuf> {
+        let mut hashed_matches = Vec::new();
+        let exact = dir.join(LIB_NAME);
+        let entries = fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
+                if name == LIB_NAME {
+                    continue;
+                }
+                hashed_matches.push(path);
+            }
+        }
+        hashed_matches
+            .into_iter()
+            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+            .or_else(|| exact.exists().then_some(exact))
+    }
+
+    if let Ok(dir) = std::env::var("CHELIS_RUNTIME_DIR") {
+        if let Some(candidate) = find_in_dir(&PathBuf::from(&dir)) {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "cannot find {LIB_NAME} in CHELIS_RUNTIME_DIR; set CHELIS_RUNTIME_DIR to the directory containing the chelis runtime static library"
+        ));
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("cannot determine current executable path: {err}"))?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| "cannot determine executable directory".to_string())?;
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for candidate_dir in [
+        exe_dir.join("deps"),
+        exe_dir.to_path_buf(),
+        exe_dir.join("lib"),
+        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
+        exe_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+        exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
+        manifest_dir.join("../../target/debug/deps"),
+        manifest_dir.join("../../target/release/deps"),
+        manifest_dir.join("../../target/debug"),
+        manifest_dir.join("../../target/release"),
+    ] {
+        if !candidate_dir.as_os_str().is_empty()
+            && let Some(found) = find_in_dir(&candidate_dir)
+        {
+            return Ok(found);
+        }
+    }
+
+    Err(format!(
+        "cannot find {LIB_NAME}; set CHELIS_RUNTIME_DIR or install chelis so {LIB_NAME} is available relative to the chelis executable"
+    ))
+}
+
+fn stage_runtime_library_inner(root: &Path) -> Result<PathBuf, String> {
+    let source = find_runtime_library_inner()?;
+    let dest = root.join("libchelis_runtime.a");
+    fs::copy(&source, &dest).map_err(|err| format!("copy {} failed: {err}", dest.display()))?;
+    Ok(dest)
+}
+
 fn compile_shared_library_inner(
     root: &Path,
     source_path: &Path,
     artifact: &CompiledExecutionArtifact,
+    runtime_library: &Path,
 ) -> Result<PathBuf, String> {
     let stem = source_path
         .file_stem()
@@ -754,6 +836,11 @@ fn compile_shared_library_inner(
             command.arg(root.join(&file.path));
         }
     }
+    if artifact.compile_result.target == CompileTarget::Hip {
+        command.arg("-x");
+        command.arg("none");
+    }
+    command.arg(runtime_library);
     command.args(&artifact.compile_result.link_flags);
     command.arg("-o");
     command.arg(&lib_path);
@@ -1341,6 +1428,7 @@ mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
@@ -1435,5 +1523,35 @@ loss = (mean(x, 0) : tensor[f32])
                 "unexpected error: {err}"
             );
         });
+    }
+
+    #[test]
+    fn compile_and_load_job_links_runtime_into_shared_library() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
+        )
+        .expect("write source");
+
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+
+        assert!(output.lib_path.exists(), "{}", output.lib_path.display());
+        assert!(
+            dir.path().join("libchelis_runtime.a").exists(),
+            "runtime archive should be staged next to the shared library"
+        );
+
+        let library = unsafe { Library::new(&output.lib_path) }
+            .expect("shared library should load without unresolved runtime symbols");
+        drop(library);
     }
 }

@@ -11,8 +11,7 @@ import safetensors.torch
 import torch
 
 
-LOSS_PROGRAM = """let x = (x : tensor[4, f32])
-let loss = (mean(x, 0) : tensor[f32])
+LOSS_PROGRAM = """def loss(x: tensor[4, f32]) -> tensor[f32] = mean(x, 0)
 """
 
 CHECK_PROGRAM = """def relu2(x: tensor[2, f32]) -> tensor[2, f32] = relu(x)
