@@ -5,6 +5,7 @@ use chelis_ir::host::{
 
 use crate::emit::CEmitter;
 use chelis_ir::dag::RiscOp;
+use std::collections::HashMap;
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     let mut out = Vec::<String>::new();
@@ -26,7 +27,8 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     // (no main) keep external linkage so the exported symbols remain callable from the
     // linker.
     let internal_linkage = !program.globals.is_empty();
-    let header = emit_host_header_with_linkage(program, internal_linkage);
+    let emitted_names = emitted_function_names(program, program_name);
+    let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
     if !header.is_empty() {
         out.push(header);
         out.push(String::new());
@@ -41,16 +43,27 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
     for function in &program.functions {
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
+            let function_name = emitted_names
+                .get(&function.name)
+                .expect("host function emitted name");
             append_helper(
                 &mut out,
                 helper,
-                &format!("{}__tensor_{index}", function.name),
+                &format!("{function_name}__tensor_{index}"),
             );
         }
     }
 
     for function in &program.functions {
-        emit_function(&mut out, function, internal_linkage);
+        emit_function(
+            &mut out,
+            function,
+            emitted_names
+                .get(&function.name)
+                .expect("host function emitted name"),
+            &emitted_names,
+            internal_linkage,
+        );
         out.push(String::new());
     }
 
@@ -59,6 +72,27 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     }
 
     out.join("\n")
+}
+
+fn emitted_function_name(program_name: &str, function_name: &str) -> String {
+    if function_name == "main" {
+        format!("{program_name}__main")
+    } else {
+        function_name.to_string()
+    }
+}
+
+fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<String, String> {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                function.name.clone(),
+                emitted_function_name(program_name, &function.name),
+            )
+        })
+        .collect()
 }
 
 fn append_uniform_sample_helper(out: &mut Vec<String>) {
@@ -157,11 +191,15 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
-pub fn emit_host_header(program: &HostProgram) -> String {
-    emit_host_header_with_linkage(program, false)
+pub fn emit_host_header(program: &HostProgram, program_name: &str) -> String {
+    emit_host_header_with_linkage(program, program_name, false)
 }
 
-fn emit_host_header_with_linkage(program: &HostProgram, internal_linkage: bool) -> String {
+fn emit_host_header_with_linkage(
+    program: &HostProgram,
+    program_name: &str,
+    internal_linkage: bool,
+) -> String {
     let prefix = if internal_linkage {
         "static inline "
     } else {
@@ -177,10 +215,11 @@ fn emit_host_header_with_linkage(program: &HostProgram, internal_linkage: bool) 
                 .map(|param| c_decl(&param.ty, &param.name))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let emitted_name = emitted_function_name(program_name, &function.name);
             format!(
                 "{prefix}{} {}({});",
                 c_type(&function.ret_ty),
-                function.name,
+                emitted_name,
                 params
             )
         })
@@ -250,7 +289,13 @@ fn identity_helper_input(
     }
 }
 
-fn emit_function(out: &mut Vec<String>, function: &HostFunction, internal_linkage: bool) {
+fn emit_function(
+    out: &mut Vec<String>,
+    function: &HostFunction,
+    emitted_name: &str,
+    emitted_names: &HashMap<String, String>,
+    internal_linkage: bool,
+) {
     let params = function
         .params
         .iter()
@@ -265,10 +310,10 @@ fn emit_function(out: &mut Vec<String>, function: &HostFunction, internal_linkag
     out.push(format!(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty),
-        function.name,
+        emitted_name,
         params
     ));
-    let mut emitter = HostEmitter::new("    ".to_string(), function.name.as_str());
+    let mut emitter = HostEmitter::new("    ".to_string(), emitted_name, emitted_names.clone());
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty);
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
@@ -277,7 +322,11 @@ fn emit_function(out: &mut Vec<String>, function: &HostFunction, internal_linkag
 
 fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
     out.push("int main(void) {".to_string());
-    let mut emitter = HostEmitter::new("    ".to_string(), &format!("{program_name}__global"));
+    let mut emitter = HostEmitter::new(
+        "    ".to_string(),
+        &format!("{program_name}__global"),
+        HashMap::new(),
+    );
     for (index, binding) in program.globals.iter().enumerate() {
         emitter.emit_expr_to_var(
             &binding.value,
@@ -309,15 +358,17 @@ struct HostEmitter {
     lines: Vec<String>,
     indent: String,
     helper_prefix: String,
+    emitted_names: HashMap<String, String>,
     temp_counter: usize,
 }
 
 impl HostEmitter {
-    fn new(indent: String, helper_prefix: &str) -> Self {
+    fn new(indent: String, helper_prefix: &str, emitted_names: HashMap<String, String>) -> Self {
         Self {
             lines: Vec::new(),
             indent,
             helper_prefix: helper_prefix.to_string(),
+            emitted_names,
             temp_counter: 0,
         }
     }
@@ -1414,7 +1465,10 @@ impl HostEmitter {
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
-            function,
+            self.emitted_names
+                .get(function)
+                .map(String::as_str)
+                .unwrap_or(function),
             arg_vars.join(", ")
         ));
     }

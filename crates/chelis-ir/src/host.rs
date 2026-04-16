@@ -221,12 +221,156 @@ pub fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
     }
 }
 
+pub fn host_program_requires_host_backend(program: &HostProgram) -> bool {
+    if !program.globals.is_empty() {
+        return true;
+    }
+
+    let tensor_only_functions = program
+        .functions
+        .iter()
+        .filter(|function| {
+            matches!(function.ret_ty, HostType::Tensor(_))
+                && function
+                    .params
+                    .iter()
+                    .all(|param| matches!(param.ty, HostType::Tensor(_)))
+        })
+        .map(|function| function.name.clone())
+        .collect::<HashSet<_>>();
+
+    program.functions.iter().any(|function| {
+        !tensor_only_functions.contains(&function.name)
+            || !host_expr_stays_on_tensor_path(&function.body, &tensor_only_functions)
+    })
+}
+
+fn host_expr_stays_on_tensor_path(
+    expr: &HostExpr,
+    tensor_only_functions: &HashSet<String>,
+) -> bool {
+    match expr {
+        HostExpr::Var(_, HostType::Tensor(_)) => true,
+        HostExpr::TensorCall { .. } => true,
+        HostExpr::Call {
+            function,
+            args,
+            arg_tys,
+            ty,
+        } => {
+            matches!(ty, HostType::Tensor(_))
+                && tensor_only_functions.contains(function)
+                && arg_tys.iter().all(|ty| matches!(ty, HostType::Tensor(_)))
+                && args
+                    .iter()
+                    .all(|arg| host_expr_stays_on_tensor_path(arg, tensor_only_functions))
+        }
+        HostExpr::Let { bindings, body, ty } => {
+            matches!(ty, HostType::Tensor(_))
+                && bindings.iter().all(|binding| {
+                    matches!(binding.ty, HostType::Tensor(_))
+                        && host_expr_stays_on_tensor_path(&binding.value, tensor_only_functions)
+                })
+                && host_expr_stays_on_tensor_path(body, tensor_only_functions)
+        }
+        _ => false,
+    }
+}
+
+pub fn preferred_tensor_entry_name(program: &HostProgram) -> Option<&str> {
+    fn tensor_signature(function: &HostFunction) -> bool {
+        matches!(function.ret_ty, HostType::Tensor(_))
+            && function
+                .params
+                .iter()
+                .all(|param| matches!(param.ty, HostType::Tensor(_)))
+    }
+
+    if let Some(function) = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main" && tensor_signature(function))
+    {
+        return Some(function.name.as_str());
+    }
+
+    program
+        .functions
+        .iter()
+        .rev()
+        .find(|function| tensor_signature(function))
+        .map(|function| function.name.as_str())
+}
+
+pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
+    let defs = collect_program_defs(program.exprs());
+    let body = lookup_program_def(&defs, name)?.clone();
+    let Expr::List(list, _) = &body else {
+        return None;
+    };
+    if tag(list) != Some("fn") {
+        return None;
+    }
+
+    let kids = children(list);
+    let params_list = kids.first().and_then(as_list)?;
+    if tag(params_list) != Some("params") {
+        return None;
+    }
+
+    let declared_param_tys = lookup_declared_type_expr(program, name)
+        .and_then(parse_fn_type_expr)
+        .map(|(params, _)| params)
+        .unwrap_or_default();
+    let mut scope = HashMap::new();
+    for (index, param) in children(params_list).iter().enumerate() {
+        let pname = param_name(param)?;
+        let pty = param_host_type(param)
+            .or_else(|| declared_param_tys.get(index).cloned())
+            .filter(|ty| *ty != HostType::Unknown)?;
+        let HostType::Tensor(tensor_ty) = pty else {
+            return None;
+        };
+        scope.insert(pname, tensor_ty);
+    }
+
+    let body_expr = kids.get(1)?;
+    Some(crate::lower::lower_subexpr_program(
+        body_expr,
+        scope,
+        program.type_env().clone(),
+        defs,
+    ))
+}
+
 fn lower_host_program(
     program: &CheckedProgram,
     lowered_names: &HashMap<String, bool>,
 ) -> HostProgram {
     let mut host = HostProgram::default();
     let mut global_scope = HashMap::new();
+    // Count pure-tensor `fn`-body top-level defs in the program. When there
+    // is more than one, the legacy DAG-only path would collapse them into a
+    // single file-named entry point that drops all but one def's parameters
+    // (Nautilus Bug 3c). In that case we emit a host wrapper per def so each
+    // gets its own C symbol.
+    let lowered_fn_def_count = top_level_items(program.exprs())
+        .iter()
+        .filter(|expr| {
+            let Expr::List(list, _) = expr else {
+                return false;
+            };
+            if tag(list) != Some("def") {
+                return false;
+            }
+            let kids = children(list);
+            let Some(def_name) = kids.first().and_then(symbol_name) else {
+                return false;
+            };
+            let is_fn_body = matches!(kids.get(1), Some(Expr::List(body_list, _)) if tag(body_list) == Some("fn"));
+            is_fn_body && lowered_names.get(def_name).copied().unwrap_or(false)
+        })
+        .count();
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -246,14 +390,20 @@ fn lower_host_program(
         // DAG. But when the program also has host-lane bindings (i.e. some
         // def is NOT DAG-lowerable), downstream host-lane callers still
         // need a real C function symbol for the wrapper. In that case,
-        // emit a HostFunction wrapper alongside the DAG lowering. For
-        // pure-DAG programs (every def lowered) the legacy skip path is
-        // preserved so the DAG backend paths (C and HIP) continue to own
-        // emission.
+        // emit a HostFunction wrapper alongside the DAG lowering.
+        //
+        // A single pure-tensor function def can still use the legacy
+        // DAG-only path (the file-named entry point wraps it 1:1 with the
+        // correct signature). But when there are multiple pure-tensor
+        // function defs in the same program, the DAG path would collapse
+        // them into a single file-named entry that silently drops all but
+        // one def's parameters and outputs (Nautilus Bug 3c). Emit a host
+        // wrapper per def in that case so each gets its own C symbol.
         let is_fn_body = matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
-        let skip_for_lowered = lowered_names.get(name).copied().unwrap_or(false)
-            && !(is_fn_body && has_any_host_lane_def);
+        let needs_host_wrapper = is_fn_body && (has_any_host_lane_def || lowered_fn_def_count > 1);
+        let skip_for_lowered =
+            lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
         if skip_for_lowered {
             continue;
         }

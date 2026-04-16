@@ -605,18 +605,35 @@ fn cmd_build(
             }
         }
         "hip" => {
+            let host_requires_host_backend = compiled_program
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+            let preferred_entry_dag = compiled_program
+                .host
+                .as_ref()
+                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
             if dag.roots().is_empty()
+                && preferred_entry_dag.is_none()
+                && host_requires_host_backend
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_hip_host(result, func_name, output)
             } else {
-                reject_unsupported_effect_ops(&dag, "hip")?;
-                reject_unsupported_hip_ops(&dag)?;
-                // Current `chelis build` path lowers a forward DAG and then fuses before HIP emission.
-                // When grad participates in a GPU compilation pipeline, the intended ordering is:
-                // lower -> optimize -> grad -> optimize -> fuse -> codegen.
-                let fused = chelis_ir::fuse::fuse(&dag);
+                let mut hip_dag = if !dag.roots().is_empty() {
+                    dag.clone()
+                } else if let Some(entry_dag) = preferred_entry_dag {
+                    entry_dag
+                } else {
+                    chelis_ir::lower::lower_program(&checked)
+                };
+                hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+                reject_unsupported_effect_ops(&hip_dag, "hip")?;
+                reject_unsupported_hip_ops(&hip_dag)?;
+                let fused = chelis_ir::fuse::fuse(&hip_dag);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }

@@ -5656,6 +5656,21 @@ fn infer_fn(
         param_types.push(ty);
     }
 
+    // Snapshot the dimension variables introduced by the declared parameter
+    // signatures. If the body later forces any of them to a concrete literal,
+    // the signature's polymorphism claim is self-contradictory (Nautilus Bug 2):
+    // the user wrote `def f[m, n](x: tensor[m, n, f32])` but the body body
+    // demands `tensor[2, 2, f32]`. We flag this post-body so legitimate
+    // polymorphic uses (where the dvar stays unbound) still type-check.
+    let mut declared_dvars: Vec<DimVar> = Vec::new();
+    for t in &param_types {
+        for dv in crate::env::free_dvars(t) {
+            if !declared_dvars.contains(&dv) {
+                declared_dvars.push(dv);
+            }
+        }
+    }
+
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
@@ -5671,6 +5686,24 @@ fn infer_fn(
         typed_nodes,
         total_nodes,
     );
+
+    for dv in &declared_dvars {
+        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        if let Dim::Lit(n) = resolved {
+            errors.push(CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "polymorphic dim variable forced to concrete Lit({n}) by function body — \
+                     declared dim parameters must remain polymorphic"
+                ),
+                vec![
+                    "Replace the polymorphic dim with the concrete literal in the signature, or \
+                     ensure the body does not pin the dim to a specific size"
+                        .to_string(),
+                ],
+            ));
+        }
+    }
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
@@ -7973,6 +8006,27 @@ mod tests {
                 .iter()
                 .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
             "expected phase0e inference to preserve literal dimension mismatches, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn phase0e_rejects_polymorphic_dims_pinned_by_body() {
+        let decls = chelis_surf::parser::parse_str(
+            "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
+             def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+             def main() -> f32 = cast(0.0, f32)\n",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+
+        let result = infer_phase0e_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+            "expected phase0e inference to reject polymorphic dims forced to literals by the body, got {:?}",
             result.errors
         );
     }

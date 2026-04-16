@@ -1485,6 +1485,7 @@ impl LowerCtx {
             && let Some(Expr::Atom(Atom::Symbol(func_tag), _)) = func_list.elements.first()
             && func_tag == "var"
             && let Some(Expr::Atom(Atom::Symbol(func_name), _)) = func_list.elements.get(2)
+            && !self.program_defs.contains_key(func_name)
         {
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,

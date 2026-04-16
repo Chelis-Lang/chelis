@@ -52,6 +52,10 @@ separate host-language embedding model first.
 After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
 plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
 implementation file.
+When object-mode host emission needs to export a source-level `def main(...)`, the
+generated C symbol should be renamed to a file-stem-derived helper such as
+`<program>__main` so downstream C or C++ drivers can still define their own
+process entry `main(void)`.
 
 ## 3. Embedding the Compiler
 

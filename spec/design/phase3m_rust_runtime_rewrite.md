@@ -134,6 +134,9 @@ source of truth.
 - `chelis_hip_runtime.h` for HIP builds
 
 It no longer emits `chelis_runtime.c`.
+When a generated object-mode header would otherwise export a source-level
+`main`, the emitted C symbol is renamed to `<program>__main` so downstream
+drivers can link their own `main(void)` without collision.
 
 ### Runtime Discovery
 
@@ -256,4 +259,3 @@ Before calling `3m` healthy enough to unblock `3g`, red-team these concrete surf
 - no active tests compile `chelis_runtime.c`
 - runtime discovery failures are explicit and actionable
 - mixed-program compiled execution agrees with `chelis eval` on both C and HIP paths
-

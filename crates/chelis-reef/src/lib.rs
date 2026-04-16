@@ -1725,7 +1725,7 @@ mod tests {
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 "#,
         );

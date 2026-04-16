@@ -830,6 +830,62 @@ fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
 }
 
 #[test]
+fn build_c_multidef_tensor_entry_renames_source_main_for_driver_compatibility() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bug3c.ch");
+    let out_dir = dir.path().join("bug3c-build-out");
+    write_file(
+        &path,
+        "def combine(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = add(a, b)\n\
+         def main(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = combine(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let header = fs::read_to_string(out_dir.join("bug3c.h")).expect("generated header");
+    let source = fs::read_to_string(out_dir.join("bug3c.c")).expect("generated source");
+    assert!(
+        header.contains("chelis_tensor* bug3c__main("),
+        "expected source-level main to be renamed in generated header, got:\n{header}"
+    );
+    assert!(
+        !header.contains("chelis_tensor* main("),
+        "generated header must not export raw C `main`, got:\n{header}"
+    );
+    assert!(
+        source.contains("chelis_tensor* bug3c__main("),
+        "expected generated source to rename source-level main, got:\n{source}"
+    );
+    assert!(
+        source.contains("chelis_tensor* combine("),
+        "expected helper symbol to remain callable, got:\n{source}"
+    );
+
+    write_file(
+        &out_dir.join("driver.c"),
+        "#include \"chelis_runtime.h\"\n\
+         #include \"bug3c.h\"\n\
+         int main(void) { return 0; }\n",
+    );
+    let status = gcc_link_sources(&out_dir, &["driver.c", "bug3c.c"], "bug3c_driver");
+    assert!(
+        status.success(),
+        "downstream C driver with its own main() should link against generated output; status {status}"
+    );
+}
+
+#[test]
 fn check_rejects_literal_dimension_mismatch() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("literal_dim_mismatch.ch");
@@ -847,6 +903,36 @@ fn check_rejects_literal_dimension_mismatch() {
             .iter()
             .any(|error| error["kind"] == "DimensionMismatch"),
         "expected DimensionMismatch in check output, got {json}"
+    );
+    assert_eq!(
+        json["unresolved_names"]
+            .as_array()
+            .expect("unresolved_names array")
+            .len(),
+        0,
+        "{json}"
+    );
+}
+
+#[test]
+fn check_rejects_polymorphic_dims_pinned_by_body() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("polymorphic_dim_pinned.ch");
+    write_file(
+        &path,
+        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+         def main() -> f32 = cast(0.0, f32)\n",
+    );
+
+    let json = run_json_check(&path);
+    assert!(
+        json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch"),
+        "expected DimensionMismatch when polymorphic dims are pinned by the body, got {json}"
     );
     assert_eq!(
         json["unresolved_names"]
@@ -946,7 +1032,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1874,7 +1960,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1951,7 +2037,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 
 [dependencies]
@@ -1993,7 +2079,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Common"
 "#,
     );
@@ -2012,7 +2098,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2053,7 +2139,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Common"
 "#,
     );
@@ -2103,7 +2189,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.5"
+compiler = "=0.1.6"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2428,6 +2514,47 @@ fn build_hip_mnist_emits_fused_kernels_and_launches() {
     assert!(
         hip_src.contains("chelis_launch_kernel"),
         "MNIST HIP build should emit kernel launches on the real CLI path"
+    );
+}
+
+#[test]
+fn build_hip_multidef_tensor_entry_uses_single_entry_abi() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bug3c.ch");
+    let out_dir = dir.path().join("hip-output");
+    write_file(
+        &path,
+        "def combine(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = add(a, b)\n\
+         def main(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = combine(x, y)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let hip_src = fs::read_to_string(out_dir.join("bug3c_hip.cpp")).expect("hip source");
+    let hip_header = fs::read_to_string(out_dir.join("bug3c_hip.h")).expect("hip header");
+    assert!(
+        hip_header.contains("extern \"C\" void bug3c("),
+        "expected HIP build to keep the single-entry ABI, got:\n{hip_header}"
+    );
+    assert!(
+        hip_src.contains("expected %d inputs, got %d\\n\", 2, n_in"),
+        "expected HIP build to preserve the two-input entry signature, got:\n{hip_src}"
+    );
+    assert!(
+        !hip_src.contains("input `combine`")
+            && !hip_src.contains("expected %d outputs, got %d\\n\", 2, n_out"),
+        "HIP build must not treat helper defs as extra inputs or outputs, got:\n{hip_src}"
     );
 }
 

@@ -54,7 +54,7 @@ pub fn codegen_host_program(
     func_name: &str,
 ) -> CodegenResult {
     let c_source = host_emit::emit_host_program(program, func_name);
-    let h_header = host_emit::emit_host_header(program);
+    let h_header = host_emit::emit_host_header(program, func_name);
     CodegenResult {
         c_source,
         h_header,

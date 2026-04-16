@@ -173,7 +173,21 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             ))
         }
         CompileTarget::Hip => {
+            let host_requires_host_backend = host_compiled
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+            let preferred_entry_dag = host_compiled
+                .host
+                .as_ref()
+                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(|name| {
+                    chelis_ir::host::lower_named_tensor_entry_dag(&compiled.checked, name)
+                });
             if compiled.dag.roots().is_empty()
+                && preferred_entry_dag.is_none()
+                && host_requires_host_backend
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
@@ -187,17 +201,25 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                     Vec::new(),
                 ));
             }
-            reject_unsized_named_dims(&compiled.dag, "hip")?;
-            reject_unsupported_hip_ops(&compiled.dag)?;
-            let fused = chelis_ir::fuse::fuse(&compiled.dag);
+            let mut hip_dag = if !compiled.dag.roots().is_empty() {
+                compiled.dag.clone()
+            } else if let Some(entry_dag) = preferred_entry_dag {
+                entry_dag
+            } else {
+                compiled.dag.clone()
+            };
+            hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+            reject_unsized_named_dims(&hip_dag, "hip")?;
+            reject_unsupported_hip_ops(&hip_dag)?;
+            let fused = chelis_ir::fuse::fuse(&hip_dag);
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
             Ok(compiled_execution_artifact(
                 request.target,
                 &func_name,
                 Some(format!("{func_name}_device")),
                 compile_result_hip(request.target, &func_name, &result),
-                execution_input_specs(&compiled.dag, &result.input_labels),
-                execution_output_specs(&compiled.dag, &result.output_labels),
+                execution_input_specs(&hip_dag, &result.input_labels),
+                execution_output_specs(&hip_dag, &result.output_labels),
                 result.symbolic_dims,
             ))
         }
