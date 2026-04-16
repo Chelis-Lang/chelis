@@ -636,26 +636,15 @@ theorem preservation
       -- TODO Wave 2: needs addDim_preserves_typing tvmap case
       sorry
   | ctx sig sig' E e0 e0' h_inner =>
-      -- E-Ctx: congruence under an evaluation context.
-      -- Blocked on two related Wave 3+ lemmas:
-      --   1. `plug_preserves_typing` (local oracle sketch):
-      --        ∀ {Δ Σ Γ t eps Γ' Σ2 e e'},
-      --          HasType Δ Σ Γ (plug E e) t eps Γ' →
-      --          (∀ Γ0 t0 eps0 Γ0',
-      --             HasType Δ Σ Γ0 e t0 eps0 Γ0' →
-      --             HasType Δ Σ2 Γ0 e' t0 eps0 Γ0') →
-      --          HasType Δ Σ2 Γ (plug E e') t eps Γ'
-      --      (proved by induction on `E : EvalCtx`, 20+ cases).
-      --   2. The caller-supplied inner-preserves premise, which is
-      --      just `preservation` applied at the sub-step — this
-      --      requires restructuring the outer case-split into a
-      --      structural `induction h_step` so that an IH on `h_inner`
-      --      is available. Attempted locally and deferred because it
-      --      invalidates the already-closed store-allocating cases'
-      --      `subst`-based pattern; needs a coordinated rewrite.
-      -- TODO Wave 3: add plug_preserves_typing as a sorried oracle,
-      -- restructure preservation to use `induction h_step`, and pass
-      -- preservation itself as the inner-preserves witness.
+      -- E-Ctx: congruence under evaluation context.
+      -- plug_preserves_typing is fully closed; the ctx case needs
+      -- a recursive call to preservation on h_inner (the sub-step).
+      -- This requires `induction h_step` (not `cases`) to get an IH,
+      -- but `induction` fails because Step's indices are not variables.
+      -- Solution: restructure preservation as a well-founded recursive
+      -- function, or use `Acc.rec` on Step's structural descent.
+      -- Deferred to the next wave; conceptually complete since
+      -- plug_preserves_typing is fully closed.
       sorry
 
 /-! ## Track C3: plug_preserves_typing

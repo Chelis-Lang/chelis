@@ -87,20 +87,9 @@ theorem AdjointNamesFresh.cons_freshName
   · exact h m hm base hbase (by simpa [linearCtxDom] using hIn)
   · exact hne_name hIn
 
-/-- `List.filter` by "name ≠ a" is a no-op when `a` is not in the
-    domain of `Γ`. Obsolete after tombstone-style contexts; kept as
-    sorry for downstream references. -/
-theorem linearCtx_filter_fresh_eq (Γ : LinearCtx) (a : String)
-    (h : a ∉ linearCtxDom Γ) :
-    Γ.filter (fun p => p.1 ≠ a) = Γ := by
-  sorry
-
-/-- Same for the letpair filter `p.1 ≠ a ∧ p.1 ≠ b`. Obsolete after
-    tombstone-style contexts. -/
-theorem linearCtx_filter_fresh_two_eq (Γ : LinearCtx) (a b : String)
-    (ha : a ∉ linearCtxDom Γ) (hb : b ∉ linearCtxDom Γ) :
-    Γ.filter (fun p => decide (p.1 ≠ a ∧ p.1 ≠ b)) = Γ := by
-  sorry
+-- linearCtx_filter_fresh_eq and linearCtx_filter_fresh_two_eq
+-- deleted: obsolete under tombstone-style contexts (no more .filter
+-- on output contexts).
 
 /-- `SubEffRow` from `union eps [accum, accum]`-shaped rows back to
     `union [accum] eps`. Elementwise membership. -/
