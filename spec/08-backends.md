@@ -31,6 +31,10 @@ Current design points:
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
 - ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
+- tuple-returning host exports use the stable runtime tuple ABI:
+  generated headers surface `chelis_tuple*`, drivers construct tuples with
+  `chelis_tuple_from_values(...)`, and typed extraction goes through the
+  `chelis_tuple_get_*` helpers documented in `chelis_runtime.h`
 
 This backend is the correctness oracle for future GPU and interoperability backends.
 

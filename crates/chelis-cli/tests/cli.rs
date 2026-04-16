@@ -774,6 +774,85 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
 }
 
 #[test]
+fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gram_bug5.ch");
+    let out_dir = dir.path().join("gram-bug5-build-out");
+    write_file(
+        &path,
+        "def gram(a: tensor[2, 3, f32]) -> tensor[3, 3, f32] = matmul(permute(copy(a), 1, 0), copy(a))\n\
+         def apply(a: tensor[2, 3, f32]) -> tensor[3, 3, f32] = gram(a)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("gram_bug5.c")).expect("generated source");
+    assert!(
+        generated.contains("expected %d inputs, got %d\\n\", 1, n_in"),
+        "expected helper ABI to dedup repeated tensor loads, got:\n{generated}"
+    );
+
+    write_file(
+        &out_dir.join("driver.c"),
+        r#"#include "chelis_runtime.h"
+#include "gram_bug5.h"
+#include <math.h>
+#include <stdio.h>
+
+int main(void) {
+    int shape[2] = {2, 3};
+    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
+    float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    for (int i = 0; i < 6; ++i) {
+        a->data[i] = values[i];
+    }
+
+    chelis_tensor *out = gram(a);
+    float expected[9] = {
+        17.0f, 22.0f, 27.0f,
+        22.0f, 29.0f, 36.0f,
+        27.0f, 36.0f, 45.0f
+    };
+    for (int i = 0; i < 9; ++i) {
+        if (fabsf(out->data[i] - expected[i]) > 1e-4f) {
+            fprintf(stderr, "mismatch at %d: got %f expected %f\n", i, out->data[i], expected[i]);
+            return 1;
+        }
+    }
+
+    chelis_free(out);
+    chelis_free(a);
+    return 0;
+}
+"#,
+    );
+
+    let status = gcc_link_sources(&out_dir, &["driver.c", "gram_bug5.c"], "gram_bug5_driver");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("gram_bug5_driver"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {} stderr:\n{}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+}
+
+#[test]
 fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
     // Regression guard for Nautilus benchmark ask: when `chelis build` produces a
     // self-contained binary (top-level `result = ...` triggers main emission), any
@@ -826,6 +905,82 @@ fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
             && actual.contains("33.0")
             && actual.contains("44.0"),
         "combine should elementwise-add both operands; got: {actual}"
+    );
+}
+
+#[test]
+fn build_c_tuple_return_header_supports_driver_extraction() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tuple_abi.ch");
+    let out_dir = dir.path().join("tuple-abi-build-out");
+    write_file(
+        &path,
+        "def eig_pair() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let header = fs::read_to_string(out_dir.join("tuple_abi.h")).expect("generated header");
+    assert!(
+        header.contains("chelis_tuple* eig_pair("),
+        "expected tuple-returning C ABI in generated header, got:\n{header}"
+    );
+
+    write_file(
+        &out_dir.join("driver.c"),
+        r#"#include "chelis_runtime.h"
+#include "tuple_abi.h"
+#include <math.h>
+#include <stdio.h>
+
+int main(void) {
+    chelis_tuple *out = eig_pair();
+    chelis_tensor *lhs = chelis_tuple_get_tensor(out, 0);
+    chelis_tensor *rhs = chelis_tuple_get_tensor(out, 1);
+
+    if (lhs->size != 2 || rhs->size != 2) {
+        fprintf(stderr, "unexpected tuple tensor sizes\n");
+        return 1;
+    }
+    if (fabsf(lhs->data[0] - 1.0f) > 1e-4f || fabsf(lhs->data[1] - 2.0f) > 1e-4f) {
+        fprintf(stderr, "lhs mismatch\n");
+        return 1;
+    }
+    if (fabsf(rhs->data[0] - 3.0f) > 1e-4f || fabsf(rhs->data[1] - 4.0f) > 1e-4f) {
+        fprintf(stderr, "rhs mismatch\n");
+        return 1;
+    }
+
+    chelis_free(lhs);
+    chelis_free(rhs);
+    chelis_tuple_release(out);
+    return 0;
+}
+"#,
+    );
+
+    let status = gcc_link_sources(&out_dir, &["driver.c", "tuple_abi.c"], "tuple_abi_driver");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("tuple_abi_driver"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {} stderr:\n{}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr)
     );
 }
 

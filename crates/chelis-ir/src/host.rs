@@ -532,17 +532,7 @@ fn lower_tensor_helper_call(
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
     );
-    let inputs = dag
-        .nodes()
-        .iter()
-        .filter_map(|node| match &node.op {
-            crate::RiscOp::Load { name } => Some(HostTensorInput {
-                name: name.clone(),
-                ty: node.output_type.clone(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let inputs = tensor_helper_inputs(&dag);
     let output = dag
         .roots()
         .first()
@@ -585,17 +575,7 @@ fn lower_host_expr(
             program.type_env().clone(),
             collect_program_defs(program.exprs()),
         );
-        let inputs = dag
-            .nodes()
-            .iter()
-            .filter_map(|node| match &node.op {
-                crate::RiscOp::Load { name } => Some(HostTensorInput {
-                    name: name.clone(),
-                    ty: node.output_type.clone(),
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let inputs = tensor_helper_inputs(&dag);
         let output = dag
             .roots()
             .first()
@@ -2145,7 +2125,8 @@ fn collect_tensor_args(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Vec<HostExpr> {
     let mut args = Vec::new();
-    collect_tensor_arg_exprs(expr, program, scope, tensor_helpers, &mut args);
+    let mut seen = HashSet::new();
+    collect_tensor_arg_exprs(expr, program, scope, tensor_helpers, &mut args, &mut seen);
     args
 }
 
@@ -2155,6 +2136,7 @@ fn collect_tensor_arg_exprs(
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     out: &mut Vec<HostExpr>,
+    seen: &mut HashSet<String>,
 ) {
     match expr {
         Expr::List(list, _) if tag(list) == Some("var") => {
@@ -2164,20 +2146,35 @@ fn collect_tensor_arg_exprs(
                     .cloned()
                     .or_else(|| lookup_declared_host_type(program, name))
                     .is_some_and(|ty| matches!(ty, HostType::Tensor(_)))
+                && seen.insert(name.to_string())
             {
                 out.push(lower_host_expr(expr, program, scope, tensor_helpers));
             }
         }
         Expr::List(list, _) => {
             for child in children(list) {
-                collect_tensor_arg_exprs(child, program, scope, tensor_helpers, out);
+                collect_tensor_arg_exprs(child, program, scope, tensor_helpers, out, seen);
             }
         }
         Expr::MetaExpr(meta, _) => {
-            collect_tensor_arg_exprs(&meta.expr, program, scope, tensor_helpers, out);
+            collect_tensor_arg_exprs(&meta.expr, program, scope, tensor_helpers, out, seen);
         }
         _ => {}
     }
+}
+
+fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
+    let mut seen = HashSet::new();
+    dag.nodes()
+        .iter()
+        .filter_map(|node| match &node.op {
+            crate::RiscOp::Load { name } if seen.insert(name.clone()) => Some(HostTensorInput {
+                name: name.clone(),
+                ty: node.output_type.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {

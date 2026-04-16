@@ -226,6 +226,49 @@ chelis_mapped_file *chelis_mmap_file(chelis_string path);
 chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
 
+/*
+ * Stable tuple ABI for generated C drivers:
+ *
+ * - Construct tuples with `chelis_tuple_from_values(...)` after boxing each item with
+ *   the matching `chelis_value_from_*` helper.
+ * - Extract typed items from tuple-returning Chelis functions with the helpers below.
+ */
+static inline int64_t chelis_tuple_get_int64(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_int64(chelis_tuple_get(tuple, index));
+}
+
+static inline double chelis_tuple_get_f64(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_f64(chelis_tuple_get(tuple, index));
+}
+
+static inline bool chelis_tuple_get_bool(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_bool(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_string chelis_tuple_get_string(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_string(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_tensor *chelis_tuple_get_tensor(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_tensor(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_list *chelis_tuple_get_list(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_list(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_tuple *chelis_tuple_get_tuple(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_tuple(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_dict *chelis_tuple_get_dict(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_dict(chelis_tuple_get(tuple, index));
+}
+
+static inline chelis_adt *chelis_tuple_get_adt(const chelis_tuple *tuple, int64_t index) {
+    return chelis_value_as_adt(chelis_tuple_get(tuple, index));
+}
+
 static inline void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {
     for (int d = ndim - 1; d >= 0; d--) {
         out[d] = flat % shape[d];
