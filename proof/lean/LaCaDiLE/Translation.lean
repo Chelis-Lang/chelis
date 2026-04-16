@@ -280,6 +280,34 @@ theorem hasType_to_hasTypeDB
       exact HasTypeDB.tpair Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
         (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
         t1 t2 eps1 eps2 ih1 ih2
+  | tadd Δ' S' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      exact HasTypeDB.tadd Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
+        ds eps1 eps2 ih1 ih2
+  | tmul Δ' S' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      exact HasTypeDB.tmul Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
+        ds eps1 eps2 ih1 ih2
+  | tsum Δ' S' Γ1 Γ2 e_ ds d eps_ _h _hmem ih =>
+      simp only [termToDB]
+      exact HasTypeDB.tsum Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) ds 0 eps_ ih (rem ds d) (trivial)
+  | texpand Δ' S' Γ1 Γ2 e_ ds d eps_ _h ih =>
+      simp only [termToDB]
+      exact HasTypeDB.texpand Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) ds 0 0 eps_ ih (ins ds d) (trivial)
+  | uniformLike Δ' S' Γ1 Γ2 e_ ds lo hi eps_ _h ih =>
+      simp only [termToDB]
+      exact HasTypeDB.uniformLike Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) ds lo hi eps_ ih
+  | perform Δ' S' Γ1 Γ2 op e_ tArg tRet eps_ _h hM ih =>
+      simp only [termToDB]
+      exact HasTypeDB.perform Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        op (termToDB (envOfCtx Γ1) e_) tArg tRet eps_ ih hM
   | _ => sorry
 
 end LaCaDiLE
