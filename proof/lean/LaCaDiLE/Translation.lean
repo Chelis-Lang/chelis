@@ -183,7 +183,41 @@ theorem hasType_names_preserved
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Δ S Γ e t eps Γ') :
     Γ.map Prod.fst = Γ'.map Prod.fst := by
-  sorry
+  induction h using HasType.rec
+    (motive_2 := fun _ _ Γ2 Γ3 _ _ _ _ => Γ2.map Prod.fst = Γ3.map Prod.fst)
+    with
+  | var _ _ Γpre Γpost x t_ =>
+      simp [List.map_append]
+  | unit _ _ _ => rfl
+  | abs _ _ _ _ _ _ _ _ _ _ _ ih =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih
+      exact List.append_cancel_right ih
+  | letBind _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih2
+      exact ih1.trans (List.append_cancel_right ih2)
+  | letpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih2
+      exact ih1.trans (List.append_cancel_right ih2)
+  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | copy _ _ _ _ _ _ _ _ ih => exact ih
+  | fst _ _ _ _ _ _ _ _ _ ih => exact ih
+  | snd _ _ _ _ _ _ _ _ _ ih => exact ih
+  | const _ _ _ _ _ => rfl
+  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tsum _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | texpand _ _ _ _ _ _ _ _ _ ih => exact ih
+  | uniformLike _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | perform _ _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | handle _ _ _ _ _ _ _ _ _ _ h_body _ _ _ _ ih_body ih_clauses =>
+      exact ih_body.trans ih_clauses
+  | tgrad => sorry
+  | tvmap => sorry
+  | loc _ _ _ _ _ _ => rfl
+  | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | nil _ _ _ _ _ => rfl
+  | cons => sorry
 
 theorem hasType_envOfCtx_eq
     {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
