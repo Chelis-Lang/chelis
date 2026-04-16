@@ -438,19 +438,58 @@ theorem DomSub.append_left (G1 G2 : LinearCtx) :
   simp only [linearCtxDom, List.map_append, List.mem_append]
   left; exact hx
 
+/-- Names in LinearCtx are invariant across HasType derivations.
+    Tombstoning only changes Option Typ values, not the String keys. -/
+theorem hasType_names_preserved
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    Gamma.map Prod.fst = Gamma'.map Prod.fst := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ Γ2 Γ3 _ _ _ _ => Γ2.map Prod.fst = Γ3.map Prod.fst)
+    with
+  | var _ _ Γpre Γpost _ _ => simp [List.map_append]
+  | unit _ _ _ => rfl
+  | abs _ _ _ _ _ _ _ _ _ _ _ ih =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih
+      exact List.append_cancel_right ih
+  | letBind _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih2
+      exact ih1.trans (List.append_cancel_right ih2)
+  | letpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp only [List.map_append, List.map_cons, List.map_nil] at ih2
+      exact ih1.trans (List.append_cancel_right ih2)
+  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | copy _ _ _ _ _ _ _ _ ih => exact ih
+  | fst _ _ _ _ _ _ _ _ _ ih => exact ih
+  | snd _ _ _ _ _ _ _ _ _ ih => exact ih
+  | const _ _ _ _ _ => rfl
+  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => exact ih1.trans ih2
+  | tsum _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | texpand _ _ _ _ _ _ _ _ _ ih => exact ih
+  | uniformLike _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | perform _ _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_body ih_clauses =>
+      exact ih_body.trans ih_clauses
+  | tgrad => rfl
+  | tvmap => rfl
+  | loc _ _ _ _ _ _ => rfl
+  | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | nil _ _ _ _ _ => rfl
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
+
 /-- Linear-context domain is invariant across HasType derivations.
-    Under tombstone semantics, consumption only changes Option values
-    (some t → none), not names. So Γ.map Prod.fst = Γ'.map Prod.fst.
-    DomSub follows by rewriting. -/
+    Under tombstone semantics, linearCtxDom = map Prod.fst includes
+    all names. Since names are preserved, domain is identical. -/
 theorem has_type_linear_shrinks
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
     ∀ x, x ∈ linearCtxDom Gamma' → x ∈ linearCtxDom Gamma := by
-  -- Under tombstoning, linearCtxDom = map Prod.fst includes all names
-  -- (live and dead). Names are preserved by hasType_names_preserved
-  -- (proved in Translation.lean). Inline proof pending import refactor.
-  sorry
+  simp only [linearCtxDom, hasType_names_preserved h]
+  exact fun _ h => h
 
 /-- Linear-context outputs are not merely domain subsets of inputs;
     they preserve the original order as actual list sublists. This is
