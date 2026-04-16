@@ -170,6 +170,43 @@ theorem envIndex_cons_ne (x y : String) (rest : List String) (h : x ≠ y) :
 
 -- hasType_to_hasTypeDB moved to after termToDB mutual block below
 
+/-! ## Var-case structural lemmas for the forward translation -/
+
+theorem ctxToDB_split (Γpre Γpost : LinearCtx) (x : String) (ot : Option Typ) :
+    ctxToDB (Γpre ++ [(x, ot)] ++ Γpost) =
+    ctxToDB Γpost ++ [ot] ++ ctxToDB Γpre := by
+  simp only [ctxToDB, List.reverse_append, List.map_append, List.map_reverse,
+    List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil, List.nil_append,
+    List.singleton_append, List.append_assoc]
+
+theorem ctxToDB_split_getElem (Γpre Γpost : LinearCtx) (x : String) (ot : Option Typ) :
+    (ctxToDB (Γpre ++ [(x, ot)] ++ Γpost))[Γpost.length]? = some ot := by
+  rw [ctxToDB_split]
+  simp [ctxToDB, List.getElem?_append]
+
+theorem ctxToDB_split_set (Γpre Γpost : LinearCtx) (x : String)
+    (ot1 ot2 : Option Typ) :
+    (ctxToDB (Γpre ++ [(x, ot1)] ++ Γpost)).set Γpost.length ot2 =
+    ctxToDB (Γpre ++ [(x, ot2)] ++ Γpost) := by
+  simp only [ctxToDB_split]
+  simp [ctxToDB, List.set_append]
+
+theorem envOfCtx_split (Γpre Γpost : LinearCtx) (x : String) (ot : Option Typ) :
+    envOfCtx (Γpre ++ [(x, ot)] ++ Γpost) =
+    (Γpost.map Prod.fst).reverse ++ [x] ++ (Γpre.map Prod.fst).reverse := by
+  simp [envOfCtx, List.map_append, List.reverse_append]
+
+theorem envIndex_not_mem (xs : List String) (x : String) (rest : List String)
+    (h : x ∉ xs) :
+    envIndex (xs ++ [x] ++ rest) x = xs.length := by
+  induction xs with
+  | nil => simp [envIndex]
+  | cons y ys ih =>
+    have hne : x ≠ y := fun heq => h (heq ▸ List.mem_cons_self ..)
+    simp only [List.cons_append, List.length_cons, envIndex, hne, ite_false]
+    congr 1
+    exact ih (fun hm => h (List.mem_cons_of_mem y hm))
+
 /-! ## Name preservation under tombstoning
 
 Since `HasType` only changes `Option Typ` values (tombstoning `some t →
