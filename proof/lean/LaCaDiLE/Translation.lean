@@ -446,14 +446,19 @@ theorem hasType_to_hasTypeDB
         obtain ⟨hb', hmem'⟩ := exists_subst_of_clausesToDB cl hmem
         exact ⟨(cl.1, hb'), hmem', hcl_eq⟩
   | var Δ' S' Γpre Γpost x t_ =>
-      -- The var case requires showing that envIndex finds x at position
-      -- |Γpost| in the reversed name list, which corresponds to the
-      -- position of the (some t_) entry in ctxToDB. This holds when
-      -- x ∉ names(Γpost) (linearity/uniqueness of names in context).
-      -- Full closure requires a NoDup premise or a proof that HasType
-      -- derivations only inhabit contexts with unique names. Sorry'd
-      -- pending that premise; the rest of the translation chain
-      -- (subst_preserves_typing corollary) works modulo this case.
-      sorry
+      simp only [termToDB]
+      -- envIndex finds x at position |Γpost| when x ∉ names(Γpost).
+      -- This is a context well-formedness condition (no name shadowing).
+      have h_fresh : x ∉ (Γpost.map Prod.fst).reverse := by
+        sorry -- well-formedness: x not shadowed in Γpost
+      rw [envOfCtx_split]
+      rw [envIndex_not_mem _ _ _ h_fresh]
+      simp only [List.length_reverse, List.length_map]
+      have hlook := ctxToDB_split_getElem Γpre Γpost x (some t_)
+      have hset := ctxToDB_split_set Γpre Γpost x (some t_) none
+      have hvar := HasTypeDB.var Δ' S' (ctxToDB (Γpre ++ [(x, some t_)] ++ Γpost))
+        Γpost.length t_ hlook
+      rw [hset] at hvar
+      exact hvar
 
 end LaCaDiLE
