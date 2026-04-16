@@ -180,15 +180,11 @@ fn validate_tag_shape(
     };
 
     match tag {
-        "if" | "arm" => {
-            if child_count != 3 {
-                warn_arity(warnings, "exactly 3 children");
-            }
+        "if" | "arm" if child_count != 3 => {
+            warn_arity(warnings, "exactly 3 children");
         }
-        "handle-effect" => {
-            if child_count != 2 {
-                warn_arity(warnings, "exactly 2 children");
-            }
+        "handle-effect" if child_count != 2 => {
+            warn_arity(warnings, "exactly 2 children");
         }
         "fn" => {
             if child_count != 2 {
@@ -226,12 +222,10 @@ fn validate_tag_shape(
                 });
             }
         }
-        "app" => {
-            if child_count < 1 {
-                warn_arity(warnings, "at least 1 child");
-            }
+        "app" if child_count < 1 => {
+            warn_arity(warnings, "at least 1 child");
         }
-        "params" => {
+        "params"
             if !list.elements.iter().skip(2).all(|child| match child {
                 Expr::Atom(crate::ast::Atom::Symbol(_), _) => true,
                 Expr::MetaExpr(meta, _) => matches!(
@@ -247,25 +241,23 @@ fn validate_tag_shape(
                         && matches!(inner.elements.get(1), Some(Expr::Map(_, _)))
                 }
                 _ => false,
-            }) {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`params` must contain bare names or typed-name metadata helpers"
-                        .to_string(),
-                });
-            }
+            }) =>
+        {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: "`params` must contain bare names or typed-name metadata helpers"
+                    .to_string(),
+            });
         }
-        "bind" => {
-            if !child_count.is_multiple_of(2) {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`bind` must contain name/expression pairs".to_string(),
-                });
-            }
+        "bind" if !child_count.is_multiple_of(2) => {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: "`bind` must contain name/expression pairs".to_string(),
+            });
         }
-        "effects" => {
+        "effects"
             if !list.elements.iter().skip(2).all(|child| {
                 matches!(child, Expr::Atom(crate::ast::Atom::Symbol(_), _))
                     || matches!(
@@ -276,19 +268,17 @@ fn validate_tag_shape(
                                 Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) if tag == "resource"
                             )
                     )
-            }) {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`effects` must contain symbols or `(resource {} ...)` entries"
-                        .to_string(),
-                });
-            }
+            }) =>
+        {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: "`effects` must contain symbols or `(resource {} ...)` entries"
+                    .to_string(),
+            });
         }
-        "resource" => {
-            if child_count != 1 {
-                warn_arity(warnings, "exactly 1 child");
-            }
+        "resource" if child_count != 1 => {
+            warn_arity(warnings, "exactly 1 child");
         }
         _ => {}
     }

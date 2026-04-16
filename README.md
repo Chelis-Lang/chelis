@@ -68,6 +68,7 @@ crates/
 editors/vscode/      VS Code-compatible extension and TextMate grammars
 grammars/            Tree-sitter grammars for Surf and Deep
 packages/chelis-std/ Reef-packaged standard library
+docs/book/           mdBook source for developer-facing docs
 examples/            Executable example programs
 spec/                Numbered language specs and design docs
 ```
@@ -87,10 +88,10 @@ spec/                Numbered language specs and design docs
 ## Documentation
 
 - [Agent Contract](AGENTS.md)
-- [LLM Skill File](SKILL.md)
+- [chelis-std SKILL File](packages/chelis-std/SKILL.md)
+- [Developer Book](docs/book/src/README.md)
 - [Canonical Project Reference](spec/design/chelis_canonical_reference.md)
 - [Ecosystem Context](spec/design/chelis_ecosystem_context.md)
-- [Architecture Guide](ARCHITECTURE.md)
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
 - [Roadmap](spec/12-roadmap.md)

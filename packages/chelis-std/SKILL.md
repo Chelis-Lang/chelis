@@ -1,4 +1,4 @@
-# Chelis SKILL
+# chelis-std SKILL.md
 
 Use this file to prompt a frontier model to write Chelis that passes the compiler in
 this repository today.
@@ -33,13 +33,13 @@ The metadata map is always present, even when empty.
 
 Canonical shape:
 
-```scheme
+```chelis-deep-fragment
 (tag {} child1 child2 ...)
 ```
 
 Increasing-complexity examples:
 
-```scheme
+```chelis-deep-fragment
 (lit {type: (t-prim {} f32)} 3.14)
 (var {} x)
 (app {} (var {} add) (var {} x) (var {} y))
@@ -67,6 +67,10 @@ Rules that matter most:
 - Literals use `lit` with a `type` metadata entry.
 - Function parameters live inside `(params {} ...)`.
 - `let` bindings live inside `(bind {} name expr ...)`.
+- `chelis-surf` and `chelis-deep` fences in this file are complete programs and are
+  compiler-validated in CI.
+- `chelis-surf-fragment` and `chelis-deep-fragment` fences are partial teaching snippets
+  and are intentionally not validated as standalone programs.
 
 ### 2b. Complete Tag Vocabulary
 

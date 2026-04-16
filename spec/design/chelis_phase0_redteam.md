@@ -59,10 +59,10 @@ If any crate is significantly below the expected minimum, flag it.
 ## Check 3: Phase 0a — Scaffold
 
 - [ ] README.md exists and has: project description, build instructions, links to spec docs
-- [ ] ARCHITECTURE.md exists and describes crate structure
+- [ ] `docs/book/` exists and covers developer-facing repo usage
 - [ ] `spec/` directory contains: 02-surf-syntax.md, 03-deep-syntax.md, 04-type-system.md, 05-risc-primitives.md
 - [ ] CI exists (GitHub Actions or equivalent) and is green
-- [ ] SKILL.md exists at repo root and `skill_suite.rs` validates its examples
+- [ ] `packages/chelis-std/SKILL.md` exists and `skill_suite.rs` validates its examples
 
 ## Check 4: Phase 0b — Deep Parser
 

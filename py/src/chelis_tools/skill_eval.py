@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--checker", default="target/debug/check_snippet")
-    parser.add_argument("--skill", default="SKILL.md")
+    parser.add_argument("--skill", default="packages/chelis-std/SKILL.md")
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 

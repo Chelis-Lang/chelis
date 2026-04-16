@@ -1,0 +1,8 @@
+[book]
+title = "Chelis Developer Book"
+authors = ["Chelis contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"

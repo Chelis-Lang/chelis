@@ -186,7 +186,8 @@ fn phase1f_deep_examples_and_specs_agree_with_strict_parser() {
 
 #[test]
 fn phase1f_skill_blocks_agree_with_compiler_paths() {
-    let skill = fs::read_to_string(repo_root().join("SKILL.md")).expect("read SKILL");
+    let skill = fs::read_to_string(repo_root().join("packages/chelis-std/SKILL.md"))
+        .expect("read package SKILL");
     let blocks = extract_code_blocks(&skill);
 
     for (index, block) in blocks.into_iter().enumerate() {

@@ -638,7 +638,7 @@ Use the docs in this order:
 
 1. this file for project-level truth
 2. `README.md` for repository orientation
-3. `ARCHITECTURE.md` for crate and pipeline overview
+3. `docs/book/` for developer-facing usage docs
 4. numbered `spec/*.md` files for language semantics
 5. `spec/design/chelis_project_plan.md` for phased execution
 

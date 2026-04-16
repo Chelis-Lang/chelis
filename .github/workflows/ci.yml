@@ -136,3 +136,26 @@ jobs:
             exit 1
           fi
           echo "All commits clean."
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+
+      - name: Validate package SKILL and mdBook examples
+        run: cargo test -p chelis-e2e --test skill_suite
+
+      - name: Build mdBook
+        run: mdbook build docs/book

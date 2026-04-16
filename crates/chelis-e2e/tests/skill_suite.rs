@@ -14,6 +14,12 @@ struct CodeBlock {
     body: String,
 }
 
+#[derive(Clone, Copy)]
+struct MarkdownExpectations {
+    min_surf_blocks: usize,
+    min_deep_blocks: usize,
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -59,6 +65,22 @@ fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
     blocks
 }
 
+fn collect_markdown_files(dir: &PathBuf) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_markdown_files(&path));
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 fn assert_valid_report(label: &str, report: &chelis_types::fitness::FitnessReport) {
     assert!(
         report.score >= 0.9,
@@ -74,11 +96,10 @@ fn assert_valid_report(label: &str, report: &chelis_types::fitness::FitnessRepor
     );
 }
 
-#[test]
-fn skill_examples_parse_validate_and_typecheck() {
-    let skill_path = repo_root().join("SKILL.md");
-    let skill = fs::read_to_string(&skill_path).expect("failed to read SKILL.md");
-    let blocks = extract_code_blocks(&skill);
+fn validate_markdown_file(path: &PathBuf, expectations: Option<MarkdownExpectations>) {
+    let markdown =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("failed to read {}", path.display()));
+    let blocks = extract_code_blocks(&markdown);
 
     let surf_blocks: Vec<_> = blocks
         .iter()
@@ -89,22 +110,28 @@ fn skill_examples_parse_validate_and_typecheck() {
         .filter(|block| block.lang == "chelis-deep")
         .collect();
 
-    assert!(
-        surf_blocks.len() >= 10,
-        "expected at least 10 validated Surf examples, found {}",
-        surf_blocks.len()
-    );
-    assert!(
-        deep_blocks.len() >= 10,
-        "expected at least 10 validated Deep examples, found {}",
-        deep_blocks.len()
-    );
+    if let Some(expectations) = expectations {
+        assert!(
+            surf_blocks.len() >= expectations.min_surf_blocks,
+            "expected at least {} validated Surf examples in {}, found {}",
+            expectations.min_surf_blocks,
+            path.display(),
+            surf_blocks.len()
+        );
+        assert!(
+            deep_blocks.len() >= expectations.min_deep_blocks,
+            "expected at least {} validated Deep examples in {}, found {}",
+            expectations.min_deep_blocks,
+            path.display(),
+            deep_blocks.len()
+        );
+    }
 
     for (index, block) in surf_blocks.iter().enumerate() {
         let label = format!(
-            "SKILL Surf example {} at {}:{}",
+            "Surf example {} at {}:{}",
             index + 1,
-            skill_path.display(),
+            path.display(),
             block.start_line
         );
         let decls = parse_surf(&block.body)
@@ -120,9 +147,9 @@ fn skill_examples_parse_validate_and_typecheck() {
 
     for (index, block) in deep_blocks.iter().enumerate() {
         let label = format!(
-            "SKILL Deep example {} at {}:{}",
+            "Deep example {} at {}:{}",
             index + 1,
-            skill_path.display(),
+            path.display(),
             block.start_line
         );
         let exprs = parse_deep_strict(&block.body)
@@ -159,5 +186,32 @@ fn skill_examples_parse_validate_and_typecheck() {
 
         let report = chelis_types::check_program(&exprs);
         assert_valid_report(&label, &report);
+    }
+}
+
+#[test]
+fn skill_examples_parse_validate_and_typecheck() {
+    let skill_path = repo_root().join("packages/chelis-std/SKILL.md");
+    validate_markdown_file(
+        &skill_path,
+        Some(MarkdownExpectations {
+            min_surf_blocks: 10,
+            min_deep_blocks: 10,
+        }),
+    );
+}
+
+#[test]
+fn mdbook_examples_parse_validate_and_typecheck() {
+    let docs_root = repo_root().join("docs/book/src");
+    let markdown_files = collect_markdown_files(&docs_root);
+    assert!(
+        !markdown_files.is_empty(),
+        "expected mdBook markdown files under {}",
+        docs_root.display()
+    );
+
+    for path in markdown_files {
+        validate_markdown_file(&path, None);
     }
 }
