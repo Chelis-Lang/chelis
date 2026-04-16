@@ -698,11 +698,48 @@ theorem has_type_closed_term_of_closed_input
     closed output context. (Lighter form — the `IsValue` premise is
     not actually used because `has_type_linear_shrinks` gives
     shrinkage for any derivation.) -/
+theorem hasType_length_preserved
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    Gamma.length = Gamma'.length := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ Γ2 Γ3 _ _ _ _ => Γ2.length = Γ3.length) with
+  | var _ _ Γpre Γpost _ _ => simp [List.length_append]
+  | unit _ _ _ => rfl
+  | abs _ _ _ _ _ _ _ _ _ _ _ ih =>
+      simp [List.length_append] at ih; omega
+  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => omega
+  | letBind _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp [List.length_append] at ih2; omega
+  | copy _ _ _ _ _ _ _ _ ih => exact ih
+  | letpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      simp [List.length_append] at ih2; omega
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => omega
+  | fst _ _ _ _ _ _ _ _ _ ih => exact ih
+  | snd _ _ _ _ _ _ _ _ _ ih => exact ih
+  | const _ _ _ _ _ => rfl
+  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => omega
+  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 => omega
+  | tsum _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | texpand _ _ _ _ _ _ _ _ _ ih => exact ih
+  | uniformLike _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | perform _ _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_body ih_clauses => omega
+  | tgrad => rfl
+  | tvmap => rfl
+  | loc _ _ _ _ _ _ => rfl
+  | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
+  | nil _ _ _ _ _ => rfl
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
+
 theorem has_type_closed_output_of_closed_input
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma [] e t eps Gamma') : Gamma' = [] := by
-  sorry
+  have hlen := hasType_length_preserved h
+  simp at hlen
+  exact List.eq_nil_of_length_eq_zero hlen.symm
 
 /-! ## Effect-scoping lemma (Track C2)
 
