@@ -326,7 +326,7 @@ theorem hasType_to_hasTypeDB
       exact HasTypeDB.const Δ' S' (ctxToDB Γ_) v ds
   | loc Δ' S' Γ_ ell t' hlook =>
       simp only [termToDB]
-      sorry -- needs storeTypLookup preservation under ctxToDB
+      exact HasTypeDB.loc Δ' S' (ctxToDB Γ_) ell t' hlook
   | subEff Δ' S' Γ_ Γ'_ e_ t_ eps_ eps'_ _h hSub ih =>
       exact HasTypeDB.subEff Δ' S' (ctxToDB Γ_) (ctxToDB Γ'_)
         (termToDB (envOfCtx Γ_) e_) t_ eps_ eps'_ ih hSub
