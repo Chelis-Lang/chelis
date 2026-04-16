@@ -332,10 +332,20 @@ theorem hasType_to_hasTypeDB
         slotY slotX
         (termToDB (envOfCtx Γ2) e1) (termToDB (y :: x :: envOfCtx Γ2) e2)
         t1 t2 t_ eps1 eps2 ih1 ih2
+  | tgrad Δ' S' Γ_ x ds dsOut body eps_ slot _h hsub ih =>
+      simp only [termToDB]
+      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
+      rw [ctxToDB_append_singleton] at ih
+      exact HasTypeDB.tgrad Δ' S' (ctxToDB Γ_) slot ds dsOut
+        (termToDB (x :: envOfCtx Γ_) body) eps_ ih hsub
+  | tvmap Δ' S' Γ_ x t1 t2 body eps_ d slot _h ih =>
+      simp only [termToDB]
+      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
+      rw [ctxToDB_append_singleton] at ih
+      exact HasTypeDB.tvmap Δ' S' (ctxToDB Γ_) slot t1 t2
+        (termToDB (x :: envOfCtx Γ_) body) eps_ d ih
   | var => sorry
   | handle => sorry
-  | tgrad => sorry
-  | tvmap => sorry
   | nil => sorry
   | cons => sorry
 
