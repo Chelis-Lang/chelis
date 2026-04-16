@@ -48,7 +48,36 @@ theorem HasType.value_eff_polymorphic
     {v : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma v t eps Gamma') (hv : IsValue v) :
     ∀ eps', HasType Delta Sigma Gamma v t eps' Gamma' := by
-  sorry
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | unit Δ S G =>
+      intro eps'
+      exact HasType.subEff Δ S G G _ _ [] eps' (HasType.unit Δ S G)
+        (fun _ hm => by cases hm)
+  | abs Δ S G1 G2 y t1 t2 epsBody body slot h_body =>
+      intro eps'
+      exact HasType.subEff Δ S G1 G2 _ _ [] eps'
+        (HasType.abs Δ S G1 G2 y t1 t2 epsBody body slot h_body)
+        (fun _ hm => by cases hm)
+  | tpair Δ S G1 G2 G3 v1 v2 t1 t2 eps1 eps2 _hv1 _hv2 ih1 ih2 =>
+      intro eps'
+      cases hv with
+      | pair _ _ hp1 hp2 =>
+          have h1' := ih1 hp1 ([] : EffectRow)
+          have h2' := ih2 hp2 ([] : EffectRow)
+          exact HasType.subEff Δ S G1 G3 _ _ _ eps'
+            (HasType.tpair Δ S G1 G2 G3 v1 v2 t1 t2 [] [] h1' h2')
+            (fun _ hm => by cases hm)
+  | loc Δ S G ell t' hlook =>
+      intro eps'
+      exact HasType.subEff Δ S G G _ _ [] eps'
+        (HasType.loc Δ S G ell t' hlook)
+        (fun _ hm => by cases hm)
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      intro eps'; exact ih hv eps'
+  | nil => exact True.intro
+  | cons => exact True.intro
+  | _ => intro _; cases hv
 
 -- (handleRet_value_preserves_typing moved below handle_inv)
 
@@ -664,8 +693,63 @@ theorem hasType_store_weaken
     (h : HasType Delta Sigma Gamma e t eps Gamma')
     (hsub : StoreTypSub Sigma Sigma')
     :
-    HasType Delta Sigma' Gamma e t eps Gamma' := by sorry
--- Wave 5r: hasType_store_weaken proof needs slot-param update; original proof preserved below.
+    HasType Delta Sigma' Gamma e t eps Gamma' := by
+  induction h using HasType.rec
+    (motive_2 := fun Δ_ S_ Γ2_ Γ3_ t_ εR_ cls_ _ =>
+      StoreTypSub S_ Sigma' → ClausesTyped Δ_ Sigma' Γ2_ Γ3_ t_ εR_ cls_) with
+  | var Δ_ _ Γpre Γpost x tv => exact HasType.var Δ_ Sigma' Γpre Γpost x tv
+  | unit Δ_ _ Γ_ => exact HasType.unit Δ_ Sigma' Γ_
+  | abs Δ_ _ Γ1 Γ2 x t1 t2 eps_ body slot _h ih =>
+      exact HasType.abs Δ_ Sigma' Γ1 Γ2 x t1 t2 eps_ body slot (ih hsub)
+  | app Δ_ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.app Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2
+        (ih1 hsub) (ih2 hsub)
+  | letBind Δ_ _ Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot _h1 _h2 ih1 ih2 =>
+      exact HasType.letBind Δ_ Sigma' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2
+        slot (ih1 hsub) (ih2 hsub)
+  | copy Δ_ _ Γ1 Γ2 e0 ds ep _h ih =>
+      exact HasType.copy Δ_ Sigma' Γ1 Γ2 e0 ds ep (ih hsub)
+  | letpair Δ_ _ Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 slotX slotY
+            _h1 _h2 ih1 ih2 =>
+      exact HasType.letpair Δ_ Sigma' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2
+        slotX slotY (ih1 hsub) (ih2 hsub)
+  | tpair Δ_ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tpair Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2
+        (ih1 hsub) (ih2 hsub)
+  | fst Δ_ _ Γ1 Γ2 e0 t1 t2 ep _h ih =>
+      exact HasType.fst Δ_ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hsub)
+  | snd Δ_ _ Γ1 Γ2 e0 t1 t2 ep _h ih =>
+      exact HasType.snd Δ_ Sigma' Γ1 Γ2 e0 t1 t2 ep (ih hsub)
+  | const Δ_ _ Γ_ v ds => exact HasType.const Δ_ Sigma' Γ_ v ds
+  | tadd Δ_ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tadd Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 hsub) (ih2 hsub)
+  | tmul Δ_ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tmul Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 hsub) (ih2 hsub)
+  | tsum Δ_ _ Γ1 Γ2 e0 ds d ep _h hmem ih =>
+      exact HasType.tsum Δ_ Sigma' Γ1 Γ2 e0 ds d ep (ih hsub) hmem
+  | texpand Δ_ _ Γ1 Γ2 e0 ds d ep _h ih =>
+      exact HasType.texpand Δ_ Sigma' Γ1 Γ2 e0 ds d ep (ih hsub)
+  | uniformLike Δ_ _ Γ1 Γ2 e0 ds lo hi ep _h ih =>
+      exact HasType.uniformLike Δ_ Sigma' Γ1 Γ2 e0 ds lo hi ep (ih hsub)
+  | perform Δ_ _ Γ1 Γ2 op e0 tArg tRet ep _h hM ih =>
+      exact HasType.perform Δ_ Sigma' Γ1 Γ2 op e0 tArg tRet ep (ih hsub) hM
+  | handle Δ_ _ Γ1 Γ2 Γ3 body clauses t_ epsH epsB _hb hSubsH hClsH
+           hCover _hcls ih_body ih_clauses =>
+      exact HasType.handle Δ_ Sigma' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
+        (ih_body hsub) hSubsH hClsH hCover (ih_clauses hsub)
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff ih =>
+      exact HasType.tgrad Δ_ Sigma' Γ_ x ds dsOut body ep slot (ih hsub) hsub_eff
+  | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
+      exact HasType.tvmap Δ_ Sigma' Γ_ x t1 t2 body ep d slot (ih hsub)
+  | loc Δ_ _ Γ_ ell tv hlook =>
+      exact HasType.loc Δ_ Sigma' Γ_ ell tv (hsub ell tv hlook)
+  | subEff Δ_ _ Γ_ Γ'' e0 tv eps0 eps1 _h hSub ih =>
+      exact HasType.subEff Δ_ Sigma' Γ_ Γ'' e0 tv eps0 eps1 (ih hsub) hSub
+  | nil => sorry
+  | cons => sorry
+-- Wave 5r: original proof preserved below for reference.
 /-
   -- Term-mode recursor application with both motives pinned.
   refine
