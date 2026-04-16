@@ -2711,5 +2711,21 @@ theorem subst_preserves_typing_db_gen
         op (substDBAux (j + 2) (lift (lift v)) hb) (substClausesDBAux j v rest)
         hb_typ' hrest'
 
+/-- Public substitution theorem (trajectory 2 specialization).
+
+    If `e` is typed in a context with a live slot at position `j`
+    that gets consumed (output `none`), and `v` is a pure closed
+    value at the slot's type, then substituting `v` for the slot in
+    `e` preserves typing with `Γ_in = Γ_out`. This is the form that
+    Preservation's beta/letBind/letpair/handleOpDirect cases use. -/
+theorem subst_preserves_typing_db
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j none))
+    (h_v : HasTypeDB Δ S Γ v t_v [] Γ) :
+    HasTypeDB Δ S Γ (substDBAux j v e) t eps Γ :=
+  subst_preserves_typing_db_gen h_e j Γ Γ (some t_v) none hj hj
+    rfl rfl (Or.inr (Or.inl ⟨rfl, rfl⟩)) h_v
 
 end LaCaDiLE
