@@ -847,7 +847,15 @@ theorem clausesTyped_store_weaken
     {cls : List (EffectLabel × String × String × Term)}
     (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls)
     (hsub : StoreTypSub Sigma Sigma') :
-    ClausesTyped Delta Sigma' Gamma2 Gamma3 t epsR cls := by sorry
+    ClausesTyped Delta Sigma' Gamma2 Gamma3 t epsR cls := by
+  match h with
+  | ClausesTyped.nil _ _ Γ2 t_ epsR_ =>
+      exact ClausesTyped.nil _ Sigma' Γ2 t_ epsR_
+  | ClausesTyped.cons _ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+                       slotX slotK h_body h_rest =>
+      exact ClausesTyped.cons _ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+        slotX slotK (hasType_store_weaken h_body hsub)
+        (clausesTyped_store_weaken h_rest hsub)
 /-  -- Wave 5r tombstone: store_weaken proof needs slot-param update.
   refine
     @ClausesTyped.rec
