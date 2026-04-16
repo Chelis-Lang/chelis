@@ -308,6 +308,35 @@ theorem hasType_to_hasTypeDB
       simp only [termToDB]
       exact HasTypeDB.perform Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
         op (termToDB (envOfCtx Γ1) e_) tArg tRet eps_ ih hM
-  | _ => sorry
+  | abs Δ' S' Γ1 Γ2 x t1 t2 eps_ body slot _h ih =>
+      simp only [termToDB]
+      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
+      rw [ctxToDB_append_singleton] at ih
+      exact HasTypeDB.abs Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) slot t1 t2 eps_
+        (termToDB (x :: envOfCtx Γ1) body) ih
+  | letBind Δ' S' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih2
+      rw [ctxToDB_append_singleton] at ih2
+      exact HasTypeDB.letBind Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        slot (termToDB (envOfCtx Γ2) e1) (termToDB (x :: envOfCtx Γ2) e2)
+        t1 t2 eps1 eps2 ih1 ih2
+  | letpair Δ' S' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 t_ eps1 eps2 slotX slotY
+            h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      rw [ctxToDB_append_pair, envOfCtx_append_pair] at ih2
+      rw [ctxToDB_append_pair] at ih2
+      exact HasTypeDB.letpair Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        slotY slotX
+        (termToDB (envOfCtx Γ2) e1) (termToDB (y :: x :: envOfCtx Γ2) e2)
+        t1 t2 t_ eps1 eps2 ih1 ih2
+  | var => sorry
+  | handle => sorry
+  | tgrad => sorry
+  | tvmap => sorry
+  | nil => sorry
+  | cons => sorry
 
 end LaCaDiLE
