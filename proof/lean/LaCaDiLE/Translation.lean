@@ -226,6 +226,42 @@ theorem hasType_envOfCtx_eq
     envOfCtx Γ = envOfCtx Γ' := by
   simp [envOfCtx, hasType_names_preserved h]
 
+/-! ## clausesToDB op-preservation helpers -/
+
+theorem exists_orig_of_clausesToDB
+    {env : List String}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {cl : EffectLabel × TermDB}
+    (h : cl ∈ clausesToDB env clauses) :
+    ∃ orig ∈ clauses, orig.1 = cl.1 := by
+  induction clauses with
+  | nil => exact absurd h (by simp [clausesToDB])
+  | cons hd rest ih =>
+    simp only [clausesToDB, List.mem_cons] at h
+    obtain ⟨op, xArg, kCont, body⟩ := hd
+    rcases h with heq | hrest
+    · refine ⟨(op, xArg, kCont, body), List.mem_cons_self .., ?_⟩
+      cases cl; simp only [Prod.mk.injEq] at heq; exact heq.1.symm
+    · obtain ⟨orig, hmem, hop⟩ := ih hrest
+      exact ⟨orig, List.mem_cons_of_mem _ hmem, hop⟩
+
+theorem exists_subst_of_clausesToDB
+    {env : List String}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (cl : EffectLabel × String × String × Term)
+    (h : cl ∈ clauses) :
+    ∃ hb', (cl.1, hb') ∈ clausesToDB env clauses := by
+  induction clauses with
+  | nil => exact absurd h (by simp)
+  | cons hd rest ih =>
+    obtain ⟨op, xArg, kCont, body⟩ := hd
+    simp only [List.mem_cons] at h
+    rcases h with heq | hrest
+    · subst heq
+      exact ⟨_, List.mem_cons_self ..⟩
+    · obtain ⟨hb', hmem⟩ := ih hrest
+      exact ⟨hb', List.mem_cons_of_mem _ hmem⟩
+
 /-! ## Forward typing preservation (Wave 5p)
 
 The main theorem `hasType_to_hasTypeDB` maps a named `HasType`
@@ -344,9 +380,33 @@ theorem hasType_to_hasTypeDB
       rw [ctxToDB_append_singleton] at ih
       exact HasTypeDB.tvmap Δ' S' (ctxToDB Γ_) slot t1 t2
         (termToDB (x :: envOfCtx Γ_) body) eps_ d ih
+  | nil Δ' S' Γ2 t_ epsR =>
+      simp only [clausesToDB]
+      exact ClausesTypedDB.nil Δ' S' (ctxToDB Γ2) t_ epsR
+  | cons Δ' S' Γ2 Γ3 t_ tArg tRet epsR op x k hb rest slotX slotK
+         _h_body _h_rest ih_body ih_rest =>
+      simp only [clausesToDB]
+      rw [ctxToDB_append_pair, envOfCtx_append_pair] at ih_body
+      rw [ctxToDB_append_pair] at ih_body
+      exact ClausesTypedDB.cons Δ' S' (ctxToDB Γ2) (ctxToDB Γ3)
+        slotK slotX t_ tArg tRet epsR op
+        (termToDB (k :: x :: envOfCtx Γ2) hb) (clausesToDB (envOfCtx Γ2) rest)
+        ih_body ih_rest
+  | handle Δ' S' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
+           h_body hSubsH hClsH hCover _h_cls ih_body ih_cls =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h_body] at ih_body ⊢
+      refine HasTypeDB.handle Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        (termToDB (envOfCtx Γ2) body)
+        (clausesToDB (envOfCtx Γ2) clauses) t_ epsH epsB
+        ih_body hSubsH ?_ ?_ ih_cls
+      · intro cl hmem
+        obtain ⟨orig, horig, hop⟩ := exists_orig_of_clausesToDB hmem
+        rw [← hop]; exact hClsH orig horig
+      · intro op hop
+        obtain ⟨cl, hmem, hcl_eq⟩ := hCover op hop
+        obtain ⟨hb', hmem'⟩ := exists_subst_of_clausesToDB cl hmem
+        exact ⟨(cl.1, hb'), hmem', hcl_eq⟩
   | var => sorry
-  | handle => sorry
-  | nil => sorry
-  | cons => sorry
 
 end LaCaDiLE
