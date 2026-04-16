@@ -625,10 +625,44 @@ market data via named tensor dimensions.
 | `Shoals.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
 | `Shoals.Orderbook` | Limit order book representation, matching logic (host-side collections) |
 
+### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
+
+A reef package. The notation bridge between quant-finance LaTeX and Chelis Deep.
+Depends on `chelis-std` + `nautilus`; **not** `coral` or `shoals`. Runs **in
+parallel with `3l`** because it has the same prerequisite (`3j` green) and needs
+nothing from Shoals. Octant is a notation adapter, **not** a CAS — no symbolic
+integration, no simplification, no equation solving. The intelligence is in the
+coding model (for the LLM-assisted lowering path that lands in `3o`) and the
+compiler (for type verification and provenance tracking). Full design in
+`chelis_octant_design.md`; executable sub-phase contract in `phase3n_octant.md`.
+
+| Module | Contents |
+|---|---|
+| `Octant.Parse` | LaTeX subset parser for quant-finance expressions — arithmetic, unary, powers/roots, transcendentals, special functions (`erf`, `\Phi`, `\Gamma`, `B`), derivatives, integrals, sums/products, piecewise, matrix notation. Out-of-scope LaTeX (TikZ, `\begin{theorem}`, prose) produces diagnostic errors, not silent drops. |
+| `Octant.Symbolic` | Thin ~30-node `SymExpr` AST mapping directly to Chelis RISC primitives and Nautilus library calls. |
+| `Octant.Lower` (deterministic path) | SymExpr → Deep for every form the LaTeX uniquely determines. Special functions → `Nautilus.Special`/`Nautilus.Distributions`; integrals → `Nautilus.Integrate`; matrix ops → `Nautilus.LinAlg`. |
+| `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). |
+| `Octant.Provenance` | Source-span annotations on **every** Deep node produced by Octant lowering. Core value proposition — without the audit trail the first round-trip ships a parser, not a product. |
+
+### 3o: Octant — Finance Notation + Notebook (Part B)
+
+A reef package extension. Adds finance-notation lowering through `shoals`, Greek
+rendering patterns, and the `Octant.Notebook` cell runtime. Depends on
+`chelis-std` + `nautilus` + `shoals` + `3n`. Runs **after `3l`**. Provenance
+extends to cover the new node kinds using the `3n` contract.
+
+| Module | Contents |
+|---|---|
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization + time grid + noise), Monte Carlo expectation → `Shoals.Pricing` (variance reduction + `Random` effect), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. |
+| `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → Δ`, `grad(price, wrt=vol) → 𝒱`, `grad(price, wrt=rate) → ρ`, `grad(price, wrt=T) → Θ`. Configurable variable-name conventions. |
+| `Octant.Notebook` | Cell-based environment — formula, parameter, execution, Greek cells. NOT a Jupyter kernel; cells produce Deep, execution runs compiled C, rendering is mathematical notation. |
+| `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. |
+
 ### Post-Phase-3 Shell Stubs
 
-Two further shells are named and reserved but scoped as stubs beyond Phase 3. They are
-listed here so the ecosystem story is explicit, but no Phase 3 sub-phase implements them.
+Three further shells (and one Octant sub-scope) are named and reserved but scoped
+as stubs beyond Phase 3. They are listed here so the ecosystem story is explicit,
+but no Phase 3 sub-phase implements them.
 
 - **`school`** — classical ML (scikit-learn competitor). Regression, decision trees,
   SVMs, clustering, pipelines, cross-validation. Depends on `chelis-std` + `nautilus` +
@@ -639,6 +673,11 @@ listed here so the ecosystem story is explicit, but no Phase 3 sub-phase impleme
   crossover are typed AST operations, and the compiler's 0–1 fitness score is literally
   the fitness function for evolutionary search. Requires `nautilus`; optionally uses
   `coral` for evolving feature-engineering pipelines over tabular data.
+- **`octant-docs`** — Octant Phase 4 (from the design doc). Parses full LaTeX model
+  documents, extracts `\begin{equation}` environments, and associates formulas with
+  surrounding prose so model-validation teams can ingest an entire model document as
+  a unit. Parser scope is significantly larger than the quant-finance expression
+  subset shipped in `3n`. Depends on the full `3n`/`3o` Octant surface.
 
 ### 3f: SKILL.md v2
 
@@ -657,8 +696,12 @@ Phase 3 success condition:
   compute loss and gradients, and print results without dropping to Python
 - the package, Python, and style foundations already shipped in `3a`, `3b`, `3b-ii`,
   and `3e` remain valid while the language grows beyond tensor-kernel scope
-- domain shells (`nautilus`, `coral`, `shoals`) build and import through the Reef
+- domain shells (`nautilus`, `coral`, `shoals`, `octant`) build and import through the Reef
   pipeline, composing correctly on top of `chelis-std`
+- `octant` parses the quant-finance LaTeX subset, lowers deterministic expressions
+  to Deep, and round-trips Black-Scholes through the compiler with provenance
+  annotations intact on every emitted Deep node; SDE / Monte Carlo / Greek
+  rendering and the notebook ship in `3o` on top of `shoals`
 - `SKILL.md` and examples match the fuller language including domain shells rather than
   the earlier tensor-compute-only subset
 

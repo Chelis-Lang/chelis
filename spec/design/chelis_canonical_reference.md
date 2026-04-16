@@ -132,6 +132,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Numerical methods shell | **Nautilus** | Mathematical precision — the chambered nautilus is nature's logarithmic spiral |
 | Dataframe shell | **Coral** | Structured colonies built from the reef |
 | Finance shell | **Shoals** | Where the currents of capital run shallow |
+| LaTeX ↔ Deep bridge shell | **Octant** | Navigational instrument bridging celestial observation (math) and positional computation (code) |
 | Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 
@@ -141,8 +142,13 @@ The domain is **chelis.ch**.
 ### Shell Ecosystem
 
 Packages layered on `chelis-std`. `nautilus` and `coral` are independent and can land in
-parallel; `shoals` depends on both. `school` (classical ML) and `darwin` (evolutionary
-algorithms) are post-Phase-3 stubs.
+parallel; `shoals` depends on both. `octant` Part A (LaTeX ↔ Deep bridge, parser +
+deterministic lowering + rendering + provenance) has the same prerequisite as
+`shoals` (namely `nautilus` green) and runs **in parallel with `shoals`**; `octant`
+Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
+sequential after `shoals`. `school` (classical ML) and `darwin` (evolutionary
+algorithms) are post-Phase-3 stubs, as is `octant-docs` (full LaTeX document
+ingestion, Octant Phase 4).
 
 | Shell | Depends On | Status | Contents |
 |---|---|---|---|
@@ -150,14 +156,17 @@ algorithms) are post-Phase-3 stubs.
 | `nautilus` | `chelis-std` | Phase 3j | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
+| `octant` | `chelis-std` + `nautilus` required; `shoals` required only for the Part B SDE / MC / curve lowering | Phase 3n (Part A) ∥ Phase 3l, Phase 3o (Part B) after Phase 3l | LaTeX ↔ Deep bridge for quantitative finance. Parses a bounded LaTeX subset, lowers to Deep deterministically (arithmetic, derivatives, special functions, integrals, matrix ops) in Part A plus LLM-assisted lowering (SDE, Monte Carlo expectation, calibration, yield curves) in Part B, round-trips through the compiler with type overlays, and carries provenance spans on every Deep node. Ships an interactive cell-based notebook in Part B. **NOT a CAS** — notation adapter only, no symbolic integration or simplification. |
 | `school` | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
 | `darwin` | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 
 Design rule: `chelis-std` covers what every Chelis program may need (tensors, neural
 primitives, time, decimal). `nautilus` owns general numerical methods. `coral` owns
 tabular data. `shoals` is finance-only. `school` is classical ML only. `darwin` is
-evolutionary search only. Time and decimal stay in `chelis-std` because every domain
-needs dates and exact arithmetic.
+evolutionary search only. `octant` is a notation bridge layered on top of `nautilus`
+and (optionally) `shoals` — it consumes their APIs and adds no numerical capabilities
+of its own. Time and decimal stay in `chelis-std` because every domain needs dates
+and exact arithmetic.
 
 ---
 

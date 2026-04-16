@@ -50,12 +50,16 @@ Remaining work
   -> 3i: Standard Library Expansion
   -> 3j-pre: Release Infra + Std Surface Expansion
   -> 3j: Nautilus  ∥  3k: Coral        (parallel, independent)
-  -> 3l: Shoals                        (depends on both 3j and 3k)
+  -> 3l: Shoals  ∥  3n: Octant (Part A)  (parallel, both depend on 3j; 3l also needs 3k)
+  -> 3o: Octant (Part B)               (depends on both 3l and 3n)
   -> 3f: SKILL.md v2 Redo
 ```
 
 `3j` (nautilus) and `3k` (coral) run in parallel; neither depends on the other. `3l`
-(shoals) depends on both.
+(shoals) depends on both. `3n` (octant Part A) has the same prerequisite as `3l`
+(namely `3j` green) and runs in parallel with `3l`. `3o` (octant Part B) is
+sequential after both `3l` and `3n` because its finance-notation lowering paths
+require `Shoals.Stochastic`, `Shoals.Pricing`, and `Shoals.Curves`.
 
 **Recommended execution order:**
 
@@ -65,8 +69,9 @@ Remaining work
 4. `3i`: standard library expansion (`Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, `Std.Nn.Generate`)
 5. `3j-pre`: release infrastructure + standard library surface expansion that `nautilus` and `coral` both assume
 6. `3j` ∥ `3k`: `nautilus` (numerical methods) and `coral` (typed dataframes) in parallel
-7. `3l`: `shoals` (finance), depends on both `3j` and `3k`
-8. `3f`: SKILL.md v2 redo
+7. `3l` ∥ `3n`: `shoals` (finance) in parallel with `octant` Part A (LaTeX ↔ Deep parser, deterministic lowering, render, provenance)
+8. `3o`: `octant` Part B (finance-notation lowering through `shoals`, Greek rendering, notebook), depends on both `3l` and `3n`
+9. `3f`: SKILL.md v2 redo
 
 Shipped Phase 3 foundations stay in place and continue to constrain the remaining work:
 
@@ -1260,6 +1265,163 @@ option via Black-Scholes and Monte Carlo, verifies convergence, computes Greeks 
 **Effort:** medium. Black-Scholes + Monte Carlo + basic risk is the core; curves and
 order book are smaller. The bulk of the work is composing existing primitives (`nautilus`
 solvers, `coral` dataframes, tensor ops), not implementing new infrastructure.
+
+---
+
+## 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
+
+**Goal:** A reef package providing a notation bridge between quant-finance LaTeX and
+Chelis Deep. Part A ships the parser, the thin `SymExpr` AST, deterministic lowering
+for every expression form that maps mechanically to Chelis, Deep → LaTeX rendering
+with type overlays, and — critically — provenance spans on every Deep node produced
+by Octant lowering.
+
+**Prerequisite:** `3j` (nautilus — special functions, distributions, linear algebra,
+integrals). Does **not** depend on `3k` or `3l`, so `3n` runs **in parallel with `3l`**.
+
+Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contract
+(test plans, acceptance oracles, non-silent deferrals, infrastructure decisions):
+`phase3n_octant.md`.
+
+### Modules (Part A)
+
+| Module | Contents | Key Dependencies |
+|---|---|---|
+| `Octant.Parse` | LaTeX subset parser — arithmetic, unary functions, powers/roots, transcendentals, special functions (`erf`, `\Phi`, `\Gamma`, `B`), derivatives (`\partial`), integrals, sums/products, piecewise, matrix notation, subscript/superscript conventions. Out-of-scope LaTeX produces clean diagnostic errors, never silent drops. | Rust LaTeX parser crate via runtime FFI (infrastructure decision owned by `phase3n_octant.md`) |
+| `Octant.Symbolic` | The ~30-node `SymExpr` AST. | `chelis-std` |
+| `Octant.Lower` (deterministic path) | SymExpr → Deep for every form where the LaTeX uniquely determines the computation. Special functions route through `Nautilus.Special` / `Nautilus.Distributions`; integrals through `Nautilus.Integrate`; matrix ops through `Nautilus.LinAlg`. | `Nautilus.Special`, `Nautilus.Distributions`, `Nautilus.LinAlg`, `Nautilus.Integrate` |
+| `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). Excludes the Greek pattern matches that need Shoals context (deferred to 3o). | typed Deep from the compiler |
+| `Octant.Provenance` | Source-span annotations on every Deep node produced by Octant lowering. Contract: every lowered Deep node's metadata map carries `provenance` (raw LaTeX fragment) and `source_span` (line, column, length). This is the core value proposition — the audit trail that proves compiled code implements the formula. | nothing new — Deep nodes already carry a metadata slot |
+
+### Test Plan
+
+- Parser corpus: at least one positive test per in-scope LaTeX construct plus
+  negative tests for out-of-scope constructs (`\begin{theorem}`, TikZ, paragraph
+  text, symbolic integration requests) that must produce diagnostics naming the
+  offending token.
+- **Black-Scholes `d_1` round-trip acceptance test:** parse
+  `d_1 = \frac{\ln(S/K) + (r + \sigma^2/2) T}{\sigma \sqrt{T}}` → lower → compile
+  through `chelis check`/`chelis eval` → render back to LaTeX → strip type
+  overlays (named-dim subscripts, effect markers, linearity markers are
+  rendering decoration, not part of the in-scope parser grammar) → **re-parse
+  the stripped output and assert the re-parsed `SymExpr` is structurally
+  equal to the original modulo whitespace, bracket normalization, and
+  floating-point formatting** (the `phase3n_octant.md §3.4` determinism invariant, not a
+  brittle byte-for-byte LaTeX comparison) and walk the lowered Deep asserting
+  every node carries a `provenance` span whose fragment is a substring of the
+  original LaTeX.
+- **Provenance error-localization test:** a deliberately ill-typed LaTeX
+  fragment (for example a shape-mismatched `\sigma \sqrt{T}`) produces a
+  `chelis check` error whose message surfaces the originating LaTeX source
+  span, not just the Deep node id. This pins the audit-trail semantics — the
+  presence-only provenance check is not enough by itself to prove the core
+  value proposition.
+- **Out-of-scope LaTeX invariant test (Cross-Sub-Phase Invariant §3.2):** fed
+  `\begin{theorem}`, a TikZ block, and "please integrate `\int e^{-x^2}`", the
+  parser returns diagnostics naming the offending token — it must never
+  silently drop to an empty `SymExpr`. This test lives inside the acceptance
+  oracle, not only in loose unit tests.
+- Type-overlay rendering: named tensor dims appear as subscripts, `Random`/`IO`
+  effects produce correct markers, `grad(f, wrt=x)` renders as
+  `\frac{\partial f}{\partial x}`.
+- Provenance completeness: a fuzz-style test generates ten varied in-scope
+  expressions, lowers each, and asserts zero Deep nodes have missing or empty
+  provenance metadata. This pins the core invariant.
+- Special function lowering positives: `erf`, `\Phi`, `\Gamma`, `\log\Gamma`, `B`
+  each route to the correct `Nautilus` call.
+- Integral lowering: `\int_0^T f(t)\,dt` → `Nautilus.Integrate.adaptive_simpson`.
+- Matrix lowering: `\mathbf{A}^{-1}\mathbf{b}` → `Nautilus.LinAlg.solve(A, b)`.
+- Package gate: `chelis reef build` produces a valid `.chb`, a consumer crate
+  imports `octant` and type-checks.
+
+### Acceptance Oracle
+
+`cargo test -p chelis-cli phase3n_octant_oracle -- --exact` — exercises the
+Black-Scholes `d_1` round-trip, the provenance-completeness invariant, a
+special-function lowering through Nautilus, and the reef-package gate. Named here
+but deliberately not implemented by the planning change set that introduced
+`3n`; creating it is owned by the agent who picks up 3n coding work. A fresh-
+context red team is still required before any `3n` completion claim.
+
+### Cross-Repo CI
+
+The `octant` shell builds and tests both in its own repo (on the `chelis-lang`
+org) and in the Chelis monorepo integration run. Green octant CI is a
+prerequisite for green Chelis CI once `3n` is shipping.
+
+**Effort:** medium. The LaTeX parser + deterministic lowering + rendering is
+mechanical once the `SymExpr` grammar is pinned; the provenance plumbing is
+small but spans every lowering path.
+
+---
+
+## 3o: Octant — Finance Notation + Notebook (Part B)
+
+**Goal:** Extend Octant with finance-notation lowering (SDE, Monte Carlo
+expectation, calibration, yield curves) through `shoals` and `nautilus`, Greek
+rendering pattern matches, and the `Octant.Notebook` cell runtime. Provenance
+extends to cover the new node kinds using the `3n` contract.
+
+**Prerequisite:** `3l` (shoals — `Shoals.Stochastic`, `Shoals.Pricing`,
+`Shoals.Curves`) green, `3i` green (`Std.Time` is a direct dependency of the
+yield curve / day count lowering path, not only a transitive dep through
+`shoals`), **and** `3n` (octant Part A) green.
+
+Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
+
+### Modules (Part B)
+
+| Module | Contents | Key Dependencies |
+|---|---|---|
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, `Random` effect), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
+| `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`, `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`. Configurable variable-name conventions. | 3n render surface |
+| `Octant.Notebook` | Cell runtime — formula, parameter, execution, Greek cells. Not a Jupyter kernel. Cells produce Deep, execution runs compiled C, rendering is mathematical notation. UI layer (web / VS Code / Cove extension / standalone) is a separate implementation decision. | full 3n Octant surface |
+| `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. No Deep node produced by Octant lowering may be missing a span. | 3n provenance surface |
+
+### Test Plan
+
+- Black-Scholes full pricer round-trip: parse the full call pricing formula →
+  lower → compile → evaluate → match analytical Black-Scholes within `1e-10`.
+- Greeks: `grad(price, wrt=spot)` lowers and renders as `\Delta`, numerical
+  value matches analytical delta within `1e-6`.
+- GBM SDE lowering: `dS = \mu S\,dt + \sigma S\,dW_t` lowers through
+  `Shoals.Stochastic`, generated paths satisfy statistical properties
+  (mean `S_0 exp(\mu T)`, variance within tolerance).
+- Monte Carlo expectation: `\mathbb{E}[\max(S_T - K, 0)]` converges to
+  analytical Black-Scholes price within `1%` at 100k paths via
+  `Shoals.Pricing`.
+- Notebook cell contracts: formula edit triggers parse → lower → compile →
+  render in one transaction; parameter cell bindings propagate to downstream
+  execution cells; Greek cells show formula + simplification + numerical
+  value.
+- Provenance completeness (3o extension): every Deep node produced by SDE /
+  MC / calibration lowering carries a valid span — regression of the 3n
+  invariant on the new node kinds.
+
+### Acceptance Oracle
+
+`cargo test -p chelis-cli phase3o_octant_oracle -- --exact` — Black-Scholes full
+pricer round-trip (including Greeks via `grad` and `Shoals.Pricing` Monte
+Carlo), the extended provenance-completeness invariant, a notebook cell-kind
+contract test, and the reef-package gate. Named here but not implemented by
+this planning change. Fresh-context red team still required before any `3o`
+completion claim.
+
+### Non-Silent Deferrals
+
+- **Octant Phase 4 — full-document LaTeX ingestion** (parsing full LaTeX
+  papers, `\begin{equation}` extraction, formula↔prose association) is parked
+  as a post-Phase-3 shell stub (`octant-docs`), tracked alongside `school`
+  and `darwin` in `chelis_project_plan.md`. No Phase 3 sub-phase implements
+  it.
+- **`Octant.Signal`** (FFT, STFT, filter lowering) remains stubbed — blocked
+  indefinitely by complex-number support (Phase 5f).
+
+**Effort:** medium to large. The LLM-assisted lowering path is the novel piece
+and depends on the SSD → SDFT → RLVR coding-model pipeline being mature enough
+to produce correct Deep fragments for SDE / MC / calibration notation. Greek
+rendering, notebook cell runtime, and provenance extension are mechanical by
+comparison.
 
 ---
 
