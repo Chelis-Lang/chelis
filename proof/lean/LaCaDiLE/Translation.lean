@@ -170,6 +170,28 @@ theorem envIndex_cons_ne (x y : String) (rest : List String) (h : x ≠ y) :
 
 -- hasType_to_hasTypeDB moved to after termToDB mutual block below
 
+/-! ## Name preservation under tombstoning
+
+Since `HasType` only changes `Option Typ` values (tombstoning `some t →
+none`), the name component of every context entry is preserved.
+`envOfCtx` maps `Prod.fst` and reverses, so it's invariant across any
+`HasType` derivation. This means `termToDB (envOfCtx Γ) e` uses the
+same environment at every intermediate context in the derivation. -/
+
+theorem hasType_names_preserved
+    {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Δ S Γ e t eps Γ') :
+    Γ.map Prod.fst = Γ'.map Prod.fst := by
+  sorry
+
+theorem hasType_envOfCtx_eq
+    {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Δ S Γ e t eps Γ') :
+    envOfCtx Γ = envOfCtx Γ' := by
+  simp [envOfCtx, hasType_names_preserved h]
+
 /-! ## Forward typing preservation (Wave 5p)
 
 The main theorem `hasType_to_hasTypeDB` maps a named `HasType`
@@ -184,6 +206,46 @@ theorem hasType_to_hasTypeDB
     (h : HasType Δ S Γ e t eps Γ') :
     HasTypeDB Δ S (ctxToDB Γ) (termToDB (envOfCtx Γ) e)
               t eps (ctxToDB Γ') := by
-  sorry
+  induction h using HasType.rec
+    (motive_2 := fun Δ' S' Γ2 Γ3 t' epsR cls _ =>
+      ClausesTypedDB Δ' S' (ctxToDB Γ2) (ctxToDB Γ3) t' epsR
+                     (clausesToDB (envOfCtx Γ2) cls)) with
+  | unit Δ' S' Γ_ =>
+      simp only [termToDB]
+      exact HasTypeDB.unit Δ' S' (ctxToDB Γ_)
+  | const Δ' S' Γ_ v ds =>
+      simp only [termToDB]
+      exact HasTypeDB.const Δ' S' (ctxToDB Γ_) v ds
+  | loc Δ' S' Γ_ ell t' hlook =>
+      simp only [termToDB]
+      sorry -- needs storeTypLookup preservation under ctxToDB
+  | subEff Δ' S' Γ_ Γ'_ e_ t_ eps_ eps'_ _h hSub ih =>
+      exact HasTypeDB.subEff Δ' S' (ctxToDB Γ_) (ctxToDB Γ'_)
+        (termToDB (envOfCtx Γ_) e_) t_ eps_ eps'_ ih hSub
+  | fst Δ' S' Γ1 Γ2 e_ t1 t2 eps_ _h ih =>
+      simp only [termToDB]
+      exact HasTypeDB.fst Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) t1 t2 eps_ ih
+  | snd Δ' S' Γ1 Γ2 e_ t1 t2 eps_ _h ih =>
+      simp only [termToDB]
+      exact HasTypeDB.snd Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) t1 t2 eps_ ih
+  | copy Δ' S' Γ1 Γ2 e_ ds eps_ _h ih =>
+      simp only [termToDB]
+      exact HasTypeDB.copy Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
+        (termToDB (envOfCtx Γ1) e_) ds eps_ ih
+  | app Δ' S' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      exact HasTypeDB.app Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
+        t1 t2 eps_ eps1 eps2 ih1 ih2
+  | tpair Δ' S' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 _h2 ih1 ih2 =>
+      simp only [termToDB]
+      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
+      exact HasTypeDB.tpair Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
+        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
+        t1 t2 eps1 eps2 ih1 ih2
+  | _ => sorry
 
 end LaCaDiLE
