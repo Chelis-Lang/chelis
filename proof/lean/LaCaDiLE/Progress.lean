@@ -254,7 +254,15 @@ theorem HasType.letBind_inv
       HasType Delta Sigma (Gamma2 ++ [(x, some t1)]) e2 t eps2
               (Gamma3 ++ [(x, slot)]) ∧
       Gamma_out = Gamma3 := by
-  sorry
+  generalize heq : Term.letBind x e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ eps1 eps2 slot h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, slot, h1, h2, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- LetPair inversion. -/
 theorem HasType.letpair_inv
@@ -267,7 +275,15 @@ theorem HasType.letpair_inv
       HasType Delta Sigma (Gamma2 ++ [(x, some t1), (y, some t2)]) e2 t eps2
               (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
       Gamma_out = Gamma3 := by
-  sorry
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1 t2 _ eps1 eps2 slotX slotY h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- A location whose store-typing lookup succeeds is live in the store
     (via `StoreWf`). Used to produce the `TensorVal` witness that head

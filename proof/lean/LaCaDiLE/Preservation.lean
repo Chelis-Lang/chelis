@@ -747,7 +747,7 @@ theorem hasType_store_weaken
       exact HasType.loc Δ_ Sigma' Γ_ ell tv (hsub ell tv hlook)
   | subEff Δ_ _ Γ_ Γ'' e0 tv eps0 eps1 _h hSub ih =>
       exact HasType.subEff Δ_ Sigma' Γ_ Γ'' e0 tv eps0 eps1 (ih hsub) hSub
-  | nil => sorry
+  | nil => exact ClausesTyped.nil _ Sigma' _ _ _
   | cons => sorry
 -- Wave 5r: original proof preserved below for reference.
 /-
@@ -965,7 +965,18 @@ theorem HasType.plug_letBind_inv
               (Gamma3 ++ [(x, slot)]) ∧
       Gamma_out = Gamma3 ∧
       SubEffRow (EffectRow.union eps1 eps2) eps := by
-  sorry
+  generalize heq : Term.letBind x e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ eps1 eps2 slot h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, slot, h1, h2, rfl, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, Γ3, t1, eps1, eps2, slot, h1, h2, hout, hwit⟩ := ih heq
+      exact ⟨Γ2, Γ3, t1, eps1, eps2, slot, h1, h2, hout,
+             fun op hop => hSub op (hwit op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- Plug-local letpair inversion with SubEffRow witness. -/
 theorem HasType.plug_letpair_inv
@@ -979,7 +990,18 @@ theorem HasType.plug_letpair_inv
               (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
       Gamma_out = Gamma3 ∧
       SubEffRow (EffectRow.union eps1 eps2) eps := by
-  sorry
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1 t2 _ eps1 eps2 slotX slotY h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl, fun _ hh => hh⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Γ2, Γ3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, hout, hwit⟩ := ih heq
+      exact ⟨Γ2, Γ3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, hout,
+             fun op hop => hSub op (hwit op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 -- Wave 5r: old proof below
 /-
   generalize heq : Term.letpair x y e1 e2 = e_in at h
