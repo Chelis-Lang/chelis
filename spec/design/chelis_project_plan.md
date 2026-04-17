@@ -604,6 +604,13 @@ dataframe library supports. Depends on `chelis-std` + 3h primitives (gather, sca
 argsort). Single-machine, no query optimizer — does NOT compete with Polars/DuckDB query
 planning or Spark distributed processing.
 
+Current Chelis ground truth for Coral startup is now pinned in tests: ADT-based columns,
+tensor-valued `Dict`s, bool `gather`, and `Std.Tensor.Construct.arange` all work today.
+The standard Phase A index-extraction path is `Std.Tensor.Mask.where_indices`, a host-lane
+helper built from `to_list`/`enumerate`/`filter`/`map`/`to_tensor`. Known residual:
+zero-match masks still hit the existing empty-`to_tensor([])` limitation and need a
+downstream special case until empty tensor construction lands.
+
 | Module | Contents |
 |---|---|
 | `Coral.Frame` | Core DataFrame type, column selection, row filtering, sorting by column, mutation, `rename`, vertical `concat`, `describe` (via `Nautilus.Stats`), `value_counts`. **NaN handling is built into `Coral.Frame`, not a separate module:** `is_nan`, `fill_nan`, `drop_nan`, `any_nan`, `count_nan`. Float columns use IEEE 754 NaN; integer columns use a companion boolean mask. |

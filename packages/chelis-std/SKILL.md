@@ -314,6 +314,8 @@ From lowest to highest:
 - All reduction-style calls currently need an explicit axis: `sum(x, 0)`, `softmax(x, 0)`.
 - Tensor math expects tensors, not bare `f32`.
   For scalar arithmetic that passes today, use rank-0 tensors such as `tensor[f32]`.
+- Tensor helpers ship in nested modules such as `Std.Tensor.Construct`,
+  `Std.Tensor.Reduce`, and `Std.Tensor.Mask`.
 
 ## 4. Type System Rules
 
@@ -685,7 +687,38 @@ Deep:
       (arm {} (pat-ctor {} Sigmoid) () (app {} (var {} sigmoid) (var {} x))))))
 ```
 
-### 5.12 Current Limit: Do Not Use MLP or MNIST as Your First Prompt
+### 5.12 Tensor Column ADT Pattern
+
+Surf:
+
+```chelis-surf-fragment
+type Column =
+  | FloatCol(tensor[n, f32])
+  | IntCol(tensor[n, int64])
+
+def get_float(col: Column) -> tensor[n, f32] =
+  match col with {
+    | FloatCol(values) => values
+    | IntCol(_) => fail("expected FloatCol")
+  }
+```
+
+This is the preferred current snapshot pattern for typed dataframe-like columns.
+It compiles today and is the intended Coral column representation.
+
+Related mask/index helper:
+
+```chelis-surf-fragment
+import Std.Tensor.Mask (where_indices)
+
+ids = where_indices(mask)
+```
+
+`where_indices` is host-lane (`to_list`/`enumerate`/`filter`/`map`/`to_tensor`), not a
+new tensor primitive. It works for non-empty matches today. An all-false mask still
+hits the current empty-`to_tensor([])` residual.
+
+### 5.13 Current Limit: Do Not Use MLP or MNIST as Your First Prompt
 
 The spec and roadmap include `matmul`, multi-layer networks, and MNIST-scale examples.
 The current teaching file intentionally does not validate those yet because the

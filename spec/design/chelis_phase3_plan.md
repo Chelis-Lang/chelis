@@ -1100,6 +1100,20 @@ library supports.
 **Prerequisite:** 3h (gather, scatter, argsort for sort-by/group-by), 3d (collections
 for string columns), 3g (Std.IO.Csv/Json for data loading).
 
+**Verified compiler/std ground truth before Coral starts:**
+
+- ADTs + exhaustive pattern matching already support a `Column` sum type.
+- `Dict[string, tensor[...]]` already type-checks, so tensor-valued maps are available.
+- `gather` already accepts `tensor[..., bool]` and builds through the C backend.
+- `Std.Tensor.Construct.arange` already ships.
+- `Std.Tensor.Mask.where_indices` is the sanctioned Phase A helper for
+  boolean-mask-to-index conversion. It is intentionally host-lane
+  (`to_list` → `enumerate` → `filter` → `map` → `to_tensor`), not a new tensor
+  primitive.
+- Known residual: an all-false mask still hits the existing empty-`to_tensor([])`
+  limitation, so zero-match filtering needs a downstream special case until empty
+  tensor construction lands.
+
 ### Core Design
 
 A DataFrame is `Dict[String, Column]` where:
@@ -1137,7 +1151,7 @@ actually composes (see coral spec §13 open question #7).
 
 | Module | Contents | Key Primitives Used |
 |---|---|---|
-| `Coral.Frame` | DataFrame construction, column selection, row filtering (boolean mask → `gather`), sorting by column (`argsort` → `gather` all columns), mutation (add computed column), column type queries, `rename`, vertical `concat`, `describe` (calls `Nautilus.Stats`), `value_counts` (groupby shorthand). **NaN handling lives here, not in a separate module:** `is_nan`, `fill_nan`, `drop_nan`, `any_nan`, `count_nan`. Float columns use IEEE 754 NaN propagation (GPU kernels handle NaN correctly); integer columns use a companion boolean mask for missingness. | gather, argsort, where, `Nautilus.Stats` |
+| `Coral.Frame` | DataFrame construction, column selection, row filtering (`Std.Tensor.Mask.where_indices` on the host lane, then `gather`), sorting by column (`argsort` → `gather` all columns), mutation (add computed column), column type queries, `rename`, vertical `concat`, `describe` (calls `Nautilus.Stats`), `value_counts` (groupby shorthand). **NaN handling lives here, not in a separate module:** `is_nan`, `fill_nan`, `drop_nan`, `any_nan`, `count_nan`. Float columns use IEEE 754 NaN propagation (GPU kernels handle NaN correctly); integer columns use a companion boolean mask for missingness. | gather, argsort, where, `Nautilus.Stats` |
 | `Coral.GroupBy` | Group-by via `argsort` + run-length detection, aggregation (sum, mean, count, min, max per group) via segmented `scatter(..., "add")` | argsort, scatter, cumsum |
 | `Coral.Join` | Sort-merge join on typed key columns, left/inner/outer join variants | argsort, gather, concat |
 | `Coral.Reshape` | Pivot (long → wide), melt (wide → long), stack/unstack | Dict manipulation, tensor reshape |
