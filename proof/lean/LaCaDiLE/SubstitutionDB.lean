@@ -1900,20 +1900,108 @@ theorem subst_multi_decomp_h2
     rw [hlook_out] at hmono
     exact Option.some.inj hmono
 
-/-! ## Generalized substitution theorem (Wave 5h mutual checkpoint)
+/-! ## Clause label-membership invariance
 
-This mutual block is the Wave 5h checkpoint: 14 of 24 cases are
-closed (13 HasTypeDB + ClausesTypedDB.nil), 11 remain as sorry.
-The structure and signatures are final; the remaining cases are
-mechanical applications of helpers that either already exist
-(`weakening_head_db`, `weakening_head2_db`) or will land in
-subsequent waves (`hasTypeDB_cap_weaken` for tgrad/tvmap, a
-multi-context decomposition helper for app/tpair/tadd/tmul/
-letBind/letpair, and a mutual clauses-cons case).
+`substClausesDBAux` rewrites only clause bodies, never labels.
+So `(op, hb') ∈ substClausesDBAux j v cls` iff some `(op, hb) ∈ cls`
+with `hb' = substDBAux (j+2) (lift (lift v)) hb`. Used by the
+gen theorem's `handle` case to transport coverage premises. -/
+theorem substClausesDBAux_mem_iff
+    {j : Nat} {v : TermDB} {cls : List (EffectLabel × TermDB)}
+    {cl : EffectLabel × TermDB} :
+    cl ∈ substClausesDBAux j v cls ↔
+      ∃ cl0 ∈ cls, cl = (cl0.fst, substDBAux (j + 2) (lift (lift v)) cl0.snd) := by
+  induction cls with
+  | nil => simp [substClausesDBAux]
+  | cons hd tl ih =>
+      cases hd with
+      | mk op hb =>
+          simp only [substClausesDBAux, List.mem_cons]
+          constructor
+          · rintro (rfl | hmem)
+            · exact ⟨(op, hb), Or.inl rfl, rfl⟩
+            · obtain ⟨cl0, hmem0, heq⟩ := ih.mp hmem
+              exact ⟨cl0, Or.inr hmem0, heq⟩
+          · rintro ⟨cl0, hmem0, heq⟩
+            rcases hmem0 with rfl | hmem0
+            · left; exact heq
+            · right; exact ih.mpr ⟨cl0, hmem0, heq⟩
 
-Checkpoint sorry counts: gen theorem carries 10 case sorries,
-clauses partner carries 1 (cons case). The theorem signatures
-are the final shape per Wave 5f's trajectory analysis. -/
+/-! ## Clauses analog of `subst_multi_decomp_h2`
+
+Lift the slot-trajectory inversion from `HasTypeDB` to
+`ClausesTypedDB`. Used by the gen theorem's `handle` case to
+recover the clauses partner's slot trajectory from the body's
+intermediate `slot_mid`. Proven by induction on the clauses
+derivation; nil collapses via `subst_leaf_resolve`, cons recurses
+on the partner's tail. -/
+theorem clauses_subst_decomp_h2
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {cls : List (EffectLabel × TermDB)}
+    {t : Typ} {epsR : EffectRow}
+    (h : ClausesTypedDB Δ S Γ1 Γ2 t epsR cls) :
+    ∀ {Γ_mid_base Γ_out : LinearCtxDB} {t_v : Typ}
+      {slot_mid slot_out : Option Typ}
+      (j : Nat),
+      j ≤ Γ_mid_base.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_mid_base.insertAt j slot_mid →
+      Γ2 = Γ_out.insertAt j slot_out →
+      (slot_mid = some t_v ∨ slot_mid = none) →
+      (slot_mid = some t_v ∧ slot_out = some t_v) ∨
+      (slot_mid = some t_v ∧ slot_out = none) ∨
+      (slot_mid = none ∧ slot_out = none) := by
+  intro Γ_mid_base Γ_out t_v slot_mid slot_out j hj_mid hj_out hin hout h_mid
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ =>
+      -- nil: Γ1 = Γ2, so insertAt j slot_mid = insertAt j slot_out, hence
+      -- slot_mid = slot_out by reading off position j.
+      have heq : Γ_mid_base.insertAt j slot_mid = Γ_out.insertAt j slot_out :=
+        hin.symm.trans hout
+      have hs : slot_mid = slot_out := by
+        have hgm := LinearCtxDB.getElem?_insertAt_eq Γ_mid_base j slot_mid hj_mid
+        have hgo := LinearCtxDB.getElem?_insertAt_eq Γ_out j slot_out hj_out
+        have hh : (Γ_mid_base.insertAt j slot_mid)[j]? =
+                  (Γ_out.insertAt j slot_out)[j]? := by rw [heq]
+        rw [hgm, hgo] at hh
+        exact Option.some.inj hh
+      rcases h_mid with hl | hd
+      · left; exact ⟨hl, hs ▸ hl⟩
+      · right; right; exact ⟨hd, hs ▸ hd⟩
+  | ClausesTypedDB.cons _ _ Γ2_inner Γ3_inner slot1 slot2 _ tArg tRet _ op hb rest hb_typ hrest =>
+      -- The cons constructor: Γ1 = Γ2_inner, Γ2 = Γ3_inner.
+      -- hb_typ : (some(arrow tRet t epsR) :: some tArg :: Γ2_inner) →
+      --         (slot1 :: slot2 :: Γ3_inner)
+      -- With hin/hout, both become insertAt-shaped at cutoff j+2.
+      have hb_typ_shape :
+          HasTypeDB Δ S
+            (LinearCtxDB.insertAt (j + 2) slot_mid
+              (some (Typ.arrow tRet t epsR) :: some tArg :: Γ_mid_base))
+            hb t epsR
+            (LinearCtxDB.insertAt (j + 2) slot_out (slot1 :: slot2 :: Γ_out)) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hin,
+            show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hout]
+        exact hb_typ
+      have hj_mid_body :
+          j + 2 ≤ (some (Typ.arrow tRet t epsR) :: some tArg :: Γ_mid_base).length := by
+        simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by simp; omega
+      exact subst_multi_decomp_h2 (t_v := t_v) (j + 2) hj_mid_body hj_out_body
+        hb_typ_shape h_mid
+
+/-! ## Generalized substitution theorem (Wave 5l: closing handle)
+
+Mutual block over `HasTypeDB` and `ClausesTypedDB`. As of Wave 5l,
+all gen-theorem cases close except `tgrad`'s capability-context
+permutation obligation (deferred to a `cap_swap` helper landing in
+the same wave). The clauses partner closes both nil and cons.
+
+Theorem signatures are final per Wave 5f's trajectory analysis. -/
 
 mutual
 
@@ -2214,7 +2302,50 @@ theorem subst_preserves_typing_db_gen
         Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
       simp only [substDBAux]
       exact HasTypeDB.perform Δ_ S_ Γ_in Γ_out op (substDBAux j v e_) tArg tRet eps_ hbody' hM
-  | HasTypeDB.handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls => sorry
+  | HasTypeDB.handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls =>
+      -- hb : Γ1 → Γ2 (body)
+      -- hcls : Γ2 → Γ3 (clauses partner)
+      -- Outer judgment is Γ1 → Γ3, so Γ2 is the middle context to decompose.
+      have h_slot_in : slot_in = some t_v ∨ slot_in = none := by
+        rcases hslots with ⟨hi, _⟩ | ⟨hi, _⟩ | ⟨hi, _⟩ <;> simp [hi]
+      have hb_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j slot_in) body ty epsB Γ2 :=
+        hin ▸ hb
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in hb_shape h_slot_in
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with ⟨_, hm⟩ | ⟨_, hm⟩ | ⟨_, hm⟩ <;> simp [hm]
+      have hcls_shape :
+          ClausesTypedDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) Γ3 ty
+            (EffectRow.removeOps epsB epsH) clauses := h_Γ2_eq ▸ hcls
+      -- h23 trajectory: derive from the clauses derivation directly using
+      -- monotonicity, lifted from HasTypeDB to ClausesTypedDB via
+      -- `clauses_subst_decomp_h2`.
+      have h23_traj :=
+        clauses_subst_decomp_h2 (t_v := t_v) hcls j hj_mid hj_out
+          h_Γ2_eq hout h_slot_mid
+      have h_v_mid : HasTypeDB Δ_ S_ Γ_mid_base v t_v [] Γ_mid_base :=
+        pure_context_rebase_db h_v h_mid_len.symm
+      have hb' := subst_preserves_typing_db_gen (t_v := t_v) hb j
+        Γ_in Γ_mid_base slot_in slot_mid hj_in hj_mid hin h_Γ2_eq h12_traj h_v
+      have hcls' := subst_preserves_typing_clauses_db_gen (t_v := t_v) hcls j
+        Γ_mid_base Γ_out slot_mid slot_out hj_mid hj_out h_Γ2_eq hout
+        h23_traj h_v_mid
+      -- substClausesDBAux preserves clause labels exactly, so the
+      -- coverage premises hClsH / hCover transport via a label-membership lemma.
+      have hClsH' : ∀ cl ∈ substClausesDBAux j v clauses, cl.fst ∈ epsH := by
+        intro cl hcl
+        obtain ⟨cl0, hmem0, heq⟩ := substClausesDBAux_mem_iff.mp hcl
+        rw [heq]; exact hClsH cl0 hmem0
+      have hCover' :
+          ∀ op ∈ epsH, ∃ cl ∈ substClausesDBAux j v clauses, cl.fst = op := by
+        intro op hop
+        obtain ⟨cl0, hmem0, hfst0⟩ := hCover op hop
+        refine ⟨(cl0.fst, substDBAux (j + 2) (lift (lift v)) cl0.snd),
+                substClausesDBAux_mem_iff.mpr ⟨cl0, hmem0, rfl⟩, hfst0⟩
+      simp only [substDBAux]
+      exact HasTypeDB.handle Δ_ S_ Γ_in Γ_mid_base Γ_out
+        (substDBAux j v body) (substClausesDBAux j v clauses) ty epsH epsB
+        hb' hSubsH hClsH' hCover' hcls'
   | HasTypeDB.tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub =>
       -- tgrad is pure Γ → Γ. Γ_in = Γ_out via insertAt_inj.
       -- Body runs under `diff :: Δ_`; recursion needs h_v cap-weakened.
