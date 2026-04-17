@@ -2311,7 +2311,45 @@ theorem subst_preserves_typing_clauses_db_gen
       subst hΓ
       simp only [substClausesDBAux]
       exact ClausesTypedDB.nil Δ_ S_ Γ_in ty epsR_
-  | ClausesTypedDB.cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hb_typ hrest => sorry
+  | ClausesTypedDB.cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hb_typ hrest =>
+      -- hb_typ : (some (arrow tRet t epsR) :: some tArg :: Γ2) → (slot1 :: slot2 :: Γ3)
+      -- The clauses input/output Γ2/Γ3 carry the substitution trajectory
+      -- (Γ2 = Γ_in.insertAt j slot_in, Γ3 = Γ_out.insertAt j slot_out).
+      -- The body's 2-slot prefix shifts the cutoff by 2; trajectory is unchanged.
+      have h_v_lifted2 :
+          HasTypeDB Δ_ S_
+            (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+            (lift (lift v)) t_v []
+            (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) :=
+        weakening_head_db (weakening_head_db h_v)
+      have hin_body :
+          some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ2 =
+            LinearCtxDB.insertAt (j + 2) slot_in
+              (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hin]
+      have hout_body :
+          slot1 :: slot2 :: Γ3 =
+            LinearCtxDB.insertAt (j + 2) slot_out (slot1 :: slot2 :: Γ_out) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hout]
+      have hj_in_body :
+          j + 2 ≤ (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in).length := by
+        simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have hb_typ' := subst_preserves_typing_db_gen (t_v := t_v) hb_typ (j + 2)
+        (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+        (slot1 :: slot2 :: Γ_out) slot_in slot_out
+        hj_in_body hj_out_body hin_body hout_body hslots h_v_lifted2
+      have hrest' := subst_preserves_typing_clauses_db_gen (t_v := t_v) hrest j
+        Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
+      simp only [substClausesDBAux]
+      exact ClausesTypedDB.cons Δ_ S_ Γ_in Γ_out slot1 slot2 ty tArg tRet epsR_
+        op (substDBAux (j + 2) (lift (lift v)) hb) (substClausesDBAux j v rest)
+        hb_typ' hrest'
 
 end
 
