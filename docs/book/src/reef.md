@@ -27,9 +27,8 @@ import Std.Nn.Linear(..)
 ## Typical Workflow
 
 ```sh
-chelis reef init demo
-chelis reef check
-chelis reef build
+chelis reef init demo --module-prefix Demo --output demo
+chelis reef build demo
 ```
 
 For the current release contract and downstream pinning policy, use

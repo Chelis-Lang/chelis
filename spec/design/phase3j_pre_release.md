@@ -71,7 +71,7 @@ Downstream reef packages (Nautilus, Coral, and user-facing apps) should
 pin an exact compiler version in their `reef.toml`:
 
 ```toml
-[toolchain]
+[package]
 compiler = "=0.1.7"
 ```
 

@@ -216,6 +216,8 @@ fn validate_tag_shape(
         "app" if child_count < 1 => Err(wrong_arity("at least 1 child")),
         "params" => validate_params_children(children, offset),
         "bind" => validate_bind_children(children, offset),
+        "effects" => validate_effects_children(children, offset),
+        "resource" if child_count != 1 => Err(wrong_arity("exactly 1 child")),
         _ => Ok(()),
     }
 }
@@ -277,6 +279,29 @@ fn validate_bind_children(
     Ok(())
 }
 
+fn validate_effects_children(
+    children: &[Pair<'_, deep::Rule>],
+    offset: usize,
+) -> Result<(), ValidationError> {
+    for child in children {
+        match child.as_rule() {
+            deep::Rule::bare_name => {}
+            deep::Rule::node
+                if child
+                    .clone()
+                    .into_inner()
+                    .next()
+                    .is_some_and(|tag| tag.as_str() == "resource") => {}
+            _ => {
+                return Err(ValidationError::Failed(format!(
+                    "`effects` must contain bare names or `(resource {{}} ...)` entries at byte {offset}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{validate_deep, validate_desugared, validate_surf};
@@ -311,6 +336,24 @@ mod tests {
         let source = "(mystery {} x)";
         let error = validate_deep(source).expect_err("unknown tag should fail");
         assert!(error.to_string().contains("unknown Deep tag"));
+    }
+
+    #[test]
+    fn deep_rejects_invalid_effects_children() {
+        let source = "(effects {} 1)";
+        let error = validate_deep(source).expect_err("non-symbol effects child should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("`effects` must contain bare names")
+        );
+    }
+
+    #[test]
+    fn deep_rejects_invalid_resource_arity() {
+        let source = "(resource {} x y)";
+        let error = validate_deep(source).expect_err("resource arity should fail");
+        assert!(error.to_string().contains("expected exactly 1 child"));
     }
 
     #[test]

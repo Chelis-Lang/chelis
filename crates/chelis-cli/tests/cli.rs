@@ -3318,3 +3318,60 @@ fn validate_deep_rejects_unknown_tag() {
         .failure()
         .stderr(predicate::str::contains("unknown Deep tag"));
 }
+
+#[test]
+fn validate_deep_rejects_invalid_effects_children() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad_effects.dp");
+    write_file(&path, "(effects {} 1)\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`effects` must contain bare names or `(resource {} ...)` entries",
+        ));
+}
+
+#[test]
+fn validate_deep_rejects_invalid_resource_arity() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bad_resource.dp");
+    write_file(&path, "(resource {} x y)\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["validate", "--deep", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("expected exactly 1 child"));
+}
+
+#[test]
+fn reef_book_workflow_commands_are_valid() {
+    let dir = tempdir().expect("tempdir");
+    let pkg = dir.path().join("demo");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "reef",
+            "init",
+            "demo",
+            "--module-prefix",
+            "Demo",
+            "--output",
+            pkg.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["reef", "build", pkg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Built demo 0.1.0"));
+}
