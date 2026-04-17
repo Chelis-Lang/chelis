@@ -1943,7 +1943,58 @@ theorem hasTypeDB_cap_insert
     (h : HasTypeDB Delta Sigma Γ e t eps Γ')
     (n : Nat) (c : Capability) :
     HasTypeDB (CapCtx.insertAt n c Delta) Sigma Γ e t eps Γ' := by
-  sorry
+  revert n c
+  change ∀ n c, HasTypeDB (CapCtx.insertAt n c Delta) Sigma Γ e t eps Γ'
+  induction h using HasTypeDB.rec
+    (motive_2 := fun Δ S Γ2 Γ3 t epsR cls _ =>
+      ∀ n c, ClausesTypedDB (CapCtx.insertAt n c Δ) S Γ2 Γ3 t epsR cls)
+    with
+  | var _ _ Γ i ti hl => intro n c; exact HasTypeDB.var _ _ Γ i ti hl
+  | unit _ _ Γ => intro n c; exact HasTypeDB.unit _ _ Γ
+  | abs _ _ _ _ sl t1 t2 ep b _ ih =>
+      intro n c; exact HasTypeDB.abs _ _ _ _ sl t1 t2 ep b (ih n c)
+  | app _ _ _ _ _ _ _ t1 t2 ep ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.app _ _ _ _ _ _ _ t1 t2 ep ep1 ep2 (ih1 n c) (ih2 n c)
+  | letBind _ _ _ _ _ sl _ _ t1 t2 ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.letBind _ _ _ _ _ sl _ _ t1 t2 ep1 ep2 (ih1 n c) (ih2 n c)
+  | copy _ _ _ _ e ds ep _ ih =>
+      intro n c; exact HasTypeDB.copy _ _ _ _ e ds ep (ih n c)
+  | letpair _ _ _ _ _ s1 s2 _ _ t1 t2 t ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.letpair _ _ _ _ _ s1 s2 _ _ t1 t2 t ep1 ep2 (ih1 n c) (ih2 n c)
+  | tpair _ _ _ _ _ _ _ t1 t2 ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.tpair _ _ _ _ _ _ _ t1 t2 ep1 ep2 (ih1 n c) (ih2 n c)
+  | fst _ _ _ _ e t1 t2 ep _ ih =>
+      intro n c; exact HasTypeDB.fst _ _ _ _ e t1 t2 ep (ih n c)
+  | snd _ _ _ _ e t1 t2 ep _ ih =>
+      intro n c; exact HasTypeDB.snd _ _ _ _ e t1 t2 ep (ih n c)
+  | const _ _ Γ v ds => intro n c; exact HasTypeDB.const _ _ Γ v ds
+  | tadd _ _ _ _ _ _ _ ds ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.tadd _ _ _ _ _ _ _ ds ep1 ep2 (ih1 n c) (ih2 n c)
+  | tmul _ _ _ _ _ _ _ ds ep1 ep2 _ _ ih1 ih2 =>
+      intro n c; exact HasTypeDB.tmul _ _ _ _ _ _ _ ds ep1 ep2 (ih1 n c) (ih2 n c)
+  | tsum _ _ _ _ e ds i ep _ ds' hds' ih =>
+      intro n c; exact HasTypeDB.tsum _ _ _ _ e ds i ep (ih n c) ds' hds'
+  | texpand _ _ _ _ e ds i k ep _ ds' hds' ih =>
+      intro n c; exact HasTypeDB.texpand _ _ _ _ e ds i k ep (ih n c) ds' hds'
+  | uniformLike _ _ _ _ e ds lo hi ep _ ih =>
+      intro n c; exact HasTypeDB.uniformLike _ _ _ _ e ds lo hi ep (ih n c)
+  | perform _ _ _ _ op e tA tR ep _ hM ih =>
+      intro n c; exact HasTypeDB.perform _ _ _ _ op e tA tR ep (ih n c) hM
+  | handle _ _ _ _ _ b cls t epsH epsB _ hSub hCl hCov _ ih_b ih_cls =>
+      intro n c; exact HasTypeDB.handle _ _ _ _ _ b cls t epsH epsB
+        (ih_b n c) hSub hCl hCov (ih_cls n c)
+  | tgrad _ _ Γ sl ds dsOut b ep _ hsub_eff ih =>
+      intro n c
+      have := ih (n + 1) c
+      rw [CapCtx.insertAt_cons_succ] at this
+      exact HasTypeDB.tgrad _ _ Γ sl ds dsOut b ep this hsub_eff
+  | tvmap _ _ Γ sl t1 t2 b ep d _ ih =>
+      intro n c; exact HasTypeDB.tvmap _ _ Γ sl t1 t2 b ep d (ih n c)
+  | loc _ _ Γ ell t hl => intro n c; exact HasTypeDB.loc _ _ Γ ell t hl
+  | subEff _ _ _ _ e t ep ep' _ hS ih =>
+      intro n c; exact HasTypeDB.subEff _ _ _ _ e t ep ep' (ih n c) hS
+  | nil _ _ Γ_ t_ epsR_ => exact ClausesTypedDB.nil _ _ Γ_ t_ epsR_
+  | cons => sorry
 /-  -- Wave 5t: full proof by induction on HasTypeDB.rec with ∀ n c
   -- motive. The tgrad case uses IH at n+1 via CapCtx.insertAt_cons_succ.
   -- Proof structure established; sorry'd pending case-count debugging.
@@ -1999,6 +2050,20 @@ theorem hasTypeDB_cap_insert
       exact ClausesTypedDB.cons _ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest
         (ih_hb n c) (ih_rest n c)
 -/
+
+theorem clausesTypedDB_cap_insert
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow} {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls)
+    (n : Nat) (c : Capability) :
+    ClausesTypedDB (CapCtx.insertAt n c Delta) Sigma Γ2 Γ3 t epsR cls := by
+  match h with
+  | ClausesTypedDB.nil _ _ Γ_ t_ epsR_ =>
+      exact ClausesTypedDB.nil _ _ Γ_ t_ epsR_
+  | ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest hb_typ hrest =>
+      exact ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest
+        (hasTypeDB_cap_insert hb_typ n c)
+        (clausesTypedDB_cap_insert hrest n c)
 theorem hasTypeDB_cap_weaken_tgrad_body
     {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
     {e : TermDB} {t : Typ} {eps : EffectRow}
