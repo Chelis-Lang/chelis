@@ -132,7 +132,7 @@ fn write_file(path: &Path, contents: &str) {
 }
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    StdCommand::new("gcc")
+    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
         .current_dir(out_dir)
         .args([
             "-O2",
@@ -151,7 +151,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
 }
 
 fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::process::ExitStatus {
-    let mut cmd = StdCommand::new("gcc");
+    let mut cmd = StdCommand::new(chelis_backend_c::toolchain::c_compiler());
     cmd.current_dir(out_dir);
     cmd.args(["-O2", "-fopenmp"]);
     cmd.args(sources);
@@ -168,7 +168,7 @@ fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::proc
 }
 
 fn gcc_compile_generated(out_dir: &Path, source: &str) -> std::process::ExitStatus {
-    StdCommand::new("gcc")
+    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
         .current_dir(out_dir)
         .args(["-O2", "-fopenmp", "-I.", "-c", source])
         .status()
@@ -1232,7 +1232,7 @@ def main(
 
     assert!(app_pkg.join("reef.lock").exists());
     assert!(out_dir.join("main.c").exists());
-    let status = StdCommand::new("gcc")
+    let status = StdCommand::new(chelis_backend_c::toolchain::c_compiler())
         .current_dir(&out_dir)
         .args(["-O2", "-fopenmp", "-c", "main.c", "-o", "main.o"])
         .status()

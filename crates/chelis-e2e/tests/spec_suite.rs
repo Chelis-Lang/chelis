@@ -351,7 +351,7 @@ fn spec_matmul_decomposes() {
 // =========================================================================
 
 fn gcc_available() -> bool {
-    Command::new("gcc")
+    Command::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -437,7 +437,7 @@ int main() {{
     write("main.c", &main_c);
     let bin_path = tmp.path().join("test_bin");
 
-    let mut cmd = Command::new("gcc");
+    let mut cmd = Command::new(chelis_backend_c::toolchain::c_compiler());
     cmd.args(["-O2", "-Wall"]);
     cmd.args(&result.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());

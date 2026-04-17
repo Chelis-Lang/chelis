@@ -176,10 +176,10 @@ enum Backend {
 }
 
 impl Backend {
-    fn tool(self) -> &'static str {
+    fn tool(self) -> String {
         match self {
-            Self::Cpu => "gcc",
-            Self::Hip => "hipcc",
+            Self::Cpu => chelis_backend_c::toolchain::c_compiler(),
+            Self::Hip => "hipcc".to_string(),
         }
     }
 }
@@ -509,8 +509,9 @@ fn run_training_backend(
     programs: &TrainingPrograms,
     uses_accuracy: bool,
 ) -> RunArtifacts {
-    if !tool_available(backend.tool(), &["--version"]) {
-        return skipped(format!("{} not available", backend.tool()));
+    let tool = backend.tool();
+    if !tool_available(&tool, &["--version"]) {
+        return skipped(format!("{tool} not available"));
     }
 
     let train = match backend {
@@ -578,8 +579,9 @@ fn run_forward_backend(
     data_path: &Path,
     programs: &ForwardPrograms,
 ) -> RunArtifacts {
-    if !tool_available(backend.tool(), &["--version"]) {
-        return skipped(format!("{} not available", backend.tool()));
+    let tool = backend.tool();
+    if !tool_available(&tool, &["--version"]) {
+        return skipped(format!("{tool} not available"));
     }
 
     match backend {
@@ -1047,7 +1049,7 @@ fn compile_and_run_c(
         .map_err(|e| format!("write main.c failed: {e}"))?;
 
     let bin = temp.path().join(prefix);
-    let mut cmd = Command::new("gcc");
+    let mut cmd = Command::new(chelis_backend_c::toolchain::c_compiler());
     cmd.arg("-O3");
     cmd.args(compile_flags);
     cmd.arg(temp.path().join("main.c"));

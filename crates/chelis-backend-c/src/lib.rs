@@ -4,6 +4,7 @@ pub mod blas;
 pub mod emit;
 pub mod host_emit;
 pub mod memory;
+pub mod toolchain;
 
 /// Result of C code generation.
 pub struct CodegenResult {
@@ -346,7 +347,7 @@ mod tests {
     }
 
     fn gcc_available() -> bool {
-        Command::new("gcc")
+        Command::new(crate::toolchain::c_compiler())
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -378,7 +379,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let src_path = write_temp_file(tmp.path(), "probe.c", source);
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.arg(src_path.to_str().unwrap())
             .args(extra_args)
@@ -433,7 +434,7 @@ int main(void) {
         );
         let o_path = tmp.path().join("runtime_smoke");
 
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2"])
             .arg(tmp.path().join("main.c").to_str().unwrap());
@@ -473,7 +474,7 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("runtime_view");
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap());
@@ -523,7 +524,7 @@ int main() {
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_add");
 
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
@@ -585,7 +586,7 @@ int main() {{
         write_temp_file(tmp.path(), "main.c", &main_c);
         let bin_path = tmp.path().join("test_bin");
 
-        let mut compile_cmd = Command::new("gcc");
+        let mut compile_cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
         compile_cmd.args(&result.compile_flags);
@@ -742,7 +743,7 @@ int main(void) {{
         write_temp_file(tmp.path(), "main.c", &main_c);
         let bin_path = tmp.path().join("test_cases");
 
-        let mut compile_cmd = Command::new("gcc");
+        let mut compile_cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
         compile_cmd.args(&result.compile_flags);
@@ -1470,7 +1471,7 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_multi");
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
@@ -1529,7 +1530,7 @@ int main(void) {
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
         let bin_path = tmp.path().join("test_load_copy");
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2", "-lm"])
             .arg(tmp.path().join("main.c").to_str().unwrap())
@@ -1618,7 +1619,7 @@ int main(void) {
 }
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
-        let mut cmd = Command::new("gcc");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2"])
             .args(&result.compile_flags)

@@ -323,7 +323,7 @@ g = grad(loss_fn)
 // -------------------------------------------------------------------------
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    StdCommand::new("gcc")
+    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
         .current_dir(out_dir)
         .args([
             "-O2",

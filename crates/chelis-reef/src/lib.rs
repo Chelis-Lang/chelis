@@ -1734,6 +1734,6 @@ module_prefix = "Demo"
         let found = find_package_root_for_input(&nested.join("demo.ch"))
             .expect("search")
             .expect("package root");
-        assert_eq!(found, project);
+        assert_eq!(found, project.canonicalize().expect("canonicalize project"));
     }
 }

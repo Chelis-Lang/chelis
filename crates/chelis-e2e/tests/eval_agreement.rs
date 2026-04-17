@@ -51,7 +51,7 @@ fn runtime_library_path() -> PathBuf {
 }
 
 fn gcc_available() -> bool {
-    Command::new("gcc")
+    Command::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -112,7 +112,7 @@ int main() {{
     write_temp_file(tmp.path(), "main.c", &main_c);
     let bin_path = tmp.path().join("test_bin");
 
-    let mut cmd = Command::new("gcc");
+    let mut cmd = Command::new(chelis_backend_c::toolchain::c_compiler());
     let extra = c_test_extra_flags();
     if !extra.is_empty() {
         cmd.args(&extra);

@@ -868,8 +868,15 @@ fn native_compiler_path(target: CompileTarget) -> PathBuf {
             .filter(|path| path.exists())
             .or_else(|| {
                 let path = PathBuf::from("/usr/bin/gcc");
-                path.exists().then_some(path)
+                // Skip /usr/bin/gcc on macOS: it's an Apple clang alias that
+                // rejects -fopenmp, which the codegen always emits.
+                if path.exists() && !is_apple_clang(&path) {
+                    Some(path)
+                } else {
+                    None
+                }
             })
+            .or_else(find_real_gcc_on_path)
             .unwrap_or_else(|| PathBuf::from("gcc")),
         CompileTarget::Hip => std::env::var_os("CHELIS_HIPCC")
             .map(PathBuf::from)
@@ -880,6 +887,36 @@ fn native_compiler_path(target: CompileTarget) -> PathBuf {
             })
             .unwrap_or_else(|| PathBuf::from("hipcc")),
     }
+}
+
+fn is_apple_clang(path: &Path) -> bool {
+    std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.contains("Apple clang") || text.contains("clang version")
+        })
+        .unwrap_or(false)
+}
+
+fn find_real_gcc_on_path() -> Option<PathBuf> {
+    // Prefer a real GCC when `gcc` itself is the Apple clang shim (macOS).
+    // Homebrew installs versioned binaries (`gcc-15`, `gcc-14`, ...) on PATH.
+    for name in ["gcc", "gcc-15", "gcc-14", "gcc-13", "gcc-12"] {
+        let path = PathBuf::from(name);
+        if !is_apple_clang(&path)
+            && std::process::Command::new(&path)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn write_manifest_inner(path: &Path, manifest: &ArtifactManifest) -> Result<(), String> {

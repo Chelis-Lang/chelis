@@ -69,7 +69,7 @@ fn c_fused_codegen_compiles() {
     );
 
     // Try gcc -fsyntax-only
-    let output = std::process::Command::new("gcc")
+    let output = std::process::Command::new(chelis_backend_c::toolchain::c_compiler())
         .args([
             "-fsyntax-only",
             "-I",
@@ -188,7 +188,7 @@ fn c_fused_reduce_compiles() {
     let h_src = std::fs::read_to_string(rt_header).unwrap();
     std::fs::write(dir.join("chelis_runtime.h"), &h_src).unwrap();
 
-    let output = std::process::Command::new("gcc")
+    let output = std::process::Command::new(chelis_backend_c::toolchain::c_compiler())
         .args([
             "-fsyntax-only",
             "-I",
