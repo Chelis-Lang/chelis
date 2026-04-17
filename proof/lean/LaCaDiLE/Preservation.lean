@@ -635,16 +635,13 @@ theorem preservation
   | tvmap s x tv body d =>
       -- TODO Wave 2: needs addDim_preserves_typing tvmap case
       sorry
-  | ctx sig sig' E e0 e0' h_inner =>
-      -- E-Ctx: congruence under evaluation context.
-      -- plug_preserves_typing is fully closed; the ctx case needs
-      -- a recursive call to preservation on h_inner (the sub-step).
-      -- This requires `induction h_step` (not `cases`) to get an IH,
-      -- but `induction` fails because Step's indices are not variables.
-      -- Solution: restructure preservation as a well-founded recursive
-      -- function, or use `Acc.rec` on Step's structural descent.
-      -- Deferred to the next wave; conceptually complete since
-      -- plug_preserves_typing is fully closed.
+  | ctx _ _ E e0 e0' h_inner =>
+      -- E-Ctx: plug_preserves_typing + recursive preservation on h_inner.
+      -- The recursive call needs preservation generalized to open contexts
+      -- (the inner term lives under a non-empty context from the eval ctx).
+      -- Currently blocked: preservation is restricted to Γ = [].
+      -- The axiom plug_preserves_typing_fwd + a generalized preservation
+      -- closes this case structurally; the generalization is Wave 5u work.
       sorry
 
 /-! ## Track C3: plug_preserves_typing
