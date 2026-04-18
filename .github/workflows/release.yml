@@ -5,11 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Build the release tarball but do not publish a GitHub Release'
-        required: false
-        default: 'true'
 
 permissions:
   contents: write
@@ -39,6 +34,9 @@ jobs:
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
+
+      - name: Test workspace
+        run: cargo test --workspace
 
       - name: Strip binary
         run: strip target/release/chelis
@@ -103,11 +101,53 @@ jobs:
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
 
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      - name: Test workspace
+        run: CARGO_INCREMENTAL=0 cargo test --workspace
+
       - name: Strip binary
         run: strip -x target/release/chelis || true
 
       - name: Verify binary runs
         run: ./target/release/chelis --help || ./target/release/chelis help || true
+
+      - name: Verify packaged binary architecture
+        run: |
+          set -euo pipefail
+          file target/release/chelis | grep -E 'arm64|aarch64'
+
+      - name: Smoke test generated C with Accelerate
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          cat > "$tmpdir/matmul.ch" <<'EOF'
+          a = (a : tensor[2, 3, f32])
+          b = (b : tensor[3, 4, f32])
+          out = (matmul(a, b) : tensor[2, 4, f32])
+          EOF
+          ./target/release/chelis build "$tmpdir/matmul.ch" --output "$tmpdir/out"
+          grep -q 'cblas_sgemm' "$tmpdir/out/matmul.c"
+          grep -q 'chelis_blas.h' "$tmpdir/out/matmul.c"
+          cat > "$tmpdir/out/driver.c" <<'EOF'
+          #include "chelis_runtime.h"
+          void matmul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+          int main(void) {
+              chelis_tensor *outputs[1] = {0};
+              matmul(NULL, 0, outputs, 1);
+              chelis_free(outputs[0]);
+              return 0;
+          }
+          EOF
+          clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/matmul.c" -o "$tmpdir/out/matmul.o"
+          clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/driver.c" -o "$tmpdir/out/driver.o"
+          clang "$tmpdir/out/matmul.o" "$tmpdir/out/driver.o" \
+            "$tmpdir/out/libchelis_runtime.a" -framework Accelerate -lpthread -ldl \
+            -o "$tmpdir/out/matmul_bin"
+          "$tmpdir/out/matmul_bin"
 
       - name: Determine version
         id: version
