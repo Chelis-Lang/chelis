@@ -168,6 +168,16 @@ and (optionally) `shoals` — it consumes their APIs and adds no numerical capab
 of its own. Time and decimal stay in `chelis-std` because every domain needs dates
 and exact arithmetic.
 
+### Cross-Cutting Design Decisions
+
+**Stability labels on exported APIs.** Every function in every shell's SKILL.md API surface table carries a stability label: `stable` (signature will not change between releases — safe for AI training corpus inclusion) or `alpha` (signature may change — exclude from training data or down-weight). This serves the AI coding pipeline: the RLVR training loop (Phase 4) needs to know which functions are safe to teach the model. It also serves human consumers: a function marked `alpha` comes with an explicit warning that the API may change.
+
+**Persistent data structures for frame-like containers.** Coral's DataFrame uses a persistent dictionary (HAMT) for the column map, so that operations like `with_column`, `drop_column`, and `rename` produce new frames sharing column references with the original via structural sharing. This is a performance requirement for AD through frame pipelines: `grad(fn_with_10_frame_ops)` produces intermediate frames on the backward pass, and structural sharing keeps memory cost at O(num_operations) rather than O(num_columns * num_operations). Pure-Chelis HAMT preferred over Rust-side HAMT for AD compatibility (the persistent dict must be transparent to the AD system).
+
+**Instruments as dicts in Shoals, not closed ADTs.** Financial instruments are open-ended (new payoff structures are invented continuously). Representing instruments as `Dict[String, f32]` lets new instrument types be added as data without code changes. The pricing function dispatches on a key, not a pattern match over a closed enum. This also makes instrument definitions AI-friendly: an agent writes a dict literal (within current LLM capability), not a new ADT variant (requires understanding the type system's extension points).
+
+**Fast `chelis eval` as a pre-Phase 4 investment.** The RLVR training pipeline needs sub-second program evaluation with package-aware imports. `chelis eval` must resolve reef package imports and return results in under 200ms for the training loop to be practical. This also serves agent-driven development (sub-second feedback during Coral/Shoals/Octant construction).
+
 ---
 
 ## 6. CLI Surface

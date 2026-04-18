@@ -1120,6 +1120,19 @@ eagerly. The type system tracks which columns are which. No query optimizer — 
 optimization comes from the tensor compiler's existing fusion passes, not a
 dataframe-specific planner.
 
+**Persistent column dictionary (HAMT).** The internal `Dict[String, Column]` backing a
+Frame uses a persistent data structure (hash array mapped trie) so that `with_column`,
+`drop_column`, and `rename` produce new frames that share column references with the
+original via structural sharing. This is a performance requirement for AD through frame
+pipelines: `grad(fn_with_10_frame_ops)` produces intermediate frames on the backward
+pass, and without structural sharing each intermediate copies the entire column
+dictionary — making AD memory cost O(num_columns * num_operations) instead of
+O(num_operations). The HAMT stores column references (`Arc` handles to immutable
+tensors), not column data, so the tree is small at real portfolio sizes (50-100
+columns). Pure-Chelis HAMT is strongly preferred over Rust-side HAMT so the persistent
+dict composes transparently with `grad`; decide at implementation start which path
+actually composes (see coral spec §13 open question #7).
+
 ### Modules
 
 | Module | Contents | Key Primitives Used |
@@ -1218,6 +1231,17 @@ curves, stochastic processes, order books. Built entirely on `chelis-std` + `nau
 **Prerequisite:** 3j (nautilus — distributions, optimization, SDE solvers), 3k (coral —
 for loading/manipulating financial data), 3i (Std.Time for dates, Std.Decimal for cash
 amounts).
+
+### Key Design Decision: Instruments as Dicts, Not Closed ADTs
+
+Financial instruments are open-ended — structuring desks invent new payoff formulas
+continuously. Representing instruments as `Dict[String, f32]` (or `Dict[String, Column]`
+for term structures) lets new instrument types be added as data without modifying the
+Shoals source or releasing a new package version. The pricing function dispatches on a
+key (e.g., `get(instrument, "type")`), not on a pattern match over a closed enum. This
+also serves the AI coding story: an agent generating a new instrument definition writes
+a dict literal (well within current LLM capability), not a new ADT variant (which
+requires understanding the type system's extension points).
 
 ### Modules
 
@@ -1462,6 +1486,16 @@ The refreshed skill should teach:
 - `school` (classical ML) and `darwin` (evolutionary algorithms) shells are named but
   scoped as stubs; SKILL.md mentions them as post-Phase-3 targets only
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
+
+Every API surface table in the refreshed SKILL.md (`Std.*`, `Nautilus.*`, `Coral.*`,
+`Shoals.*`) carries a `Stability` column whose value is `stable` (signature will not
+change between releases — safe for training-corpus inclusion) or `alpha` (signature may
+change — excluded or down-weighted for training). This is the labeling convention the
+Phase 4a corpus-curation step relies on. Nautilus v0.1.0 candidates for `stable`: all
+of `Nautilus.Special`, all of `Nautilus.Distributions` (pdf/cdf/inv_cdf). Candidates
+for `alpha`: `Nautilus.CurveFit`, `Nautilus.SDE` (APIs may shift when autonomous
+`Random` sampling lands). Apply the same convention to `Coral` and `Shoals` when they
+ship.
 
 ### Acceptance Oracle
 

@@ -613,12 +613,30 @@ planning or Spark distributed processing.
 | `Coral.Window` | Rolling operations over numeric columns: `rolling_mean`, `rolling_sum`, `rolling_std`, `ewm` |
 | `Coral.IO` | DataFrame-aware CSV/JSON loading, typed column auto-detection, **Parquet I/O via the Rust `parquet2` crate in the runtime** |
 
+Persistent column dictionary: the internal column map uses a persistent data structure
+(HAMT) with structural sharing, so frame operations like `with_column` and
+`drop_column` produce new frames sharing column references with the original. Required
+for practical AD through frame pipelines — without structural sharing,
+`grad(fn_with_many_frame_ops)` copies the entire column map per intermediate frame. Full
+rationale and the pure-Chelis-vs-Rust-runtime decision point are covered in
+`chelis_coral_design_spec.md`.
+
 ### 3l: Shoals — Finance
 
 A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus` +
 `coral`. Contains only finance-specific logic — nothing a non-finance programmer would
 need. Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed
 market data via named tensor dimensions.
+
+**Key design decision: instruments as dicts, not closed ADTs.** Financial instruments
+are open-ended — structuring desks invent new payoff formulas continuously. Representing
+instruments as `Dict[String, f32]` (or `Dict[String, Column]` for term structures) lets
+new instrument types be added as data without modifying the Shoals source or releasing
+a new package version. The pricing function dispatches on a key (e.g., `get(instrument,
+"type")`), not on a pattern match over a closed enum. This also serves the AI coding
+story: an agent generating a new instrument definition writes a dict literal (well
+within current LLM capability), not a new ADT variant (which requires understanding the
+type system's extension points).
 
 | Module | Contents |
 |---|---|
@@ -717,6 +735,29 @@ through `3h`, `3m`, `3g`, `3i`, `3j-pre`, `3j`, `3k`, `3l`, and `3f` complete.
 **Deliverable:** Chelis ships with a local coding model as standard tooling and a
 reproducible benchmark proving the "designed for LLMs" thesis. The turtle carries its
 home.
+
+### Pre-Phase 4 Investments
+
+**Fast `chelis eval` with package-aware imports.** The RLVR training pipeline runs
+thousands of Chelis programs and scores them via compiler fitness. If every evaluation
+requires `chelis build` → gcc → link → run, the training loop is bottlenecked by
+compilation (seconds per program). If `chelis eval` resolves reef package imports and
+returns results in milliseconds, the RLVR reward signal is fast enough for online
+training. Investment: make the evaluator resolve imports from installed reef packages,
+optimize startup time, and handle the standard library without filesystem round-trips.
+This also serves agent-driven development (sub-second feedback on whether a generated
+function produces the right value). Target: `chelis eval myfile.ch --expr "erf(0.5)"`
+completes in under 200ms with Nautilus imported.
+
+**Stability labels on shell APIs.** Mark each exported function in every SKILL.md as
+`stable` or `alpha`. The training pipeline's corpus-curation step (4a) uses these
+labels: stable functions are safe to include in training data and will not break
+between releases; alpha functions are excluded or down-weighted because their
+signatures may change. Convention: add a `Stability` column to the API surface tables
+in each shell's SKILL.md. Nautilus v0.1.0 candidates for `stable`: all of Special, all
+of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API may
+change when autonomous Random sampling lands). Apply the same convention to Coral and
+Shoals when they ship.
 
 ### Why This Is a Distinct Phase
 
@@ -856,6 +897,29 @@ Phase 4 success condition:
 - Chelis ships a first-party local coding model as part of the product, not as an
   optional research extra
 - ChelisBench provides reproducible evidence for the "designed for LLMs" thesis
+
+### Future: `chelis fuzz` — Type-Driven Property Testing
+
+Deferred until after the RLVR pipeline exists. A `chelis fuzz` command that generates
+random well-typed inputs for a function and checks declared properties. The type system
+already provides the input domain (`f32`, `tensor[n, f32]`, etc.). Mathematical
+properties (output range, monotonicity, symmetry) are expressed as lightweight
+annotations or CLI flags:
+
+```bash
+chelis fuzz erf --property "output_in(-1, 1)" --property "monotonic" --trials 10000
+chelis fuzz normal_cdf --property "output_in(0, 1)" --property "monotonic" --trials 10000
+chelis fuzz solve_2x2 --property "no_nan_on_valid_input" --trials 1000
+```
+
+Value for the AI story: fuzz properties become part of the RLVR reward signal. A
+generated function that passes 10k random inputs without NaN is higher quality than one
+that only passes fixed golden tests. The reward function can incorporate `chelis fuzz`
+results as a continuous reward component alongside the 0-1 fitness score.
+
+Value for the numerical library story: catches edge cases that golden fixture grids
+miss. The Nautilus bessel_y1 drift in (7.5, 8) would have been caught by fuzzing before
+it became a documented known limitation.
 
 ---
 
