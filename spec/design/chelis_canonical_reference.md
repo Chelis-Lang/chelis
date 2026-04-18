@@ -178,6 +178,14 @@ and exact arithmetic.
 
 **Fast `chelis eval` as a pre-Phase 4 investment.** The RLVR training pipeline needs sub-second program evaluation with package-aware imports. `chelis eval` must resolve reef package imports and return results in under 200ms for the training loop to be practical. This also serves agent-driven development (sub-second feedback during Coral/Shoals/Octant construction).
 
+**Verified error messages with per-property explanations.** Compiler diagnostics explain which property the rejection protects and suggest a fix. Not "type mismatch" but "mul requires dimension-wise equality: expected [batch, hidden] got [hidden, batch] — did you mean permute(b, [1, 0])?" Directly improves the RLVR reward signal: better errors = more informative feedback = faster agent repair = faster training convergence. Does not require Lean — the existing type checker has the information, it just needs better formatting.
+
+**Structured fitness score with per-property components.** The 0-1 fitness score is broken into components in the fitness JSON: dimension score, effect score, linearity score, differentiability score, syntax score. Agents see which property failed and focus repair on that specific issue. The aggregate score is still computed for RLVR reward; the components are exposed for agent introspection and trajectory analysis.
+
+**Reproducibility manifests.** `chelis manifest program.ch` extracts all `Random`-effect-annotated operations from the typed AST into a structured JSON report: which operations introduce randomness, which seed handlers cover them, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. Finance product feature for model validation teams. Full design: `chelis_reproducibility_manifests.md`.
+
+**Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with seed(n)` for Random (already used), `with_deterministic_random(sequence)` for exact output testing, `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
+
 ---
 
 ## 6. CLI Surface
@@ -187,11 +195,14 @@ The planned user-facing command set is:
 ```text
 chelis build app.ch
 chelis build app.ch --target hip
-chelis check app.ch
+chelis build app.ch --target metal
+chelis check app.ch                         # fitness report (JSON) with per-property components
 chelis deep app.ch
 chelis deep --flat app.ch
 chelis surf program.dp
 chelis eval expr
+chelis manifest app.ch                      # generate reproducibility manifest (JSON)
+chelis manifest app.ch --check              # exit 0 if reproducible, exit 1 if not
 chelis tide
 chelis tide serve --port 8080
 chelis tide mcp

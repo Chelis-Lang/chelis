@@ -646,6 +646,14 @@ type system's extension points).
 | `Shoals.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
 | `Shoals.Orderbook` | Limit order book representation, matching logic (host-side collections) |
 
+**Reproducibility manifests.** A compiler pass (`chelis manifest`) extracts all
+`Random`-effect-annotated operations from the typed AST into a structured JSON report:
+which operations introduce randomness, which seed handlers cover them, and whether the
+computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating.
+This is a product feature for model-validation teams ("machine-generated certificate
+that your simulation is reproducible"). Full design:
+`chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
+
 ### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
 
 A reef package. The notation bridge between quant-finance LaTeX and Chelis Deep.
@@ -737,6 +745,32 @@ reproducible benchmark proving the "designed for LLMs" thesis. The turtle carrie
 home.
 
 ### Pre-Phase 4 Investments
+
+**Verified error messages with per-property explanations.** When the compiler rejects a
+program, the diagnostic should explain which property the rejection protects and
+suggest a fix. Not "type mismatch on line 42" but "mul requires dimension-wise
+equality: your first operand has dimensions [batch, hidden] but your second has
+[hidden, batch]. Did you mean permute(b, [1, 0])?" This is the single highest-leverage
+compiler investment for the AI story: when the RLVR training loop generates a program
+that fails type checking, the quality of the error message IS the reward signal's
+informativeness. "Type error" gives the agent nothing to work with. "Dimension
+mismatch: expected [batch, hidden] got [hidden, batch] in mul at position 2" gives the
+agent enough information to repair the program. Better error messages = faster RLVR
+convergence = better coding model. Implementation: improve diagnostics in
+`crates/chelis-types/` to include the specific rule violated, the expected vs actual
+types/dims/effects, and a repair suggestion where possible. Does not require Lean — the
+existing type checker has the information, it just doesn't format it well.
+
+**Structured fitness score with per-property components.** Break the 0-1 fitness score
+into per-property components returned in the fitness JSON: dimension score, effect
+score, linearity score, differentiability score, syntax score. An agent generating a
+program sees which property failed and can focus its repair on that specific issue
+rather than re-generating from scratch. The aggregate fitness score is still computed
+(for RLVR reward), but the components are exposed for agent introspection and for the
+trajectory-collection step (4c) to record which properties are hardest for the model.
+Implementation: extend the fitness JSON output in `crates/chelis-cli/` to include a
+`components` object alongside the aggregate `score`. The type checker already computes
+these properties independently — the change is formatting, not analysis.
 
 **Fast `chelis eval` with package-aware imports.** The RLVR training pipeline runs
 thousands of Chelis programs and scores them via compiler fitness. If every evaluation

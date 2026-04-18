@@ -1284,6 +1284,13 @@ requires understanding the type system's extension points).
 - Effect tracking: MC pricing propagates `Random`, curve construction propagates `IO`
   for market data
 - Reproducibility: same seed produces identical prices across runs
+- Manifest: `chelis manifest --check` passes for every Shoals example program (all
+  Random ops covered by seed handlers)
+
+**Reproducibility manifests.** The `chelis manifest` command (compiler-side pass)
+extracts all `Random`-effect-annotated operations into a structured JSON report.
+`chelis manifest --check` is a CI gate: fail the build if any random operation in a
+Shoals program is unseeded. Full design: `chelis_reproducibility_manifests.md`.
 
 ### Acceptance Oracle
 
@@ -1487,6 +1494,8 @@ The refreshed skill should teach:
   scoped as stubs; SKILL.md mentions them as post-Phase-3 targets only
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
+### API Stability Labels
+
 Every API surface table in the refreshed SKILL.md (`Std.*`, `Nautilus.*`, `Coral.*`,
 `Shoals.*`) carries a `Stability` column whose value is `stable` (signature will not
 change between releases — safe for training-corpus inclusion) or `alpha` (signature may
@@ -1496,6 +1505,37 @@ of `Nautilus.Special`, all of `Nautilus.Distributions` (pdf/cdf/inv_cdf). Candid
 for `alpha`: `Nautilus.CurveFit`, `Nautilus.SDE` (APIs may shift when autonomous
 `Random` sampling lands). Apply the same convention to `Coral` and `Shoals` when they
 ship.
+
+### Effect-Polymorphic Test Handlers
+
+Document and standardize the pattern of replacing effects with test doubles:
+
+- `with seed(n) { ... }` replaces `Random` with deterministic output — already used
+  throughout Nautilus tests.
+- `with_deterministic_random(sequence) { ... }` — a test handler that returns values
+  from a fixed sequence instead of pseudorandom values. Useful for testing exact output
+  sequences.
+- `with_mock_io(recorded_trace) { ... }` — a test handler for `IO` effect that returns
+  recorded data instead of reading files.
+- `with_cpu_fallback { ... }` — a test handler for `Resource(GPU)` that routes all GPU
+  allocations to CPU.
+
+The effect system guarantees these substitutions are type-safe: a program's behavior is
+identical modulo the handled effects (by LaCaDiLE Theorem 3, effect correctness). This
+gives property-based testing where the test harness is provably faithful to the
+production semantics.
+
+Implementation: standard library functions in `Std.Test` (or documented patterns in the
+SKILL.md if the functions are trivial). Not a compiler change — library code plus
+documentation.
+
+### Post-POPL: Typing Rules in Documentation
+
+After the LaCaDiLE POPL paper is submitted and the typing rules are finalized, publish
+them as a reference appendix in the Chelis mdBook. Users can look up the precise rule
+for any construct. This falls out naturally from the POPL paper — the typing-rule
+figures are already typeset in LaTeX and can be rendered in the book. Not a separate
+work item; just a "copy the figures into the docs" step after submission.
 
 ### Acceptance Oracle
 
