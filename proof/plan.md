@@ -1,5 +1,14 @@
 # Chelis Proof — Project Plan
 
+## Current Snapshot
+
+- Branch: `chelis-proof`
+- Proof build oracle: `cd proof/lean && lake build`
+- Current proof state: the branch builds cleanly with 4 active `sorry` declarations in `AdjointTyping.lean`, `Preservation.lean`, and `Substitution.lean` (2x)
+- Immediate critical path: finish or retire the remaining `Substitution.lean` admissions, then discharge the substitution-dependent `Preservation.lean` cases; `AdjointTyping.lean` and `AddDim.lean` remain the calculus-level blockers after that
+
+This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
+
 ## Dependency Graph
 
 ```
@@ -36,10 +45,10 @@ If WS3.14 proves intractable, the fallback is: state Theorem 5 in Lean, `sorry` 
 
 | ID | File | Title | Size | Status |
 |---|---|---|---|---|
-| WS1 | [workstreams/ws1-core-calculus.md](workstreams/ws1-core-calculus.md) | Core Calculus on Paper | Medium | not started |
-| WS2 | [workstreams/ws2-paper-proofs.md](workstreams/ws2-paper-proofs.md) | Metatheory (Paper Proofs) | Large | not started |
-| WS3 | [workstreams/ws3-lean-mechanization.md](workstreams/ws3-lean-mechanization.md) | Lean 4 Formalization | Large | not started |
-| WS4 | [workstreams/ws4-paper-draft.md](workstreams/ws4-paper-draft.md) | Paper Draft | Large | not started |
+| WS1 | [workstreams/ws1-core-calculus.md](workstreams/ws1-core-calculus.md) | Core Calculus on Paper | Medium | done |
+| WS2 | [workstreams/ws2-paper-proofs.md](workstreams/ws2-paper-proofs.md) | Metatheory (Paper Proofs) | Large | in progress |
+| WS3 | [workstreams/ws3-lean-mechanization.md](workstreams/ws3-lean-mechanization.md) | Lean 4 Formalization | Large | in progress |
+| WS4 | [workstreams/ws4-paper-draft.md](workstreams/ws4-paper-draft.md) | Paper Draft | Large | in progress |
 | WS5 | [workstreams/ws5-supplementary.md](workstreams/ws5-supplementary.md) | Supplementary Material | Medium | not started |
 | WS6 | [workstreams/ws6-submission-logistics.md](workstreams/ws6-submission-logistics.md) | Submission Logistics | Small | not started |
 

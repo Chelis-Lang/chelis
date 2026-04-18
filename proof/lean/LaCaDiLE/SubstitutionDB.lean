@@ -1647,6 +1647,148 @@ theorem subst_preserves_typing_db_var
     rw [substDBAux_var_gt _ hij]
     exact HasTypeDB.var Δ S Γ_in (i - 1) ti hlook_base
 
+/-! ## Capability swap under prefix (Wave 5l)
+
+Permute two adjacent capabilities under an arbitrary concrete prefix:
+`Δ_pre ++ a :: b :: Δ_suf` typing implies `Δ_pre ++ b :: a :: Δ_suf`
+typing. No `HasTypeDB` rule inspects capability-context order beyond
+`tgrad`'s `diff :: _` head check, and that test is preserved by
+swapping strictly below the explicit prefix. -/
+
+theorem hasTypeDB_cap_swap
+    {Δ : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ Sigma Γ e t eps Γ')
+    {Δ_pre : CapCtx} {a b : Capability} {Δ_suf : CapCtx}
+    (hΔ : Δ = Δ_pre ++ a :: b :: Δ_suf) :
+    HasTypeDB (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ e t eps Γ' := by
+  revert Δ_pre a b Δ_suf hΔ
+  induction h using HasTypeDB.rec
+    (motive_2 := fun Delta Sigma Γ2 Γ3 t epsR cls _ =>
+      ∀ {Δ_pre : CapCtx} {a b : Capability} {Δ_suf : CapCtx},
+        Delta = Δ_pre ++ a :: b :: Δ_suf →
+        ClausesTypedDB (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ2 Γ3 t epsR cls) with
+  | var Delta Sigma Γ i ti hlook =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.var (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ i ti hlook
+  | unit Delta Sigma Γ =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.unit (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ
+  | abs Delta Sigma Γ1 Γ2 slot t1 t2 eps body hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.abs (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 slot t1 t2 eps body
+        (ih rfl)
+  | app Delta Sigma Γ1 Γ2 Γ3 e1 e2 t1 t2 eps eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.app (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 e1 e2 t1 t2 eps eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | letBind Delta Sigma Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.letBind (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | copy Delta Sigma Γ1 Γ2 e ds eps hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.copy (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e ds eps
+        (ih rfl)
+  | letpair Delta Sigma Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.letpair (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | tpair Delta Sigma Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.tpair (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | fst Delta Sigma Γ1 Γ2 e t1 t2 eps hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.fst (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e t1 t2 eps
+        (ih rfl)
+  | snd Delta Sigma Γ1 Γ2 e t1 t2 eps hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.snd (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e t1 t2 eps
+        (ih rfl)
+  | const Delta Sigma Γ v ds =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.const (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ v ds
+  | tadd Delta Sigma Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.tadd (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | tmul Delta Sigma Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.tmul (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 rfl) (ih2 rfl)
+  | tsum Delta Sigma Γ1 Γ2 e ds i eps hbody ds' hds' ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.tsum (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e ds i eps
+        (ih rfl) ds' hds'
+  | texpand Delta Sigma Γ1 Γ2 e ds i k eps hbody ds' hds' ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.texpand (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e ds i k eps
+        (ih rfl) ds' hds'
+  | uniformLike Delta Sigma Γ1 Γ2 e ds lo hi eps hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.uniformLike (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 e ds lo hi eps
+        (ih rfl)
+  | perform Delta Sigma Γ1 Γ2 op e tArg tRet eps hbody hM ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.perform (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 op e tArg tRet eps
+        (ih rfl) hM
+  | handle Delta Sigma Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ihb ihcls =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.handle (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ1 Γ2 Γ3 body clauses ty epsH epsB
+        (ihb rfl) hSubsH hClsH hCover (ihcls rfl)
+  | tgrad Delta Sigma Γ slot ds dsOut body eps hbody hsub ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      have hbody' :
+          HasTypeDB ((Capability.diff :: Δ_pre) ++ b :: a :: Δ_suf)
+            Sigma (some (Typ.tensor ds) :: Γ) body (Typ.tensor dsOut) eps
+            (slot :: Γ) :=
+        ih (by simp)
+      exact HasTypeDB.tgrad (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ slot ds dsOut body eps
+        (by simpa [List.cons_append] using hbody') hsub
+  | tvmap Delta Sigma Γ slot t1 t2 body eps d hbody ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.tvmap (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ slot t1 t2 body eps d
+        (ih rfl)
+  | loc Delta Sigma Γ ell t hlook =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.loc (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ ell t hlook
+  | subEff Delta Sigma Γ Γ' e t eps eps' hbody hSub ih =>
+      intro Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact HasTypeDB.subEff (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ Γ' e t eps eps'
+        (ih rfl) hSub
+  | nil Delta Sigma Γ2 t epsR =>
+      rename_i Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact ClausesTypedDB.nil (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ2 t epsR
+  | cons Delta Sigma Γ2 Γ3 slot1 slot2 t tArg tRet epsR op hb rest hbody hrest ihb ihrest =>
+      rename_i Δ_pre a b Δ_suf hΔ
+      subst hΔ
+      exact ClausesTypedDB.cons (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ2 Γ3 slot1 slot2 t tArg tRet epsR
+        op hb rest (ihb rfl) (ihrest rfl)
+
 /-! ## Capability weakening (Wave 5j)
 
 Adding a new capability to the outer `Delta` preserves all typings.
@@ -1717,23 +1859,16 @@ theorem hasTypeDB_cap_weaken
         (hasTypeDB_cap_weaken hb c) hSubsH hClsH hCover
         (hasTypeDB_cap_weaken_clauses hcls c)
   | HasTypeDB.tgrad _ _ Γ slot ds dsOut body eps_ hbody hsub =>
-      -- tgrad's body is under diff :: Delta; adding c makes it c :: diff :: Delta.
-      -- The body derivation becomes HasTypeDB (diff :: Delta) ... which we
-      -- need to lift to HasTypeDB (c :: diff :: Delta) ... — that's a
-      -- recursive cap_weaken call with c, but Lean's termination checker
-      -- needs to see h is structurally smaller. The IH on `hbody` is at a
-      -- strictly smaller derivation, so the recursive call with `c` at
-      -- position of the outer list works.
-      -- However: the structural permutation of the cap context would need
-      -- `HasTypeDB (diff :: c :: Delta) ...` to be equivalent to the
-      -- rebuilt form. A cleaner path: use cap_weaken with `c` positionally
-      -- at position 1 (after `diff`). That requires a more general
-      -- "cap_weaken at arbitrary position" variant. For this wave, accept
-      -- that the body IH comes out with `c` prepended and rely on the cap
-      -- context being effectively a set (order-insensitive at the rule
-      -- level since no rule inspects Δ's structure beyond `diff :: _`).
-      exact HasTypeDB.tgrad (c :: Delta) Sigma Γ slot ds dsOut body eps_
-        (hasTypeDB_cap_weaken_tgrad_body hbody c) hsub
+      have hbody' :
+          HasTypeDB (Capability.diff :: c :: Delta) Sigma
+            (some (Typ.tensor ds) :: Γ) body (Typ.tensor dsOut) eps_ (slot :: Γ) := by
+        have hweakened :
+            HasTypeDB (c :: Capability.diff :: Delta) Sigma
+              (some (Typ.tensor ds) :: Γ) body (Typ.tensor dsOut) eps_ (slot :: Γ) :=
+          hasTypeDB_cap_weaken hbody c
+        exact hasTypeDB_cap_swap (Δ_pre := []) (a := c) (b := Capability.diff)
+          (Δ_suf := Delta) hweakened rfl
+      exact HasTypeDB.tgrad (c :: Delta) Sigma Γ slot ds dsOut body eps_ hbody' hsub
   | HasTypeDB.tvmap _ _ Γ slot t1 t2 body eps_ d hbody =>
       exact HasTypeDB.tvmap (c :: Delta) Sigma Γ slot t1 t2 body eps_ d
         (hasTypeDB_cap_weaken hbody c)
@@ -1744,38 +1879,18 @@ theorem hasTypeDB_cap_weaken
         (hasTypeDB_cap_weaken hbody c) hSub
 
 /-- Internal helper for the tgrad case: lift cap_weaken through the
-    diff-extended body context. Since the cap context is effectively
-    a set for `HasTypeDB` purposes (no rule pattern-matches on Δ
-    beyond `diff :: _` in tgrad itself, and `diff` stays in place
-    because we prepend new capabilities), this commutes. -/
+    diff-extended body context by composing cap weakening with the
+    adjacent-capability swap above. -/
 theorem hasTypeDB_cap_weaken_tgrad_body
     {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
     {e : TermDB} {t : Typ} {eps : EffectRow}
     (h : HasTypeDB (Capability.diff :: Delta) Sigma Γ e t eps Γ')
     (c : Capability) :
     HasTypeDB (Capability.diff :: c :: Delta) Sigma Γ e t eps Γ' := by
-  -- We want `diff :: c :: Delta` as the output. Applying cap_weaken with
-  -- `c` to `h` gives `c :: diff :: Delta`. These two cap contexts differ
-  -- only in the order of `diff` and `c`. Since no rule inspects the
-  -- cap context's ordering (tgrad's premise requires `diff` anywhere
-  -- in Δ — but actually tgrad's premise is `Capability.diff :: Delta`
-  -- which IS a specific shape).
-  --
-  -- For tgrad's body we need `diff` at position 0. After cap_weaken,
-  -- `c :: diff :: Delta` has `c` at position 0, not `diff`. So we need
-  -- either (a) a swap lemma or (b) a different approach.
-  --
-  -- Observation: tgrad's outer rule produces a typing under `Delta`
-  -- (not `diff :: Delta`). The body runs under `diff :: Delta` but that
-  -- doesn't escape. So adding `c` to the outer `Delta` gives outer
-  -- `c :: Delta`, and the body runs under `diff :: c :: Delta`. The body's
-  -- new derivation is obtained by cap_weaken at position 1 (inside the
-  -- `diff :: _` frame) — which is NOT the same as cap_weaken at position 0.
-  --
-  -- The cleanest cleanup here is a cap_weaken variant indexed by position,
-  -- matching `weakening_insert_db`. For now, this helper documents the
-  -- obstacle and stays as a separate proof obligation.
-  sorry
+  have hweakened : HasTypeDB (c :: Capability.diff :: Delta) Sigma Γ e t eps Γ' :=
+    hasTypeDB_cap_weaken h c
+  exact hasTypeDB_cap_swap (Δ_pre := []) (a := c) (b := Capability.diff)
+    (Δ_suf := Delta) hweakened rfl
 
 theorem hasTypeDB_cap_weaken_clauses
     {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
