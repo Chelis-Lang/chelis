@@ -121,33 +121,7 @@ jobs:
           file target/release/chelis | grep -E 'arm64|aarch64'
 
       - name: Smoke test generated C with Accelerate
-        run: |
-          set -euo pipefail
-          tmpdir="$(mktemp -d)"
-          cat > "$tmpdir/matmul.ch" <<'EOF'
-          a = (a : tensor[2, 3, f32])
-          b = (b : tensor[3, 4, f32])
-          out = (matmul(a, b) : tensor[2, 4, f32])
-          EOF
-          ./target/release/chelis build "$tmpdir/matmul.ch" --output "$tmpdir/out"
-          grep -q 'cblas_sgemm' "$tmpdir/out/matmul.c"
-          grep -q 'chelis_blas.h' "$tmpdir/out/matmul.c"
-          cat > "$tmpdir/out/driver.c" <<'EOF'
-          #include "chelis_runtime.h"
-          void matmul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
-          int main(void) {
-              chelis_tensor *outputs[1] = {0};
-              matmul(NULL, 0, outputs, 1);
-              chelis_free(outputs[0]);
-              return 0;
-          }
-          EOF
-          clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/matmul.c" -o "$tmpdir/out/matmul.o"
-          clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/driver.c" -o "$tmpdir/out/driver.o"
-          clang "$tmpdir/out/matmul.o" "$tmpdir/out/driver.o" \
-            "$tmpdir/out/libchelis_runtime.a" -framework Accelerate -lpthread -ldl \
-            -o "$tmpdir/out/matmul_bin"
-          "$tmpdir/out/matmul_bin"
+        run: bash .github/scripts/smoke_macos_accelerate.sh ./target/release/chelis
 
       - name: Determine version
         id: version

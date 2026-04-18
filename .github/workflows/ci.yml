@@ -81,6 +81,38 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Build release artifacts
+        run: |
+          cargo build --release -p chelis-cli
+          cargo build --release -p chelis-runtime
+
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      - name: Verify packaged binary architecture
+        run: |
+          set -euo pipefail
+          file target/release/chelis | grep -E 'arm64|aarch64'
+
+      - name: Smoke test generated C with Accelerate
+        run: bash .github/scripts/smoke_macos_accelerate.sh ./target/release/chelis
+
+      - name: Stage darwin-arm64 tarball
+        run: |
+          set -euo pipefail
+          staging="chelis-ci-${GITHUB_SHA::8}-darwin-arm64"
+          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
+          cp target/release/chelis "$staging/bin/"
+          cp target/release/libchelis_runtime.a "$staging/lib/"
+          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
+          cp README.md "$staging/"
+          cp LICENSE "$staging/"
+          tar czf "${staging}.tar.gz" "$staging"
+          test -f "${staging}.tar.gz"
+
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest

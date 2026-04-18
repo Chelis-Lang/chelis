@@ -20,6 +20,7 @@ Current guarantees:
 
 Compiler selection:
 
-- native C compilation prefers `/usr/bin/gcc` when present; override with `CHELIS_CC`
+- native C compilation resolves through Chelis's shared platform toolchain:
+  `clang` + Accelerate on macOS, `gcc` + OpenBLAS on Linux; override with `CHELIS_CC`
 - native HIP compilation prefers `/usr/bin/hipcc` when present; override with
   `CHELIS_HIPCC`

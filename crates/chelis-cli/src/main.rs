@@ -822,7 +822,7 @@ fn cmd_build_c_result(
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
     if result.c_source.contains("int main(") {
         println!(
-            "Compile: {} -O2 {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            "Compile: {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
             toolchain.compiler,
             toolchain.compile_flags.join(" "),
             c_path.display(),

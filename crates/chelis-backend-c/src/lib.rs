@@ -180,8 +180,10 @@ mod tests {
     fn add_runtime_link(cmd: &mut Command, dir: &std::path::Path) {
         cmd.arg(format!("-L{}", dir.display()));
         cmd.arg("-lchelis_runtime");
-        cmd.arg("-lpthread");
-        cmd.arg("-ldl");
+        cmd.args(
+            crate::toolchain::runtime_toolchain(crate::toolchain::CodegenRequirements::default())
+                .link_flags,
+        );
     }
 
     // ---- Codegen API tests ----

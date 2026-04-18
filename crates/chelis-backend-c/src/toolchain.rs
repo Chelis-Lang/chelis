@@ -43,6 +43,10 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
 
     let mut compile_flags = Vec::new();
     let mut link_flags = vec!["-lm".to_string()];
+    if !cfg!(target_os = "macos") {
+        link_flags.push("-lpthread".to_string());
+        link_flags.push("-ldl".to_string());
+    }
     if openmp_enabled {
         compile_flags.push("-fopenmp".to_string());
         link_flags.push("-fopenmp".to_string());

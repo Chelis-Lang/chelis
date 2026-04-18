@@ -158,7 +158,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime", "-lpthread", "-ldl"]);
+    cmd.args(["-L.", "-lchelis_runtime"]);
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")
@@ -171,7 +171,7 @@ fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::proc
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.args(sources);
-    cmd.args(["-L.", "-lchelis_runtime", "-lpthread", "-ldl"]);
+    cmd.args(["-L.", "-lchelis_runtime"]);
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")

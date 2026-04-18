@@ -126,8 +126,6 @@ int main() {{
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
     cmd.arg(format!("-L{}", tmp.path().display()));
     cmd.arg("-lchelis_runtime");
-    cmd.arg("-lpthread");
-    cmd.arg("-ldl");
     cmd.args(&toolchain.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());

@@ -1055,8 +1055,6 @@ fn compile_and_run_c(
     }
     cmd.arg("-L").arg(temp.path());
     cmd.arg("-lchelis_runtime");
-    cmd.arg("-lpthread");
-    cmd.arg("-ldl");
     cmd.args(&toolchain.link_flags);
     cmd.arg("-o").arg(&bin);
 
