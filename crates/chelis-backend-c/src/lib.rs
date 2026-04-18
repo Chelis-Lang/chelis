@@ -12,10 +12,8 @@ pub struct CodegenResult {
     pub c_source: String,
     /// The generated C header declaration for the function.
     pub h_header: String,
-    /// Compiler flags required for the generated source.
-    pub compile_flags: Vec<String>,
-    /// Linker flags required for the generated source.
-    pub link_flags: Vec<String>,
+    /// Platform-neutral codegen requirements resolved later by the native toolchain layer.
+    pub requirements: toolchain::CodegenRequirements,
     /// Input slot labels in positional order. Repeated `Load(name)` nodes share one slot.
     pub input_labels: Vec<String>,
     /// Output slot labels in positional order.
@@ -40,8 +38,8 @@ pub struct CodegenOptions {
 ///
 /// Phase 0f codegen supports only `f32`/`bool` tensors.
 ///
-/// Returns a [`CodegenResult`] containing the generated code plus the required
-/// compile/link flags and positional input/output labels.
+/// Returns a [`CodegenResult`] containing the generated code plus the native-toolchain
+/// requirements and positional input/output labels.
 ///
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
@@ -59,8 +57,10 @@ pub fn codegen_host_program(
     CodegenResult {
         c_source,
         h_header,
-        compile_flags: vec!["-fopenmp".to_string()],
-        link_flags: vec!["-lm".to_string(), "-fopenmp".to_string()],
+        requirements: toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
         input_labels: Vec::new(),
         output_labels: Vec::new(),
         symbolic_dims: Vec::new(),
@@ -77,28 +77,21 @@ pub fn codegen_with_options(
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let mut compile_flags = vec!["-fopenmp".to_string()];
-    let mut link_flags = vec!["-lm".to_string(), "-fopenmp".to_string()];
-    if options.use_blas
+    let needs_blas = options.use_blas
         && dag.nodes().iter().any(|node| {
             matches!(node.op, chelis_ir::dag::RiscOp::Sum { .. })
                 && crate::blas::detect_matmul_pattern(dag, node.id).is_some()
-        })
-    {
-        link_flags.push("-lopenblas".to_string());
-    }
+        });
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
     let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
-    compile_flags.sort();
-    compile_flags.dedup();
-    link_flags.sort();
-    link_flags.dedup();
     CodegenResult {
         c_source,
         h_header,
-        compile_flags,
-        link_flags,
+        requirements: toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas,
+        },
         input_labels,
         output_labels,
         symbolic_dims,
@@ -138,6 +131,10 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
     }
 
+    fn runtime_blas_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_blas.h")
+    }
+
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = [
@@ -175,6 +172,8 @@ mod tests {
     fn copy_runtime_artifacts(dst: &std::path::Path) {
         let h_src = std::fs::read_to_string(runtime_header_path()).unwrap();
         write_temp_file(dst, "chelis_runtime.h", &h_src);
+        let blas_h_src = std::fs::read_to_string(runtime_blas_header_path()).unwrap();
+        write_temp_file(dst, "chelis_blas.h", &blas_h_src);
         std::fs::copy(runtime_library_path(), dst.join("libchelis_runtime.a")).unwrap();
     }
 
@@ -194,8 +193,13 @@ mod tests {
         let result = codegen(&dag, "my_func");
         assert!(result.c_source.contains("void my_func("));
         assert!(result.h_header.contains("void my_func("));
-        assert_eq!(result.compile_flags, vec!["-fopenmp"]);
-        assert_eq!(result.link_flags, vec!["-fopenmp", "-lm"]);
+        assert_eq!(
+            result.requirements,
+            toolchain::CodegenRequirements {
+                wants_openmp: true,
+                needs_blas: false,
+            }
+        );
         assert!(result.input_labels.is_empty());
         assert_eq!(result.output_labels, vec!["root0"]);
     }
@@ -292,7 +296,7 @@ mod tests {
         );
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
         let result = codegen(&dag, "test_fn");
-        assert!(!result.link_flags.iter().any(|flag| flag == "-lopenblas"));
+        assert!(!result.requirements.needs_blas);
         assert!(!result.c_source.contains("cblas_sgemm("));
     }
 
@@ -333,7 +337,8 @@ mod tests {
         );
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
         let result = codegen_with_options(&dag, "test_fn", CodegenOptions { use_blas: true });
-        assert!(result.link_flags.iter().any(|flag| flag == "-lopenblas"));
+        assert!(result.requirements.needs_blas);
+        assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
     }
 
@@ -373,6 +378,12 @@ mod tests {
         }
     }
 
+    fn test_toolchain(
+        requirements: crate::toolchain::CodegenRequirements,
+    ) -> crate::toolchain::NativeToolchain {
+        crate::toolchain::test_toolchain(requirements)
+    }
+
     fn gcc_can_link(extra_args: &[&str], source: &str) -> bool {
         if !gcc_available() {
             return false;
@@ -389,8 +400,19 @@ mod tests {
     }
 
     fn openmp_available() -> bool {
+        let toolchain = test_toolchain(crate::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        });
+        if !toolchain.openmp_enabled {
+            return false;
+        }
         gcc_can_link(
-            &["-fopenmp"],
+            &toolchain
+                .compile_flags
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             r#"
 #include <omp.h>
 int main(void) {
@@ -404,10 +426,22 @@ int main(void) {
     }
 
     fn openblas_available() -> bool {
+        let toolchain = test_toolchain(crate::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: true,
+        });
         gcc_can_link(
-            &["-lopenblas"],
+            &toolchain
+                .link_flags
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             r#"
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#else
 #include <cblas.h>
+#endif
 int main(void) {
     float a[1] = {1.0f};
     float b[1] = {2.0f};
@@ -586,15 +620,16 @@ int main() {{
         write_temp_file(tmp.path(), "main.c", &main_c);
         let bin_path = tmp.path().join("test_bin");
 
-        let mut compile_cmd = Command::new(crate::toolchain::c_compiler());
+        let toolchain = test_toolchain(result.requirements);
+        let mut compile_cmd = Command::new(&toolchain.compiler);
         apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
-        compile_cmd.args(&result.compile_flags);
+        compile_cmd.args(&toolchain.compile_flags);
         compile_cmd.args(extra_args);
         compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         compile_cmd.arg(tmp.path().join("model.c").to_str().unwrap());
         add_runtime_link(&mut compile_cmd, tmp.path());
-        compile_cmd.args(&result.link_flags);
+        compile_cmd.args(&toolchain.link_flags);
         compile_cmd.arg("-o");
         compile_cmd.arg(bin_path.to_str().unwrap());
         let compile = compile_cmd.output().unwrap();
@@ -743,14 +778,15 @@ int main(void) {{
         write_temp_file(tmp.path(), "main.c", &main_c);
         let bin_path = tmp.path().join("test_cases");
 
-        let mut compile_cmd = Command::new(crate::toolchain::c_compiler());
+        let toolchain = test_toolchain(result.requirements);
+        let mut compile_cmd = Command::new(&toolchain.compiler);
         apply_c_test_flags(&mut compile_cmd);
         compile_cmd.args(["-O2"]);
-        compile_cmd.args(&result.compile_flags);
+        compile_cmd.args(&toolchain.compile_flags);
         compile_cmd.arg(tmp.path().join("main.c").to_str().unwrap());
         compile_cmd.arg(tmp.path().join("model.c").to_str().unwrap());
         add_runtime_link(&mut compile_cmd, tmp.path());
-        compile_cmd.args(&result.link_flags);
+        compile_cmd.args(&toolchain.link_flags);
         compile_cmd.arg("-o");
         compile_cmd.arg(bin_path.to_str().unwrap());
         let compile = compile_cmd.output().unwrap();
@@ -1619,14 +1655,15 @@ int main(void) {
 }
 "#;
         write_temp_file(tmp.path(), "main.c", main_c);
-        let mut cmd = Command::new(crate::toolchain::c_compiler());
+        let toolchain = test_toolchain(result.requirements);
+        let mut cmd = Command::new(&toolchain.compiler);
         apply_c_test_flags(&mut cmd);
         cmd.args(["-O2"])
-            .args(&result.compile_flags)
+            .args(&toolchain.compile_flags)
             .arg(tmp.path().join("main.c").to_str().unwrap())
             .arg(tmp.path().join("model.c").to_str().unwrap());
         add_runtime_link(&mut cmd, tmp.path());
-        cmd.args(&result.link_flags)
+        cmd.args(&toolchain.link_flags)
             .arg("-o")
             .arg(tmp.path().join("test_blas").to_str().unwrap());
         let out = cmd.output().unwrap();

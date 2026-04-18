@@ -26,13 +26,18 @@ sudo dnf install gcc openblas-devel valgrind
 sudo apt-get install gcc libopenblas-dev valgrind
 
 # macOS
-brew install gcc openblas
+xcode-select --install
 ```
 
 Required:
-- **GCC** (or clang) — compiles generated C code
-- **OpenBLAS** — BLAS matmul path (`cblas_sgemm`)
-- **OpenMP** — ships with GCC (`-fopenmp`)
+- **Linux:** GCC + OpenBLAS for BLAS-backed matmul and OpenMP loop parallelism
+- **macOS Apple Silicon:** Apple clang + Accelerate (`vecLib`) are supported out of the box
+- **Homebrew GCC on macOS:** optional performance path when you want OpenMP-enabled CPU loops
+
+Optional on macOS:
+```sh
+brew install gcc
+```
 
 Optional:
 - **Valgrind** — memory leak tests on generated C

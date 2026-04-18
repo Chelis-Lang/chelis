@@ -15,6 +15,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
 libc = "0.2"
 libloading = "0.8"

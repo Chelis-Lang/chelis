@@ -84,7 +84,9 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
+    let blas_h_src = std::fs::read_to_string(rt_dir.join("chelis_blas.h")).unwrap();
     write_temp_file(tmp.path(), "chelis_runtime.h", &h_src);
+    write_temp_file(tmp.path(), "chelis_blas.h", &blas_h_src);
     std::fs::copy(
         runtime_library_path(),
         tmp.path().join("libchelis_runtime.a"),
@@ -112,26 +114,28 @@ int main() {{
     write_temp_file(tmp.path(), "main.c", &main_c);
     let bin_path = tmp.path().join("test_bin");
 
-    let mut cmd = Command::new(chelis_backend_c::toolchain::c_compiler());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    let mut cmd = Command::new(&toolchain.compiler);
     let extra = c_test_extra_flags();
     if !extra.is_empty() {
         cmd.args(&extra);
     }
     cmd.args(["-O2"]);
-    cmd.args(&result.compile_flags);
+    cmd.args(&toolchain.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
     cmd.arg(format!("-L{}", tmp.path().display()));
     cmd.arg("-lchelis_runtime");
     cmd.arg("-lpthread");
     cmd.arg("-ldl");
-    cmd.args(&result.link_flags);
+    cmd.args(&toolchain.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());
     let compile = cmd.output().unwrap();
     assert!(
         compile.status.success(),
-        "gcc failed:\nstderr: {}\nC source:\n{}",
+        "{} failed:\nstderr: {}\nC source:\n{}",
+        toolchain.compiler,
         String::from_utf8_lossy(&compile.stderr),
         result.c_source
     );

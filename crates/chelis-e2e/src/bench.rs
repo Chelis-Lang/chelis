@@ -531,8 +531,7 @@ fn run_training_backend(
         prefix,
         &[("train_model.c", &train.c_source)],
         &main_source,
-        &train.compile_flags,
-        &train.link_flags,
+        train.requirements,
     ) {
         Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
         Err(err) => failed(err),
@@ -592,8 +591,7 @@ fn run_forward_backend(
                 prefix,
                 &[("model.c", &programs.cpu.c_source)],
                 &main_source,
-                &programs.cpu.compile_flags,
-                &programs.cpu.link_flags,
+                programs.cpu.requirements,
             ) {
                 Ok((compile_ms, stdout)) => parse_run_output(stdout, compile_ms, None, None),
                 Err(err) => failed(err),
@@ -985,8 +983,7 @@ fn c_shim(hip: &HipCodegenResult) -> CCodegenResult {
     CCodegenResult {
         c_source: hip.c_source.clone(),
         h_header: hip.h_header.clone(),
-        compile_flags: hip.compile_flags.clone(),
-        link_flags: hip.link_flags.clone(),
+        requirements: chelis_backend_c::toolchain::CodegenRequirements::default(),
         input_labels: hip.input_labels.clone(),
         output_labels: hip.output_labels.clone(),
         symbolic_dims: hip.symbolic_dims.clone(),
@@ -1036,8 +1033,7 @@ fn compile_and_run_c(
     prefix: &str,
     model_sources: &[(&str, &str)],
     main_source: &str,
-    compile_flags: &[String],
-    link_flags: &[String],
+    requirements: chelis_backend_c::toolchain::CodegenRequirements,
 ) -> Result<(f64, String), String> {
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
     write_runtime_files(temp.path(), false)?;
@@ -1049,9 +1045,10 @@ fn compile_and_run_c(
         .map_err(|e| format!("write main.c failed: {e}"))?;
 
     let bin = temp.path().join(prefix);
-    let mut cmd = Command::new(chelis_backend_c::toolchain::c_compiler());
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(requirements);
+    let mut cmd = Command::new(&toolchain.compiler);
     cmd.arg("-O3");
-    cmd.args(compile_flags);
+    cmd.args(&toolchain.compile_flags);
     cmd.arg(temp.path().join("main.c"));
     for (name, _) in model_sources {
         cmd.arg(temp.path().join(name));
@@ -1060,17 +1057,18 @@ fn compile_and_run_c(
     cmd.arg("-lchelis_runtime");
     cmd.arg("-lpthread");
     cmd.arg("-ldl");
-    cmd.args(link_flags);
+    cmd.args(&toolchain.link_flags);
     cmd.arg("-o").arg(&bin);
 
     let start = Instant::now();
     let output = cmd
         .output()
-        .map_err(|e| format!("gcc failed to start: {e}"))?;
+        .map_err(|e| format!("{} failed to start: {e}", toolchain.compiler))?;
     let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
     if !output.status.success() {
         return Err(format!(
-            "gcc failed:\n{}",
+            "{} failed:\n{}",
+            toolchain.compiler,
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -1236,6 +1234,12 @@ fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
             .map_err(|e| format!("read chelis_runtime.h failed: {e}"))?,
     )
     .map_err(|e| format!("write chelis_runtime.h failed: {e}"))?;
+    fs::write(
+        dir.join("chelis_blas.h"),
+        fs::read_to_string(cpu_runtime.join("chelis_blas.h"))
+            .map_err(|e| format!("read chelis_blas.h failed: {e}"))?,
+    )
+    .map_err(|e| format!("write chelis_blas.h failed: {e}"))?;
     fs::copy(cpu_runtime_library(), dir.join("libchelis_runtime.a"))
         .map_err(|e| format!("copy libchelis_runtime.a failed: {e}"))?;
     if hip {

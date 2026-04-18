@@ -1,58 +1,118 @@
-//! Cross-platform toolchain probing for Chelis C-backend tests and harnesses.
-//!
-//! The project targets Linux/x86_64 with real GCC, where `gcc` is the right
-//! default. On macOS, `gcc` is typically a wrapper around Apple clang, which
-//! does not accept `-fopenmp`. This module picks a compiler that supports the
-//! flags the codegen emits.
+//! Cross-platform toolchain resolution for Chelis CPU codegen consumers.
 
 use std::process::Command;
-use std::sync::OnceLock;
 
-static C_COMPILER: OnceLock<String> = OnceLock::new();
-
-// Ordered preference for a real OpenMP-capable GCC on macOS when `gcc` is
-// Apple clang. Newer versions first. Homebrew installs these on PATH.
-const MACOS_GCC_FALLBACKS: &[&str] = &["gcc-15", "gcc-14", "gcc-13", "gcc-12"];
-
-/// Return the C compiler binary name to use for tests and harness compiles.
-///
-/// Resolution order:
-/// 1. `CHELIS_TEST_CC` environment variable (explicit override).
-/// 2. `gcc` when it is real GCC (Linux default; brew gcc aliased as `gcc`).
-/// 3. On macOS, the first available `gcc-NN` from `MACOS_GCC_FALLBACKS`.
-/// 4. `gcc` as a last resort so downstream `--version` probes report clearly.
-pub fn c_compiler() -> String {
-    C_COMPILER.get_or_init(resolve_c_compiler).clone()
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodegenRequirements {
+    pub wants_openmp: bool,
+    pub needs_blas: bool,
 }
 
-fn resolve_c_compiler() -> String {
-    if let Ok(override_cc) = std::env::var("CHELIS_TEST_CC")
-        && !override_cc.is_empty()
-    {
-        return override_cc;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlasProvider {
+    None,
+    OpenBlas,
+    Accelerate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeToolchain {
+    pub compiler: String,
+    pub compile_flags: Vec<String>,
+    pub link_flags: Vec<String>,
+    pub openmp_enabled: bool,
+    pub blas_provider: BlasProvider,
+}
+
+/// Legacy helper kept for older tests that only need the compiler name.
+pub fn c_compiler() -> String {
+    test_toolchain(CodegenRequirements::default()).compiler
+}
+
+pub fn runtime_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
+    resolve_toolchain(requirements, &["CHELIS_CC"])
+}
+
+pub fn test_toolchain(requirements: CodegenRequirements) -> NativeToolchain {
+    resolve_toolchain(requirements, &["CHELIS_TEST_CC", "CHELIS_CC"])
+}
+
+fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) -> NativeToolchain {
+    let compiler = resolve_compiler(override_vars);
+    let openmp_enabled = requirements.wants_openmp && is_real_gcc(&compiler);
+
+    let mut compile_flags = Vec::new();
+    let mut link_flags = vec!["-lm".to_string()];
+    if openmp_enabled {
+        compile_flags.push("-fopenmp".to_string());
+        link_flags.push("-fopenmp".to_string());
+    }
+
+    let blas_provider = if requirements.needs_blas {
+        if cfg!(target_os = "macos") {
+            link_flags.push("-framework".to_string());
+            link_flags.push("Accelerate".to_string());
+            BlasProvider::Accelerate
+        } else {
+            link_flags.push("-lopenblas".to_string());
+            BlasProvider::OpenBlas
+        }
+    } else {
+        BlasProvider::None
+    };
+
+    NativeToolchain {
+        compiler,
+        compile_flags,
+        link_flags,
+        openmp_enabled,
+        blas_provider,
+    }
+}
+
+fn resolve_compiler(override_vars: &[&str]) -> String {
+    for var in override_vars {
+        if let Ok(override_cc) = std::env::var(var)
+            && !override_cc.is_empty()
+        {
+            return override_cc;
+        }
+    }
+    if cfg!(target_os = "macos") {
+        return "clang".to_string();
     }
     if is_real_gcc("gcc") {
         return "gcc".to_string();
     }
-    if cfg!(target_os = "macos") {
-        for candidate in MACOS_GCC_FALLBACKS {
-            if is_real_gcc(candidate) {
-                return (*candidate).to_string();
-            }
-        }
-    }
     "gcc".to_string()
 }
 
-fn is_real_gcc(bin: &str) -> bool {
+pub fn is_real_gcc(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--version").output() else {
         return false;
     };
     if !output.status.success() {
         return false;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Apple clang aliases `gcc` and reports "Apple clang version ...".
-    // Real GCC reports "gcc (<distro/tag>) N.N.N".
+    let text = compiler_version_text(&output);
     !text.contains("Apple clang") && !text.contains("clang version")
+}
+
+pub fn is_apple_clang(bin: &str) -> bool {
+    let Ok(output) = Command::new(bin).arg("--version").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = compiler_version_text(&output);
+    text.contains("Apple clang")
+}
+
+fn compiler_version_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        return stdout.into_owned();
+    }
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }

@@ -33,6 +33,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const BLAS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_blas.h"
+));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
@@ -161,7 +165,11 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             }
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let fused = chelis_ir::fuse::fuse(&compiled.dag);
-            let result = chelis_backend_c::codegen(&fused, &func_name);
+            let result = chelis_backend_c::codegen_with_options(
+                &fused,
+                &func_name,
+                chelis_backend_c::CodegenOptions { use_blas: true },
+            );
             Ok(compiled_execution_artifact(
                 request.target,
                 &func_name,
@@ -687,6 +695,7 @@ fn compile_result_c(
     func_name: &str,
     result: &CodegenResult,
 ) -> CompileResult {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
     CompileResult {
         target,
         entry_name: func_name.to_string(),
@@ -703,9 +712,13 @@ fn compile_result_c(
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
             },
+            GeneratedFile {
+                path: "chelis_blas.h".to_string(),
+                contents: BLAS_H.to_string(),
+            },
         ],
-        compile_flags: result.compile_flags.clone(),
-        link_flags: result.link_flags.clone(),
+        compile_flags: toolchain.compile_flags,
+        link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
     }
 }
@@ -747,6 +760,9 @@ fn compile_result_hip_host(
     func_name: &str,
     result: &CodegenResult,
 ) -> CompileResult {
+    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    toolchain.compile_flags.retain(|flag| flag != "-fopenmp");
+    toolchain.link_flags.retain(|flag| flag != "-fopenmp");
     CompileResult {
         target,
         entry_name: func_name.to_string(),
@@ -768,8 +784,8 @@ fn compile_result_hip_host(
                 contents: HIP_RUNTIME_H.to_string(),
             },
         ],
-        compile_flags: result.compile_flags.clone(),
-        link_flags: result.link_flags.clone(),
+        compile_flags: toolchain.compile_flags,
+        link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
     }
 }

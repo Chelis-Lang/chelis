@@ -55,7 +55,7 @@ impl CEmitter {
 
         e.line("#include \"chelis_runtime.h\"");
         if e.use_blas {
-            e.line("#include <cblas.h>");
+            e.line("#include \"chelis_blas.h\"");
         }
         e.line(
             "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {",

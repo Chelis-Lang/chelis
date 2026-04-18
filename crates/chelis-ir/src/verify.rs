@@ -5,6 +5,11 @@ use crate::dag::{Dag, DimInfo, RiscOp};
 use chelis_types::types::Prim;
 
 /// Verify structural invariants of the DAG. Returns a list of error messages (empty = valid).
+// `collapsible_match` (rust 1.95+) flags `match { X => { if cond { ... } } }` patterns.
+// The validation arms here have large bodies and no else branch, so converting to match
+// guards would require dedenting ~90 lines per arm with no readability win; the `if`
+// inside an otherwise-empty arm body is the clearer expression of intent.
+#[allow(clippy::collapsible_match)]
 pub fn verify(dag: &Dag) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];

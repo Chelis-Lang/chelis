@@ -323,22 +323,24 @@ g = grad(loss_fn)
 // -------------------------------------------------------------------------
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .current_dir(out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            source,
-            "-L.",
-            "-lchelis_runtime",
-            "-lm",
-            "-lpthread",
-            "-ldl",
-            "-o",
-            binary,
-        ])
-        .status()
-        .expect("gcc should run")
+    let needs_blas = fs::read_to_string(out_dir.join(source))
+        .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
+        .unwrap_or(false);
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas,
+        },
+    );
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.arg(source);
+    cmd.args(["-L.", "-lchelis_runtime", "-lpthread", "-ldl"]);
+    cmd.args(&toolchain.link_flags);
+    cmd.args(["-o", binary]);
+    cmd.status().expect("gcc should run")
 }
 
 fn build_and_run(reef_home: &Path, app_pkg: &Path) -> (std::process::ExitStatus, String, String) {

@@ -1414,14 +1414,14 @@ fn validate_phase0e_builtin_symbolic_requirements(
                 }
             }
         }
-        "mean" => {
-            if phase0e_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
-                    "Phase 0e builtin `mean` requires a concrete reduced axis extent".to_string(),
-                    vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
-                ));
-            }
+        "mean"
+            if phase0e_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) =>
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                "Phase 0e builtin `mean` requires a concrete reduced axis extent".to_string(),
+                vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
+            ));
         }
         "layer_norm" => {
             let x_dims = list

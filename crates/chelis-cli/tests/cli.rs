@@ -131,48 +131,60 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+fn generated_source_needs_blas(out_dir: &Path, sources: &[&str]) -> bool {
+    sources.iter().any(|source| {
+        fs::read_to_string(out_dir.join(source))
+            .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
+            .unwrap_or(false)
+    })
+}
+
+fn cpu_toolchain_for_sources(
+    out_dir: &Path,
+    sources: &[&str],
+) -> chelis_backend_c::toolchain::NativeToolchain {
+    chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: generated_source_needs_blas(out_dir, sources),
+        },
+    )
+}
+
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
-    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .current_dir(out_dir)
-        .args([
-            "-O2",
-            "-fopenmp",
-            source,
-            "-L.",
-            "-lchelis_runtime",
-            "-lm",
-            "-lpthread",
-            "-ldl",
-            "-o",
-            binary,
-        ])
-        .status()
-        .expect("gcc should run")
+    let toolchain = cpu_toolchain_for_sources(out_dir, &[source]);
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.arg(source);
+    cmd.args(["-L.", "-lchelis_runtime", "-lpthread", "-ldl"]);
+    cmd.args(&toolchain.link_flags);
+    cmd.args(["-o", binary]);
+    cmd.status().expect("gcc should run")
 }
 
 fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::process::ExitStatus {
-    let mut cmd = StdCommand::new(chelis_backend_c::toolchain::c_compiler());
+    let toolchain = cpu_toolchain_for_sources(out_dir, sources);
+    let mut cmd = StdCommand::new(&toolchain.compiler);
     cmd.current_dir(out_dir);
-    cmd.args(["-O2", "-fopenmp"]);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
     cmd.args(sources);
-    cmd.args([
-        "-L.",
-        "-lchelis_runtime",
-        "-lm",
-        "-lpthread",
-        "-ldl",
-        "-o",
-        binary,
-    ]);
+    cmd.args(["-L.", "-lchelis_runtime", "-lpthread", "-ldl"]);
+    cmd.args(&toolchain.link_flags);
+    cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")
 }
 
 fn gcc_compile_generated(out_dir: &Path, source: &str) -> std::process::ExitStatus {
-    StdCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .current_dir(out_dir)
-        .args(["-O2", "-fopenmp", "-I.", "-c", source])
-        .status()
-        .expect("gcc should run")
+    let toolchain = cpu_toolchain_for_sources(out_dir, &[source]);
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.args(["-I.", "-c", source]);
+    cmd.status().expect("gcc should run")
 }
 
 fn hipcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
@@ -1232,11 +1244,13 @@ def main(
 
     assert!(app_pkg.join("reef.lock").exists());
     assert!(out_dir.join("main.c").exists());
-    let status = StdCommand::new(chelis_backend_c::toolchain::c_compiler())
-        .current_dir(&out_dir)
-        .args(["-O2", "-fopenmp", "-c", "main.c", "-o", "main.o"])
-        .status()
-        .expect("gcc should run");
+    let toolchain = cpu_toolchain_for_sources(&out_dir, &["main.c"]);
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(&out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.args(["-c", "main.c", "-o", "main.o"]);
+    let status = cmd.status().expect("gcc should run");
     assert!(
         status.success(),
         "gcc object compile failed with status {status}"

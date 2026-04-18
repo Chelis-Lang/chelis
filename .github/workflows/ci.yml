@@ -62,6 +62,24 @@ jobs:
           git commit -m "Update LOC report"
           git push || echo "LOC report push skipped: token lacks write access"
 
+  check-macos:
+    name: Build and Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest

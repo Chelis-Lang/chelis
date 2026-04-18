@@ -480,32 +480,28 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             if get_tag(list) == Some("handle-effect") {
                 let kids = children(list);
                 match effect_name(list) {
-                    Some("random") => {
-                        if kids.first().and_then(int_literal).is_none() {
-                            errors.push(EffectError {
-                                kind: EffectErrorKind::InvalidHandler,
-                                message: "with seed(...) currently requires an int literal seed"
+                    Some("random") if kids.first().and_then(int_literal).is_none() => {
+                        errors.push(EffectError {
+                            kind: EffectErrorKind::InvalidHandler,
+                            message: "with seed(...) currently requires an int literal seed"
+                                .to_string(),
+                            suggestions: vec![
+                                "Use `with seed(42) { ... }` with an explicit integer seed"
                                     .to_string(),
-                                suggestions: vec![
-                                    "Use `with seed(42) { ... }` with an explicit integer seed"
-                                        .to_string(),
-                                ],
-                            });
-                        }
+                            ],
+                        });
                     }
-                    Some("resource") => {
-                        if kids.first().and_then(string_literal).is_none() {
-                            errors.push(EffectError {
-                                kind: EffectErrorKind::InvalidHandler,
-                                message:
-                                    "with device(...) currently requires a string literal device"
-                                        .to_string(),
-                                suggestions: vec![
-                                    "Use `with device(\"gpu:0\") { ... }` with an explicit device literal"
-                                        .to_string(),
-                                ],
-                            });
-                        }
+                    Some("resource") if kids.first().and_then(string_literal).is_none() => {
+                        errors.push(EffectError {
+                            kind: EffectErrorKind::InvalidHandler,
+                            message:
+                                "with device(...) currently requires a string literal device"
+                                    .to_string(),
+                            suggestions: vec![
+                                "Use `with device(\"gpu:0\") { ... }` with an explicit device literal"
+                                    .to_string(),
+                            ],
+                        });
                     }
                     _ => {}
                 }

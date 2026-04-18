@@ -1,6 +1,6 @@
 # Phase 3j-pre — Compiler Release Infrastructure
 
-Status: shipped through `v0.1.7`.
+Status: shipped through `v0.1.7`; platform expansion work targets the next minor release.
 
 This document describes how the Chelis compiler binary is released and how
 downstream shells (Nautilus, Coral, and any future domain packages) should
@@ -33,14 +33,15 @@ limitations section).
 Release is driven by `.github/workflows/release.yml`:
 
 - **Trigger:** pushing a tag matching `v*` to `origin/main`.
-- **Platform:** `ubuntu-latest` (Linux x86_64 only in this phase).
+- **Platforms:** `ubuntu-latest` for `linux-x86_64` and `macos-latest` for `darwin-arm64`.
 - **Build:** `cargo build --release -p chelis-cli`.
-- **Packaging:** the stripped `chelis` binary, plus `README.md` and
-  `LICENSE`, are tarred as
-  `chelis-<version>-linux-x86_64.tar.gz` with a sibling `.sha256`
-  file.
-- **Publish:** `softprops/action-gh-release@v2` attaches the tarball and
-  checksum to an auto-generated GitHub Release on the tag.
+- **Packaging:** each release stages the stripped `chelis` binary, `libchelis_runtime.a`,
+  `chelis_runtime.h`, `chelis_blas.h`, `README.md`, and `LICENSE` into a platform tarball.
+- **Artifacts:** releases attach
+  `chelis-<version>-linux-x86_64.tar.gz` and
+  `chelis-<version>-darwin-arm64.tar.gz`, each with a sibling `.sha256` file.
+- **Publish:** build jobs upload artifacts and a final `softprops/action-gh-release@v2`
+  step attaches them to the tag.
 
 The workflow also exposes a `workflow_dispatch` trigger so the build path
 can be exercised on a branch without publishing. Dispatch runs upload the
@@ -53,17 +54,19 @@ section is needed in the root `Cargo.toml`.
 
 ## Platform Scope
 
-The `v0.1.x` line supports **Linux x86_64 only**. macOS (x86_64 and aarch64) and
-Linux aarch64 are explicit non-goals for this phase. When those platforms
-are added, the expectation is:
+Historical note: the `v0.1.x` line shipped as **Linux x86_64 only**.
 
-- Extend the workflow `jobs` matrix with `macos-latest` and an
-  `aarch64-unknown-linux-gnu` native runner (no cross-compilation).
-- Bump to `v0.2.0` (or later) with a dedicated "platform expansion" phase
-  entry that owns the acceptance oracle.
+The platform-expansion release line supports:
 
-Downstream shells should not assume macOS or aarch64 support in the
-`v0.1.x` series.
+- `linux-x86_64`
+- `darwin-arm64` (Apple Silicon)
+
+Support contract:
+
+- macOS support is CPU-first only.
+- The default macOS path is Apple clang + Accelerate.
+- Homebrew GCC is optional for OpenMP-enabled CPU loops.
+- Intel macOS and Linux aarch64 remain out of scope for this release line.
 
 ## Pinning the Toolchain in `reef.toml`
 
@@ -79,9 +82,8 @@ Meaning:
 
 - `=0.1.7` is an exact match. Until Chelis stabilizes its surface,
   downstream shells should prefer exact pins over caret or tilde ranges.
-- `reef` resolves the pin by downloading the matching tarball from the
-  GitHub Releases page of `Chelis-Lang/chelis`:
-  `https://github.com/Chelis-Lang/chelis/releases/download/v0.1.7/chelis-v0.1.7-linux-x86_64.tar.gz`
+- `reef` resolves the pin by downloading the matching platform tarball from the
+  GitHub Releases page of `Chelis-Lang/chelis`.
 - The `.sha256` sibling file is the expected checksum.
 
 When a shell needs a newer compiler surface, it should bump its pin in a

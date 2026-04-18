@@ -1417,13 +1417,8 @@ impl LowerCtx {
             match val_expr {
                 Expr::Atom(Atom::Int(n), _) => *n as f64,
                 Expr::Atom(Atom::Float(f), _) => *f,
-                Expr::Atom(Atom::Bool(b), _) => {
-                    if *b {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
+                Expr::Atom(Atom::Bool(true), _) => 1.0,
+                Expr::Atom(Atom::Bool(false), _) => 0.0,
                 _ => 0.0,
             }
         } else {

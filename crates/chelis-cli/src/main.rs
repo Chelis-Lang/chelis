@@ -15,6 +15,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const BLAS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_blas.h"
+));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
@@ -87,6 +91,7 @@ fn copy_runtime_artifacts(
     include_hip_runtime: bool,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
     if include_hip_runtime {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
     }
@@ -770,7 +775,11 @@ fn cmd_build_c(
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_c::codegen(dag, func_name);
+    let result = chelis_backend_c::codegen_with_options(
+        dag,
+        func_name,
+        chelis_backend_c::CodegenOptions { use_blas: true },
+    );
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     cmd_build_c_result(result, func_name, output, &symbolic_dims)
 }
@@ -802,33 +811,30 @@ fn cmd_build_c_result(
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
-        "Wrote {} and {}",
+        "Wrote {}, {}, and {}",
         runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("chelis_blas.h").display(),
         runtime_dir.join("libchelis_runtime.a").display()
     );
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
-    let mut flags: Vec<&str> = result
-        .compile_flags
-        .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    flags.sort();
-    flags.dedup();
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
     if result.c_source.contains("int main(") {
         println!(
-            "Compile: gcc -O2 {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
-            flags.join(" "),
+            "Compile: {} -O2 {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            toolchain.compiler,
+            toolchain.compile_flags.join(" "),
             c_path.display(),
             runtime_dir.display(),
+            toolchain.link_flags.join(" "),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: gcc -O2 {} -c {}",
-            flags.join(" "),
+            "Compile object: {} -O2 {} -c {}",
+            toolchain.compiler,
+            toolchain.compile_flags.join(" "),
             c_path.display()
         );
     }
@@ -864,33 +870,39 @@ fn cmd_build_hip_host(
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
-        "Wrote runtime: {}, {}, {}",
+        "Wrote runtime: {}, {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("chelis_blas.h").display(),
         runtime_dir.join("libchelis_runtime.a").display(),
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
 
-    let mut flags: Vec<&str> = result
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    let mut compile_flags = cpu_toolchain
         .compile_flags
         .iter()
-        .chain(result.link_flags.iter())
-        .map(|s| s.as_str())
-        .collect();
-    flags.sort();
-    flags.dedup();
-    flags.retain(|flag| *flag != "-fopenmp");
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    compile_flags.retain(|flag| *flag != "-fopenmp");
+    let mut link_flags = cpu_toolchain
+        .link_flags
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    link_flags.retain(|flag| *flag != "-fopenmp");
     if result.c_source.contains("int main(") {
         println!(
-            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
-            flags.join(" "),
+            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            compile_flags.join(" "),
             c_path.display(),
             runtime_dir.display(),
+            link_flags.join(" "),
             c_path.with_extension("").display()
         );
     } else {
         println!(
             "Compile object: hipcc {} -c {}",
-            flags.join(" "),
+            compile_flags.join(" "),
             c_path.display()
         );
     }
