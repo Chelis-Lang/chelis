@@ -160,11 +160,7 @@ pub fn run(options: CoveOptions) -> Result<()> {
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             if event::poll(Duration::from_millis(100)).context("poll Cove terminal events")? {
                 match event::read().context("read Cove terminal event")? {
-                    Event::Key(key) => {
-                        if app.handle_key(key) {
-                            break;
-                        }
-                    }
+                    Event::Key(key) if app.handle_key(key) => break,
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
