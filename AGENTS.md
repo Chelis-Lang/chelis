@@ -149,23 +149,45 @@ Default-gate discipline:
 Phase-specific manual gates must be called out explicitly when they are not part of the
 default workspace run.
 
-## Local HIP Environment
+## Supported Development Environments
 
-This repository is currently being worked on from a real AMD/ROCm machine, not a
-CPU-only dev box.
+This repository targets two classes of developer environment. Code, tests, docs, and
+scripts must stay portable across both and must not hard-code any single host, user,
+distro, shell, or GPU vendor.
 
-- Host OS: Fedora 43 (`Linux fedora 6.18.16-200.fc43.x86_64`)
-- CPU marketing name from `rocminfo`: `AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`
-- GPU marketing name from `rocminfo`: `Radeon 8060S Graphics`
-- ROCm ISA from `rocminfo`: `amdgcn-amd-amdhsa--gfx1100`
-- `hipcc` on PATH: HIP `6.4.43484-9999`
-- `rocminfo` is available and should be treated as the source of truth for local GPU
-  probing
-- `rocm-smi` may be absent; do not assume it exists before using it in instructions or
-  validation scripts
+- **CPU-only host** (macOS on arm64, or Linux on x86_64/arm64 without a usable GPU).
+  The default workspace gate (`cargo build/test/clippy/fmt`, `python3
+  proof/scripts/check_toolchain.py`, and the WS3 Leanstral/vibe loop) must work here.
+  No ROCm, no CUDA, no `rocminfo`/`rocm-smi`/`nvidia-smi`.
+- **GPU-enabled Linux host** (currently validated on AMD/ROCm; NVIDIA/CUDA may be
+  added later). Adds the HIP/ROCm manual gates on top of the CPU-only gate. Required
+  tools are probed via `shutil.which` — do not assume `rocminfo`, `rocm-smi`, `hipcc`,
+  `nvidia-smi`, or `nvcc` exist without guarding for them.
 
-Implication for agent work: on this machine, ignored/manual HIP validation gates should
-be treated as runnable unless they require a separate missing prerequisite.
+### Portability rules for agents
+
+- Never hard-code absolute paths like `/home/<user>/...` or `/Users/<user>/...` into
+  committed code or docs. Use `$HOME`, `Path.home()`, or `~` in user-facing prose; use
+  repo-relative paths (`PROOF_ROOT`, `REPO_ROOT`) for in-repo references.
+- Never hard-code a single shell rc file. Say "the login shell's rc file (e.g.
+  `~/.bashrc`, `~/.zshrc`)" rather than picking one.
+- Never hard-code a package manager. If install steps need one, list the common ones
+  (`brew`, `apt`, `dnf`) or defer to the upstream installer.
+- Probe the current environment at runtime (`uname`, `shutil.which`, `Path.home()`,
+  `platform.system()`) rather than inheriting assumptions from a previous session.
+- When a gate is inherently GPU-only, say so explicitly and describe which capability
+  is needed (e.g. "requires a working `hipcc` and a ROCm-compatible GPU"), not which
+  specific machine runs it. On CPU-only hosts, such gates are blocked-on-environment,
+  not failed.
+- A new developer on a different OS or GPU vendor should be able to follow the docs
+  without patching anything. If you find a spot that fails that test, fix it in the
+  same change set as whatever you were doing.
+
+### Reference hardware
+
+The GPU gates were last exercised on a Fedora 43 workstation with an AMD Radeon 8060S
+(ROCm ISA `amdgcn-amd-amdhsa--gfx1100`, HIP `6.4.x`). This is a known-good witness,
+not a required configuration.
 
 ## Manual Gates
 
@@ -219,8 +241,9 @@ When writing or rewriting Surf in this repository:
 - `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
 - `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
 - Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
-- On this workstation specifically, HIP manual gates can use the local `hipcc` + ROCm
-  stack directly; prefer `rocminfo` for environment confirmation
+- HIP manual gates require a GPU-enabled Linux host with `hipcc` + ROCm on PATH; on
+  such hosts, prefer `rocminfo` for environment confirmation. On CPU-only hosts these
+  gates are blocked-on-environment — see "Supported Development Environments" above
 
 ## Shared Local Skills
 

@@ -32,7 +32,7 @@ Claude Code drives Vibe in programmatic mode (`-p`). Leanstral reasons, calls `l
   curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
     | sh -s -- -y --default-toolchain stable
   ```
-- **PATH:** `~/.elan/bin` must be on PATH. Persisted in `~/.bashrc`.
+- **PATH:** `~/.elan/bin` must be on PATH. Persist in the login shell's rc file (`~/.bashrc` on bash, `~/.zshrc` on zsh).
 - **Verify:** `lean --version` → `Lean (version 4.29.0, ...)`, `lake --version` → `Lake version 5.0.0-src+...`.
 - Any new `lake` project created under `lean/` should inherit `lean-toolchain` to stay pinned.
 
@@ -40,7 +40,7 @@ Claude Code drives Vibe in programmatic mode (`-p`). Leanstral reasons, calls `l
 
 - **Package:** `mistral-vibe` (PyPI, installed as a `uv tool`)
 - **Minimum version:** 2.5.0
-- **Installed version:** 2.7.4
+- **Installed version:** 2.7.6 (checked 2026-04-18 on macOS arm64; 2.7.4 was confirmed on Fedora earlier)
 - **Install:**
   ```
   curl -LsSf https://mistral.ai/vibe/install.sh | bash
@@ -56,7 +56,7 @@ Claude Code drives Vibe in programmatic mode (`-p`). Leanstral reasons, calls `l
 
 Leanstral (`labs-leanstral-2603`) is served by Mistral as a Labs model. Prerequisites:
 
-- **API key** exported as `MISTRAL_API_KEY`. Persisted in `~/.bashrc`. Key rotation is a manual step; do not commit keys.
+- **API key** exported as `MISTRAL_API_KEY`. Persist in the login shell's rc file (`~/.bashrc` on bash, `~/.zshrc` on zsh). Key rotation is a manual step; do not commit keys.
 - **Labs models enabled** at org level in the Mistral admin console: https://admin.mistral.ai/plateforme/privacy. Without this toggle, calls return `403 labs_not_enabled`. This is a one-time human action per organization and cannot be scripted.
 - **Billing:** free tier (labeled "Experimental, fast moving, lower QoS"). No budget configuration needed.
 
@@ -65,7 +65,7 @@ Leanstral (`labs-leanstral-2603`) is served by Mistral as a Labs model. Prerequi
 - **Package:** `lean-lsp-mcp` (PyPI, authored by Oliver Dressler, MIT)
 - **Installed version:** 0.26.1 (checked 2026-04-13)
 - **Install:** `uv tool install lean-lsp-mcp`
-- **Binary:** `~/.local/bin/lean-lsp-mcp` (stdio transport by default)
+- **Binary:** `~/.local/bin/lean-lsp-mcp` (uv's default shim location on Linux and macOS; stdio transport)
 - **Provides 21 tools** exposed to Leanstral as `lean-lsp_*`:
   - goal inspection: `lean_goal`, `lean_term_goal`, `lean_hover_info`, `lean_file_outline`
   - diagnostics & build: `lean_diagnostic_messages`, `lean_build`, `lean_verify`
@@ -94,10 +94,13 @@ Vibe refuses to touch files outside the trusted list. Add the proof workdir befo
 
 ```toml
 trusted = [
-    "/home/jeff/Documents/scratch/chelis-proof",
+    "<absolute path to this repo>",  # e.g. /Users/jeff/Documents/cproof/chelis-proof on macOS,
+                                     #      /home/jeff/Documents/scratch/chelis-proof on Fedora
     # add any additional Lean project roots (e.g. /tmp/lean-smoke) as needed
 ]
 ```
+
+Vibe may rewrite this file on first run; if it creates `trusted = []` with an `untrusted = []` sibling, keep the `untrusted` line and just fill in `trusted`.
 
 ## Invocation pattern
 
@@ -130,14 +133,16 @@ The script is fail-fast and prints the first missing piece. Run it after any fre
 
 ## Setup on a fresh machine
 
-1. Install elan + Lean 4.29.0 (see §1).
-2. Install `mistral-vibe` and `lean-lsp-mcp` via `uv tool install`.
-3. Export `MISTRAL_API_KEY` and enable Labs models at https://admin.mistral.ai/plateforme/privacy.
-4. Edit `~/.vibe/config.toml`: set `auto_approve = true`, `installed_agents = ["lean"]`, add the `mcp_servers` entry.
-5. Add this repo to `~/.vibe/trusted_folders.toml`.
-6. Install the LaTeX stack (see §LaTeX toolchain below).
-7. Run `python3 proof/scripts/check_toolchain.py` — fix what it complains about.
-8. Smoke test: from a scratch Lake project, run the invocation in the previous section with a trivial `sorry` to fill.
+1. Install elan + Lean 4.29.0 (see §1). If elan is already present but `lean --version` reports "no default toolchain", run `elan default leanprover/lean4:v4.29.0`.
+2. Install `uv` if it is not already on PATH: `curl -LsSf https://astral.sh/uv/install.sh | sh`. Confirm `~/.local/bin` is on PATH in the shell rc file.
+3. Install `mistral-vibe` and `lean-lsp-mcp` via `uv tool install`.
+4. Export `MISTRAL_API_KEY` (persist in the shell's rc file) and enable Labs models at https://admin.mistral.ai/plateforme/privacy. Labs is an org-level toggle; once enabled on the org it persists across machines.
+5. Edit `~/.vibe/config.toml`: set `auto_approve = true`, `installed_agents = ["lean"]`, add the `mcp_servers` entry.
+6. Add this repo's absolute path to `~/.vibe/trusted_folders.toml`.
+7. Install the LaTeX stack (see §LaTeX toolchain below).
+8. Run `python3 proof/scripts/check_toolchain.py` — fix what it complains about.
+9. Smoke test the API: `curl -sS -w "\nHTTP %{http_code}\n" https://api.mistral.ai/v1/chat/completions -H "Authorization: Bearer $MISTRAL_API_KEY" -H "Content-Type: application/json" -d '{"model":"labs-leanstral-2603","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}'` — HTTP 200 means key + Labs toggle + billing are all wired. HTTP 403 with `labs_not_enabled` means step 4's admin toggle is still off.
+10. End-to-end smoke: from a scratch Lake project, run the invocation in the previous section with a trivial `sorry` to fill.
 
 ## LaTeX toolchain (for `proof/paper/`)
 
@@ -153,7 +158,12 @@ The POPL paper source lives in `proof/paper/` and is built with `pdflatex` (not 
   - `texlive-hyperxmp`, `texlive-float`, `texlive-draftwatermark`, `texlive-fancyhdr`
   - `texlive-preprint`, `texlive-comment`, `texlive-ncctools`, `texlive-trimspaces`
   - `texlive-cm-super`, `texlive-ec`
-- On Fedora, the lazy path is `sudo dnf install texlive-scheme-full` (≈2 GB). The surgical path is to install the list above individually. The current workstation was set up surgically during Phase 1 Wave 1 (T9): missing packages were extracted from their `texlive-*.rpm` files into `~/texmf-local/` and symlinked to `~/texmf/` so kpathsea resolves them without root. **That local install is not part of this repo and is not reproducible outside this machine.** A fresh clone needs real TeXLive packages installed system-wide.
+- Install options by platform (pick one; lazy paths get you everything acmart needs):
+  - **macOS:** `brew install --cask mactex-no-gui` (≈4 GB; omit `-no-gui` for the full suite). After install, `eval "$(/usr/libexec/path_helper)"` in a new shell so `/Library/TeX/texbin` is picked up.
+  - **Fedora / RHEL:** `sudo dnf install texlive-scheme-full` (≈2 GB), or install the `texlive-*` packages enumerated above for a surgical build.
+  - **Debian / Ubuntu:** `sudo apt install texlive-full` (≈5 GB), or the equivalent `texlive-latex-extra texlive-fonts-extra texlive-publishers texlive-science texlive-xetex` subset.
+  - **Other / no root:** install upstream TeX Live from https://tug.org/texlive/ into `~/texlive` and add `~/texlive/<year>/bin/<arch>` to PATH.
+- A historical note from Phase 1 Wave 1 (T9): one early workstation was set up by extracting `texlive-*.rpm` contents into `~/texmf-local/` and symlinking into `~/texmf/` so kpathsea resolved them without root. That local install is **not reproducible from the repo**; treat it as a one-off workaround, not a recommended path. A fresh clone should use one of the install options above.
 
 Build commands:
 
