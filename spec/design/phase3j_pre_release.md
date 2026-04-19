@@ -1,12 +1,12 @@
 # Phase 3j-pre — Compiler Release Infrastructure
 
-Status: shipped through `v0.1.8`; Linux x86_64 and macOS darwin-arm64 release packaging are live.
+Status: shipped through `v0.1.9`; Linux x86_64 and macOS darwin-arm64 release packaging are live.
 
 This document describes how the Chelis compiler binary is released and how
 downstream shells (Nautilus, Coral, and any future domain packages) should
 pin a toolchain version.
 
-As of April 19, 2026, `v0.1.8` is the current Chelis compiler release and the
+As of April 19, 2026, `v0.1.9` is the current Chelis compiler release and the
 exact compiler pin used by the first downstream shell release,
 `Nautilus v0.1.0`.
 
@@ -75,12 +75,12 @@ pin an exact compiler version in their `reef.toml`:
 
 ```toml
 [package]
-compiler = "=0.1.8"
+compiler = "=0.1.9"
 ```
 
 Meaning:
 
-- `=0.1.8` is an exact match. Until Chelis stabilizes its surface,
+- `=0.1.9` is an exact match. Until Chelis stabilizes its surface,
   downstream shells should prefer exact pins over caret or tilde ranges.
 - `reef` resolves the pin by downloading the matching platform tarball from the
   GitHub Releases page of `Chelis-Lang/chelis`.
@@ -92,18 +92,19 @@ new compiler.
 
 Current downstream state:
 
-- `Nautilus v0.1.0` should bump to `chelis = "=0.1.8"` to pick up the
-  published darwin-arm64 artifact and the `eval --file` Reef-import fix for
-  ad hoc snippet files.
-- `v0.1.8` is a patch release on top of the `v0.1.7` line: it keeps the same
+- `Nautilus v0.1.0` should bump to `chelis = "=0.1.9"` to pick up the
+  published darwin-arm64 artifact, the `eval --file` Reef-import fix for ad
+  hoc snippet files, and the streamlined release pipeline that avoids a second
+  full workspace validation pass during packaging.
+- `v0.1.9` is a patch release on top of the `v0.1.7` line: it keeps the same
   documented Phase 3j-pre compiler surface while shipping the validated
-  multi-platform release packaging and the file-backed Reef eval fix needed by
-  downstream startup probes.
+  multi-platform release packaging, the file-backed Reef eval fix needed by
+  downstream startup probes, and a faster release workflow.
 
 ## Versioning Policy
 
 - The tag name and `workspace.package.version` in the root `Cargo.toml`
-  must agree. `v0.1.8` corresponds to `version = "0.1.8"` in
+  must agree. `v0.1.9` corresponds to `version = "0.1.9"` in
   `Cargo.toml`.
 - Until `v1.0.0`, minor bumps may include breaking surface changes.
   Downstream shells should respond with exact-pin bumps, not range
