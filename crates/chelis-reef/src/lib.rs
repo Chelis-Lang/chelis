@@ -161,10 +161,21 @@ pub fn find_package_root_for_input(file: &Path) -> Result<Option<PathBuf>, Strin
     let file = file
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize {}: {e}", file.display()))?;
-    let mut dir = file
+    let dir = file
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", file.display()))?
         .to_path_buf();
+    find_package_root_from_dir(dir)
+}
+
+pub fn find_package_root_for_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize {}: {e}", dir.display()))?;
+    find_package_root_from_dir(dir)
+}
+
+fn find_package_root_from_dir(mut dir: PathBuf) -> Result<Option<PathBuf>, String> {
     let home = env::var_os("HOME").map(PathBuf::from);
 
     loop {
@@ -207,6 +218,62 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     Ok(Some(PreparedProgram {
         decls,
         entry_decls,
+        package_root: root,
+    }))
+}
+
+pub fn prepare_program_for_eval_file(
+    file: &Path,
+    context_dir: &Path,
+) -> Result<Option<PreparedProgram>, String> {
+    let source =
+        fs::read_to_string(file).map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+    let decls =
+        chelis_surf::parser::parse_str(&source).map_err(|e| format!("{}: {e}", file.display()))?;
+    if matches!(decls.as_slice(), [Decl::Module { .. }]) {
+        return prepare_program_for_file(file);
+    }
+    prepare_program_for_eval_source(context_dir, &decls)
+}
+
+pub fn prepare_program_for_eval_source(
+    context_dir: &Path,
+    entry_decls: &[Decl],
+) -> Result<Option<PreparedProgram>, String> {
+    let Some(root) = find_package_root_for_dir(context_dir)? else {
+        return Ok(None);
+    };
+    let graph = resolve_package_graph(&root)?;
+    write_lockfile(&root.join("reef.lock"), &build_lockfile(&graph))?;
+
+    let linked = link_graph(&graph, &[])?;
+    let internal_maps = build_internal_maps(&graph);
+    let dep_shells = dependency_shells(&graph);
+    let eval_module_name = graph
+        .packages
+        .get(&graph.root_package)
+        .map(|package| format!("{}.__Eval", package.manifest.package.module_prefix))
+        .unwrap_or_else(|| "__Eval".to_string());
+    let eval_module = ModuleSource {
+        package_name: graph.root_package.clone(),
+        module_name: eval_module_name,
+        decls: entry_decls.to_vec(),
+        file_rel: PathBuf::from("__eval__.ch"),
+        exports: BTreeSet::new(),
+        symbols: collect_symbol_kinds(entry_decls),
+    };
+    let rewritten_entry_decls =
+        rewrite_eval_module_decls(&eval_module, &graph, &internal_maps, &dep_shells)?;
+
+    let mut decls = Vec::new();
+    for module in linked {
+        decls.extend(module.decls);
+    }
+    decls.extend(rewritten_entry_decls);
+
+    Ok(Some(PreparedProgram {
+        decls,
+        entry_decls: entry_decls.to_vec(),
         package_root: root,
     }))
 }
@@ -959,20 +1026,7 @@ fn effect_name(effect: &EffectExpr) -> String {
 
 fn link_graph(graph: &PackageGraph, entry_modules: &[String]) -> Result<Vec<LinkedModule>, String> {
     let internal_maps = build_internal_maps(graph);
-    let dep_shells = graph
-        .packages
-        .iter()
-        .filter_map(|(name, package)| {
-            if name == &graph.root_package {
-                None
-            } else {
-                package
-                    .shell
-                    .as_ref()
-                    .map(|shell| (name.clone(), shell.clone()))
-            }
-        })
-        .collect::<BTreeMap<_, _>>();
+    let dep_shells = dependency_shells(graph);
 
     let mut linked = Vec::new();
     for (package_name, package) in &graph.packages {
@@ -986,6 +1040,23 @@ fn link_graph(graph: &PackageGraph, entry_modules: &[String]) -> Result<Vec<Link
         }
     }
     Ok(linked)
+}
+
+fn dependency_shells(graph: &PackageGraph) -> BTreeMap<String, ShellPackage> {
+    graph
+        .packages
+        .iter()
+        .filter_map(|(name, package)| {
+            if name == &graph.root_package {
+                None
+            } else {
+                package
+                    .shell
+                    .as_ref()
+                    .map(|shell| (name.clone(), shell.clone()))
+            }
+        })
+        .collect::<BTreeMap<_, _>>()
 }
 
 fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMap<String, String>> {
@@ -1008,12 +1079,12 @@ fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMa
     maps
 }
 
-fn rewrite_module_decls(
+fn build_name_resolver(
     module: &ModuleSource,
     graph: &PackageGraph,
     internal_maps: &HashMap<(String, String), HashMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
-) -> Result<Vec<Decl>, String> {
+) -> Result<NameResolver, String> {
     let mut qualified = HashMap::<String, HashMap<String, String>>::new();
     let mut unqualified = HashMap::<String, String>::new();
     let module_internal = internal_maps
@@ -1088,12 +1159,20 @@ fn rewrite_module_decls(
         }
     }
 
-    let resolver = NameResolver {
+    Ok(NameResolver {
         own_names: module_internal,
         imported_names: unqualified,
         qualified_modules: qualified,
-    };
+    })
+}
 
+fn rewrite_module_decls(
+    module: &ModuleSource,
+    graph: &PackageGraph,
+    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    dep_shells: &BTreeMap<String, ShellPackage>,
+) -> Result<Vec<Decl>, String> {
+    let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
     let mut out = Vec::new();
     for decl in &module.decls {
         match decl {
@@ -1105,6 +1184,24 @@ fn rewrite_module_decls(
                 &module.package_name,
                 &module.module_name,
             )),
+        }
+    }
+    Ok(out)
+}
+
+fn rewrite_eval_module_decls(
+    module: &ModuleSource,
+    graph: &PackageGraph,
+    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    dep_shells: &BTreeMap<String, ShellPackage>,
+) -> Result<Vec<Decl>, String> {
+    let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
+    let mut out = Vec::new();
+    for decl in &module.decls {
+        match decl {
+            Decl::Import { .. } | Decl::Export { .. } => {}
+            Decl::Module { .. } => unreachable!("module wrappers already stripped"),
+            _ => out.push(rewrite_eval_decl(decl, &resolver)),
         }
     }
     Ok(out)
@@ -1266,6 +1363,101 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             span: *span,
         },
         Decl::Module { .. } | Decl::Import { .. } | Decl::Export { .. } => decl.clone(),
+    }
+}
+
+fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
+    match decl {
+        Decl::FunDef {
+            name,
+            dim_params,
+            params,
+            ret_ty,
+            effects,
+            body,
+            span,
+        } => {
+            let mut locals = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<HashSet<_>>();
+            let body = rewrite_expr(body, resolver, &mut locals);
+            Decl::FunDef {
+                name: name.clone(),
+                dim_params: dim_params.clone(),
+                params: params
+                    .iter()
+                    .map(|param| rewrite_param(param, resolver))
+                    .collect(),
+                ret_ty: ret_ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
+                effects: effects.clone(),
+                body,
+                span: *span,
+            }
+        }
+        Decl::LetDef {
+            name,
+            ty,
+            value,
+            span,
+        } => Decl::LetDef {
+            name: name.clone(),
+            ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
+            value: rewrite_expr(value, resolver, &mut HashSet::new()),
+            span: *span,
+        },
+        Decl::Sig {
+            name,
+            ty,
+            effects,
+            span,
+        } => Decl::Sig {
+            name: name.clone(),
+            ty: rewrite_type(ty, resolver),
+            effects: effects.clone(),
+            span: *span,
+        },
+        Decl::TypeDef {
+            name,
+            params,
+            variants,
+            span,
+        } => Decl::TypeDef {
+            name: name.clone(),
+            params: params.clone(),
+            variants: variants
+                .iter()
+                .map(|variant| rewrite_variant(variant, resolver))
+                .collect(),
+            span: *span,
+        },
+        Decl::TypeAlias {
+            name,
+            params,
+            ty,
+            span,
+        } => Decl::TypeAlias {
+            name: name.clone(),
+            params: params.clone(),
+            ty: rewrite_type(ty, resolver),
+            span: *span,
+        },
+        Decl::MacroDef {
+            name,
+            params,
+            body,
+            span,
+        } => Decl::MacroDef {
+            name: name.clone(),
+            params: params.clone(),
+            body: rewrite_expr(body, resolver, &mut HashSet::new()),
+            span: *span,
+        },
+        Decl::Dim { names, span } => Decl::Dim {
+            names: names.clone(),
+            span: *span,
+        },
+        Decl::Export { .. } | Decl::Import { .. } | Decl::Module { .. } => decl.clone(),
     }
 }
 
@@ -1725,7 +1917,7 @@ mod tests {
             r#"[package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.1.7"
+compiler = "=0.1.8"
 module_prefix = "Demo"
 "#,
         );

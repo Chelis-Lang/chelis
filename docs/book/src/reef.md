@@ -14,7 +14,7 @@ Reef is Chelis' package and shell distribution layer.
 [package]
 name = "demo"
 version = "0.1.0"
-compiler = "=0.1.7"
+compiler = "=0.1.8"
 module_prefix = "Demo"
 ```
 

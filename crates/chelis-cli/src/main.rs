@@ -337,7 +337,7 @@ fn cmd_eval(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (source_kind, source, selected_roots) = match (file, expr) {
         (Some(path), _) => {
-            let (decls, entry_decls) = load_check_build_decls(path)?;
+            let (decls, entry_decls) = load_eval_decls(path)?;
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             (
@@ -689,6 +689,18 @@ fn load_check_build_decls(
 ) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
     if let Some(prepared) =
         chelis_reef::prepare_program_for_file(file).map_err(boxed_string_error)?
+    {
+        return Ok((prepared.decls, prepared.entry_decls));
+    }
+    let source = fs::read_to_string(file)?;
+    let decls = chelis_surf::parser::parse_str(&source)?;
+    Ok((decls.clone(), decls))
+}
+
+fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::error::Error>> {
+    let current_dir = env::current_dir()?;
+    if let Some(prepared) = chelis_reef::prepare_program_for_eval_file(file, &current_dir)
+        .map_err(boxed_string_error)?
     {
         return Ok((prepared.decls, prepared.entry_decls));
     }

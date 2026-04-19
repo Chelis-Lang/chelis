@@ -22,6 +22,10 @@ chelis deep app.ch
 chelis build app.ch --target c --output out/
 ```
 
+When `chelis eval --file` runs from inside a Reef package root, ad hoc snippet files can
+import package modules even if the snippet file itself lives outside `src/` and does not
+declare a top-level `module`.
+
 ## Output Contract
 
 - `check` is machine-facing: perfect score implies an empty error list.
