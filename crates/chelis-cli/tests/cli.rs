@@ -1379,7 +1379,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2309,7 +2309,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2386,7 +2386,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2428,7 +2428,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Common"
 "#,
     );
@@ -2447,7 +2447,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2488,7 +2488,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Common"
 "#,
     );
@@ -2538,7 +2538,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.11"
+compiler = "=0.1.12"
 module_prefix = "Demo"
 
 [dependencies]
