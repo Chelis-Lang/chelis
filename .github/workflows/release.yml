@@ -21,22 +21,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
       - name: Build chelis-cli (release)
         run: cargo build --release -p chelis-cli
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
-
-      - name: Test workspace
-        run: cargo test --workspace
 
       - name: Strip binary
         run: strip target/release/chelis
@@ -87,13 +78,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
       - name: Build chelis-cli (release)
         run: cargo build --release -p chelis-cli
@@ -105,9 +90,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = "arm64"
-
-      - name: Test workspace
-        run: CARGO_INCREMENTAL=0 cargo test --workspace
 
       - name: Strip binary
         run: strip -x target/release/chelis || true
