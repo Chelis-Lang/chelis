@@ -567,14 +567,11 @@ fn cmd_build(
         host_program.globals = host_program
             .globals
             .iter()
-            .filter_map(|binding| {
-                host_display_root_name(&binding.name, &entry_display_root_names).map(
-                    |display_name| {
-                        let mut binding = binding.clone();
-                        binding.display_name = Some(display_name);
-                        binding
-                    },
-                )
+            .map(|binding| {
+                let mut binding = binding.clone();
+                binding.display_name =
+                    host_display_root_name(&binding.name, &entry_display_root_names);
+                binding
             })
             .collect();
     }

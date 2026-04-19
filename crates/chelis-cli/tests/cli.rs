@@ -1178,6 +1178,107 @@ fn build_c_nested_float_builtins_do_not_emit_int_temps() {
     assert!(status.success(), "gcc failed with status {status}");
 }
 
+#[test]
+fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("fold_tuple_tensor_acc.ch");
+    let out_dir = dir.path().join("fold-tuple-build-out");
+    write_file(
+        &path,
+        "xs = to_list(to_tensor([1.0, 2.0]))\n\
+         state0 = (to_tensor([0.0, 0.0]), cast(0.0, f32))\n\
+         step = fn (state, x) -> {\n\
+           l_inner = state.0\n\
+           total = state.1\n\
+           (l_inner, add(total, x))\n\
+         }\n\
+         out = fold(step, state0, xs)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("fold_tuple_tensor_acc.c")).expect("generated c");
+    assert!(
+        source.contains("chelis_tensor* l_inner;"),
+        "expected tuple-get binding to lower as a tensor local:\n{source}"
+    );
+    assert!(
+        !source.contains("int l_inner;"),
+        "tuple tensor binding must not degrade to int:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "fold_tuple_tensor_acc.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
+fn build_c_map_tensor_grad_specializes_callback_item_type() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_rows_map.ch");
+    let out_dir = dir.path().join("grad-rows-map-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
+           add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
+         grad_loss = grad(loss, wrt=(theta))\n\
+         xs: List[f32] = [1.0, 2.0]\n\
+         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_rows_map.c")).expect("generated c");
+    assert!(
+        source.contains("double __map_item_") && source.contains("double x = __map_item_"),
+        "expected map callback item to lower as double rather than int:\n{source}"
+    );
+    assert!(
+        !source.contains("int __map_item_") && !source.contains("int x;"),
+        "map callback item must not degrade to int:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_rows_map.c", "grad_rows_map");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_rows_map"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains(
+            "rows = [tensor(shape=[2], data=[2.0, 4.0]), tensor(shape=[2], data=[2.0, 4.0])]"
+        ),
+        "unexpected gradient rows output:\n{stdout}"
+    );
+}
+
 fn assert_reef_std_embedding_builds_to_valid_c() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -1199,7 +1300,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2129,7 +2230,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2206,7 +2307,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2248,7 +2349,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Common"
 "#,
     );
@@ -2267,7 +2368,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2308,7 +2409,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Common"
 "#,
     );
@@ -2358,7 +2459,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.9"
+compiler = "=0.1.10"
 module_prefix = "Demo"
 
 [dependencies]

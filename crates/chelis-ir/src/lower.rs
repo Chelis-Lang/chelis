@@ -177,7 +177,10 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                     .any(|(_, value)| expr_requires_host_runtime(value))
         }
         Expr::List(list, _) => {
-            if matches!(get_tag(list), Some("if" | "match" | "record" | "access")) {
+            if matches!(
+                get_tag(list),
+                Some("if" | "match" | "record" | "access" | "tuple-get")
+            ) {
                 return true;
             }
             if get_tag(list) == Some("var")
@@ -220,6 +223,7 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "numel"
                         | "tensor_to_scalar"
                         | "scalar_to_tensor"
+                        | "tuple-get"
                         | "len"
                         | "index"
                         | "append"
@@ -2446,6 +2450,12 @@ impl LowerCtx {
                     ty.clone()
                 };
                 self.dag.add_node(RiscOp::Sum { axis }, vec![x], out_ty)
+            }
+            "tensor_to_scalar" if args.len() == 1 => {
+                self.lower_expr_node(&args[0], "tensor_to_scalar input")
+            }
+            "scalar_to_tensor" if args.len() == 1 => {
+                self.lower_expr_node(&args[0], "scalar_to_tensor input")
             }
             "max_reduce" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "max_reduce input");

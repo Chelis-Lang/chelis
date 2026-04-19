@@ -340,14 +340,9 @@ fn emit_main(out: &mut Vec<String>, program_name: &str, program: &HostProgram) {
         ));
     }
     for binding in &program.globals {
-        emitter.emit_labeled_root(
-            binding
-                .display_name
-                .as_deref()
-                .unwrap_or(binding.name.as_str()),
-            binding.name.as_str(),
-            &binding.ty,
-        );
+        if let Some(display_name) = binding.display_name.as_deref() {
+            emitter.emit_labeled_root(display_name, binding.name.as_str(), &binding.ty);
+        }
     }
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
@@ -1401,9 +1396,30 @@ impl HostEmitter {
             .iter()
             .enumerate()
             .map(|(index, arg)| {
-                let arg_name = self.next_temp(&format!("tensor_arg{index}"));
-                self.emit_expr_to_var(arg, &arg_name, &host_type(arg));
-                arg_name
+                let inferred_ty = host_type(arg);
+                if matches!(inferred_ty, HostType::Tensor(_)) {
+                    let arg_name = self.next_temp(&format!("tensor_arg{index}"));
+                    self.emit_expr_to_var(arg, &arg_name, &inferred_ty);
+                    (arg_name, None)
+                } else {
+                    let value_name = self.next_temp(&format!("tensor_scalar{index}"));
+                    self.emit_expr_to_var(arg, &value_name, &inferred_ty);
+                    let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
+                    self.lines
+                        .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
+                    let boxed = match inferred_ty {
+                        HostType::Int64 => {
+                            format!("chelis_scalar_tensor_from_i64({value_name})")
+                        }
+                        HostType::Bool => {
+                            format!("chelis_scalar_tensor_from_i64({value_name} ? 1 : 0)")
+                        }
+                        _ => format!("chelis_scalar_tensor_from_f64({value_name})"),
+                    };
+                    self.lines
+                        .push(format!("{}{tensor_name} = {boxed};", self.indent));
+                    (tensor_name.clone(), Some(tensor_name))
+                }
             })
             .collect::<Vec<_>>();
         let inputs_name = self.next_temp("inputs");
@@ -1414,7 +1430,7 @@ impl HostEmitter {
             inputs_name,
             tensor_args.len()
         ));
-        for (index, arg) in tensor_args.iter().enumerate() {
+        for (index, (arg, _)) in tensor_args.iter().enumerate() {
             self.lines.push(format!(
                 "{}{}[{index}] = {};",
                 self.indent, inputs_name, arg
@@ -1434,6 +1450,12 @@ impl HostEmitter {
         ));
         self.lines
             .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+        for (_, boxed) in tensor_args {
+            if let Some(boxed) = boxed {
+                self.lines
+                    .push(format!("{}chelis_free({boxed});", self.indent));
+            }
+        }
     }
 
     fn assign_call(
