@@ -1,6 +1,6 @@
 # Lines of Code Report
 
-Generated: 2026-04-19 22:33 UTC
+Generated: 2026-04-19 22:54 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
@@ -10,7 +10,7 @@ Generated: 2026-04-19 22:33 UTC
 | Python | 15 | 1,537 | 116 | 544 | 2,197 | PyO3 bindings, tools, benchmarks |
 | **Chelis Surf** (.ch) | **51** | **1,226** | **0** | **2** | **1,228** | **Examples, std library, test fixtures** |
 | TOML | 27 | 413 | 0 | 55 | 468 | Cargo/reef manifests |
-| YAML | 2 | 304 | 0 | 66 | 370 | CI workflows |
+| YAML | 2 | 287 | 0 | 64 | 351 | CI workflows |
 | PEG Grammars (.pest) | 2 | 248 | 0 | 28 | 276 | Validator grammars (Surf + Deep) |
 | XML | 1 | 212 | 57 | 38 | 307 |  |
 | JavaScript | 2 | 190 | 0 | 28 | 218 | Tree-sitter grammar definitions |
@@ -18,4 +18,4 @@ Generated: 2026-04-19 22:33 UTC
 | **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
 | Bash | 1 | 19 | 1 | 6 | 26 |  |
 | Markdown | 79 | 0 | 6,519 | 3,468 | 9,987 | Specs, design docs, plans |
-| **Total** | **330** | **91,598** | **8,528** | **28,510** | **128,636** | |
+| **Total** | **330** | **91,581** | **8,528** | **28,508** | **128,617** | |
