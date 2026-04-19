@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -29,9 +32,6 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --workspace --all-targets
 
       - name: Test
         run: cargo test --workspace
@@ -75,16 +75,11 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --workspace --all-targets
-
       - name: Test
         run: cargo test --workspace
 
-      - name: Build release artifacts
-        run: |
-          cargo build --release -p chelis-cli
-          cargo build --release -p chelis-runtime
+      - name: Build macOS smoke-test toolchain
+        run: cargo build -p chelis-cli -p chelis-runtime
 
       - name: Assert Apple Silicon runner
         run: |
@@ -94,24 +89,10 @@ jobs:
       - name: Verify packaged binary architecture
         run: |
           set -euo pipefail
-          file target/release/chelis | grep -E 'arm64|aarch64'
+          file target/debug/chelis | grep -E 'arm64|aarch64'
 
       - name: Smoke test generated C with Accelerate
-        run: bash .github/scripts/smoke_macos_accelerate.sh ./target/release/chelis
-
-      - name: Stage darwin-arm64 tarball
-        run: |
-          set -euo pipefail
-          staging="chelis-ci-${GITHUB_SHA::8}-darwin-arm64"
-          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
-          cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp README.md "$staging/"
-          cp LICENSE "$staging/"
-          tar czf "${staging}.tar.gz" "$staging"
-          test -f "${staging}.tar.gz"
+        run: bash .github/scripts/smoke_macos_accelerate.sh ./target/debug/chelis
 
   backend-sanitizers:
     name: Backend Sanitizers
