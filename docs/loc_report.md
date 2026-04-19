@@ -1,10 +1,10 @@
 # Lines of Code Report
 
-Generated: 2026-04-19 22:54 UTC
+Generated: 2026-04-19 23:51 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 114 | 56,509 | 1,670 | 21,265 | 79,444 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 114 | 56,652 | 1,670 | 21,320 | 79,642 | Compiler, CLI, runtime, backends, type checker |
 | C | 11 | 27,776 | 165 | 632 | 28,573 | Generated runtime, headers |
 | JSON | 18 | 3,025 | 0 | 2,371 | 5,396 | Package metadata, test fixtures |
 | Python | 15 | 1,537 | 116 | 544 | 2,197 | PyO3 bindings, tools, benchmarks |
@@ -18,4 +18,4 @@ Generated: 2026-04-19 22:54 UTC
 | **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
 | Bash | 1 | 19 | 1 | 6 | 26 |  |
 | Markdown | 79 | 0 | 6,519 | 3,468 | 9,987 | Specs, design docs, plans |
-| **Total** | **330** | **91,581** | **8,528** | **28,508** | **128,617** | |
+| **Total** | **330** | **91,724** | **8,528** | **28,563** | **128,815** | |
