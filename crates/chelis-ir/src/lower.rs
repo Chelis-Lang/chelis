@@ -96,6 +96,26 @@ pub fn top_level_lowering_map(
     cache
 }
 
+pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
+    if expr_requires_host_runtime(expr) {
+        return false;
+    }
+
+    let top_level_defs = collect_top_level_defs(program.exprs());
+    let top_level_sigs = collect_top_level_sigs(program.exprs());
+    let mut cache = HashMap::new();
+    let mut visiting = HashSet::new();
+    !expr_depends_on_nonlowerable_name(
+        expr,
+        &top_level_defs,
+        &top_level_sigs,
+        program.type_env(),
+        &mut cache,
+        &mut visiting,
+        &HashSet::new(),
+    )
+}
+
 fn top_level_expr_is_lowered_with_names(
     expr: &Expr,
     type_env: &HashMap<String, Expr>,
@@ -177,9 +197,13 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                     .any(|(_, value)| expr_requires_host_runtime(value))
         }
         Expr::List(list, _) => {
-            if matches!(
+            if get_tag(list) == Some("if") {
+                if !if_expr_is_dag_lowerable(list) {
+                    return true;
+                }
+            } else if matches!(
                 get_tag(list),
-                Some("if" | "match" | "record" | "access" | "tuple-get")
+                Some("match" | "record" | "access" | "tuple-get")
             ) {
                 return true;
             }
@@ -221,8 +245,6 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "rank"
                         | "shape"
                         | "numel"
-                        | "tensor_to_scalar"
-                        | "scalar_to_tensor"
                         | "tuple-get"
                         | "len"
                         | "index"
@@ -706,11 +728,32 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+fn if_expr_is_dag_lowerable(list: &List) -> bool {
+    if get_tag(list) != Some("if") {
+        return false;
+    }
+
+    let result_ty = match list.elements.get(1) {
+        Some(Expr::Map(meta, _)) => LowerCtx::type_from_meta(&meta.entries),
+        _ => LowerCtx::default_type(),
+    };
+    if !result_ty.precision.is_float() {
+        return false;
+    }
+
+    let Some(cond_ty_expr) = children(list).first().and_then(expr_type_metadata) else {
+        return false;
+    };
+    let cond_ty = LowerCtx::type_from_type_expr(cond_ty_expr);
+    cond_ty.precision == Prim::Bool && (cond_ty.dims.is_empty() || cond_ty.dims == result_ty.dims)
+}
+
 fn assert_phase0e_lowerable(expr: &Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && matches!(tag.as_str(), "if" | "match" | "par" | "jit")
+                && ((tag == "if" && !if_expr_is_dag_lowerable(list))
+                    || matches!(tag.as_str(), "match" | "par" | "jit"))
             {
                 panic!(
                     "`{tag}` is not representable in the Phase 0e RISC DAG; reject it before lowering"
@@ -2964,7 +3007,61 @@ impl LowerCtx {
 
     /// `(if {} cond then else)` -- Phase 0: select via arithmetic on bools.
     fn lower_if(&mut self, elems: &[Expr]) -> LoweredValue {
-        self.lower_unrepresentable("if", elems)
+        let Some(cond_expr) = elems.get(2) else {
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
+        };
+        let Some(then_expr) = elems.get(3) else {
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
+        };
+        let Some(else_expr) = elems.get(4) else {
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::Const { value: 0.0 },
+                vec![],
+                Self::default_type(),
+            ));
+        };
+
+        let cond = self.lower_expr_node(cond_expr, "if condition");
+        let then_node = self.lower_expr_node(then_expr, "if then branch");
+        let else_node = self.lower_expr_node(else_expr, "if else branch");
+        let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+            Self::type_from_meta(&meta.entries)
+        } else {
+            self.dag
+                .get(then_node)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(Self::default_type)
+        };
+        if !out_ty.precision.is_float() {
+            return self.lower_unrepresentable("if", elems);
+        }
+
+        let mask = self.lower_if_mask(cond, &out_ty);
+        let one = self
+            .dag
+            .add_node(RiscOp::Const { value: 1.0 }, vec![], out_ty.clone());
+        let neg_mask = self.dag.add_node(RiscOp::Neg, vec![mask], out_ty.clone());
+        let inv_mask = self
+            .dag
+            .add_node(RiscOp::Add, vec![one, neg_mask], out_ty.clone());
+        let masked_then = self
+            .dag
+            .add_node(RiscOp::Mul, vec![mask, then_node], out_ty.clone());
+        let masked_else = self
+            .dag
+            .add_node(RiscOp::Mul, vec![inv_mask, else_node], out_ty.clone());
+        LoweredValue::Node(
+            self.dag
+                .add_node(RiscOp::Add, vec![masked_then, masked_else], out_ty),
+        )
     }
 
     /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
@@ -3060,6 +3157,47 @@ impl LowerCtx {
     /// Unsupported Phase 2 constructs (vmap, jit).
     fn lower_unsupported(&mut self, tag: &str, _elems: &[Expr]) -> LoweredValue {
         panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
+    }
+
+    fn lower_if_mask(&mut self, cond: NodeId, out_ty: &TensorType) -> NodeId {
+        let mut mask = cond;
+        let cond_ty = self
+            .dag
+            .get(cond)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        if cond_ty.precision != out_ty.precision {
+            mask = self.dag.add_node(
+                RiscOp::Cast {
+                    new_precision: out_ty.precision,
+                },
+                vec![mask],
+                TensorType {
+                    dims: cond_ty.dims.clone(),
+                    precision: out_ty.precision,
+                },
+            );
+        }
+        if cond_ty.dims.is_empty() && !out_ty.dims.is_empty() {
+            let mut expanded = mask;
+            let mut dims = Vec::new();
+            for (axis, dim) in out_ty.dims.iter().enumerate() {
+                dims.push(dim.clone());
+                expanded = self.dag.add_node(
+                    RiscOp::Expand {
+                        axis,
+                        size: DimExpr::from(dim),
+                    },
+                    vec![expanded],
+                    TensorType {
+                        dims: dims.clone(),
+                        precision: out_ty.precision,
+                    },
+                );
+            }
+            return expanded;
+        }
+        mask
     }
 }
 
@@ -3788,9 +3926,31 @@ mod regression_tests {
     }
 
     #[test]
+    fn float_if_lowers_via_masked_select() {
+        let dag = parse_and_lower("(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))");
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "expected lowered if to synthesize masked multiplications"
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Add)),
+            "expected lowered if to synthesize additive select"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "`if` is not representable in the Phase 0e RISC DAG")]
-    fn unsupported_if_is_rejected_before_lowering() {
-        let _ = parse_and_lower("(if {} (lit {} true) (lit {} 1.0) (lit {} 0.0))");
+    fn non_float_if_is_rejected_before_lowering() {
+        let _ = parse_and_lower(
+            "(if {type: (t-prim {} bool)} \
+                (lit {type: (t-prim {} bool)} true) \
+                (lit {type: (t-prim {} bool)} true) \
+                (lit {type: (t-prim {} bool)} false))",
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ mod tests {
                 name: "chelis-std".to_string(),
                 version: "0.1.0".to_string(),
             },
-            compiler: "=0.1.10".to_string(),
+            compiler: "=0.1.11".to_string(),
             modules: vec![ShellModule {
                 module: "Std.Nn.Linear".to_string(),
                 exports: vec![ShellSymbol {

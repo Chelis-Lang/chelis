@@ -4,7 +4,7 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
 use crate::dag::TensorType;
-use crate::lower::{lower_program, top_level_lowering_map};
+use crate::lower::{expr_is_dag_lowerable, lower_program, top_level_lowering_map};
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
@@ -515,8 +515,11 @@ fn lower_host_function(
     // `Std.Tensor.Reduce.min` get a real C function symbol rather than a
     // fallthrough `HostExpr::Builtin` with an "unsupported builtin"
     // placeholder (Phase 3j-pre Batch 5b bug 4).
+    let callable_body_is_synthetic =
+        !matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
     let host_body = if let HostType::Tensor(expected) = ret_ty.clone()
         && !should_keep_tensor_expr_in_host_lane(&body_expr)
+        && (callable_body_is_synthetic || expr_is_dag_lowerable(&body_expr, program))
     {
         lower_tensor_helper_call(&body_expr, program, &scope, &mut tensor_helpers, expected)
     } else {
@@ -633,6 +636,7 @@ fn lower_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     if let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
+        && expr_is_dag_lowerable(expr, program)
         && !should_keep_tensor_expr_in_host_lane(expr)
     {
         if let Expr::List(list, _) = expr
@@ -2131,6 +2135,14 @@ fn lower_app_host_expr(
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
+    let app_expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
+    if let Some(tensor_ty) = expr_tensor_type(&app_expr, program, scope)
+        && expr_is_dag_lowerable(&app_expr, program)
+        && !should_keep_tensor_expr_in_host_lane(&app_expr)
+    {
+        return lower_tensor_helper_call(&app_expr, program, scope, tensor_helpers, tensor_ty);
+    }
+
     let kids = children(list);
     let name = kids
         .first()
@@ -2147,11 +2159,7 @@ fn lower_app_host_expr(
     let fn_sig =
         lookup_declared_fn_type(program, &name).or_else(|| kids.first().and_then(expr_fn_type));
     let ctor_info = lookup_adt_ctor(program, &name);
-    let explicit_ty = expr_host_type(
-        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-        program,
-        scope,
-    );
+    let explicit_ty = expr_host_type(&app_expr, program, scope);
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
@@ -2190,11 +2198,7 @@ fn lower_app_host_expr(
         && let Some(callback) = lower_host_callback(&kids[1], program, scope, tensor_helpers)
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             HostType::List(Box::new(callback.ret_ty.clone()))
         } else {
@@ -2211,11 +2215,7 @@ fn lower_app_host_expr(
         && let Some(callback) = lower_host_callback(&kids[1], program, scope, tensor_helpers)
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             host_expr_type(&list_expr)
         } else {
@@ -2233,11 +2233,7 @@ fn lower_app_host_expr(
     {
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             host_expr_type(&init_expr)
         } else {
@@ -2256,11 +2252,7 @@ fn lower_app_host_expr(
     {
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             HostType::List(Box::new(host_expr_type(&init_expr)))
         } else {
@@ -2278,11 +2270,7 @@ fn lower_app_host_expr(
         && let Some(callback) = lower_host_callback(&kids[1], program, scope, tensor_helpers)
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             let list_ty = host_expr_type(&list_expr);
             HostType::Tuple(vec![list_ty.clone(), list_ty])
@@ -2300,11 +2288,7 @@ fn lower_app_host_expr(
         && let Some(callback) = lower_host_callback(&kids[1], program, scope, tensor_helpers)
     {
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers);
-        let ty = expr_host_type(
-            &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-            program,
-            scope,
-        );
+        let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty == HostType::Unknown {
             match callback.ret_ty.clone() {
                 HostType::List(inner) => HostType::List(inner),

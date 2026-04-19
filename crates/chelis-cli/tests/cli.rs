@@ -1279,6 +1279,85 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
     );
 }
 
+#[test]
+fn build_c_tensor_grad_with_host_branching_dependency_builds() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_rows_branching.ch");
+    let out_dir = dir.path().join("grad-rows-branching-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
+           if x < 0.0 then tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)) else add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
+         grad_loss = grad(loss, wrt=(theta))\n\
+         xs: List[f32] = [1.0, -2.0]\n\
+         rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_rows_branching.c")).expect("generated c");
+    assert!(
+        source.contains("static inline double loss("),
+        "expected host-side scalar loss helper to be emitted:\n{source}"
+    );
+    assert!(
+        source.contains("if (__cond"),
+        "expected branching loss to stay on the host path rather than panic in DAG lowering:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_rows_branching.c", "grad_rows_branching");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
+fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tensor_fold_if.ch");
+    let out_dir = dir.path().join("tensor-fold-if-build-out");
+    write_file(
+        &path,
+        "def chooser(x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           fold(fn (acc, y) -> if y < 0.0 then acc else add(acc, x), to_tensor([0.0, 0.0]), to_list(to_tensor([1.0, -1.0])))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("tensor_fold_if.c")).expect("generated c");
+    assert!(
+        source.contains("chelis_tensor* chooser("),
+        "expected chooser to remain a host-emitted tensor function:\n{source}"
+    );
+    assert!(
+        source.contains("if (__cond"),
+        "expected fold callback branch to stay on the host path:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "tensor_fold_if.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
 fn assert_reef_std_embedding_builds_to_valid_c() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -1300,7 +1379,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2230,7 +2309,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2307,7 +2386,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2349,7 +2428,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Common"
 "#,
     );
@@ -2368,7 +2447,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2409,7 +2488,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Common"
 "#,
     );
@@ -2459,7 +2538,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.10"
+compiler = "=0.1.11"
 module_prefix = "Demo"
 
 [dependencies]
