@@ -1633,7 +1633,7 @@ mod tests {
         dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32());
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
-        assert!(c.contains("for (int k"));
+        assert!(c.contains("for (int __reduce_i"));
     }
 
     #[test]
@@ -2037,7 +2037,7 @@ mod tests {
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(!c.contains("cblas_sgemm("));
-        assert!(c.contains("for (int k = 0; k < 3; k++) {"));
+        assert!(c.contains("for (int __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
     }
 
     #[test]
