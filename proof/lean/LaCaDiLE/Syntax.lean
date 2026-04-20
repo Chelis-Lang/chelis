@@ -435,6 +435,132 @@ end
 def freshInTerm (y : String) (e : Term) : Prop :=
   y ∉ freeVars e ∧ y ∉ boundVars e
 
+/-- Global binder-distinctness for named terms. This is the scoping
+    side condition used by the TranslationDB bridge to align lexical
+    named substitution with positional DB substitution under the current
+    non-lexical `HasType.var` rule. -/
+def WellScoped (e : Term) : Prop :=
+  (boundVars e).Nodup
+
+@[simp] theorem wellScoped_var (x : String) : WellScoped (Term.var x) := by
+  simp [WellScoped, boundVars]
+
+@[simp] theorem wellScoped_unit : WellScoped Term.unit := by
+  simp [WellScoped, boundVars]
+
+@[simp] theorem wellScoped_loc (ell : Loc) : WellScoped (Term.loc ell) := by
+  simp [WellScoped, boundVars]
+
+theorem wellScoped_abs_iff (x : String) (t : Typ) (body : Term) :
+    WellScoped (Term.abs x t body) ↔ x ∉ boundVars body ∧ WellScoped body := by
+  simp [WellScoped, boundVars]
+
+theorem wellScoped_grad_iff (x : String) (t tOut : Typ) (body : Term) :
+    WellScoped (Term.grad x t tOut body) ↔
+      x ∉ boundVars body ∧ WellScoped body := by
+  simp [WellScoped, boundVars]
+
+theorem wellScoped_vmap_iff (x : String) (t : Typ) (body : Term) :
+    WellScoped (Term.vmap x t body) ↔
+      x ∉ boundVars body ∧ WellScoped body := by
+  simp [WellScoped, boundVars]
+
+theorem wellScoped_abs_body
+    {x : String} {t : Typ} {body : Term}
+    (h : WellScoped (Term.abs x t body)) :
+    x ∉ boundVars body ∧ WellScoped body := by
+  exact (wellScoped_abs_iff x t body).mp h
+
+theorem wellScoped_grad_body
+    {x : String} {t tOut : Typ} {body : Term}
+    (h : WellScoped (Term.grad x t tOut body)) :
+    x ∉ boundVars body ∧ WellScoped body := by
+  exact (wellScoped_grad_iff x t tOut body).mp h
+
+theorem wellScoped_vmap_body
+    {x : String} {t : Typ} {body : Term}
+    (h : WellScoped (Term.vmap x t body)) :
+    x ∉ boundVars body ∧ WellScoped body := by
+  exact (wellScoped_vmap_iff x t body).mp h
+
+theorem wellScoped_letpair_names_ne
+    {x y : String} {e1 e2 : Term}
+    (h : WellScoped (Term.letpair x y e1 e2)) :
+    x ≠ y := by
+  simp [WellScoped, boundVars] at h
+  exact h.1.1
+
+theorem wellScoped_handle_body
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (h : WellScoped (Term.handle epsH body clauses)) :
+    WellScoped body := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact h.1
+
+theorem wellScoped_letBind_body
+    {x : String} {e1 e2 : Term}
+    (h : WellScoped (Term.letBind x e1 e2)) :
+    WellScoped e1 ∧ x ∉ boundVars e2 ∧ WellScoped e2 := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact ⟨h.2.1, h.1.2, h.2.2.1⟩
+
+theorem wellScoped_pair_left
+    {e1 e2 : Term}
+    (h : WellScoped (Term.pair e1 e2)) :
+    WellScoped e1 := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact h.1
+
+theorem wellScoped_pair_right
+    {e1 e2 : Term}
+    (h : WellScoped (Term.pair e1 e2)) :
+    WellScoped e2 := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact h.2.1
+
+theorem wellScoped_letpair_body
+    {x y : String} {e1 e2 : Term}
+    (h : WellScoped (Term.letpair x y e1 e2)) :
+    WellScoped e1 ∧ x ≠ y ∧ x ∉ boundVars e2 ∧ y ∉ boundVars e2 ∧ WellScoped e2 := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact ⟨h.2.2.1, h.1.1, h.1.2.2, h.2.1.2, h.2.2.2.1⟩
+
+theorem boundVarsClauses_mem_scoped
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hnd : (boundVarsClauses clauses).Nodup)
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    x ≠ k ∧ x ∉ boundVars hb ∧ k ∉ boundVars hb ∧ WellScoped hb := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      cases cl with
+      | mk op' tail =>
+          cases tail with
+          | mk x' tail =>
+              cases tail with
+              | mk k' hb' =>
+                  simp [boundVarsClauses, List.nodup_append] at hnd
+                  rcases List.mem_cons.mp hmem with hhd | htl
+                  · cases hhd
+                    exact ⟨hnd.1.1, hnd.1.2.1, hnd.2.1.1, hnd.2.2.1⟩
+                  · have hrest : (boundVarsClauses rest).Nodup := by
+                      exact hnd.2.2.2.1
+                    exact ih hrest htl
+
+theorem wellScoped_handle_clause
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (h : WellScoped (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    x ≠ k ∧ x ∉ boundVars hb ∧ k ∉ boundVars hb ∧ WellScoped hb := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  have hcls : (boundVarsClauses clauses).Nodup := h.2.1
+  exact boundVarsClauses_mem_scoped hcls hmem
+
 /-! ## Values -/
 
 /-- Value predicate on `Term`. A term is a value iff it is a location, a
@@ -500,6 +626,24 @@ proof will need something in this shape. -/
 /-- Domain of a linear context (the names of the bindings). -/
 def linearCtxDom (G : LinearCtx) : List String :=
   G.map Prod.fst
+
+/-- Linear-context names are pairwise distinct. This is the scoping
+    well-formedness predicate the TranslationDB bridge needs in order to
+    align lexical named substitution with positional DB substitution. -/
+def NoDupNames (G : LinearCtx) : Prop :=
+  (linearCtxDom G).Nodup
+
+@[simp] theorem noDupNames_nil : NoDupNames ([] : LinearCtx) := by
+  simp [NoDupNames, linearCtxDom]
+
+@[simp] theorem noDupNames_singleton (x : String) (t : Typ) :
+    NoDupNames ([(x, t)] : LinearCtx) := by
+  simp [NoDupNames, linearCtxDom]
+
+theorem noDupNames_pair_iff
+    (x y : String) (tx ty : Typ) :
+    NoDupNames ([(x, tx), (y, ty)] : LinearCtx) ↔ x ≠ y := by
+  simp [NoDupNames, linearCtxDom]
 
 /-- Disjointness of two linear contexts' domains. Phase 2 scaffolding. -/
 def linearCtxDisjoint (G1 G2 : LinearCtx) : Prop :=

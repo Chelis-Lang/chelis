@@ -4,8 +4,8 @@
 --
 -- Wave 4 status: mechanical cases that do NOT depend on a typing rule
 -- for `Term.loc` are closed directly by Step-case inversion plus small
--- HasType inversion lemmas. Cases that either (a) rely on substitution
--- (Wave 2 sibling work on `subst_preserves_typing`), (b) need to type a
+-- HasType inversion lemmas. Cases that either (a) rely on the
+-- TranslationDB bridge onto `SubstitutionDB`, (b) need to type a
 -- freshly-allocated `Term.loc` (no `HasType.loc` rule exists in
 -- Typing.lean yet — see TODO below), or (c) depend on `adjoint` /
 -- `addDim` typing preservation lemmas that are themselves in progress,
@@ -25,6 +25,7 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
+import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
 
@@ -393,6 +394,7 @@ theorem preservation
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term) (t : Typ) (eps : EffectRow)
     (h_typ : HasType [] Sigma [] e t eps [])
+    (h_scope : WellScoped e)
     (h_wf : StoreWf sigma Sigma)
     (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
     ∃ Sigma',
@@ -402,14 +404,14 @@ theorem preservation
   -- value-case closures via `has_type_closed_output_of_closed_input`.
   cases h_step with
   | beta s x tv body v hv =>
-      -- TODO Wave 2: needs subst_preserves_typing
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_beta_via_db h_typ hv h_scope
   | letBind s x v body hv =>
-      -- TODO Wave 2: needs subst_preserves_typing
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_letBind_via_db h_typ hv h_scope
   | letpair s x y v1 v2 body hv1 hv2 =>
-      -- TODO Wave 2: needs subst_preserves_typing
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_letpair_via_db h_typ hv1 hv2 h_scope
   | fst s v1 v2 hv1 hv2 =>
       -- E-Fst: fst (pair v1 v2) ↦ v1. With Γ = [], h1 is at [] → Γmid,
       -- and has_type_closed_output_of_closed_input gives Γmid = [].
@@ -613,8 +615,8 @@ theorem preservation
       refine ⟨Sigma, ?_, h_wf⟩
       exact handleRet_value_preserves_typing hv h_typ
   | handleOpDirect s op v epsH clauses x k hb tRet hv hmem =>
-      -- TODO Wave 2: needs subst_preserves_typing
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_handleOpDirect_via_db h_typ hv hmem h_scope
   | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hmem hop hE =>
       -- TODO Wave 2: paper-accurate captured-context handle-op case.
       -- Needs `subst_preserves_typing` plus a `plug`-typing inversion
