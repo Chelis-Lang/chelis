@@ -149,8 +149,9 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
     match request.target {
         CompileTarget::C => {
-            if compiled.dag.roots().is_empty()
-                && let Some(host_program) = host_compiled.host.as_ref()
+            if let Some(host_program) = host_compiled.host.as_ref()
+                && (chelis_ir::host::host_program_requires_host_backend(host_program)
+                    || compiled.dag.roots().is_empty())
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name);
                 return Ok(compiled_execution_artifact(

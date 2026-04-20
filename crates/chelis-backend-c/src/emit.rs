@@ -918,7 +918,7 @@ impl CEmitter {
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
         ));
-        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.line(&format!("for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"));
         self.indent += 1;
         self.line("int full_indices[CHELIS_MAX_DIM];");
         // Build full indices: insert k at the reduction axis
@@ -927,7 +927,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
-        self.line("full_indices[d] = k;");
+        self.line("full_indices[d] = __reduce_i;");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -976,7 +976,7 @@ impl CEmitter {
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
         ));
-        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.line(&format!("for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"));
         self.indent += 1;
         self.line("int full_indices[CHELIS_MAX_DIM];");
         self.line("int out_d = 0;");
@@ -984,7 +984,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
-        self.line("full_indices[d] = k;");
+        self.line("full_indices[d] = __reduce_i;");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -1041,7 +1041,7 @@ impl CEmitter {
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
         ));
-        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.line(&format!("for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"));
         self.indent += 1;
         self.line("int full_indices[CHELIS_MAX_DIM];");
         self.line("int out_d = 0;");
@@ -1049,7 +1049,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
-        self.line("full_indices[d] = k;");
+        self.line("full_indices[d] = __reduce_i;");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -1109,7 +1109,7 @@ impl CEmitter {
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
         ));
-        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.line(&format!("for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"));
         self.indent += 1;
         self.line("int full_indices[CHELIS_MAX_DIM];");
         self.line("int out_d = 0;");
@@ -1117,7 +1117,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
-        self.line("full_indices[d] = k;");
+        self.line("full_indices[d] = __reduce_i;");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -1188,7 +1188,7 @@ impl CEmitter {
         self.line(&format!(
             "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
         ));
-        self.line(&format!("for (int k = 0; k < {axis_size}; k++) {{"));
+        self.line(&format!("for (int __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"));
         self.indent += 1;
         self.line("int full_indices[CHELIS_MAX_DIM];");
         self.line("int out_d = 0;");
@@ -1196,7 +1196,7 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
-        self.line("full_indices[d] = k;");
+        self.line("full_indices[d] = __reduce_i;");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;

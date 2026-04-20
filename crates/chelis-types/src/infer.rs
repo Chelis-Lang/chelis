@@ -1159,12 +1159,12 @@ fn infer_expr_in_scope(
     expr: &deep::Expr,
     env: &Env,
     vg: &VarGen,
-    subst: &Subst,
+    _subst: &Subst,
     adt_reg: &AdtRegistry,
 ) -> Type {
     let mut env = env.clone();
     let mut vg = vg.clone();
-    let mut subst = subst.clone();
+    let mut subst = Subst::new();
     let mut errors = Vec::new();
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
@@ -1188,6 +1188,11 @@ fn should_attach_type_metadata(tag: &str) -> bool {
             | "import"
             | "import-all"
             | "export"
+            | "let"
+            | "fn"
+            | "var"
+            | "tuple"
+            | "tuple-get"
             | "defsig"
             | "deftype"
             | "typealias"
@@ -8653,6 +8658,50 @@ bad = fold(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
             "expected accumulator mismatch, got {:?}",
             err.errors
         );
+    }
+
+    fn surf_tuple_fold_tensor_slot_program() -> Vec<deep::Expr> {
+        chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(
+                r#"
+def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
+  idxs = range(cast(0, int64), numel(copy(xs)))
+  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
+  step = fn (state, i) -> {
+    acc = state.0
+    total = state.1
+    (acc, add(total, i))
+  }
+  fold(step, state0, idxs)
+}
+
+out = f(to_tensor([1.0, 2.0, 3.0]))
+"#,
+            )
+            .expect("surf parse"),
+        )
+    }
+
+    #[test]
+    fn surf_polymorphic_tuple_fold_with_tensor_slot_infers_phase0e() {
+        let result = infer_phase0e_program(&surf_tuple_fold_tensor_slot_program());
+        assert!(
+            result.errors.is_empty(),
+            "phase0e inference should succeed without overflowing: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_phase0e() {
+        let program = surf_tuple_fold_tensor_slot_program();
+        let _ = annotate_phase0e_program(&program);
+    }
+
+    #[test]
+    fn surf_polymorphic_tuple_fold_with_tensor_slot_type_checks() {
+        let result = check_phase0e_program(&surf_tuple_fold_tensor_slot_program());
+        result.expect("polymorphic tuple fold should type check without overflowing");
     }
 
     #[test]

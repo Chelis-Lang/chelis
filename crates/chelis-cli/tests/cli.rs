@@ -1321,6 +1321,56 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
 }
 
 #[test]
+fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tensor_grad_lm_canary.ch");
+    let out_dir = dir.path().join("tensor-grad-lm-canary-out");
+    write_file(
+        &path,
+        "def residual[n](theta: tensor[n, f32], x: f32, y: f32) -> f32 = {\n\
+           y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
+           sub(y, y_hat)\n\
+         }\n\
+         row = grad(residual, wrt=(theta))\n\
+         def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> List[tensor[n, f32]] = {\n\
+           pairs = zip(to_list(xs), to_list(ys))\n\
+           map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\
+         }\n\
+         out = jac(to_tensor([1.0, 2.0]), to_tensor([1.0, -2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("tensor_grad_lm_canary.c")).expect("generated c");
+    assert!(
+        source.contains("static inline chelis_tensor* row("),
+        "expected a host wrapper for the gradient row helper:\n{source}"
+    );
+    assert!(
+        source.contains("chelis_scalar_tensor_from_f64(__tensor_scalar1_"),
+        "expected host scalar dependencies to be boxed into tensor helper inputs:\n{source}"
+    );
+    assert!(
+        !source.contains("= lt;") && !source.contains("(int[]){ n }"),
+        "gradient codegen must not leave unresolved host builtins or symbolic dims in C:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "tensor_grad_lm_canary.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
 fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("tensor_fold_if.ch");
@@ -1358,6 +1408,109 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
     assert!(status.success(), "gcc failed with status {status}");
 }
 
+#[test]
+fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("library_surface.ch");
+    let out_dir = dir.path().join("library-surface-build-out");
+    write_file(
+        &path,
+        "def square(x: f32) -> f32 = mul(x, x)\n\
+         def cube(x: f32) -> f32 = mul(square(x), x)\n\
+         def main() -> f32 = square(cast(2.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = out_dir.join("library_surface.c");
+    let source = fs::read_to_string(&generated).expect("generated c");
+    assert!(
+        source.contains("double cube(double x)"),
+        "expected unreachable host def to survive build pruning for downstream drivers:\n{source}"
+    );
+
+    fs::write(&generated, source.replace("double main", "double chelis_entry"))
+        .expect("rename generated entry point");
+    write_file(
+        &out_dir.join("driver.c"),
+        r#"#include <stdio.h>
+
+double cube(double x);
+
+int main(void) {
+    printf("%.1f\n", cube(3.0));
+    return 0;
+}
+"#,
+    );
+
+    let status = gcc_link_sources(&out_dir, &["driver.c", "library_surface.c"], "library_surface_driver");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("library_surface_driver"))
+        .output()
+        .expect("compiled driver should run");
+    assert!(
+        run_output.status.success(),
+        "compiled driver failed with status {} stderr:\n{}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(run_output.stdout).expect("stdout utf8").trim(),
+        "27.0"
+    );
+}
+
+#[test]
+fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("library_tensor_surface.ch");
+    let out_dir = dir.path().join("library-tensor-surface-build-out");
+    write_file(
+        &path,
+        "def double_it[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)\n\
+         def main() -> f32 = cast(1.0, f32)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("library_tensor_surface.c")).expect("generated c");
+    assert!(
+        source.contains("chelis_tensor* double_it(chelis_tensor* x)"),
+        "expected generic tensor def to remain callable from downstream code:\n{source}"
+    );
+    assert!(
+        !source.contains("(int[]){ d"),
+        "generic tensor helper dims must be rebound to caller-visible symbols before C emission:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "library_tensor_surface.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
 fn assert_reef_std_embedding_builds_to_valid_c() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -1379,7 +1532,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2309,7 +2462,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2386,7 +2539,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2428,7 +2581,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Common"
 "#,
     );
@@ -2447,7 +2600,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2488,7 +2641,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Common"
 "#,
     );
@@ -2538,7 +2691,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.12"
+compiler = "=0.1.13"
 module_prefix = "Demo"
 
 [dependencies]

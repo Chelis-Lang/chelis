@@ -245,6 +245,12 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
     {
         return Ok(());
     }
+    if occurs_in_dim(v, dim, subst) {
+        return Err(TypeError {
+            kind: TypeErrorKind::OccursCheck,
+            message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
+        });
+    }
     subst.dims.insert(v, dim.clone());
     Ok(())
 }
@@ -261,6 +267,11 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
         Type::Prim(_) | Type::Unit | Type::Error => false,
     }
+}
+
+fn occurs_in_dim(v: DimVar, dim: &Dim, subst: &Subst) -> bool {
+    let dim = subst.apply_dim(dim);
+    matches!(dim, Dim::Var(v2) if v2 == v)
 }
 
 #[cfg(test)]
@@ -354,6 +365,17 @@ mod tests {
         let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
         assert!(unify(&t1, &t2, &mut s).is_ok());
         assert_eq!(s.apply_dim(&Dim::Var(dv)), Dim::Name("batch".into()));
+    }
+
+    #[test]
+    fn unify_dim_transitive_binding_resolves() {
+        let mut g = var_gen();
+        let d0 = g.fresh_dvar();
+        let d1 = g.fresh_dvar();
+        let mut s = Subst::new();
+        assert!(unify_dim(&Dim::Var(d0), &Dim::Var(d1), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(d1), &Dim::Name("batch".into()), &mut s).is_ok());
+        assert_eq!(s.apply_dim(&Dim::Var(d0)), Dim::Name("batch".into()));
     }
 
     #[test]

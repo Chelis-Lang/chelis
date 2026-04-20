@@ -2082,7 +2082,11 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         runtime_fail!("einsum ellipsis support is deferred in 3h");
     }
     if (*lhs).dtype != (*rhs).dtype {
-        runtime_fail!("einsum expects matching tensor dtype");
+        runtime_fail!(
+            "einsum expects matching tensor dtype (lhs={}, rhs={})",
+            (*lhs).dtype,
+            (*rhs).dtype
+        );
     }
     let (input, output) = equation
         .split_once("->")

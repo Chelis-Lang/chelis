@@ -87,6 +87,9 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
             for &input in &dag.nodes()[i].inputs {
                 live[input.0] = true;
             }
+            if let Some(reusable_input) = dag.nodes()[i].reusable_input {
+                live[reusable_input.0] = true;
+            }
         }
     }
 

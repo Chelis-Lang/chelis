@@ -65,6 +65,85 @@ pub fn lower_subexpr_program(
     crate::optimize::dead_code_eliminate(&ctx.dag)
 }
 
+pub fn remap_tensor_dim_symbols(
+    dag: &Dag,
+    formal_params: &[TensorType],
+    actual_args: &[TensorType],
+) -> Dag {
+    let substitutions = formal_params
+        .iter()
+        .zip(actual_args.iter())
+        .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
+        .filter_map(|(formal_dim, actual_dim)| match formal_dim {
+            DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    if substitutions.is_empty() {
+        return dag.clone();
+    }
+
+    fn rewrite_dim_info(dim: &DimInfo, substitutions: &HashMap<String, DimInfo>) -> DimInfo {
+        match dim {
+            DimInfo::Named(name, None) => substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| dim.clone()),
+            _ => dim.clone(),
+        }
+    }
+
+    fn rewrite_dim_expr(expr: &DimExpr, substitutions: &HashMap<String, DimInfo>) -> DimExpr {
+        match expr {
+            DimExpr::Concrete(value) => DimExpr::Concrete(*value),
+            DimExpr::Sym(name) => substitutions
+                .get(name)
+                .map(DimExpr::from)
+                .unwrap_or_else(|| DimExpr::Sym(name.clone())),
+            DimExpr::Mul(lhs, rhs) => DimExpr::Mul(
+                Box::new(rewrite_dim_expr(lhs, substitutions)),
+                Box::new(rewrite_dim_expr(rhs, substitutions)),
+            ),
+            DimExpr::Div(lhs, rhs) => DimExpr::Div(
+                Box::new(rewrite_dim_expr(lhs, substitutions)),
+                Box::new(rewrite_dim_expr(rhs, substitutions)),
+            ),
+        }
+    }
+
+    let mut specialized = dag.clone();
+    let node_ids = specialized.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+    for id in node_ids {
+        let Some(node) = specialized.get(id).cloned() else {
+            continue;
+        };
+        let mut output_type = node.output_type.clone();
+        output_type.dims = output_type
+            .dims
+            .iter()
+            .map(|dim| rewrite_dim_info(dim, &substitutions))
+            .collect();
+        let op = match node.op {
+            RiscOp::Expand { axis, size } => RiscOp::Expand {
+                axis,
+                size: rewrite_dim_expr(&size, &substitutions),
+            },
+            RiscOp::Reshape { new_shape } => RiscOp::Reshape {
+                new_shape: new_shape
+                    .iter()
+                    .map(|dim| rewrite_dim_info(dim, &substitutions))
+                    .collect(),
+            },
+            other => other,
+        };
+        specialized.replace_node(id, op, node.inputs, output_type);
+        if let Some(reusable_input) = node.reusable_input {
+            specialized.set_reusable_input(id, reusable_input);
+        }
+    }
+    specialized
+}
+
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
@@ -1097,6 +1176,14 @@ impl LowerCtx {
         Self::default_type()
     }
 
+    fn remap_callable_dim_symbols(
+        dag: &Dag,
+        formal_params: &[TensorType],
+        actual_args: &[TensorType],
+    ) -> Dag {
+        remap_tensor_dim_symbols(dag, formal_params, actual_args)
+    }
+
     fn type_from_type_expr(expr: &Expr) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
@@ -1679,6 +1766,15 @@ impl LowerCtx {
             .iter()
             .map(|arg| self.lower_expr_node(arg, "grad arguments"))
             .collect();
+        let actual_types: Vec<TensorType> = actual_args
+            .iter()
+            .map(|id| {
+                self.dag
+                    .get(*id)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
@@ -1715,15 +1811,28 @@ impl LowerCtx {
             .zip(actual_args.iter().copied())
             .map(|(name, arg)| (name.clone(), arg))
             .collect::<HashMap<_, _>>();
-        let remap = self.splice_dag(&grad_result.dag, &arg_map);
-        let flattened = wrt
+        let specialized_grad_dag =
+            Self::remap_callable_dim_symbols(&grad_result.dag, &param_types, &actual_types);
+        let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        let grad_results = wrt
             .iter()
             .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
             .map(|grad_node| remap[grad_node])
             .collect::<Vec<_>>();
-        match flattened.as_slice() {
+        let reusable_inputs = param_types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, param_ty)| {
+                self.is_selected_wrt(index, param_ty, wrt_indices)
+                    .then_some(actual_args[index])
+            })
+            .collect::<Vec<_>>();
+        for (grad_node, reusable_input) in grad_results.iter().zip(reusable_inputs.iter()) {
+            self.dag.set_reusable_input(*grad_node, *reusable_input);
+        }
+        match grad_results.as_slice() {
             [single] => LoweredValue::Node(self.attach_reuse_hint(*single, app_span, &actual_args)),
-            _ => LoweredValue::Tuple(flattened.into_iter().map(LoweredValue::Node).collect()),
+            _ => LoweredValue::Tuple(grad_results.into_iter().map(LoweredValue::Node).collect()),
         }
     }
 
@@ -1879,7 +1988,9 @@ impl LowerCtx {
             );
         }
 
-        let remap = self.splice_dag(&vmapped, &arg_map);
+        let specialized_vmapped =
+            Self::remap_callable_dim_symbols(&vmapped, &param_types, &actual_types);
+        let remap = self.splice_dag(&specialized_vmapped, &arg_map);
         let mut flattened = root_value
             .flatten_nodes()
             .into_iter()
@@ -2029,6 +2140,17 @@ impl LowerCtx {
             .filter_map(|wrt_node| grad_result.grad_nodes.get(wrt_node))
             .map(|grad_node| remap[grad_node])
             .collect::<Vec<_>>();
+        let reusable_inputs = param_types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, param_ty)| {
+                self.is_selected_wrt(index, param_ty, wrt_indices)
+                    .then_some(canonical_args[index])
+            })
+            .collect::<Vec<_>>();
+        for (grad_node, reusable_input) in flattened.iter().zip(reusable_inputs.iter()) {
+            self.dag.set_reusable_input(*grad_node, *reusable_input);
+        }
         if axis > 0 {
             for result in &mut flattened {
                 let result_ty = self
@@ -2184,7 +2306,7 @@ impl LowerCtx {
                 let node = self.dag.add_node(RiscOp::Mul, vec![a, b], out_ty);
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
-            "cmplt" if args.len() == 2 => {
+            "cmplt" | "lt" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 // C5: CmpLt always produces Bool output regardless of input precision.

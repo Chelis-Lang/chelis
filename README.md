@@ -52,6 +52,19 @@ cargo test --workspace
 `cargo test --workspace` covers the compiler, evaluator, backend, and spec
 regressions.
 
+For real downstream proof against Nautilus without going through release
+artifacts or GitHub Actions, build a local compiler binary and run:
+
+```sh
+python3 scripts/nautilus_local_gate.py baseline
+python3 scripts/nautilus_local_gate.py tensor-grad
+python3 scripts/nautilus_local_gate.py tensor-fold
+python3 scripts/nautilus_local_gate.py eval-imports
+```
+
+See [scripts/README.md](scripts/README.md) for the local downstream gate
+workflow.
+
 ## Project Structure
 
 ```text

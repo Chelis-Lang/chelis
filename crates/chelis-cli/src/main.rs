@@ -341,8 +341,8 @@ fn cmd_eval(
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             (
-                SourceKind::Deep,
-                chelis_deep::printer::print_canonical(&deep_exprs),
+                SourceKind::Surf,
+                chelis_surf::format::format_program(&decls),
                 Some(root_names_from_decls(&entry_decls, checked.type_env())),
             )
         }
@@ -542,9 +542,26 @@ fn cmd_build(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (decls, entry_decls) = load_check_build_decls(file)?;
     reject_with_seed_for_build_target(&decls, target)?;
-    let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+    let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
-    let deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
+    let pruned_deep_exprs =
+        prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
+    let preserve_host_library_surface = if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
+        let full_checked = checked_program_with_effects(&full_deep_exprs)
+            .map_err(|e| format!("Check errors: {e}"))?;
+        chelis_ir::host::lower_compiled_program(&full_checked)
+            .host
+            .as_ref()
+            .map(chelis_ir::host::host_program_requires_host_backend)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let deep_exprs = if preserve_host_library_surface {
+        full_deep_exprs
+    } else {
+        pruned_deep_exprs
+    };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
     let checked =
         checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
@@ -595,8 +612,9 @@ fn cmd_build(
 
     match target {
         "c" => {
-            if dag.roots().is_empty()
-                && let Some(host_program) = compiled_program.host.as_ref()
+            if let Some(host_program) = compiled_program.host.as_ref()
+                && (chelis_ir::host::host_program_requires_host_backend(host_program)
+                    || dag.roots().is_empty())
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)

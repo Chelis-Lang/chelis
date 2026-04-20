@@ -608,6 +608,7 @@ fn lower_tensor_helper_call(
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
     );
+    let dag = remap_tensor_helper_dim_symbols(&dag, scope, &expected);
     let inputs = tensor_helper_inputs(&dag);
     let output = dag
         .roots()
@@ -653,6 +654,7 @@ fn lower_host_expr(
             program.type_env().clone(),
             collect_program_defs(program.exprs()),
         );
+        let dag = remap_tensor_helper_dim_symbols(&dag, scope, &tensor_ty);
         let inputs = tensor_helper_inputs(&dag);
         let output = dag
             .roots()
@@ -902,6 +904,8 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
             for param in function.params.iter_mut() {
                 if param.ty == HostType::Unknown
                     && let Some(inferred) = inferred_param_fns.get(&param.name)
+                    && !host_type_has_unknown(inferred)
+                    && param.ty != *inferred
                 {
                     param.ty = inferred.clone();
                     changed = true;
@@ -1373,9 +1377,9 @@ fn refine_host_expr_types(
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
             }
-            if host_type_has_unknown(ty)
-                && let Some(inferred) = infer_builtin_host_type(name, args)
+            if let Some(inferred) = infer_builtin_host_type(name, args)
                 && !host_type_has_unknown(&inferred)
+                && *ty != inferred
             {
                 *ty = inferred;
                 changed = true;
@@ -1667,13 +1671,11 @@ fn refine_host_callback_types(
             for param in params.iter() {
                 callback_scope.insert(param.name.clone(), param.ty.clone());
             }
-            let changed = refine_host_expr_types(body, &mut callback_scope, signatures);
-            if callback.ret_ty == HostType::Unknown {
-                let inferred = host_expr_type(body);
-                if inferred != HostType::Unknown {
-                    callback.ret_ty = inferred;
-                    return true;
-                }
+            let mut changed = refine_host_expr_types(body, &mut callback_scope, signatures);
+            let inferred = host_expr_type(body);
+            if !host_type_has_unknown(&inferred) && callback.ret_ty != inferred {
+                callback.ret_ty = inferred;
+                changed = true;
             }
             changed
         }
@@ -2156,8 +2158,11 @@ fn lower_app_host_expr(
         })
         .unwrap_or("call")
         .to_string();
-    let fn_sig =
-        lookup_declared_fn_type(program, &name).or_else(|| kids.first().and_then(expr_fn_type));
+    let fn_sig = scope
+        .get(&name)
+        .and_then(host_fn_signature)
+        .or_else(|| lookup_declared_fn_type(program, &name))
+        .or_else(|| kids.first().and_then(expr_fn_type));
     let ctor_info = lookup_adt_ctor(program, &name);
     let explicit_ty = expr_host_type(&app_expr, program, scope);
     let inferred_ret_ty = fn_sig
@@ -2350,6 +2355,13 @@ fn lower_app_host_expr(
     HostExpr::Builtin { name, args, ty }
 }
 
+fn host_fn_signature(ty: &HostType) -> Option<(Vec<HostType>, HostType)> {
+    match ty {
+        HostType::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
+        _ => None,
+    }
+}
+
 fn lower_host_callback(
     expr: &Expr,
     program: &CheckedProgram,
@@ -2485,6 +2497,174 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
         .collect()
 }
 
+fn remap_tensor_helper_dim_symbols(
+    dag: &crate::Dag,
+    scope: &HashMap<String, HostType>,
+    expected_output: &TensorType,
+) -> crate::Dag {
+    fn tensor_type_has_synthetic_dims(tensor_ty: &TensorType) -> bool {
+        tensor_ty.dims.iter().any(|dim| {
+            matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+                let mut chars = name.chars();
+                matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
+            })
+        })
+    }
+
+    let formal_inputs = tensor_helper_inputs(dag);
+    let mut actual_inputs = formal_inputs
+        .iter()
+        .map(|input| match scope.get(&input.name) {
+            Some(HostType::Tensor(actual)) => actual.clone(),
+            _ => input.ty.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut formal_params = formal_inputs
+        .iter()
+        .map(|input| input.ty.clone())
+        .collect::<Vec<_>>();
+    if let Some(root) = dag.roots().first().and_then(|id| dag.get(*id)) {
+        formal_params.push(root.output_type.clone());
+        let actual_output = if tensor_type_has_synthetic_dims(expected_output) {
+            match root.op {
+                crate::dag::RiscOp::Permute { ref axes } => root
+                    .inputs
+                    .first()
+                    .and_then(|id| dag.get(*id))
+                    .map(|node| {
+                        let mut output = node.output_type.clone();
+                        output.dims = axes
+                            .iter()
+                            .filter_map(|axis| node.output_type.dims.get(*axis).cloned())
+                            .collect();
+                        output
+                    })
+                    .unwrap_or_else(|| expected_output.clone()),
+                crate::dag::RiscOp::UniformLike { .. } | crate::dag::RiscOp::Dropout { .. } => root
+                    .inputs
+                    .first()
+                    .and_then(|id| dag.get(*id))
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| expected_output.clone()),
+                _ => expected_output.clone(),
+            }
+        } else {
+            expected_output.clone()
+        };
+        actual_inputs.push(actual_output);
+    }
+    let remapped = crate::lower::remap_tensor_dim_symbols(dag, &formal_params, &actual_inputs);
+    actualize_tensor_helper_types(&remapped, scope)
+}
+
+fn actualize_tensor_helper_types(
+    dag: &crate::Dag,
+    scope: &HashMap<String, HostType>,
+) -> crate::Dag {
+    fn inferred_load_type(name: &str, scope: &HashMap<String, HostType>, fallback: &TensorType) -> TensorType {
+        match scope.get(name) {
+            Some(HostType::Tensor(actual)) => actual.clone(),
+            _ => fallback.clone(),
+        }
+    }
+
+    fn precision_like(input: &TensorType, precision: chelis_types::types::Prim) -> TensorType {
+        TensorType {
+            dims: input.dims.clone(),
+            precision,
+        }
+    }
+
+    fn synthetic_dims(tensor_ty: &TensorType) -> bool {
+        tensor_ty.dims.iter().any(|dim| {
+            matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+                let mut chars = name.chars();
+                matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
+            })
+        })
+    }
+
+    let mut inferred = HashMap::<crate::dag::NodeId, TensorType>::new();
+    for node in dag.nodes() {
+        let actual = match &node.op {
+            crate::dag::RiscOp::Load { name } => Some(inferred_load_type(name, scope, &node.output_type)),
+            crate::dag::RiscOp::Add
+            | crate::dag::RiscOp::Mul
+            | crate::dag::RiscOp::CmpLt
+            | crate::dag::RiscOp::MaxElem
+            | crate::dag::RiscOp::Neg
+            | crate::dag::RiscOp::Exp
+            | crate::dag::RiscOp::Log
+            | crate::dag::RiscOp::Sin
+            | crate::dag::RiscOp::Sqrt
+            | crate::dag::RiscOp::UniformLike { .. }
+            | crate::dag::RiscOp::Dropout { .. }
+            | crate::dag::RiscOp::Realize
+            | crate::dag::RiscOp::Cast { .. } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .map(|input| precision_like(input, node.output_type.precision)),
+            crate::dag::RiscOp::Sum { axis }
+            | crate::dag::RiscOp::MaxReduce { axis }
+            | crate::dag::RiscOp::MinReduce { axis }
+            | crate::dag::RiscOp::ProdReduce { axis }
+            | crate::dag::RiscOp::Argmax { axis }
+            | crate::dag::RiscOp::Argmin { axis } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .map(|input| TensorType {
+                    dims: input
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, dim)| (index != *axis).then_some(dim.clone()))
+                        .collect(),
+                    precision: node.output_type.precision,
+                }),
+            crate::dag::RiscOp::Permute { axes } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .map(|input| TensorType {
+                    dims: axes
+                        .iter()
+                        .filter_map(|axis| input.dims.get(*axis).cloned())
+                        .collect(),
+                    precision: node.output_type.precision,
+                }),
+            _ => None,
+        };
+        if let Some(actual) = actual {
+            inferred.insert(node.id, actual);
+        }
+    }
+
+    let mut actualized = dag.clone();
+    let node_ids = actualized
+        .nodes()
+        .iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    for id in node_ids {
+        let Some(node) = actualized.get(id).cloned() else {
+            continue;
+        };
+        let Some(actual) = inferred.get(&id) else {
+            continue;
+        };
+        if !synthetic_dims(&node.output_type) || node.output_type.dims.len() != actual.dims.len() {
+            continue;
+        }
+        actualized.replace_node(id, node.op, node.inputs, actual.clone());
+        if let Some(reusable_input) = node.reusable_input {
+            actualized.set_reusable_input(id, reusable_input);
+        }
+    }
+    actualized
+}
+
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in top_level_items(exprs) {
@@ -2527,11 +2707,27 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, TensorType> {
     scope
         .iter()
-        .filter_map(|(name, ty)| match ty {
-            HostType::Tensor(tensor) => Some((name.clone(), tensor.clone())),
-            _ => None,
-        })
+        .filter_map(|(name, ty)| tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor)))
         .collect()
+}
+
+fn tensor_type_from_host_input(ty: &HostType) -> Option<TensorType> {
+    match ty {
+        HostType::Tensor(tensor) => Some(tensor.clone()),
+        HostType::Float64 => Some(TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F32,
+        }),
+        HostType::Int64 => Some(TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Int64,
+        }),
+        HostType::Bool => Some(TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Bool,
+        }),
+        _ => None,
+    }
 }
 
 fn host_type_from_tensor_input(ty: &TensorType) -> HostType {
@@ -2572,8 +2768,119 @@ fn expr_host_type(
                     })
             })
             .unwrap_or(HostType::Unknown),
+        Expr::List(list, _) if tag(list) == Some("app") => {
+            let explicit = expr_type(expr).unwrap_or(HostType::Unknown);
+            if app_expr_needs_inferred_type(&explicit) {
+                let inferred =
+                    infer_app_expr_host_type(list, program, scope).unwrap_or(HostType::Unknown);
+                if should_prefer_inferred_app_type(&explicit, &inferred) {
+                    inferred
+                } else if explicit != HostType::Unknown {
+                    explicit
+                } else {
+                    inferred
+                }
+            } else {
+                explicit
+            }
+        }
         _ => expr_type(expr).unwrap_or(HostType::Unknown),
     }
+}
+
+fn app_expr_needs_inferred_type(explicit: &HostType) -> bool {
+    explicit == &HostType::Unknown || host_type_has_synthetic_tensor_dims(explicit)
+}
+
+fn infer_app_expr_host_type(
+    list: &List,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+) -> Option<HostType> {
+    let kids = children(list);
+    let callee = kids.first().and_then(as_list)?;
+    if tag(callee) != Some("var") {
+        return None;
+    }
+    let name = children(callee).first().and_then(symbol_name)?;
+    if !BUILTIN_NAMES.contains(&name) {
+        return lookup_declared_fn_type(program, name).map(|(_, ret)| ret);
+    }
+    if name == "einsum" {
+        let equation = match kids.get(1) {
+            Some(Expr::Atom(Atom::Str(value), _)) => value.as_str(),
+            _ => return Some(HostType::Unknown),
+        };
+        let tensors = kids[2..]
+            .iter()
+            .map(|arg| match expr_host_type(arg, program, scope) {
+                HostType::Tensor(tensor_ty) => Some(tensor_ty),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor);
+    }
+    let arg_tys = kids[1..]
+        .iter()
+        .map(|arg| expr_host_type(arg, program, scope))
+        .collect::<Vec<_>>();
+    infer_builtin_host_type_from_arg_tys(name, &arg_tys)
+}
+
+fn should_prefer_inferred_app_type(explicit: &HostType, inferred: &HostType) -> bool {
+    explicit == &HostType::Unknown
+        || matches!(
+            (explicit, inferred),
+            (HostType::Tensor(_), HostType::Tensor(_)) if host_type_has_synthetic_tensor_dims(explicit)
+                && !host_type_has_synthetic_tensor_dims(inferred)
+        )
+}
+
+fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
+    fn synthetic_dim_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
+    }
+
+    match ty {
+        HostType::Tensor(tensor_ty) => tensor_ty
+            .dims
+            .iter()
+            .any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, None) if synthetic_dim_name(name))),
+        HostType::Tuple(items) => items.iter().any(host_type_has_synthetic_tensor_dims),
+        HostType::List(inner) | HostType::Option(inner) => host_type_has_synthetic_tensor_dims(inner),
+        _ => false,
+    }
+}
+
+fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<TensorType> {
+    let (inputs, output) = equation.split_once("->")?;
+    let input_specs = inputs.split(',').map(str::trim).collect::<Vec<_>>();
+    if input_specs.len() != tensors.len() {
+        return None;
+    }
+
+    let mut labels = HashMap::<char, crate::dag::DimInfo>::new();
+    for (spec, tensor) in input_specs.iter().zip(tensors.iter()) {
+        let axes = spec.chars().filter(|ch| !ch.is_whitespace()).collect::<Vec<_>>();
+        if axes.len() != tensor.dims.len() {
+            return None;
+        }
+        for (axis, dim) in axes.into_iter().zip(tensor.dims.iter().cloned()) {
+            labels.entry(axis).or_insert(dim);
+        }
+    }
+
+    let dims = output
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(|axis| labels.get(&axis).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    let precision = tensors
+        .first()
+        .map(|tensor| tensor.precision)
+        .unwrap_or(chelis_types::types::Prim::F32);
+    Some(TensorType { dims, precision })
 }
 
 fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -2879,6 +3186,20 @@ fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
 fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostType> {
     let arg_tys = args.iter().map(host_expr_type).collect::<Vec<_>>();
     match name {
+        "einsum" => {
+            let equation = match args.first() {
+                Some(HostExpr::String(value)) => value.as_str(),
+                _ => return Some(HostType::Unknown),
+            };
+            let tensors = args[1..]
+                .iter()
+                .map(|arg| match host_expr_type(arg) {
+                    HostType::Tensor(tensor_ty) => Some(tensor_ty),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor)
+        }
         "tuple-get" => match (arg_tys.first(), args.get(1)) {
             (Some(HostType::Tuple(items)), Some(HostExpr::Int(index))) => items
                 .get(*index as usize)
@@ -2897,7 +3218,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
     });
     match name {
         "add" | "sub" | "mul" | "div" | "neg" | "exp" | "log" | "sin" | "sqrt" | "relu"
-        | "sigmoid" | "max_elem" | "min_elem" => {
+        | "sigmoid" | "max_elem" | "min_elem" | "copy" | "uniform_like" | "dropout" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostType::Tensor(tensor_ty))
             } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
@@ -2951,10 +3272,6 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
         "gather" | "scatter" | "where" | "cumsum" | "diagonal" | "trace" | "clamp" => {
             arg_tys.first().cloned()
         }
-        "einsum" => match arg_tys.get(1) {
-            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
-            _ => Some(HostType::Unknown),
-        },
         "sort" => match arg_tys.first() {
             Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tuple(vec![
                 HostType::Tensor(tensor_ty.clone()),
