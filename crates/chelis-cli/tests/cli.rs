@@ -2539,6 +2539,32 @@ fn phase3e_pipe_first_acceptance_oracle() {
 }
 
 #[test]
+fn deep_annotate_emits_type_metadata_on_fn() {
+    let dir = tempdir().expect("tempdir");
+    let surf_path = dir.path().join("ident.ch");
+    fs::write(&surf_path, "def f(x: f32) -> f32 = x\n").expect("write surf source");
+
+    // Default (no --annotate) should leave fn meta empty.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(fn {}").or(predicate::str::contains("(fn {} ")));
+
+    // --annotate should thread the inferred type onto the fn node.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--annotate", surf_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(fn {type: (t-fn"))
+        .stdout(predicate::str::contains(
+            "(t-fn {} (t-prim {} f32) (t-prim {} f32))",
+        ));
+}
+
+#[test]
 fn reef_init_scaffolds_valid_package() {
     let dir = tempdir().expect("tempdir");
     let pkg = dir.path().join("demo");

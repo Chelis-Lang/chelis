@@ -100,6 +100,12 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         );
     }
 
+    // Third pass: reject tensor types whose element precision isn't supported
+    // by the Phase 0f backend (f16/bf16/f64/f8e4m3). These would silently get
+    // downcast to f32 by the current build targets, violating the "no implicit
+    // precision promotion" rule.
+    validate_tensor_precisions_in_program(exprs, &mut errors);
+
     InferResult {
         errors,
         typed_nodes,
@@ -111,6 +117,7 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     let type_env = build_phase0e_type_env(exprs);
     let mut result = infer_phase0e_program_with_env(exprs, &type_env);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
+    validate_tensor_precisions_in_program(exprs, &mut result.errors);
     if result.errors.is_empty() {
         let annotated_exprs = annotate_phase0e_program(exprs);
         let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
@@ -141,6 +148,7 @@ pub fn infer_phase0e_program(exprs: &[deep::Expr]) -> InferResult {
     let type_env = build_phase0e_type_env(exprs);
     let mut result = infer_phase0e_program_with_env(exprs, &type_env);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
+    validate_tensor_precisions_in_program(exprs, &mut result.errors);
     result
 }
 
@@ -234,9 +242,283 @@ fn validate_phase0e_program(
     type_env: &Phase0eTypeEnv,
     errors: &mut Vec<CheckError>,
 ) {
+    detect_top_level_binding_cycles(exprs, errors);
     let mut static_env = HashMap::new();
     for expr in exprs {
         validate_phase0e_expr(expr, type_env, &mut static_env, errors);
+    }
+}
+
+/// Detect cycles among top-level `def` bindings.
+///
+/// The Nautilus external-input pattern `x = (x : tensor[...])` is permitted —
+/// a self-loop (the def body references the same name it is binding, with no
+/// intermediate hops) is treated as a declaration of an external input, not as
+/// a cycle. Any cycle of length >= 2 (e.g. `a -> b -> a`, `a -> b -> c -> a`)
+/// is a real binding cycle and is reported as a `CycleDetected` error.
+fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut def_names: Vec<String> = Vec::new();
+    let mut def_name_set: HashSet<String> = HashSet::new();
+    let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
+    for expr in exprs {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+        {
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            let Some(body) = kids.get(1) else { continue };
+            if !def_name_set.contains(name) {
+                def_name_set.insert(name.to_string());
+                def_names.push(name.to_string());
+            }
+            def_bodies.insert(name.to_string(), body);
+        }
+    }
+
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for name in &def_names {
+        let Some(body) = def_bodies.get(name) else {
+            continue;
+        };
+        let mut refs: HashSet<String> = HashSet::new();
+        let mut bound: HashSet<String> = HashSet::new();
+        collect_free_var_refs(body, &mut bound, &mut refs);
+        let mut out = Vec::new();
+        for r in refs {
+            // Distance-0 self-reference is the Nautilus external-input carve-out.
+            if r == *name {
+                continue;
+            }
+            if def_name_set.contains(&r) {
+                out.push(r);
+            }
+        }
+        edges.insert(name.clone(), out);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: HashMap<String, Color> = def_names
+        .iter()
+        .map(|n| (n.clone(), Color::White))
+        .collect();
+    let mut reported: HashSet<Vec<String>> = HashSet::new();
+
+    fn dfs(
+        node: &str,
+        edges: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<String, Color>,
+        stack: &mut Vec<String>,
+        reported: &mut HashSet<Vec<String>>,
+        errors: &mut Vec<CheckError>,
+    ) {
+        color.insert(node.to_string(), Color::Gray);
+        stack.push(node.to_string());
+        if let Some(neighbors) = edges.get(node) {
+            for next in neighbors {
+                match color.get(next).copied().unwrap_or(Color::White) {
+                    Color::White => {
+                        dfs(next, edges, color, stack, reported, errors);
+                    }
+                    Color::Gray => {
+                        if let Some(start) = stack.iter().position(|s| s == next) {
+                            let cycle: Vec<String> = stack[start..].to_vec();
+                            let mut canon = cycle.clone();
+                            if let Some((min_idx, _)) =
+                                canon.iter().enumerate().min_by(|a, b| a.1.cmp(b.1))
+                            {
+                                canon.rotate_left(min_idx);
+                            }
+                            if reported.insert(canon.clone()) {
+                                let mut path = canon.clone();
+                                path.push(canon[0].clone());
+                                let message = format!("binding cycle: {}", path.join(" -> "));
+                                errors.push(CheckError::new(
+                                    CheckErrorKind::CycleDetected,
+                                    message,
+                                    vec![
+                                        "Break the cycle by removing one of the \
+                                         self-referential definitions or replacing it \
+                                         with a concrete value."
+                                            .to_string(),
+                                    ],
+                                ));
+                            }
+                        }
+                    }
+                    Color::Black => {}
+                }
+            }
+        }
+        stack.pop();
+        color.insert(node.to_string(), Color::Black);
+    }
+
+    let mut stack: Vec<String> = Vec::new();
+    for name in &def_names {
+        if color.get(name).copied() == Some(Color::White) {
+            dfs(name, &edges, &mut color, &mut stack, &mut reported, errors);
+        }
+    }
+}
+
+/// Collect names referenced via `(var {} name)` that are not locally bound and
+/// that are NOT inside an enclosing `fn` (function) body.
+///
+/// References that appear under an enclosing `fn` are deferred — they only
+/// fire when the function is called, not at definition time, so mutual
+/// recursion between function definitions is permitted and does not count
+/// as a top-level binding cycle. This matches how Chelis actually evaluates
+/// a program: function bodies are not forced when the def is elaborated.
+fn collect_free_var_refs(
+    expr: &deep::Expr,
+    bound: &mut HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    match expr {
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("var") => {
+                if let Some(name) = children(list).first().and_then(symbol_name)
+                    && !bound.contains(name)
+                {
+                    out.insert(name.to_string());
+                }
+            }
+            Some("fn") => {
+                // Do not descend into function bodies — those references are
+                // deferred until call time and cannot form a *top-level*
+                // value cycle. This is what allows legitimate mutual
+                // recursion like `f x = g(x); g y = f(y)` to pass.
+            }
+            Some("let") => {
+                let kids = children(list);
+                let mut added: Vec<String> = Vec::new();
+                if let Some(deep::Expr::List(bind_list, _)) = kids.first()
+                    && get_tag(bind_list) == Some("bind")
+                {
+                    let bind_kids = children(bind_list);
+                    let mut i = 0;
+                    while i + 1 < bind_kids.len() {
+                        collect_free_var_refs(&bind_kids[i + 1], bound, out);
+                        if let Some(name) = symbol_name(&bind_kids[i])
+                            && bound.insert(name.to_string())
+                        {
+                            added.push(name.to_string());
+                        }
+                        i += 2;
+                    }
+                }
+                if let Some(body) = kids.get(1) {
+                    collect_free_var_refs(body, bound, out);
+                }
+                for name in added {
+                    bound.remove(&name);
+                }
+            }
+            _ => {
+                for elem in &list.elements {
+                    collect_free_var_refs(elem, bound, out);
+                }
+            }
+        },
+        deep::Expr::Map(map, _) => {
+            for (_, v) in &map.entries {
+                collect_free_var_refs(v, bound, out);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            for (_, v) in &meta.entries {
+                collect_free_var_refs(v, bound, out);
+            }
+            collect_free_var_refs(&meta.expr, bound, out);
+        }
+        deep::Expr::Atom(_, _) => {}
+    }
+}
+
+/// Walk the program's Deep AST and reject any `(t-tensor ... (t-prim {} P))`
+/// whose precision P is not supported by the Phase 0f tensor backend
+/// (currently: f16, bf16, f64, f8e4m3, string).
+///
+/// This runs after HM inference so it catches user-written tensor type
+/// ascriptions, defsig tensor types, parameter type annotations, literal
+/// type metadata, and any cast target that produces a tensor with an
+/// unsupported element precision.
+fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for expr in exprs {
+        walk_for_tensor_precision(expr, errors, &mut seen);
+    }
+}
+
+fn walk_for_tensor_precision(
+    expr: &deep::Expr,
+    errors: &mut Vec<CheckError>,
+    seen: &mut HashSet<String>,
+) {
+    match expr {
+        deep::Expr::List(list, _) => {
+            // Check t-tensor nodes at this level.
+            if get_tag(list) == Some("t-tensor") {
+                let kids = children(list);
+                if let Some(last) = kids.last()
+                    && let deep::Expr::List(prec_list, _) = last
+                    && get_tag(prec_list) == Some("t-prim")
+                    && let Some(name) = children(prec_list).first().and_then(symbol_name)
+                    && let Some(prim) = Prim::parse_name(name)
+                    && !prim.is_valid_tensor_precision()
+                    && seen.insert(format!("tensor:{name}"))
+                {
+                    errors.push(CheckError::new(
+                        CheckErrorKind::UnsupportedTensorPrecision,
+                        format!(
+                            "tensor element precision `{}` is not supported by the current \
+                             Phase 0f backend (supported: f32, bool, int8, int32, int64)",
+                            name
+                        ),
+                        vec![
+                            format!(
+                                "Use tensor[..., f32] and cast host scalars explicitly, or keep `{name}` as a host scalar",
+                                name = name,
+                            ),
+                        ],
+                    ));
+                }
+            }
+
+            // Recurse into metadata map (element[1]), which may carry
+            // `type:` ascriptions that also contain t-tensor types.
+            if list.elements.len() >= 2
+                && let deep::Expr::Map(map, _) = &list.elements[1]
+            {
+                for (_, v) in &map.entries {
+                    walk_for_tensor_precision(v, errors, seen);
+                }
+            }
+
+            // Recurse into children (elements after index 1).
+            for child in children(list) {
+                walk_for_tensor_precision(child, errors, seen);
+            }
+        }
+        deep::Expr::Map(map, _) => {
+            for (_, v) in &map.entries {
+                walk_for_tensor_precision(v, errors, seen);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            for (_, v) in &meta.entries {
+                walk_for_tensor_precision(v, errors, seen);
+            }
+            walk_for_tensor_precision(&meta.expr, errors, seen);
+        }
+        deep::Expr::Atom(_, _) => {}
     }
 }
 
@@ -6361,7 +6643,21 @@ fn infer_cast(
     };
 
     match resolved {
-        Type::Tensor(dims, _) => Type::Tensor(dims, new_prec),
+        Type::Tensor(dims, _) => {
+            if !new_prec.is_valid_tensor_precision() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::UnsupportedTensorPrecision,
+                    format!(
+                        "cannot cast tensor to unsupported element precision `{}` \
+                         (supported: f32, bool, int8, int32, int64)",
+                        new_prec.name()
+                    ),
+                    vec!["Cast to f32 or an integer precision instead".to_string()],
+                ));
+                return Type::Error;
+            }
+            Type::Tensor(dims, new_prec)
+        }
         Type::Prim(_) => Type::Prim(new_prec),
         Type::Error => Type::Error,
         _ => {
@@ -7314,9 +7610,12 @@ mod tests {
 
     #[test]
     fn cast_tensor() {
+        // Cast to a precision the Phase 0f tensor backend supports.
+        // Reduced-float targets (bf16/f16/f64/f8e4m3) are rejected — see
+        // `cast_tensor_rejects_unsupported_precision` below.
         check_ok(
             "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
-             (def {} y (cast {} (var {} x) (t-prim {} bf16)))",
+             (def {} y (cast {} (var {} x) (t-prim {} int32)))",
         );
     }
 
@@ -7334,6 +7633,119 @@ mod tests {
             "(typealias {} Floaty () (t-prim {} f32))
              (def {} x (lit {type: (t-prim {} int32)} 42))
              (def {} y (cast {} (var {} x) (t-adt {} Floaty)))",
+        );
+    }
+
+    // ── Unsupported tensor precision tests ──────────────────────
+
+    #[test]
+    fn tensor_ascription_rejects_f64() {
+        // (y : tensor[4, f64]) must be rejected at check time — the
+        // Phase 0f backend downcasts silently otherwise, violating
+        // "no implicit precision promotion".
+        check_err(
+            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f64))} 0))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn tensor_ascription_rejects_f16() {
+        check_err(
+            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f16))} 0))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn tensor_ascription_rejects_bf16() {
+        check_err(
+            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} bf16))} 0))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn tensor_ascription_rejects_f8e4m3() {
+        check_err(
+            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f8e4m3))} 0))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn tensor_ascription_accepts_int64() {
+        // Integer tensor precisions remain valid.
+        check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} int64))} 0))");
+    }
+
+    #[test]
+    fn tensor_ascription_accepts_bool() {
+        check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} bool))} false))");
+    }
+
+    #[test]
+    fn cast_tensor_rejects_f64() {
+        // cast(tensor_f32, f64) — eval fails, so reject at check time.
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} y (cast {} (var {} x) (t-prim {} f64)))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn cast_tensor_rejects_bf16() {
+        check_err(
+            "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
+             (def {} y (cast {} (var {} x) (t-prim {} bf16)))",
+            CheckErrorKind::UnsupportedTensorPrecision,
+        );
+    }
+
+    #[test]
+    fn cast_prim_to_f64_is_allowed() {
+        // Host scalar f64 is still valid — only tensor-precision f64 is banned.
+        check_ok(
+            "(def {} x (lit {type: (t-prim {} int32)} 42))
+             (def {} y (cast {} (var {} x) (t-prim {} f64)))",
+        );
+    }
+
+    #[test]
+    fn surf_source_rejects_f64_tensor_ascription() {
+        // Exercise the full surf → desugar → check pipeline to confirm
+        // the user-facing syntax `(expr : tensor[4, f64])` is rejected.
+        let decls = chelis_surf::parser::parse_str(
+            "y = (to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f64])",
+        )
+        .expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::UnsupportedTensorPrecision)),
+            "expected UnsupportedTensorPrecision in surf-level f64 tensor ascription, got: {:?}",
+            result.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn surf_source_rejects_cast_to_f64_tensor() {
+        // Exercise the full pipeline for `cast(tensor, f64)`.
+        let decls =
+            chelis_surf::parser::parse_str("y = cast(to_tensor([1.5]), f64)").expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let result = infer_program(&exprs);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::UnsupportedTensorPrecision)),
+            "expected UnsupportedTensorPrecision for cast(tensor, f64), got: {:?}",
+            result.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
     }
 
@@ -8948,6 +9360,88 @@ bad = chunk(xs, "two")
                 .any(|error| error.message.contains("chunk") || error.message.contains("integer")),
             "expected chunk size mismatch, got {:?}",
             err.errors
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Top-level binding cycle detection
+    // ------------------------------------------------------------------
+
+    fn phase0e_errors_from_surf(src: &str) -> Vec<CheckError> {
+        let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        infer_phase0e_program(&exprs).errors
+    }
+
+    #[test]
+    fn nautilus_self_reference_is_allowed() {
+        // The single-hop identity `x = (x : tensor[...])` is a pinned Nautilus
+        // external-input pattern and must NOT be flagged as a binding cycle.
+        let errors = phase0e_errors_from_surf("x = (x : tensor[4, f32])\n");
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
+            "Nautilus self-reference should not be flagged; got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn two_hop_binding_cycle_is_detected() {
+        let errors = phase0e_errors_from_surf(
+            "a = (b : tensor[4, f32])\n\
+             b = (a : tensor[4, f32])\n",
+        );
+        let cycle_err = errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
+            .unwrap_or_else(|| {
+                panic!("expected a CycleDetected error for a two-hop cycle; got {errors:?}")
+            });
+        assert!(
+            cycle_err.message.contains("binding cycle"),
+            "message should mention 'binding cycle'; got {:?}",
+            cycle_err.message
+        );
+        assert!(
+            cycle_err.message.contains("a -> b -> a"),
+            "expected 'a -> b -> a' in message; got {:?}",
+            cycle_err.message
+        );
+    }
+
+    #[test]
+    fn three_hop_binding_cycle_is_detected() {
+        let errors = phase0e_errors_from_surf(
+            "a = (b : tensor[4, f32])\n\
+             b = (c : tensor[4, f32])\n\
+             c = (a : tensor[4, f32])\n",
+        );
+        let cycle_err = errors
+            .iter()
+            .find(|e| matches!(e.kind, CheckErrorKind::CycleDetected))
+            .unwrap_or_else(|| {
+                panic!("expected a CycleDetected error for a three-hop cycle; got {errors:?}")
+            });
+        assert!(
+            cycle_err.message.contains("a -> b -> c -> a"),
+            "expected 'a -> b -> c -> a' in message; got {:?}",
+            cycle_err.message
+        );
+    }
+
+    #[test]
+    fn unrelated_defs_do_not_trigger_cycle_false_positive() {
+        // Sanity: multiple Nautilus self-references together should still pass.
+        let errors = phase0e_errors_from_surf(
+            "x = (x : tensor[4, f32])\n\
+             y = (y : tensor[4, f32])\n",
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.kind, CheckErrorKind::CycleDetected)),
+            "multiple independent Nautilus inputs must not trigger a cycle error; got {errors:?}"
         );
     }
 }

@@ -483,7 +483,7 @@ pub unsafe extern "C" fn chelis_scalar_tensor_from_i64(value: i64) -> *mut cheli
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor_from_f64(value: f64) -> *mut chelis_tensor {
-    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F64);
+    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F32);
     *(*tensor).data = value as f32;
     tensor
 }
@@ -1524,7 +1524,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         CHELIS_I32
     } else {
-        CHELIS_F64
+        CHELIS_F32
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype);
     let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
@@ -1568,7 +1568,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         CHELIS_I32
     } else {
-        CHELIS_F64
+        CHELIS_F32
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype);
     let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {

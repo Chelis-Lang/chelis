@@ -28,6 +28,10 @@ pub enum CheckErrorKind {
     TupleIndexOutOfBounds,
     UseAfterConsume,
     InvalidBorrow,
+    CycleDetected,
+    /// A tensor type uses a precision the Phase 0f backend cannot represent
+    /// (currently f16, bf16, f64, f8e4m3). Host scalar precisions are unaffected.
+    UnsupportedTensorPrecision,
     Other,
 }
 
@@ -45,6 +49,8 @@ impl CheckErrorKind {
             CheckErrorKind::TupleIndexOutOfBounds => 0.7,
             CheckErrorKind::UseAfterConsume => 0.9,
             CheckErrorKind::InvalidBorrow => 0.8,
+            CheckErrorKind::CycleDetected => 0.9,
+            CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::Other => 0.5,
         }
     }

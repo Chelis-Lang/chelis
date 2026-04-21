@@ -118,6 +118,9 @@ enum Command {
     Deep {
         #[arg(long)]
         flat: bool,
+        /// Run the typechecker and print Deep with `{type: ...}` metadata
+        #[arg(long)]
+        annotate: bool,
         file: PathBuf,
     },
     /// Decompile Deep (.dp) to Surf (best-effort)
@@ -222,7 +225,11 @@ enum ReefCommand {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Command::Deep { file, flat }) => cmd_deep(&file, flat),
+        Some(Command::Deep {
+            file,
+            flat,
+            annotate,
+        }) => cmd_deep(&file, flat, annotate),
         Some(Command::Surf { file, verbose }) => cmd_surf(&file, verbose),
         Some(Command::Fmt {
             file,
@@ -259,10 +266,24 @@ fn main() {
     }
 }
 
-fn cmd_deep(file: &Path, flat: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deep(file: &Path, flat: bool, annotate: bool) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
     let decls = chelis_surf::parser::parse_str(&source)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
+    let deep_exprs = if annotate {
+        match chelis_types::check_phase0e_program(&deep_exprs) {
+            Ok(checked) => checked.annotated_exprs().to_vec(),
+            Err(result) => {
+                return Err(format!(
+                    "`chelis deep --annotate` requires a well-typed program; type errors: {:?}",
+                    result.errors
+                )
+                .into());
+            }
+        }
+    } else {
+        deep_exprs
+    };
     let output = if flat {
         chelis_deep::printer::print_canonical_flat(&deep_exprs)
     } else {
@@ -634,6 +655,11 @@ fn cmd_build(
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
+            // NOTE: for programs without a `main` and with multiple
+            // sibling tensor-signature defs, the "preferred" entry falls
+            // back to the last fn and silently drops the others. This is a
+            // known HIP backend limitation — the backend is single-entry
+            // by design. Tracked as a residual issue.
             let preferred_entry_dag = compiled_program
                 .host
                 .as_ref()

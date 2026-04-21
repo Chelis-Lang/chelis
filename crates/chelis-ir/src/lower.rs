@@ -247,6 +247,19 @@ fn type_is_scalar_primitive(expr: &Expr) -> bool {
     get_tag(list) == Some("t-prim")
 }
 
+fn callable_ref_name(expr: &Expr) -> Option<String> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list)
+        .first()
+        .and_then(symbol_name)
+        .map(|name| name.to_string())
+}
+
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
@@ -1120,6 +1133,7 @@ struct LowerCtx {
     program_defs: HashMap<String, Expr>,
     random_seed: Option<u64>,
     linearity: LinearityInfo,
+    inlining_names: HashSet<String>,
 }
 
 impl LowerCtx {
@@ -1136,12 +1150,53 @@ impl LowerCtx {
             program_defs,
             random_seed: None,
             linearity,
+            inlining_names: HashSet::new(),
         }
     }
 
     /// Default tensor type when we don't have richer type info.
     fn default_type() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    /// Choose the output `TensorType` for an elementwise op whose shape
+    /// matches the first input. Prefer the input DAG node's dims over the
+    /// annotated `ty.dims` when the input has a non-empty rank — the input
+    /// dims carry the user-facing symbolic names from `defsig`/param types,
+    /// while `ty` after type inference can hold internal fresh-var names
+    /// (e.g. `d44`) that aren't declared in the emitted C scope. When
+    /// `precision_override` is provided it wins (e.g. `cmplt` → `Bool`);
+    /// otherwise we use `ty`'s precision when present, else the input's.
+    fn elementwise_out_ty(
+        dag: &Dag,
+        input: NodeId,
+        ty: &TensorType,
+        precision_override: Option<Prim>,
+    ) -> TensorType {
+        let input_ty = dag.get(input).map(|node| node.output_type.clone());
+        let dims = match input_ty.as_ref() {
+            Some(in_ty) if !in_ty.dims.is_empty() => in_ty.dims.clone(),
+            _ => {
+                if ty.dims.is_empty() {
+                    input_ty
+                        .as_ref()
+                        .map(|in_ty| in_ty.dims.clone())
+                        .unwrap_or_default()
+                } else {
+                    ty.dims.clone()
+                }
+            }
+        };
+        let precision = precision_override.unwrap_or_else(|| {
+            if *ty != Self::default_type() {
+                ty.precision
+            } else {
+                input_ty
+                    .map(|in_ty| in_ty.precision)
+                    .unwrap_or(ty.precision)
+            }
+        });
+        TensorType { dims, precision }
     }
 
     fn attach_reuse_hint(
@@ -1702,21 +1757,35 @@ impl LowerCtx {
         ty: &TensorType,
         app_span: Span,
     ) -> Option<LoweredValue> {
-        match self.resolve_callable_expr(func) {
-            Some(CallableExpr::Plain(fn_expr)) => {
+        let callable = self.resolve_callable_expr(func)?;
+        // If the callee is a named top-level/local def, track it on the
+        // inlining stack so a recursive body doesn't re-resolve and re-inline
+        // itself infinitely. Nameless fn literals don't need tracking because
+        // they can't refer to themselves by name.
+        let inlining_name = callable_ref_name(func).filter(|name| {
+            self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
+        });
+        if let Some(name) = inlining_name.as_ref() {
+            self.inlining_names.insert(name.clone());
+        }
+        let result = match callable {
+            CallableExpr::Plain(fn_expr) => {
                 Some(self.lower_plain_callable_app(&fn_expr, args, app_span))
             }
-            Some(CallableExpr::Vmap { fn_expr, axis }) => {
+            CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
-            Some(CallableExpr::VmapGrad { fn_expr, wrt, axis }) => Some(
+            CallableExpr::VmapGrad { fn_expr, wrt, axis } => Some(
                 self.lower_vmap_grad_callable_app(&fn_expr, wrt.as_deref(), axis, args, app_span),
             ),
-            Some(CallableExpr::Grad { fn_expr, wrt }) => {
+            CallableExpr::Grad { fn_expr, wrt } => {
                 Some(self.lower_grad_callable_app(&fn_expr, wrt.as_deref(), args, app_span))
             }
-            None => None,
+        };
+        if let Some(name) = inlining_name {
+            self.inlining_names.remove(&name);
         }
+        result
     }
 
     fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
@@ -1738,7 +1807,7 @@ impl LowerCtx {
                     Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
                     _ => None,
                 })?;
-                if !visited.insert(name.clone()) {
+                if !visited.insert(name.clone()) || self.inlining_names.contains(&name) {
                     return None;
                 }
                 let body = self
@@ -2373,28 +2442,14 @@ impl LowerCtx {
             "add" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "add lhs");
                 let b = self.lower_expr_node(&args[1], "add rhs");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(RiscOp::Add, vec![a, b], out_ty);
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "mul" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "mul lhs");
                 let b = self.lower_expr_node(&args[1], "mul rhs");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(RiscOp::Mul, vec![a, b], out_ty);
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
@@ -2402,33 +2457,13 @@ impl LowerCtx {
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 // C5: CmpLt always produces Bool output regardless of input precision.
-                // When the caller's ty has no annotation (default), fall back to the
-                // input DAG node's dims so rank/shape propagates correctly.
-                let dims = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.dims.clone())
-                        .unwrap_or_else(|| ty.dims.clone())
-                } else {
-                    ty.dims.clone()
-                };
-                let bool_ty = TensorType {
-                    dims,
-                    precision: Prim::Bool,
-                };
+                let bool_ty = Self::elementwise_out_ty(&self.dag, a, ty, Some(Prim::Bool));
                 self.dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty)
             }
             "max_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "max_elem lhs");
                 let b = self.lower_expr_node(&args[1], "max_elem rhs");
-                let out_ty = if *ty == Self::default_type() {
-                    self.dag
-                        .get(a)
-                        .map(|node| node.output_type.clone())
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(RiscOp::MaxElem, vec![a, b], out_ty);
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
@@ -4329,8 +4364,14 @@ mod regression_tests {
 
     #[test]
     fn fix1_tensor_type_lit_dim() {
+        // The checker rejects tensor[512, f64] because the Phase 0f backend
+        // cannot represent f64 tensors, so this test must bypass the
+        // checker and exercise the IR lowerer directly. The property under
+        // test is that the lowerer preserves literal-dimension metadata
+        // and non-f32 precisions on its DAG nodes — a property the lowerer
+        // should keep intact even though no front-end source reaches it.
         let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} f64))} 0))";
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.dims, vec![DimInfo::Lit(512)]);
         assert_eq!(node.output_type.precision, Prim::F64);
@@ -4545,11 +4586,15 @@ mod regression_tests {
 
     #[test]
     fn fix9_cast_preserves_input_dims() {
+        // Casting a tensor to bf16 is rejected by the checker (unsupported
+        // tensor precision for Phase 0f), so this test bypasses the checker
+        // to keep exercising the IR lowerer property: a Cast node should
+        // inherit the input tensor's dims regardless of target precision.
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y (cast {} (var {} x) (t-prim {} bf16)))
         "#;
-        let dag = parse_and_lower(src);
+        let dag = parse_and_lower_unchecked(src);
         let cast_node = dag
             .nodes()
             .iter()

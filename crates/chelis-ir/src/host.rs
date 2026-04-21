@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -6,6 +7,28 @@ use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
 use crate::dag::TensorType;
 use crate::lower::{lower_program, top_level_lowering_map};
+
+thread_local! {
+    // Tracks top-level callee names currently being inlined by
+    // `inline_top_level_host_call`. Prevents infinite specialization for
+    // recursive/mutually recursive definitions — the specialized body would
+    // re-encounter the same call and inline forever.
+    static INLINING_STACK: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+fn is_inlining(name: &str) -> bool {
+    INLINING_STACK.with(|stack| stack.borrow().contains(name))
+}
+
+fn push_inlining(name: &str) -> bool {
+    INLINING_STACK.with(|stack| stack.borrow_mut().insert(name.to_string()))
+}
+
+fn pop_inlining(name: &str) {
+    INLINING_STACK.with(|stack| {
+        stack.borrow_mut().remove(name);
+    });
+}
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
@@ -2348,10 +2371,16 @@ fn lower_app_host_expr(
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !should_keep_tensor_expr_in_host_lane(&app_expr)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
-        && let Some(tensor_call) =
-            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty)
     {
-        return tensor_call;
+        let pushed = push_inlining(&name);
+        let lowered =
+            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty);
+        if pushed {
+            pop_inlining(&name);
+        }
+        if let Some(tensor_call) = lowered {
+            return tensor_call;
+        }
     }
     let has_callable_params = fn_sig
         .as_ref()
@@ -2362,7 +2391,12 @@ fn lower_app_host_expr(
         && tensor_result
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
-        return lower_host_expr(&specialized, program, scope, tensor_helpers);
+        let pushed = push_inlining(&name);
+        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        if pushed {
+            pop_inlining(&name);
+        }
+        return lowered;
     }
     let args = kids[1..]
         .iter()
@@ -2424,6 +2458,9 @@ fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<E
         .and_then(as_list)
         .filter(|callee| tag(callee) == Some("var"))
         .and_then(|callee| children(callee).first().and_then(symbol_name))?;
+    if is_inlining(callee_name) {
+        return None;
+    }
     let defs = collect_program_defs(program.exprs());
     let body = lookup_program_def(&defs, callee_name)?;
     let Expr::List(fn_list, _) = body else {
