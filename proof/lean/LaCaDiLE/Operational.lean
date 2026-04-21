@@ -15,7 +15,7 @@
 -- prove a total substitution lemma with capture avoidance.
 
 import LaCaDiLE.Syntax
-import LaCaDiLE.AdjointTransform
+import LaCaDiLE.StringHelpers
 
 namespace LaCaDiLE
 
@@ -174,6 +174,58 @@ def EvalCtx.noHandleFor (op : EffectLabel) : EvalCtx → Prop
 def EvalCtxChain.noHandleFor (op : EffectLabel) : EvalCtxChain → Prop
   | []      => True
   | E :: Es => EvalCtx.noHandleFor op E ∧ EvalCtxChain.noHandleFor op Es
+
+/-- Maximum string length in a finite list of names. -/
+def maxStringLength : List String → Nat
+  | [] => 0
+  | s :: rest => Nat.max s.toList.length (maxStringLength rest)
+
+theorem mem_maxStringLength
+    {used : List String} {s : String}
+    (hmem : s ∈ used) :
+    s.toList.length ≤ maxStringLength used := by
+  induction used with
+  | nil =>
+      cases hmem
+  | cons hd tl ih =>
+      rcases List.mem_cons.mp hmem with rfl | htl
+      · exact Nat.le_max_left _ _
+      · exact Nat.le_trans (ih htl) (Nat.le_max_right _ _)
+
+/-- A mechanically fresh name for a finite avoid-set, built from the
+    shared `freshName` infrastructure. The counter is chosen so the
+    resulting string is strictly longer than every string in `used`. -/
+def freshNameAvoiding (used : List String) : String :=
+  freshName "" (maxStringLength used + 1)
+
+theorem freshNameAvoiding_not_mem
+    (used : List String) :
+    freshNameAvoiding used ∉ used := by
+  intro hmem
+  have hle : (freshNameAvoiding used).toList.length ≤ maxStringLength used :=
+    mem_maxStringLength hmem
+  have hlen : (freshNameAvoiding used).toList.length = maxStringLength used + 2 := by
+    unfold freshNameAvoiding
+    rw [freshName_toList]
+    simp
+  have hgt : maxStringLength used < (freshNameAvoiding used).toList.length := by
+    rw [hlen]
+    exact Nat.lt_succ_of_le (Nat.le_succ _)
+  exact Nat.not_lt_of_ge hle hgt
+
+/-- Continuation binder minted for captured-handler operational steps. -/
+def capturedContName (e : Term) : String :=
+  freshNameAvoiding (freeVars e ++ boundVars e)
+
+theorem capturedContName_freshInTerm
+    (e : Term) :
+    freshInTerm (capturedContName e) e := by
+  unfold freshInTerm capturedContName
+  refine ⟨?_, ?_⟩
+  · intro hmem
+    exact freshNameAvoiding_not_mem _ (List.mem_append.mpr (Or.inl hmem))
+  · intro hmem
+    exact freshNameAvoiding_not_mem _ (List.mem_append.mpr (Or.inr hmem))
 
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
@@ -336,15 +388,15 @@ inductive Step : Config → Config → Prop
   -- evaluation context that does NOT itself catch `op`, the step
   -- picks the matching clause `(op, xVar, kVar, hb)` from the clause
   -- list and reduces to
-  --   `hb[v / xVar][λ _kArg : tRet. handle epsH (plug E (var _kArg))
-  --                     clauses / kVar]`.
+  --   `hb[v / xVar][λ kFresh : tRet. handle epsH (plug E (var kFresh))
+  --                    clauses / kVar]`.
   -- The reified continuation re-enters the same handle around the
   -- captured context `E`, which is the standard delimited-control
   -- semantics for algebraic effects. `tRet` is the return type of
   -- the operation's signature (threaded in as a parameter, matching
-  -- `handleOpDirect`'s convention). Freshness of `_kArg` is provided
-  -- by a hardcoded sentinel name; a proper fresh-name discipline is
-  -- a separate Wave 1 task (see Phase 1 WS2.1 notes).
+  -- `handleOpDirect`'s convention). The continuation binder is chosen
+  -- by `capturedContName` so it is fresh for the entire handled term
+  -- by construction.
   | handleOpCtx
       (sigma : Store) (op : EffectLabel) (v : Term)
       (epsH : EffectRow) (E : EvalCtx)
@@ -359,9 +411,12 @@ inductive Step : Config → Config → Prop
             Term.handle epsH (plug E (Term.perform op v)) clauses⟩
            ⟨sigma,
             subst (subst hb v xVar)
-                  (Term.abs "_kArg" tRet
+                  (Term.abs (capturedContName
+                    (Term.handle epsH (plug E (Term.perform op v)) clauses)) tRet
                     (Term.handle epsH
-                      (plug E (Term.var "_kArg")) clauses)) kVar⟩
+                      (plug E (Term.var (capturedContName
+                        (Term.handle epsH (plug E (Term.perform op v)) clauses))))
+                      clauses)) kVar⟩
 
   -- E-Handle-Op (multi-frame captured-context form, Wave 1 P2).
   --
@@ -401,9 +456,12 @@ inductive Step : Config → Config → Prop
             Term.handle epsH (multiPlug Es (Term.perform op v)) clauses⟩
            ⟨sigma,
             subst (subst hb v xVar)
-                  (Term.abs "_kArg" tRet
+                  (Term.abs (capturedContName
+                    (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)) tRet
                     (Term.handle epsH
-                      (multiPlug Es (Term.var "_kArg")) clauses)) kVar⟩
+                      (multiPlug Es (Term.var (capturedContName
+                        (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses))))
+                      clauses)) kVar⟩
 
   /- ## AD and vectorization transforms -/
 
