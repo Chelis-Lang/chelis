@@ -250,9 +250,85 @@ fn validate_phase0e_program(
     errors: &mut Vec<CheckError>,
 ) {
     detect_top_level_binding_cycles(exprs, errors);
+    detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
     for expr in top_level_decl_items(exprs) {
         validate_phase0e_expr(expr, type_env, &mut static_env, errors);
+    }
+}
+
+/// Detect fn defs whose body is a direct self-call with no conditional
+/// guard — e.g. `def a(x) = a(x)`. These are guaranteed non-terminating
+/// when called and, because the DAG lowerer can't represent recursion,
+/// get silently elided to an identity in the generated C (source/object
+/// divergence). Flag at check time so the user sees a clear error
+/// instead of shipping a program that means something else than written.
+///
+/// This only catches the most trivial shape — a body that is literally
+/// `(app (var name) ...)` with the def's own name as the callee. Real
+/// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
+/// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
+fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else { continue };
+        if fn_body_is_direct_self_call(body, name) {
+            errors.push(CheckError::new(
+                CheckErrorKind::CycleDetected,
+                format!(
+                    "def `{name}` is a trivial self-call `{name}(...)` with no base case \
+                     and would not terminate at runtime; add an `if`/`match` guard that \
+                     can exit without recursing, or remove the def"
+                ),
+                vec![
+                    "Trivial self-recursion isn't representable in the Phase 0 DAG \
+                     lowering and would silently compile to an identity function."
+                        .to_string(),
+                ],
+            ));
+        }
+    }
+}
+
+fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
+    let fn_list = match def_body {
+        deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
+        _ => return false,
+    };
+    let Some(body) = children(fn_list).get(1) else {
+        return false;
+    };
+    let mut current = body;
+    loop {
+        match current {
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) => match get_tag(list) {
+                Some("app") => {
+                    let kids = children(list);
+                    let Some(callee) = kids.first() else {
+                        return false;
+                    };
+                    let deep::Expr::List(callee_list, _) = callee else {
+                        return false;
+                    };
+                    if get_tag(callee_list) != Some("var") {
+                        return false;
+                    }
+                    return children(callee_list).first().and_then(symbol_name) == Some(def_name);
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
     }
 }
 
@@ -386,125 +462,202 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
         }
     }
 
-    // Phase 2: compute transitive eager-reachability. A def `a` has edge to
-    // `b` if `b` is reachable from `a`'s body by:
-    //   - a direct free-var reference, OR
-    //   - calling a top-level fn whose body eagerly references `b`.
-    // Fixed-point over (direct_refs, applied_fns, fn_body_refs).
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    // Phase 2: build two edge sets per def.
+    //   - value_edges[d]: names read AS VALUES in d's body (i.e. `(var x)`
+    //     where x is not a fn callee). Reading a value requires that value
+    //     to already be bound — a cycle here is a real binding cycle.
+    //   - call_edges[d]: names d CALLS (`(app (var f) ...)`). Calling a fn
+    //     pushes its body into eager evaluation but does NOT require f's
+    //     value — f is a callable, not a scalar. Recursive calls with base
+    //     cases terminate and don't close a cycle.
+    //
+    // Cycle condition: DFS from each VALUE def X, traversing both edge
+    // kinds transitively. Track the stack of VALUE defs we're currently
+    // evaluating. If a value-edge lands on a stack member, that's a real
+    // binding cycle. Fn names aren't pushed onto the stack — they are
+    // intermediates in the path.
+    let mut value_edges: HashMap<String, Vec<String>> = HashMap::new();
+    let mut call_edges: HashMap<String, Vec<String>> = HashMap::new();
     for name in &def_names {
         let body = def_bodies.get(name).copied();
-        // Nautilus external-input carve-out: permit a self-loop ONLY when
-        // the body is literally `x` or `(x : T)` — a structural identity
-        // declaring that x comes from outside. Any other self-reference
-        // (including one reached via a fn call) is a genuine cycle.
         let is_nautilus_literal_self = body.is_some_and(|b| body_is_literal_self_ref(b, name));
+        let body_is_fn = matches!(
+            body,
+            Some(deep::Expr::List(list, _)) if get_tag(list) == Some("fn")
+        );
 
-        let mut reachable: HashSet<String> = HashSet::new();
-        if let Some(refs) = direct_refs.get(name) {
-            for r in refs {
-                reachable.insert(r.clone());
-            }
-        }
-        let mut frontier: Vec<String> = applied_fns
-            .get(name)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        let mut visited_fns: HashSet<String> = HashSet::new();
-        while let Some(called) = frontier.pop() {
-            if !visited_fns.insert(called.clone()) {
-                continue;
-            }
-            // Expanding a fn's body: its direct refs become ours (modulo
-            // the fn's own param scope, already filtered in phase 1), and
-            // any fns IT applies get queued.
-            if let Some((inner_refs, inner_applied)) = fn_body_refs.get(&called) {
-                for r in inner_refs {
-                    reachable.insert(r.clone());
+        let (raw_refs, raw_applied) = if body_is_fn {
+            let empty_refs: HashSet<String> = HashSet::new();
+            let empty_applied: HashSet<String> = HashSet::new();
+            fn_body_refs
+                .get(name)
+                .map(|(r, a)| (r.clone(), a.clone()))
+                .unwrap_or((empty_refs, empty_applied))
+        } else {
+            (
+                direct_refs.get(name).cloned().unwrap_or_default(),
+                applied_fns.get(name).cloned().unwrap_or_default(),
+            )
+        };
+
+        let mut value_out: Vec<String> = raw_refs
+            .into_iter()
+            .filter(|r| {
+                if r == name && is_nautilus_literal_self {
+                    return false;
                 }
-                for f in inner_applied {
-                    frontier.push(f.clone());
-                }
-            }
-        }
-        let mut out = Vec::new();
-        for r in reachable {
-            if r == *name && is_nautilus_literal_self {
-                continue;
-            }
-            if def_name_set.contains(&r) {
-                out.push(r);
-            }
-        }
-        edges.insert(name.clone(), out);
+                def_name_set.contains(r)
+            })
+            .collect();
+        let mut call_out: Vec<String> = raw_applied
+            .into_iter()
+            .filter(|r| def_name_set.contains(r))
+            .collect();
+        value_out.sort();
+        call_out.sort();
+        value_edges.insert(name.clone(), value_out);
+        call_edges.insert(name.clone(), call_out);
     }
 
+    let mut reported: HashSet<Vec<String>> = HashSet::new();
+
+    // DFS from each value def. Track:
+    //   - `value_stack`: the value defs we're "currently evaluating". A
+    //     value_edge landing on a member of this stack is a cycle.
+    //   - `visited`: nodes we've already fully explored from some starting
+    //     value def. Avoids re-walking fn bodies we've cleared.
+    //   - `path`: the traversal path for error reporting (includes both
+    //     values and fns as intermediates).
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Color {
         White,
         Gray,
         Black,
     }
-    let mut color: HashMap<String, Color> = def_names
-        .iter()
-        .map(|n| (n.clone(), Color::White))
-        .collect();
-    let mut reported: HashSet<Vec<String>> = HashSet::new();
 
+    #[allow(clippy::too_many_arguments)]
     fn dfs(
         node: &str,
-        edges: &HashMap<String, Vec<String>>,
+        is_value: &dyn Fn(&str) -> bool,
+        value_edges: &HashMap<String, Vec<String>>,
+        call_edges: &HashMap<String, Vec<String>>,
         color: &mut HashMap<String, Color>,
-        stack: &mut Vec<String>,
+        value_stack: &mut Vec<String>,
+        path: &mut Vec<String>,
         reported: &mut HashSet<Vec<String>>,
         errors: &mut Vec<CheckError>,
     ) {
         color.insert(node.to_string(), Color::Gray);
-        stack.push(node.to_string());
-        if let Some(neighbors) = edges.get(node) {
+        let this_is_value = is_value(node);
+        if this_is_value {
+            value_stack.push(node.to_string());
+        }
+        path.push(node.to_string());
+
+        if let Some(neighbors) = value_edges.get(node) {
             for next in neighbors {
-                match color.get(next).copied().unwrap_or(Color::White) {
-                    Color::White => {
-                        dfs(next, edges, color, stack, reported, errors);
+                if let Some(start) = value_stack.iter().position(|s| s == next) {
+                    // Value-edge landing on a value currently being
+                    // evaluated → real binding cycle.
+                    let value_seg_start = path.iter().position(|s| s == &value_stack[start]);
+                    let cycle: Vec<String> = if let Some(s) = value_seg_start {
+                        path[s..].to_vec()
+                    } else {
+                        value_stack[start..].to_vec()
+                    };
+                    let mut canon = cycle.clone();
+                    if let Some((min_idx, _)) = canon.iter().enumerate().min_by(|a, b| a.1.cmp(b.1))
+                    {
+                        canon.rotate_left(min_idx);
                     }
-                    Color::Gray => {
-                        if let Some(start) = stack.iter().position(|s| s == next) {
-                            let cycle: Vec<String> = stack[start..].to_vec();
-                            let mut canon = cycle.clone();
-                            if let Some((min_idx, _)) =
-                                canon.iter().enumerate().min_by(|a, b| a.1.cmp(b.1))
-                            {
-                                canon.rotate_left(min_idx);
-                            }
-                            if reported.insert(canon.clone()) {
-                                let mut path = canon.clone();
-                                path.push(canon[0].clone());
-                                let message = format!("binding cycle: {}", path.join(" -> "));
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::CycleDetected,
-                                    message,
-                                    vec![
-                                        "Break the cycle by removing one of the \
-                                         self-referential definitions or replacing it \
-                                         with a concrete value."
-                                            .to_string(),
-                                    ],
-                                ));
-                            }
-                        }
+                    if reported.insert(canon.clone()) {
+                        let mut pathstr = canon.clone();
+                        pathstr.push(canon[0].clone());
+                        let message = format!("binding cycle: {}", pathstr.join(" -> "));
+                        errors.push(CheckError::new(
+                            CheckErrorKind::CycleDetected,
+                            message,
+                            vec![
+                                "Break the cycle by removing one of the \
+                                 self-referential definitions or replacing it \
+                                 with a concrete value."
+                                    .to_string(),
+                            ],
+                        ));
                     }
-                    Color::Black => {}
+                } else if color.get(next).copied().unwrap_or(Color::White) == Color::White {
+                    dfs(
+                        next,
+                        is_value,
+                        value_edges,
+                        call_edges,
+                        color,
+                        value_stack,
+                        path,
+                        reported,
+                        errors,
+                    );
                 }
             }
         }
-        stack.pop();
+
+        if let Some(neighbors) = call_edges.get(node) {
+            for next in neighbors {
+                // Fn calls don't require the callee's VALUE — they just
+                // push the callee's body into eager evaluation. Gray nodes
+                // are mid-exploration (recursive reentry) — skip to avoid
+                // infinite DFS.
+                if color.get(next).copied().unwrap_or(Color::White) == Color::White {
+                    dfs(
+                        next,
+                        is_value,
+                        value_edges,
+                        call_edges,
+                        color,
+                        value_stack,
+                        path,
+                        reported,
+                        errors,
+                    );
+                }
+            }
+        }
+
+        path.pop();
+        if this_is_value {
+            value_stack.pop();
+        }
         color.insert(node.to_string(), Color::Black);
     }
 
-    let mut stack: Vec<String> = Vec::new();
+    let is_value = |name: &str| -> bool {
+        def_bodies
+            .get(name)
+            .map(|body| !matches!(body, deep::Expr::List(list, _) if get_tag(list) == Some("fn")))
+            .unwrap_or(false)
+    };
+    let mut color: HashMap<String, Color> = def_names
+        .iter()
+        .map(|n| (n.clone(), Color::White))
+        .collect();
+    let mut value_stack: Vec<String> = Vec::new();
+    let mut path: Vec<String> = Vec::new();
     for name in &def_names {
+        if !is_value(name) {
+            continue;
+        }
         if color.get(name).copied() == Some(Color::White) {
-            dfs(name, &edges, &mut color, &mut stack, &mut reported, errors);
+            dfs(
+                name,
+                &is_value,
+                &value_edges,
+                &call_edges,
+                &mut color,
+                &mut value_stack,
+                &mut path,
+                &mut reported,
+                errors,
+            );
         }
     }
 }
@@ -568,8 +721,12 @@ fn collect_eager_refs(
                     && let Some(fname) = children(clist).first().and_then(symbol_name)
                     && !bound.contains(fname)
                 {
+                    // Callee is in `applied` only — NOT in `refs`. For cycle
+                    // detection, reading `g` as a value is different from
+                    // calling `g()`: the former requires g's value now, the
+                    // latter just pushes g's body into eager evaluation and
+                    // may terminate at a base case.
                     applied.insert(fname.to_string());
-                    refs.insert(fname.to_string());
                 } else if let Some(callee) = kids.first() {
                     collect_eager_refs(callee, bound, refs, applied);
                 }

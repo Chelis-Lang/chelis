@@ -645,6 +645,7 @@ fn cmd_build(
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
+                reject_unsupported_c_precisions(&dag)?;
                 let fused = chelis_ir::fuse::fuse(&dag);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
@@ -779,6 +780,32 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
                 return Err(format!(
                     "`chelis build --target hip` only supports f32/bool tensors; \
                      node {} has precision {}",
+                    node.id.0,
+                    other.name()
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mirror of the per-node precision walk that the C backend's emitter
+/// performs internally (`validate_supported_precisions` panics). Emits a
+/// clean user-facing error BEFORE the backend panics, closing a
+/// check-pass/build-panic gap for programs like `def f() -> f64 = cast(1.0, f64)`
+/// that reach DAG lowering with a non-F32/Bool node.
+fn reject_unsupported_c_precisions(
+    dag: &chelis_ir::dag::Dag,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for node in dag.nodes() {
+        match node.output_type.precision {
+            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            other => {
+                return Err(format!(
+                    "`chelis build --target c` only supports f32/bool tensors on the \
+                     DAG path; node {} has precision {}. Route through a host-lane \
+                     wrapper or cast to f32.",
                     node.id.0,
                     other.name()
                 )

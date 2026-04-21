@@ -588,7 +588,17 @@ fn lower_host_function(
     // `Std.Tensor.Reduce.min` get a real C function symbol rather than a
     // fallthrough `HostExpr::Builtin` with an "unsupported builtin"
     // placeholder (Phase 3j-pre Batch 5b bug 4).
+    //
+    // But skip the tensor-helper path when any param is callable: the DAG
+    // helper has no representation for fn-pointer inputs and would otherwise
+    // coerce the callable into `chelis_scalar_tensor_from_f64`, emitting C
+    // that gcc rejects. Go straight through host-lane lowering so the fn
+    // application becomes a direct `f(x)` call.
+    let any_callable_param = params
+        .iter()
+        .any(|param| matches!(param.ty, HostType::Fn(_, _)));
     let host_body = if let HostType::Tensor(expected) = ret_ty.clone()
+        && !any_callable_param
         && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
         && !should_keep_tensor_expr_in_host_lane(&body_expr)
     {
@@ -2380,7 +2390,16 @@ fn lower_app_host_expr(
     });
     let (helper_expr, helper_scope, helper_bindings) =
         hoist_host_lane_tensor_bindings(&app_expr, program, scope, fn_sig.as_ref(), tensor_helpers);
+    // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
+    // not representable in the tensor-helper DAG — the DAG path would box
+    // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
+    // gcc rejects. Skip both tensor-helper branches and fall through to
+    // the generic `HostExpr::Call` path so the wrapper emits `return f(x);`.
+    let callee_is_local_callable = scope
+        .get(&name)
+        .is_some_and(|ty| matches!(ty, HostType::Fn(_, _)));
     if let Some(tensor_ty) = helper_tensor_ty.clone()
+        && !callee_is_local_callable
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !should_keep_tensor_expr_in_host_lane(&app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
@@ -2402,6 +2421,7 @@ fn lower_app_host_expr(
         };
     }
     if let Some(tensor_ty) = helper_tensor_ty
+        && !callee_is_local_callable
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !should_keep_tensor_expr_in_host_lane(&app_expr)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
