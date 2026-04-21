@@ -557,6 +557,34 @@ theorem boundVarsClauses_mem_scoped
                       exact hnd.2.2.2.1
                     exact ih hrest htl
 
+private theorem mem_boundVarsClauses_arg
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    x ∈ boundVarsClauses clauses := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses]
+      · simp [boundVarsClauses, ih htl]
+
+private theorem mem_boundVarsClauses_cont
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    k ∈ boundVarsClauses clauses := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses]
+      · simp [boundVarsClauses, ih htl]
+
 theorem wellScoped_handle_clause
     {epsH : EffectRow} {body : Term}
     {clauses : List (EffectLabel × String × String × Term)}
@@ -567,6 +595,20 @@ theorem wellScoped_handle_clause
   simp [WellScoped, boundVars, List.nodup_append] at h
   have hcls : (boundVarsClauses clauses).Nodup := h.2.1
   exact boundVarsClauses_mem_scoped hcls hmem
+
+theorem wellScoped_handle_clause_not_in_body
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (h : WellScoped (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    x ∉ boundVars body ∧ k ∉ boundVars body := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  refine ⟨?_, ?_⟩
+  · intro hx
+    exact h.2.2 x hx _ (mem_boundVarsClauses_arg hmem) rfl
+  · intro hk
+    exact h.2.2 k hk _ (mem_boundVarsClauses_cont hmem) rfl
 
 /-! ## Values -/
 
