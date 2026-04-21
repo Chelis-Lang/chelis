@@ -712,6 +712,37 @@ private theorem step_preserves_store_typing_on_aux
         exact hsep ell hmem ((mem_locRefs_plug E e ell).2 (Or.inr hloc))
       exact ih h_wf hsepInner
 
+private theorem step_preserves_store_typing_on_ctxLocRefs
+    (Sigma : StoreTyp)
+    (sigma sigma' : Store)
+    (E : EvalCtx) (e e' : Term)
+    (h_wf : StoreWf sigma Sigma)
+    (h_linear : RuntimeLinear (plug E e))
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    ∃ Sigma', StoreWf sigma' Sigma' ∧ StoreTypOn (ctxLocRefs E) Sigma Sigma' := by
+  rcases runtimeLinear_plug (E := E) (e := e) h_linear with ⟨_hlin, hsep⟩
+  exact step_preserves_store_typing_on_aux
+    Sigma (ctxLocRefs E) ⟨sigma, e⟩ ⟨sigma', e'⟩ h_wf h_step hsep
+
+private theorem step_preserves_store_typing_on_ctxLocRefs_append
+    (Sigma : StoreTyp) (locs : List Loc)
+    (sigma sigma' : Store)
+    (E : EvalCtx) (e e' : Term)
+    (h_wf : StoreWf sigma Sigma)
+    (h_linear : RuntimeLinear (plug E e))
+    (hsep : LocRefsSeparated locs (locRefs (plug E e)))
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    ∃ Sigma', StoreWf sigma' Sigma' ∧
+      StoreTypOn (ctxLocRefs E ++ locs) Sigma Sigma' := by
+  rcases runtimeLinear_plug (E := E) (e := e) h_linear with ⟨_hlin, hsepCtx⟩
+  have hsepBoth : LocRefsSeparated (ctxLocRefs E ++ locs) (locRefs e) := by
+    intro ell hmem hloc
+    rcases List.mem_append.mp hmem with hctx | hlocs
+    · exact hsepCtx ell hctx hloc
+    · exact hsep ell hlocs ((mem_locRefs_plug E e ell).2 (Or.inr hloc))
+  exact step_preserves_store_typing_on_aux
+    Sigma (ctxLocRefs E ++ locs) ⟨sigma, e⟩ ⟨sigma', e'⟩ h_wf h_step hsepBoth
+
 /-- Store-typing weakening: every `HasType` derivation remains valid
     under a monotone extension of the store typing. Unblocks every
     binary `EvalCtx` case of `plug_preserves_typing`, since after the
