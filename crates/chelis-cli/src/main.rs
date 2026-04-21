@@ -615,7 +615,8 @@ fn cmd_build(
         "c" => {
             if let Some(host_program) = compiled_program.host.as_ref()
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
-                    || dag.roots().is_empty())
+                    || dag.roots().is_empty()
+                    || !host_program.functions.is_empty())
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
@@ -1297,7 +1298,7 @@ fn collect_lowered_root_names_from_expr(
                 return;
             }
             if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
-                extend_root_names(name, type_env.get(name), out);
+                extend_root_names_from_value(name, type_env.get(name), top_level_def_body(expr), out);
             }
         }
     }
@@ -1324,7 +1325,7 @@ fn collect_root_names_from_expr(
             if type_env.get(name).is_some_and(type_expr_is_function) {
                 return;
             }
-            extend_root_names(name, type_env.get(name), out);
+            extend_root_names_from_value(name, type_env.get(name), top_level_def_body(expr), out);
         }
     }
 }
@@ -1441,22 +1442,69 @@ fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Optio
     })
 }
 
-fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
+fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    matches!(
+        list.elements.first(),
+        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "def"
+    )
+    .then(|| list.elements.get(3))
+    .flatten()
+}
+
+fn extend_root_names_from_value(
+    name: &str,
+    ty: Option<&DeepExpr>,
+    value: Option<&DeepExpr>,
+    out: &mut Vec<String>,
+) {
     if let Some(DeepExpr::List(list, _)) = ty
         && let Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) = list.elements.first()
     {
         if tag == "t-fn" {
-            extend_root_names(name, list.elements.last(), out);
+            extend_root_names_from_value(name, list.elements.last(), None, out);
             return;
         }
         if tag == "t-tuple" {
             for (index, child) in list.elements.iter().skip(2).enumerate() {
-                extend_root_names(&format!("{name}.{index}"), Some(child), out);
+                extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
             }
             return;
         }
     }
+    if let Some(DeepExpr::List(list, _)) = value
+        && matches!(
+            list.elements.first(),
+            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "tuple"
+        )
+    {
+        for (index, child) in list.elements.iter().skip(2).enumerate() {
+            extend_root_names_from_value(
+                &format!("{name}.{index}"),
+                expr_type_metadata(child),
+                Some(child),
+                out,
+            );
+        }
+        return;
+    }
     out.push(name.to_string());
+}
+
+fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    match list.elements.get(1) {
+        Some(DeepExpr::Map(meta, _)) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }
 }
 
 fn display_root_name(name: &str) -> String {

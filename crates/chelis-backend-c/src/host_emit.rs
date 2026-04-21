@@ -2061,7 +2061,7 @@ impl HostEmitter {
             HostType::Float64 => format!("chelis_value_from_f64({value})"),
             HostType::Bool => format!("chelis_value_from_bool({value})"),
             HostType::String => format!("chelis_value_from_string({value})"),
-            HostType::Adt(_) => format!("chelis_value_from_adt({value})"),
+            HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_from_tensor({value})"),
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
@@ -2076,7 +2076,7 @@ impl HostEmitter {
             HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
             HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
-            HostType::Adt(_) => format!("chelis_value_as_adt({value_expr})"),
+            HostType::Adt(_, _) => format!("chelis_value_as_adt({value_expr})"),
             HostType::Tensor(_) => format!("chelis_value_as_tensor({value_expr})"),
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
@@ -2108,7 +2108,7 @@ impl HostEmitter {
                 "{}chelis_print_tensor_stdout({}); printf(\"\\n\");",
                 self.indent, value
             )),
-            HostType::Adt(_) => self.lines.push(format!(
+            HostType::Adt(_, _) => self.lines.push(format!(
                 "{}chelis_print_adt({}); printf(\"\\n\");",
                 self.indent, value
             )),
@@ -2156,7 +2156,7 @@ impl HostEmitter {
                 "{}chelis_print_tensor_stdout({});",
                 self.indent, value
             )),
-            HostType::Adt(_) => self
+            HostType::Adt(_, _) => self
                 .lines
                 .push(format!("{}chelis_print_adt({});", self.indent, value)),
             HostType::List(_) => self
@@ -2251,7 +2251,7 @@ fn c_type(ty: &HostType) -> &'static str {
         HostType::Bool => "bool",
         HostType::String => "chelis_string",
         HostType::Fn(_, _) => "void*",
-        HostType::Adt(_) => "chelis_adt*",
+        HostType::Adt(_, _) => "chelis_adt*",
         HostType::List(_) => "chelis_list*",
         HostType::Dict(_, _) => "chelis_dict*",
         HostType::Tuple(_) => "chelis_tuple*",

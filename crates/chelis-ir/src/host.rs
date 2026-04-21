@@ -102,7 +102,7 @@ pub enum HostType {
     Bool,
     String,
     Fn(Vec<HostType>, Box<HostType>),
-    Adt(String),
+    Adt(String, Vec<HostType>),
     List(Box<HostType>),
     Dict(Box<HostType>, Box<HostType>),
     Tuple(Vec<HostType>),
@@ -740,7 +740,7 @@ fn lower_host_expr(
                 return HostExpr::AdtConstruct {
                     ctor: name,
                     fields: Vec::new(),
-                    ty: HostType::Adt(adt_name),
+                    ty: HostType::Adt(adt_name, Vec::new()),
                 };
             }
             HostExpr::Var(name, ty)
@@ -1807,7 +1807,11 @@ fn lower_match_host_expr(
                     none_expr = lower_host_expr(&arm_kids[2], program, scope, tensor_helpers);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields = lookup_adt_ctor_details(program, ctor_name)
+                    let ctor_fields = lookup_adt_ctor_details_for_type(
+                        program,
+                        ctor_name,
+                        Some(&scrutinee_ty),
+                    )
                         .map(|(_, fields)| fields)
                         .or_else(|| {
                             program
@@ -1874,7 +1878,7 @@ fn lower_match_host_expr(
         }
     };
 
-    if matches!(scrutinee_ty, HostType::Adt(_)) {
+    if matches!(scrutinee_ty, HostType::Adt(_, _)) {
         return HostExpr::MatchAdt {
             scrutinee: Box::new(scrutinee),
             arms: generic_arms,
@@ -2034,7 +2038,7 @@ fn lower_record_host_expr(
             explicit_ty
         } else {
             ctor_info
-                .map(|(adt_name, _)| HostType::Adt(adt_name))
+                .map(|(adt_name, _)| HostType::Adt(adt_name, Vec::new()))
                 .unwrap_or(HostType::Unknown)
         },
     }
@@ -2368,10 +2372,10 @@ fn lower_app_host_expr(
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
         .collect::<Vec<_>>();
     let construct_ty = if let Some((adt_name, _)) = &ctor_info {
-        if matches!(explicit_ty, HostType::Adt(_)) {
+        if matches!(explicit_ty, HostType::Adt(_, _)) {
             explicit_ty.clone()
         } else {
-            HostType::Adt(adt_name.clone())
+            HostType::Adt(adt_name.clone(), Vec::new())
         }
     } else {
         inferred_ret_ty.clone()
@@ -3518,8 +3522,12 @@ fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
 }
 
 fn parse_host_type(expr: &Expr) -> HostType {
+    parse_host_type_with_subst(expr, &HashMap::new())
+}
+
+fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) -> HostType {
     if let Expr::MetaExpr(meta, _) = expr {
-        return parse_host_type(&meta.expr);
+        return parse_host_type_with_subst(&meta.expr, subst);
     }
     let Expr::List(list, _) = expr else {
         return HostType::Unknown;
@@ -3533,31 +3541,49 @@ fn parse_host_type(expr: &Expr) -> HostType {
             _ => HostType::Unknown,
         },
         Some("t-tensor") => HostType::Tensor(crate::lower::tensor_type_from_deep(expr)),
+        Some("t-var") => children(list)
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| subst.get(name).cloned())
+            .unwrap_or(HostType::Unknown),
         Some("t-adt") => {
             let kids = children(list);
             match kids.first().and_then(symbol_name) {
                 Some("Option") if kids.len() == 2 => {
-                    HostType::Option(Box::new(parse_host_type(&kids[1])))
+                    HostType::Option(Box::new(parse_host_type_with_subst(&kids[1], subst)))
                 }
                 Some("List") if kids.len() == 2 => {
-                    HostType::List(Box::new(parse_host_type(&kids[1])))
+                    HostType::List(Box::new(parse_host_type_with_subst(&kids[1], subst)))
                 }
                 Some("Dict") if kids.len() == 3 => HostType::Dict(
-                    Box::new(parse_host_type(&kids[1])),
-                    Box::new(parse_host_type(&kids[2])),
+                    Box::new(parse_host_type_with_subst(&kids[1], subst)),
+                    Box::new(parse_host_type_with_subst(&kids[2], subst)),
                 ),
                 Some("MappedFile") if kids.len() == 1 => HostType::MappedFile,
-                Some(name) => HostType::Adt(name.to_string()),
+                Some(name) => HostType::Adt(
+                    name.to_string(),
+                    kids.iter()
+                        .skip(1)
+                        .map(|kid| parse_host_type_with_subst(kid, subst))
+                        .collect(),
+                ),
                 _ => HostType::Unknown,
             }
         }
-        Some("t-tuple") => HostType::Tuple(children(list).iter().map(parse_host_type).collect()),
+        Some("t-tuple") => HostType::Tuple(
+            children(list)
+                .iter()
+                .map(|kid| parse_host_type_with_subst(kid, subst))
+                .collect(),
+        ),
         Some("t-fn") => {
             let kids = children(list);
             match kids.split_last() {
                 Some((ret, args)) => HostType::Fn(
-                    args.iter().map(parse_host_type).collect(),
-                    Box::new(parse_host_type(ret)),
+                    args.iter()
+                        .map(|kid| parse_host_type_with_subst(kid, subst))
+                        .collect(),
+                    Box::new(parse_host_type_with_subst(ret, subst)),
                 ),
                 None => HostType::Unknown,
             }
@@ -4039,6 +4065,14 @@ fn lookup_adt_ctor_details(
     program: &CheckedProgram,
     ctor_name: &str,
 ) -> Option<(String, Vec<HostAdtField>)> {
+    lookup_adt_ctor_details_for_type(program, ctor_name, None)
+}
+
+fn lookup_adt_ctor_details_for_type(
+    program: &CheckedProgram,
+    ctor_name: &str,
+    instantiated_ty: Option<&HostType>,
+) -> Option<(String, Vec<HostAdtField>)> {
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -4050,6 +4084,7 @@ fn lookup_adt_ctor_details(
         let Some(adt_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
+        let subst = adt_type_substitution(children(list).get(1), adt_name, instantiated_ty);
         for variant in kids.iter().skip(2) {
             let Some(variant_list) = as_list(variant) else {
                 continue;
@@ -4073,13 +4108,13 @@ fn lookup_adt_ctor_details(
                     if let Some(ty_expr) = field_kids.get(1) {
                         fields.push(HostAdtField {
                             name: field_kids.first().and_then(symbol_name).map(str::to_string),
-                            ty: parse_host_type(ty_expr),
+                            ty: parse_host_type_with_subst(ty_expr, &subst),
                         });
                     }
                 } else {
                     fields.push(HostAdtField {
                         name: None,
-                        ty: parse_host_type(field),
+                        ty: parse_host_type_with_subst(field, &subst),
                     });
                 }
             }
@@ -4103,7 +4138,9 @@ fn lookup_access_field(
             })
         }
         _ => match host_expr_type(base) {
-            HostType::Adt(adt_name) => lookup_adt_field_on_type(program, &adt_name, field_name),
+            HostType::Adt(adt_name, args) => {
+                lookup_adt_field_on_type(program, &adt_name, &args, field_name)
+            }
             _ => None,
         },
     }
@@ -4112,6 +4149,7 @@ fn lookup_access_field(
 fn lookup_adt_field_on_type(
     program: &CheckedProgram,
     adt_name: &str,
+    args: &[HostType],
     field_name: &str,
 ) -> Option<(usize, HostType)> {
     let mut found = None;
@@ -4126,6 +4164,7 @@ fn lookup_adt_field_on_type(
         if kids.first().and_then(symbol_name) != Some(adt_name) {
             continue;
         }
+        let subst = adt_type_substitution(children(list).get(1), adt_name, Some(&HostType::Adt(adt_name.to_string(), args.to_vec())));
         for variant in kids.iter().skip(2) {
             let Some(variant_list) = as_list(variant) else {
                 continue;
@@ -4143,7 +4182,7 @@ fn lookup_adt_field_on_type(
                 if children(field_list).first().and_then(symbol_name) == Some(field_name) {
                     let ty = children(field_list)
                         .get(1)
-                        .map(parse_host_type)
+                        .map(|expr| parse_host_type_with_subst(expr, &subst))
                         .unwrap_or(HostType::Unknown);
                     if let Some(existing) = &found
                         && existing != &(index, ty.clone())
@@ -4156,6 +4195,28 @@ fn lookup_adt_field_on_type(
         }
     }
     found
+}
+
+fn adt_type_substitution(
+    params_expr: Option<&Expr>,
+    adt_name: &str,
+    instantiated_ty: Option<&HostType>,
+) -> HashMap<String, HostType> {
+    let params = params_expr
+        .and_then(as_list)
+        .map(|list| {
+            list.elements
+                .iter()
+                .filter_map(symbol_name)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let actuals = match instantiated_ty {
+        Some(HostType::Adt(name, args)) if terminal_name_matches(name, adt_name) => args.clone(),
+        _ => Vec::new(),
+    };
+    params.into_iter().zip(actuals).collect()
 }
 
 fn tag(list: &List) -> Option<&str> {
