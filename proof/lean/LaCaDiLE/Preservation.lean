@@ -2074,8 +2074,14 @@ theorem wellScoped_plug_inner
     resulting configuration has the same type (under a possibly-extended
     store typing) and preserves store well-formedness.
 
-    Current in-scope open cases are the agreed captured-context and
-    calculus-level blockers only. -/
+    Current in-scope open cases are the agreed calculus-level blockers
+    plus the generic `ctx` congruence case. `ctx` is blocked at theorem
+    shape: `plug_preserves_typing_closed` rebuilds sibling subterms via
+    `StoreTypSub Sigma Sigma2`, but inner preservation currently returns
+    only a post-step `Sigma2` plus `StoreWf`, and store-consuming steps
+    do not satisfy global monotonic extension. Closing `ctx` needs a
+    weaker frame-local store-agreement invariant, not more local proof
+    search in this theorem. -/
 theorem preservation
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term) (t : Typ) (eps : EffectRow)
@@ -2484,6 +2490,14 @@ theorem preservation
   | tvmap s x tv body d =>
       sorry
   | ctx _ _ E e0 e0' h_inner =>
+      -- Blocked on a frame-local store-agreement theorem. The natural
+      -- closed-context route wants `StoreTypSub Sigma Sigma2` so the
+      -- untouched sibling sub-derivations can be weakened, but inner
+      -- numeric/store steps remove consumed locations and therefore do
+      -- not preserve global `StoreTypSub`. This needs a theorem that
+      -- tracks agreement only on the locations mentioned by the outer
+      -- frame, or a stronger store/term invariant tying loc mentions to
+      -- linear ownership.
       sorry
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
