@@ -973,19 +973,6 @@ theorem eraseClausesNames_map_some
 
 end
 
-@[simp] theorem eraseTermNames_ctxNameSlots
-    (Gamma : LinearCtx) (e : Term) :
-    eraseTermNames (ctxNameSlots Gamma) e =
-      eraseTerm (ctxEnv Gamma) e := by
-  sorry
-
-@[simp] theorem eraseClausesNames_ctxNameSlots
-    (Gamma : LinearCtx)
-    (clauses : List (EffectLabel × String × String × Term)) :
-    eraseClausesNames (ctxNameSlots Gamma) clauses =
-      eraseClauses (ctxEnv Gamma) clauses := by
-  sorry
-
 mutual
 
 theorem eraseTerm_suffix :
