@@ -460,6 +460,47 @@ drop `SubEffRow` witnesses require an extra `HasType.subEff` widening,
 which is currently left as a local sorry pending the Wave-2 inversion
 upgrade; the top-level theorem statement is stable. -/
 
+/-- Store-typing agreement restricted to the runtime locations a term
+    actually mentions. This is the right granularity for `ctx`: sibling
+    subterms only need the post-step store typing to agree on the
+    locations they still reference, not on every location in the
+    pre-step store typing. -/
+def StoreTypOn (locs : List Loc) (Sigma Sigma' : StoreTyp) : Prop :=
+  ∀ ell t, ell ∈ locs →
+    storeTypLookup Sigma ell = some t →
+    storeTypLookup Sigma' ell = some t
+
+theorem StoreTypOn.mono
+    {locs1 locs2 : List Loc} {Sigma Sigma' : StoreTyp}
+    (hsub : ∀ ell, ell ∈ locs1 → ell ∈ locs2)
+    (h : StoreTypOn locs2 Sigma Sigma') :
+    StoreTypOn locs1 Sigma Sigma' := by
+  intro ell t hell hlook
+  exact h ell t (hsub ell hell) hlook
+
+theorem StoreTypOn.append_left
+    {locs1 locs2 : List Loc} {Sigma Sigma' : StoreTyp}
+    (h : StoreTypOn (locs1 ++ locs2) Sigma Sigma') :
+    StoreTypOn locs1 Sigma Sigma' := by
+  refine StoreTypOn.mono ?_ h
+  intro ell hell
+  exact List.mem_append_left _ hell
+
+theorem StoreTypOn.append_right
+    {locs1 locs2 : List Loc} {Sigma Sigma' : StoreTyp}
+    (h : StoreTypOn (locs1 ++ locs2) Sigma Sigma') :
+    StoreTypOn locs2 Sigma Sigma' := by
+  refine StoreTypOn.mono ?_ h
+  intro ell hell
+  exact List.mem_append_right _ hell
+
+theorem StoreTypOn.of_sub
+    {locs : List Loc} {Sigma Sigma' : StoreTyp}
+    (hsub : StoreTypSub Sigma Sigma') :
+    StoreTypOn locs Sigma Sigma' := by
+  intro ell t _ hell
+  exact hsub ell t hell
+
 /-- Store-typing weakening: every `HasType` derivation remains valid
     under a monotone extension of the store typing. Unblocks every
     binary `EvalCtx` case of `plug_preserves_typing`, since after the
@@ -534,6 +575,120 @@ theorem hasType_store_weaken
       hmatch _h_body _h_rest ih_body ih_rest hs =>
       exact ClausesTyped.cons Δ_ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
         slotX slotK hmatch (ih_body hs) (ih_rest hs)
+
+/-- Store-typing weakening at the granularity actually needed by a
+    runtime term: agreement only on its explicit `Term.loc`
+    references. This is the theorem shape required by the remaining
+    `ctx` case. -/
+theorem hasType_store_weaken_on_locRefs
+    {Delta : CapCtx} {Sigma Sigma' : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (hsub : StoreTypOn (locRefs e) Sigma Sigma') :
+    HasType Delta Sigma' Gamma e t eps Gamma' := by
+  induction h using HasType.rec
+    (motive_2 := fun Δ_ S_ Γ2_ Γ3_ t_ εR_ cls_ _ =>
+      StoreTypOn (locRefsClauses cls_) S_ Sigma' →
+        ClausesTyped Δ_ Sigma' Γ2_ Γ3_ t_ εR_ cls_) with
+  | var Δ_ _ Γpre Γpost x tv =>
+      exact HasType.var Δ_ Sigma' Γpre Γpost x tv
+  | unit Δ_ _ Γ_ =>
+      exact HasType.unit Δ_ Sigma' Γ_
+  | abs Δ_ _ Γ1 Γ2 x t1 t2 eps_ body slot _h ih =>
+      exact HasType.abs Δ_ Sigma' Γ1 Γ2 x t1 t2 eps_ body slot
+        (ih (by simpa [locRefs] using hsub))
+  | app Δ_ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.app Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | letBind Δ_ _ Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot _h1 _h2 ih1 ih2 =>
+      exact HasType.letBind Δ_ Sigma' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | copy Δ_ _ Γ1 Γ2 e0 ds ep _h ih =>
+      exact HasType.copy Δ_ Sigma' Γ1 Γ2 e0 ds ep
+        (ih (by simpa [locRefs] using hsub))
+  | letpair Δ_ _ Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 slotX slotY
+      _h1 _h2 ih1 ih2 =>
+      exact HasType.letpair Δ_ Sigma' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 slotX slotY
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | tpair Δ_ _ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tpair Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | fst Δ_ _ Γ1 Γ2 e0 t1 t2 ep _h ih =>
+      exact HasType.fst Δ_ Sigma' Γ1 Γ2 e0 t1 t2 ep
+        (ih (by simpa [locRefs] using hsub))
+  | snd Δ_ _ Γ1 Γ2 e0 t1 t2 ep _h ih =>
+      exact HasType.snd Δ_ Sigma' Γ1 Γ2 e0 t1 t2 ep
+        (ih (by simpa [locRefs] using hsub))
+  | const Δ_ _ Γ_ v ds =>
+      exact HasType.const Δ_ Sigma' Γ_ v ds
+  | tadd Δ_ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tadd Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | tmul Δ_ _ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 _h1 _h2 ih1 ih2 =>
+      exact HasType.tmul Δ_ Sigma' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2
+        (ih1 (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        (ih2 (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | tsum Δ_ _ Γ1 Γ2 e0 ds d ep _h hmem ih =>
+      exact HasType.tsum Δ_ Sigma' Γ1 Γ2 e0 ds d ep
+        (ih (by simpa [locRefs] using hsub)) hmem
+  | texpand Δ_ _ Γ1 Γ2 e0 ds d ep _h ih =>
+      exact HasType.texpand Δ_ Sigma' Γ1 Γ2 e0 ds d ep
+        (ih (by simpa [locRefs] using hsub))
+  | uniformLike Δ_ _ Γ1 Γ2 e0 ds lo hi ep _h ih =>
+      exact HasType.uniformLike Δ_ Sigma' Γ1 Γ2 e0 ds lo hi ep
+        (ih (by simpa [locRefs] using hsub))
+  | perform Δ_ _ Γ1 Γ2 op e0 tArg tRet ep _h hM ih =>
+      exact HasType.perform Δ_ Sigma' Γ1 Γ2 op e0 tArg tRet ep
+        (ih (by simpa [locRefs] using hsub)) hM
+  | handle Δ_ _ Γ1 Γ2 Γ3 body clauses t_ epsH epsB _hb hSubsH hClsH
+      hCover _hcls ih_body ih_clauses =>
+      exact HasType.handle Δ_ Sigma' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
+        (ih_body (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
+        hSubsH hClsH hCover
+        (ih_clauses (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff ih =>
+      exact HasType.tgrad Δ_ Sigma' Γ_ x ds dsOut body ep slot
+        (ih (by simpa [locRefs] using hsub)) hsub_eff
+  | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
+      exact HasType.tvmap Δ_ Sigma' Γ_ x t1 t2 body ep d slot
+        (ih (by simpa [locRefs] using hsub))
+  | loc Δ_ _ Γ_ ell tv hlook =>
+      exact HasType.loc Δ_ Sigma' Γ_ ell tv (hsub ell tv (by simp [locRefs]) hlook)
+  | subEff Δ_ _ Γ_ Γ'' e0 tv eps0 eps1 _h hSub ih =>
+      exact HasType.subEff Δ_ Sigma' Γ_ Γ'' e0 tv eps0 eps1
+        (ih (by simpa [locRefs] using hsub)) hSub
+  | nil =>
+      exact ClausesTyped.nil _ Sigma' _ _ _
+  | cons Δ_ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest slotX slotK
+      hmatch _h_body _h_rest ih_body ih_rest hs =>
+      exact ClausesTyped.cons Δ_ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+        slotX slotK hmatch
+        (ih_body (StoreTypOn.append_left (by simpa [locRefsClauses] using hs)))
+        (ih_rest (StoreTypOn.append_right (by simpa [locRefsClauses] using hs)))
+
+theorem clausesTyped_store_weaken_on_locRefs
+    {Delta : CapCtx} {Sigma Sigma' : StoreTyp} {Gamma2 Gamma3 : LinearCtx}
+    {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls)
+    (hsub : StoreTypOn (locRefsClauses cls) Sigma Sigma') :
+    ClausesTyped Delta Sigma' Gamma2 Gamma3 t epsR cls := by
+  match h with
+  | ClausesTyped.nil _ _ Γ2 t_ epsR_ =>
+      exact ClausesTyped.nil _ Sigma' Γ2 t_ epsR_
+  | ClausesTyped.cons _ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+      slotX slotK hmatch hBody hRest =>
+      exact ClausesTyped.cons _ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+        slotX slotK hmatch
+        (hasType_store_weaken_on_locRefs hBody
+          (StoreTypOn.append_left (by simpa [locRefsClauses] using hsub)))
+        (clausesTyped_store_weaken_on_locRefs hRest
+          (StoreTypOn.append_right (by simpa [locRefsClauses] using hsub)))
 -- Wave 5r: original proof preserved below for reference.
 /-
   -- Term-mode recursor application with both motives pinned.
