@@ -773,6 +773,18 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             }
             _ => {}
         }
+        match node.output_type.precision {
+            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            other => {
+                return Err(format!(
+                    "`chelis build --target hip` only supports f32/bool tensors; \
+                     node {} has precision {}",
+                    node.id.0,
+                    other.name()
+                )
+                .into());
+            }
+        }
     }
     Ok(())
 }

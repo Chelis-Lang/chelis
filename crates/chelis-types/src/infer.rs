@@ -249,6 +249,58 @@ fn validate_phase0e_program(
     }
 }
 
+/// Check whether a def body is literally a self-reference — the Nautilus
+/// external-input pattern `x = x` or `x = (x : T)`. Only this structural
+/// shape earns the self-loop carve-out; self-references reached via a fn
+/// application, a tuple, an if, etc. are real cycles and must be reported.
+fn body_is_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
+    let mut current = body;
+    loop {
+        match current {
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) => match get_tag(list) {
+                Some("var") => {
+                    return children(list).first().and_then(symbol_name) == Some(name);
+                }
+                // Type ascription desugars into a `(cast ... )`-like node
+                // in Deep: `(x : T)` keeps `x` as the first child. When
+                // the underlying is a var with the self name, treat it as
+                // the Nautilus pattern.
+                Some("ascribe") | Some(":") => match children(list).first() {
+                    Some(inner) => current = inner,
+                    None => return false,
+                },
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+}
+
+/// Yield each top-level declaration, flattening through a `(module {} name ...)`
+/// wrapper if present. Deep sources produced by Surf `module X` desugaring
+/// have every def/defsig/deftype inside this wrapper; without flattening,
+/// top-level walkers see a single `(module ...)` and miss everything inside.
+fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+    fn push<'a>(expr: &'a deep::Expr, out: &mut Vec<&'a deep::Expr>) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("module")
+        {
+            // `(module {} name children...)` — skip tag, meta, name.
+            for child in list.elements.iter().skip(3) {
+                push(child, out);
+            }
+            return;
+        }
+        out.push(expr);
+    }
+    let mut out = Vec::new();
+    for expr in exprs {
+        push(expr, &mut out);
+    }
+    out
+}
+
 /// Detect cycles among top-level `def` bindings.
 ///
 /// The Nautilus external-input pattern `x = (x : tensor[...])` is permitted —
@@ -260,7 +312,11 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
     let mut def_names: Vec<String> = Vec::new();
     let mut def_name_set: HashSet<String> = HashSet::new();
     let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
-    for expr in exprs {
+    // Descend through `(module {} name ...)` wrappers so this check works
+    // on idiomatic Surf sources (every `.ch` file starts with `module X`,
+    // which desugars to a single top-level `module` list wrapping every
+    // declaration). Without this, the cycle check is a no-op in practice.
+    for expr in top_level_decl_items(exprs) {
         if let deep::Expr::List(list, _) = expr
             && get_tag(list) == Some("def")
         {
@@ -330,6 +386,13 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
     // Fixed-point over (direct_refs, applied_fns, fn_body_refs).
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
     for name in &def_names {
+        let body = def_bodies.get(name).copied();
+        // Nautilus external-input carve-out: permit a self-loop ONLY when
+        // the body is literally `x` or `(x : T)` — a structural identity
+        // declaring that x comes from outside. Any other self-reference
+        // (including one reached via a fn call) is a genuine cycle.
+        let is_nautilus_literal_self = body.is_some_and(|b| body_is_literal_self_ref(b, name));
+
         let mut reachable: HashSet<String> = HashSet::new();
         if let Some(refs) = direct_refs.get(name) {
             for r in refs {
@@ -359,8 +422,7 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
         }
         let mut out = Vec::new();
         for r in reachable {
-            // Distance-0 self-reference is the Nautilus external-input carve-out.
-            if r == *name {
+            if r == *name && is_nautilus_literal_self {
                 continue;
             }
             if def_name_set.contains(&r) {
@@ -564,7 +626,10 @@ fn collect_eager_refs(
 /// unsupported element precision.
 fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
     let mut seen: HashSet<(String, String)> = HashSet::new();
-    for expr in exprs {
+    // Descend through `(module {} name ...)` wrappers so per-def dedup
+    // keeps each def's tensor types in their own key space (otherwise
+    // every def lives under def_context="" and errors collapse).
+    for expr in top_level_decl_items(exprs) {
         let def_name = match expr {
             deep::Expr::List(list, _) if matches!(get_tag(list), Some("def") | Some("defsig")) => {
                 children(list)

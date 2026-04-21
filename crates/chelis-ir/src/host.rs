@@ -452,9 +452,15 @@ fn lower_host_program(
                 }
                 params.iter().any(ty_has_non_dag_tensor) || ty_has_non_dag_tensor(&ret)
             });
+        // `has_callable_params` blocks the wrapper for fn-taking-fn signatures
+        // because the host emitter doesn't lower a higher-order wrapper
+        // cleanly. But if the signature ALSO contains a non-F32/Bool tensor,
+        // the DAG-only fallback panics — so in that specific combination
+        // still force the wrapper and accept degraded higher-order support
+        // over a hard backend panic.
         let needs_host_wrapper = is_fn_body
-            && !has_callable_params
-            && (has_any_host_lane_def || lowered_fn_def_count > 1 || has_non_dag_tensor);
+            && (has_non_dag_tensor
+                || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
         let skip_for_lowered =
             lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
         if skip_for_lowered {
