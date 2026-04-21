@@ -427,9 +427,34 @@ fn lower_host_program(
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
         let has_callable_params = lookup_declared_fn_type(program, name)
             .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
+        // Non-F32/Bool tensor precisions (e.g. int32, int64) aren't
+        // representable in the Phase 0f DAG-only codegen path — it still
+        // hard-asserts f32/bool. Force a host-lane wrapper for any fn whose
+        // signature carries such a tensor so the program stays on the
+        // host-lane code path instead of panicking in DAG emit.
+        let has_non_dag_tensor =
+            lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
+                fn ty_has_non_dag_tensor(ty: &HostType) -> bool {
+                    match ty {
+                        HostType::Tensor(tensor) => !matches!(
+                            tensor.precision,
+                            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool
+                        ),
+                        HostType::Option(inner) | HostType::List(inner) => {
+                            ty_has_non_dag_tensor(inner)
+                        }
+                        HostType::Tuple(items) => items.iter().any(ty_has_non_dag_tensor),
+                        HostType::Dict(k, v) => {
+                            ty_has_non_dag_tensor(k) || ty_has_non_dag_tensor(v)
+                        }
+                        _ => false,
+                    }
+                }
+                params.iter().any(ty_has_non_dag_tensor) || ty_has_non_dag_tensor(&ret)
+            });
         let needs_host_wrapper = is_fn_body
             && !has_callable_params
-            && (has_any_host_lane_def || lowered_fn_def_count > 1);
+            && (has_any_host_lane_def || lowered_fn_def_count > 1 || has_non_dag_tensor);
         let skip_for_lowered =
             lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
         if skip_for_lowered {
