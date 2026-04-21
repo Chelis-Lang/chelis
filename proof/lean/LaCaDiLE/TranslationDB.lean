@@ -56,6 +56,51 @@ def lookupBinder : BinderEnv → String → Option Nat
     lookupBinder (y :: ρ) x = Nat.succ <$> lookupBinder ρ x := by
   simp [lookupBinder, h]
 
+theorem lookupBinder_some_getElem
+    {ρ : BinderEnv} {x : String} {i : Nat}
+    (h : lookupBinder ρ x = some i) :
+    ρ[i]? = some x := by
+  induction ρ generalizing i with
+  | nil =>
+      simp [lookupBinder] at h
+  | cons y ys ih =>
+      by_cases hy : y = x
+      · subst hy
+        simp [lookupBinder] at h
+        cases h
+        simp
+      · simp [lookupBinder, hy] at h
+        rcases h with ⟨j, hj, rfl⟩
+        simp [ih hj]
+
+theorem lookupBinder_some_split
+    {ρ : BinderEnv} {x : String} {i : Nat}
+    (h : lookupBinder ρ x = some i) :
+    ∃ ρin ρout,
+      ρ = ρin ++ [x] ++ ρout ∧
+      ρin.length = i ∧
+      x ∉ ρin := by
+  induction ρ generalizing i with
+  | nil =>
+      simp [lookupBinder] at h
+  | cons y ys ih =>
+      by_cases hy : y = x
+      · subst hy
+        simp [lookupBinder] at h
+        cases h
+        refine ⟨[], ys, by simp, rfl, by simp⟩
+      · simp [lookupBinder, hy] at h
+        rcases h with ⟨j, hj, rfl⟩
+        rcases ih hj with ⟨ρin, ρout, hsplit, hlen, hfresh⟩
+        refine ⟨y :: ρin, ρout, ?_, ?_, ?_⟩
+        · simp [hsplit, List.append_assoc]
+        · simp [hlen]
+        · intro hxy
+          simp at hxy
+          rcases hxy with hxy | hmem
+          · exact hy hxy.symm
+          · exact hfresh hmem
+
 @[simp] theorem lookupBinder_eq_none_of_not_mem
     {ρ : BinderEnv} {x : String}
     (h : x ∉ ρ) :
@@ -334,6 +379,18 @@ theorem ctxCorr_length_le
   | live _ ih =>
       simpa [List.length_append] using Nat.succ_le_succ ih
 
+theorem ctxCorr_length_eq
+    {Gamma : LinearCtx} {GammaDB : LinearCtxDB}
+    (h : CtxCorr Gamma GammaDB) :
+    Gamma.length = GammaDB.length := by
+  induction h with
+  | nil =>
+      simp
+  | dead _ ih =>
+      simpa [List.length_append] using congrArg Nat.succ ih
+  | live _ ih =>
+      simpa [List.length_append] using congrArg Nat.succ ih
+
 theorem ctxCorr_length_eq_eraseCtx
     {Gamma : LinearCtx} {GammaDB : LinearCtxDB}
     (h : CtxCorr Gamma GammaDB)
@@ -354,6 +411,12 @@ theorem ctxCorr_length_eq_eraseCtx
       have hlen' : Gamma.length = GammaDB.length := by
         simpa [List.length_append] using hlen
       simpa [eraseCtx] using congrArg (fun db => some t :: db) (ih hlen')
+
+theorem ctxCorr_eq_eraseCtx
+    {Gamma : LinearCtx} {GammaDB : LinearCtxDB}
+    (h : CtxCorr Gamma GammaDB) :
+    GammaDB = eraseCtx Gamma :=
+  ctxCorr_length_eq_eraseCtx h (ctxCorr_length_eq h)
 
 theorem ctxCorr_singleton_length_one
     {x : String} {t : Typ} {GammaDB : LinearCtxDB}
