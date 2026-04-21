@@ -2008,6 +2008,29 @@ theorem HasType.letBind_inv_sub_bridge
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- Pair inversion with the outer `SubEffRow` witness retained. -/
+theorem HasType.pair_inv_sub_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t1 t2 : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) (Typ.pair t1 t2) eps Gamma3) :
+    ∃ Gamma2 eps1 eps2,
+      HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.pair e1 e2 = e_in at h
+  generalize htq : Typ.pair t1 t2 = t_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tpair _ _ _ Gamma2 _ _ _ _ _ eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      cases htq
+      exact ⟨Gamma2, eps1, eps2, h1, h2, fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      rcases ih heq htq with ⟨Gamma2, eps1, eps2, h1, h2, hSub'⟩
+      exact ⟨Gamma2, eps1, eps2, h1, h2, fun op hop => hSub op (hSub' op hop)⟩
+  | _ => (try cases heq) <;> (try cases htq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
 /-- LetPair inversion local to the DB bridge. -/
 theorem HasType.letpair_inv_bridge
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
@@ -2026,6 +2049,32 @@ theorem HasType.letpair_inv_bridge
       exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl⟩
   | subEff _ _ _ _ _ _ _ _ _ _ ih =>
       exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- LetPair inversion with the outer `SubEffRow` witness retained. -/
+theorem HasType.letpair_inv_sub_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
+    {x y : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.letpair x y e1 e2) t eps GammaOut) :
+    ∃ Gamma2 Gamma3 t1 t2 eps1 eps2 slotX slotY,
+      HasType Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 ∧
+      HasType Delta Sigma (Gamma2 ++ [(x, some t1), (y, some t2)]) e2 t eps2
+        (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
+      GammaOut = Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Gamma2 Gamma3 _ _ _ _ t1 t2 _ eps1 eps2 slotX slotY h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl,
+        fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      rcases ih heq with
+        ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, hOut, hSub'⟩
+      exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, hOut,
+        fun op hop => hSub op (hSub' op hop)⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -3115,6 +3164,153 @@ theorem eraseClauses_subst_tail
 
 end
 
+mutual
+
+/-- Closed substitutions commute at distinct variable names. This is
+    the named-side reordering lemma needed when a two-binder reduction
+    substitutes the tail binder first to match `subst_preserves_typing`,
+    then swaps back to the operational order. -/
+theorem subst_commute_closed
+    (e v1 v2 : Term) (x y : String)
+    (hxy : x ≠ y)
+    (hv1 : Closed v1)
+    (hv2 : Closed v2) :
+    subst (subst e v1 x) v2 y =
+      subst (subst e v2 y) v1 x := by
+  match e with
+  | Term.var z =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy, subst_closed _ _ _ hv1]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx, subst_closed _ _ _ hv2]
+        · simp [subst, hzx, hzy]
+  | Term.abs z t body =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx]
+        · simp [subst, hzx, hzy, subst_commute_closed body v1 v2 x y hxy hv1 hv2]
+  | Term.app e1 e2 =>
+      simp [subst, subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+        subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.letBind z e1 e2 =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy,
+          subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx,
+            subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+        · simp [subst, hzx, hzy,
+            subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+            subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.copy e =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.letpair z w e1 e2 =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy,
+          subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx,
+            subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+        · by_cases hwx : w = x
+          · subst w
+            simp [subst, hzx, hzy, hxy,
+              subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+          · by_cases hwy : w = y
+            · subst w
+              simp [subst, hzx, hzy, hwx,
+                subst_commute_closed e1 v1 v2 x y hxy hv1 hv2]
+            · simp [subst, hzx, hzy, hwx, hwy,
+                subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+                subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.pair e1 e2 =>
+      simp [subst, subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+        subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.fst e =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.snd e =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.unit =>
+      simp [subst]
+  | Term.const c ds =>
+      simp [subst]
+  | Term.add e1 e2 =>
+      simp [subst, subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+        subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.mul e1 e2 =>
+      simp [subst, subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
+        subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
+  | Term.sum e d =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.expand e d =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.uniformLike e lo hi =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.grad z t tOut body =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx]
+        · simp [subst, hzx, hzy, subst_commute_closed body v1 v2 x y hxy hv1 hv2]
+  | Term.vmap z t body =>
+      by_cases hzx : z = x
+      · subst z
+        simp [subst, hxy]
+      · by_cases hzy : z = y
+        · subst z
+          simp [subst, hzx]
+        · simp [subst, hzx, hzy, subst_commute_closed body v1 v2 x y hxy hv1 hv2]
+  | Term.handle epsH body clauses =>
+      simp [subst, subst_commute_closed body v1 v2 x y hxy hv1 hv2,
+        substClauses_commute_closed clauses v1 v2 x y hxy hv1 hv2]
+  | Term.perform op e =>
+      simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
+  | Term.loc ell =>
+      simp [subst]
+
+theorem substClauses_commute_closed
+    (clauses : List (EffectLabel × String × String × Term)) (v1 v2 : Term) (x y : String)
+    (hxy : x ≠ y)
+    (hv1 : Closed v1)
+    (hv2 : Closed v2) :
+    substClauses (substClauses clauses v1 x) v2 y =
+      substClauses (substClauses clauses v2 y) v1 x := by
+  match clauses with
+  | [] =>
+      simp [substClauses]
+  | (op, z, k, hb) :: rest =>
+      by_cases hzx : z = x
+      · subst z
+        simp [substClauses, hxy,
+          substClauses_commute_closed rest v1 v2 x y hxy hv1 hv2]
+      · by_cases hzy : z = y
+        · subst z
+          simp [substClauses, hzx,
+            substClauses_commute_closed rest v1 v2 x y hxy hv1 hv2]
+        · by_cases hkx : k = x
+          · subst k
+            simp [substClauses, hzx, hzy, hxy,
+              substClauses_commute_closed rest v1 v2 x y hxy hv1 hv2]
+          · by_cases hky : k = y
+            · subst k
+              simp [substClauses, hzx, hzy, hkx,
+                substClauses_commute_closed rest v1 v2 x y hxy hv1 hv2]
+            · simp [substClauses, hzx, hzy, hkx, hky,
+                subst_commute_closed hb v1 v2 x y hxy hv1 hv2,
+                substClauses_commute_closed rest v1 v2 x y hxy hv1 hv2]
+
+end
+
 /-- Named-facing wrapper for the beta redex case in preservation.
     Completion path:
       1. extract the body derivation under the singleton named context,
@@ -3197,7 +3393,60 @@ theorem preservation_letpair_via_db
     (hv1 : IsValue v1) (hv2 : IsValue v2)
     (h_scope : WellScoped (Term.letpair x y (Term.pair v1 v2) body)) :
     HasType [] Sigma [] (subst (subst body v1 x) v2 y) t eps [] := by
-  sorry
+  rcases HasType.letpair_inv_sub_bridge h_typ with
+    ⟨GammaMid, GammaBody, t1, t2, epsPair, epsBody, slotX, slotY, hPair, hBody, hOut, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hPair
+  subst hMid
+  subst GammaBody
+  rcases HasType.pair_inv_sub_bridge hPair with
+    ⟨GammaPair, epsV1, epsV2, hV1, hV2, hPairSub⟩
+  have hPairMid : GammaPair = [] := has_type_closed_output_of_closed_input hV1
+  subst hPairMid
+  have hV1Closed : Closed v1 := has_type_closed_term_of_closed_input hV1
+  have hV2Closed : Closed v2 := has_type_closed_term_of_closed_input hV2
+  have hV1Nil : HasType [] Sigma [] v1 t1 [] [] :=
+    HasType.value_eff_polymorphic_bridge hV1 hv1 []
+  have hV2Nil : HasType [] Sigma [] v2 t2 [] [] :=
+    HasType.value_eff_polymorphic_bridge hV2 hv2 []
+  have hxy : x ≠ y := wellScoped_letpair_names_ne h_scope
+  have hscopeNodup :
+      (x :: y :: (boundVars v1 ++ boundVars v2 ++ boundVars body)).Nodup := by
+    simpa [WellScoped, boundVars, List.append_assoc] using h_scope
+  have hxNotRest : x ∉ y :: (boundVars v1 ++ boundVars v2 ++ boundVars body) := by
+    simpa using (List.nodup_cons.mp hscopeNodup).1
+  have hyNotRest : y ∉ boundVars v1 ++ boundVars v2 ++ boundVars body := by
+    simpa using (List.nodup_cons.mp (List.nodup_cons.mp hscopeNodup).2).1
+  have hxNotV2 : x ∉ boundVars v2 := by
+    intro hx
+    exact hxNotRest (by simp [hx])
+  have hxFreshV2 : freshInTerm x v2 := by
+    unfold freshInTerm
+    refine ⟨?_, hxNotV2⟩
+    unfold Closed at hV2Closed
+    intro hx
+    rw [hV2Closed] at hx
+    simp at hx
+  rcases weakening_tail [] Sigma [] [] x t2 t1 [] v2 hV2Nil
+      (by simp [linearCtxDom]) hxFreshV2 with
+    ⟨GammaPre, GammaPost, hSplit, hV2Weak⟩
+  simp at hSplit
+  rcases hSplit with ⟨rfl, rfl⟩
+  rcases subst_preserves_typing [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
+      y t2 t epsBody body v2 hBody hV2Weak hV2Closed with
+    ⟨GammaAfterY, hAfterY⟩
+  rcases subst_preserves_typing [] Sigma [] GammaAfterY
+      x t1 t epsBody (subst body v2 y) v1 hAfterY hV1Nil hV1Closed with
+    ⟨GammaFinal, hFinal⟩
+  have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
+  subst hGammaFinal
+  have hswap :
+      subst (subst body v1 x) v2 y =
+        subst (subst body v2 y) v1 x := by
+    exact subst_commute_closed body v1 v2 x y hxy hV1Closed hV2Closed
+  have hSubBody : SubEffRow epsBody eps := by
+    exact SubEffRow.trans (SubEffRow.union_right epsPair epsBody) hSub
+  simpa [hswap] using
+    (HasType.subEff [] Sigma [] [] _ _ epsBody eps hFinal hSubBody)
 
 /-- Named-facing wrapper for the direct handled-operation redex case in
     preservation. This hides the clause-body DB substitution proof from
