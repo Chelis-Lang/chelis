@@ -1138,6 +1138,19 @@ To keep a future `salsa` migration mechanical rather than conceptual:
 
 ---
 
+### Future Compiler Optimizations (recorded, not scheduled)
+
+**Lazy list fusion on the host lane.** The tensor DAG already fuses elementwise operations on tensors (the main performance path). The host lane (lists, strings, dicts) is eager — `map(filter(map(list, g), pred), f)` creates two intermediate lists. A compiler optimization pass could recognize chains of `map`, `filter`, `fold` on lists and fuse them into single-pass traversals, eliminating intermediate allocations. This is the same idea as GHC's `foldr/build` fusion or Clojure's transducers, implemented as a compiler rewrite rather than a user-facing API. Low priority because the performance-critical path is tensors, not lists. Becomes relevant if Coral's string column operations or Hull's AST processing show list allocation as a bottleneck in profiling.
+
+**SIMD codegen improvements.** Four-level plan for improving CPU vectorization in the C backend. Full design: `spec/design/chelis_simd_plan.md`.
+
+- **Level 1 (small, ship with next codegen pass):** `restrict` pointer annotations on all tensor parameters (leverages linearity — the type system proves no aliasing, justifying `restrict`), `const` on input pointers, aligned allocation in the runtime, compiler-appropriate SIMD pragmas (`#pragma omp simd` for gcc, `#pragma clang loop vectorize(enable)` for Apple clang). Unlocks auto-vectorization on loops currently skipped due to aliasing.
+- **Level 2 (medium, when profiling shows need):** Hand-written SIMD reduction kernels in the runtime (`sum`, `max`, `min`, `argmax`, `argmin`). AVX2 implementations for x86, NEON for ARM, scalar fallback. Reductions are where auto-vectorization is weakest.
+- **Level 3 (medium, before OOPSLA benchmarks):** Vectorized math library integration. Sleef on Linux (both x86 and ARM), Accelerate vForce on macOS (already linked). The emitter maps math ops in fused kernels to SIMD-width library functions (`expf` → `Sleef_expf8_u10` on AVX2, `vvexpf` via Accelerate on Mac). Highest impact: 3-5x additional speedup on math-heavy kernels (erf, normal_cdf) on top of existing fusion wins.
+- **Level 4 (large, only if Levels 1-3 leave gaps):** Full SIMD-width-aware codegen as a parallel emit path. Diminishing returns if Level 3 handles math functions. Record as future option.
+
+---
+
 ## Design Work Pipeline
 
 Design and implementation run in parallel.

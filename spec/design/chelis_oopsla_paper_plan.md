@@ -43,6 +43,8 @@ None of these belong in the POPL paper (which is pure metatheory) or the ICLR pa
 
 4. **Compiled fusion vs the pydata stack:** Measured performance. Compound expressions (`normal_cdf(x) * exp(-x^2)`) achieve 3.0-3.6x over numpy at 100k elements because the compiler fuses them into single loops. Per-kernel wins of 2.3-6.8x on special functions and distribution CDFs. 881 scipy-parity assertions validate correctness.
 
+The current benchmarks use the scalar C backend with auto-vectorization only. The SIMD support plan (Levels 1-3) is expected to improve these numbers further: `restrict` annotations unlock auto-vectorization on aliased loops, and Sleef/vForce integration provides SIMD-width math functions (exp, log, sin, erf) in fused kernels. Level 3 is targeted for completion before the paper's benchmark section is finalized.
+
 5. **Implementation evidence:** A working Rust compiler (6 crates), CPU (C + OpenMP) and GPU (HIP/AMD) backends, a standard library covering PyTorch's NN/optim/loss surface, and three ecosystem libraries (Nautilus for numerical computing, Coral for dataframes, Shoals for finance). Not a paper design - a running system.
 
 ---

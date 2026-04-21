@@ -189,6 +189,10 @@ needs dates and exact arithmetic.
 
 **Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with seed(n)` for Random (already used), `with_deterministic_random(sequence)` for exact output testing, `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
 
+**Lazy list fusion (future compiler optimization).** The tensor DAG fuses elementwise tensor operations. The host lane (lists, strings) is eager and creates intermediate allocations for chained `map`/`filter`/`fold`. A future compiler pass could fuse host-lane list operation chains into single-pass traversals, eliminating intermediates. Same principle as tensor fusion, applied to the host lane. Low priority — becomes relevant when profiling shows list allocation as a bottleneck in Coral string columns or Hull AST processing.
+
+**SIMD support (four-level plan, future).** Level 1: `restrict` + `const` + alignment + pragmas in generated C (leverages linearity — the type system proves no aliasing, justifying `restrict`). Level 2: hand-written SIMD reductions in the runtime (sum/max/min/argmax/argmin, AVX2 + NEON). Level 3: vectorized math library integration (Sleef on Linux, Accelerate vForce on macOS) for SIMD-width math in fused kernels — highest impact item, targeted before OOPSLA benchmarks. Level 4: full SIMD-width-aware codegen (only if Levels 1-3 leave gaps). Full design: `chelis_simd_plan.md`.
+
 ---
 
 ## 6. CLI Surface
