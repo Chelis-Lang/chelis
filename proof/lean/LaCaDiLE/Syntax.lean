@@ -395,6 +395,52 @@ end
     uses `Closed v` as the side condition on the substituted value. -/
 def Closed (e : Term) : Prop := freeVars e = []
 
+/-! ## Runtime-location references
+
+`locRefs e` collects every runtime location mentioned explicitly inside
+`e`. This is a meta-level runtime invariant surface, separate from
+named-variable scoping: source terms never contain `Term.loc`, but
+reduction introduces them. Preservation's remaining `ctx` blocker needs
+this kind of term-level location accounting, not just `StoreWf`. -/
+mutual
+
+def locRefs : Term → List Loc
+  | Term.var _ => []
+  | Term.abs _ _ body => locRefs body
+  | Term.app e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.letBind _ e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.copy e => locRefs e
+  | Term.letpair _ _ e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.pair e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.fst e => locRefs e
+  | Term.snd e => locRefs e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.mul e1 e2 => locRefs e1 ++ locRefs e2
+  | Term.sum e _ => locRefs e
+  | Term.expand e _ => locRefs e
+  | Term.uniformLike e _ _ => locRefs e
+  | Term.grad _ _ _ body => locRefs body
+  | Term.vmap _ _ body => locRefs body
+  | Term.handle _ body clauses => locRefs body ++ locRefsClauses clauses
+  | Term.perform _ e => locRefs e
+  | Term.loc ell => [ell]
+
+def locRefsClauses :
+    List (EffectLabel × String × String × Term) → List Loc
+  | [] => []
+  | (_, _, _, hb) :: rest => locRefs hb ++ locRefsClauses rest
+
+end
+
+/-- Runtime linearity discipline for explicit locations: no location may
+    appear more than once in the residual runtime term. This is stronger
+    than `WellScoped` and is only meaningful after reduction has
+    introduced `Term.loc`. -/
+def RuntimeLinear (e : Term) : Prop :=
+  (locRefs e).Nodup
+
 /-! ## Bound-variable set (Wave 2 freshness predicate)
 
 `boundVars e` lists every binder occurrence inside `e`. Combined with

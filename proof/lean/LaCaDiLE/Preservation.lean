@@ -2143,6 +2143,10 @@ theorem preservation_ctx_counterexample :
       StoreWf.lookup_isSome_of_typing hWf hLookup1
     simp [storeLookup, List.find?] at hLive1
 
+theorem preservation_ctx_counterexample_not_runtimeLinear :
+    ¬ RuntimeLinear ctxCounterTerm := by
+  simp [RuntimeLinear, locRefs, ctxCounterTerm]
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
