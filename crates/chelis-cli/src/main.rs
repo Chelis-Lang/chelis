@@ -641,6 +641,18 @@ fn cmd_build(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
+                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                if !unresolved.is_empty() {
+                    return Err(format!(
+                        "`chelis build --target c` can't lower these defs — their \
+                         body contains a higher-order application whose callee isn't \
+                         a named fn (commonly `grad(f)(args)` where f isn't a plain \
+                         top-level symbol). Add a named wrapper, pass the fn directly \
+                         as an argument, or rewrite the callsite: {}",
+                        unresolved.join(", ")
+                    )
+                    .into());
+                }
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_c_result(result, func_name, output, &symbolic_dims)
             } else {

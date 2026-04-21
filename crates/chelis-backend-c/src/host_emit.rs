@@ -2263,7 +2263,12 @@ fn c_type(ty: &HostType) -> &'static str {
             _ => "chelis_option_value",
         },
         HostType::Unit => "int",
-        HostType::Unknown => "int",
+        // Unresolved polymorphic type — use `void*` so callers passing
+        // concrete pointer types (chelis_adt*, chelis_tensor*, etc.)
+        // implicitly convert cleanly. Scalars (int64/f64/bool) require
+        // explicit boxing at the callsite; Coral's HAMT / Nautilus's
+        // `a`-valued defs pass only pointer types in practice.
+        HostType::Unknown => "void*",
     }
 }
 

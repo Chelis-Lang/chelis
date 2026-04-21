@@ -529,13 +529,76 @@ fn lower_host_program(
 /// it doesn't recognize the callee. A wrapper containing this node would
 /// emit broken C (`__result = call(...);`) downstream — preferring the
 /// DAG path's inline specialization is safer than emitting that wrapper.
-#[allow(dead_code)]
+/// Scan a host program for any function whose body still contains the
+/// `Builtin { name: "call" }` fallback — the lowerer emits this when
+/// it can't recognize the callee (typically `grad(f)(theta)` where the
+/// callee is itself an application). Emitting such a wrapper produces
+/// `__result = call(...)` C code that doesn't link. The CLI uses this
+/// to surface a clean error instead of shipping broken C.
+pub fn host_program_unresolved_call_sites(program: &HostProgram) -> Vec<String> {
+    let mut out = Vec::new();
+    for function in &program.functions {
+        if host_body_has_fallback_call(&function.body) {
+            out.push(function.name.clone());
+        }
+    }
+    for binding in &program.globals {
+        if host_body_has_fallback_call(&binding.value) {
+            out.push(binding.name.clone());
+        }
+    }
+    out
+}
+
+/// Scan a host program for functions with `HostType::Unknown` params or
+/// return types — this happens for polymorphic defs where the type
+/// variable hasn't been resolved at lowering time (e.g. `hamt_put[a]`
+/// with `value: a`). The emitter currently collapses `Unknown` to `int`
+/// in C, which breaks links when callers pass concrete pointer types.
+/// Returns a list of `(def_name, position)` pairs for reporting.
+pub fn host_program_unknown_typed_params(program: &HostProgram) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for function in &program.functions {
+        for param in &function.params {
+            if host_type_contains_unknown(&param.ty) {
+                out.push((
+                    function.name.clone(),
+                    format!("parameter `{}` has unresolved polymorphic type", param.name),
+                ));
+            }
+        }
+        if host_type_contains_unknown(&function.ret_ty) {
+            out.push((
+                function.name.clone(),
+                "return type is unresolved polymorphic".to_string(),
+            ));
+        }
+    }
+    out
+}
+
+fn host_type_contains_unknown(ty: &HostType) -> bool {
+    match ty {
+        HostType::Unknown => true,
+        HostType::Option(inner) | HostType::List(inner) => host_type_contains_unknown(inner),
+        HostType::Tuple(items) => items.iter().any(host_type_contains_unknown),
+        HostType::Dict(k, v) => host_type_contains_unknown(k) || host_type_contains_unknown(v),
+        HostType::Fn(params, ret) => {
+            params.iter().any(host_type_contains_unknown) || host_type_contains_unknown(ret)
+        }
+        HostType::Adt(_, args) => args.iter().any(host_type_contains_unknown),
+        _ => false,
+    }
+}
+
 fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
     match expr {
         HostExpr::Builtin { name, args, .. } => {
             name == "call" || args.iter().any(host_body_has_fallback_call)
         }
-        HostExpr::Call { args, .. } => args.iter().any(host_body_has_fallback_call),
+        HostExpr::Call { function, args, .. } => {
+            function == "call" || args.iter().any(host_body_has_fallback_call)
+        }
         HostExpr::Let { bindings, body, .. } => {
             bindings
                 .iter()
