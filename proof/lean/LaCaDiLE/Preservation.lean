@@ -528,6 +528,190 @@ theorem StoreTypOn.of_sub
   intro ell t _ hell
   exact hsub ell t hell
 
+/-- Step-local store agreement on locations not mentioned by the redex.
+    This is the missing store-side fact for the `ctx` case: numeric
+    reductions may consume locations mentioned inside the redex, but
+    they preserve typings for all locations disjoint from that redex. -/
+private theorem step_preserves_store_typing_on_aux
+    (Sigma : StoreTyp) (locs : List Loc)
+    (c1 c2 : Config)
+    (h_wf : StoreWf c1.store Sigma)
+    (h_step : Step c1 c2)
+    (hsep : LocRefsSeparated locs (locRefs c1.term)) :
+    ∃ Sigma', StoreWf c2.store Sigma' ∧ StoreTypOn locs Sigma Sigma' := by
+  induction h_step with
+  | beta =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | letBind =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | letpair =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | fst =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | snd =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | handleRet =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | handleOpDirect =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | handleOpCtx =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | handleOpCtxs =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | tgrad =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | tvmap =>
+      exact ⟨Sigma, h_wf, fun _ _ _ hlook => hlook⟩
+  | tconst s v ds ell hell =>
+      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds),
+        StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf, ?_⟩
+      intro ell' t hmem hlook
+      have hLive : (storeLookup s ell').isSome :=
+        StoreWf.lookup_isSome_of_typing h_wf hlook
+      have hne : ell' ≠ ell := by
+        intro hEq
+        exact (storeFreshLoc_ne s ell' hLive) (by rw [hEq, hell])
+      exact storeTypLookup_extend_other Sigma ell' ell t (Typ.tensor ds) hlook hne
+  | copy s ell ellNew w _hlook hfresh =>
+      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor w.shape),
+        StoreWf.extend_fresh ellNew w (Typ.tensor w.shape) h_wf, ?_⟩
+      intro ell' t hmem hlookTy
+      have hLive : (storeLookup s ell').isSome :=
+        StoreWf.lookup_isSome_of_typing h_wf hlookTy
+      have hne : ell' ≠ ellNew := by
+        intro hEq
+        exact (storeFreshLoc_ne s ell' hLive) (by rw [hEq, hfresh])
+      exact storeTypLookup_extend_other Sigma ell' ellNew t (Typ.tensor w.shape) hlookTy hne
+  | tadd s ell1 ell2 ellOut w1 w2 _h1 _h2 hfresh =>
+      have h_wf1 := StoreWf.remove ell1 h_wf
+      have h_wf2 := StoreWf.remove ell2 h_wf1
+      refine ⟨storeTypExtend
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor w1.shape),
+        StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor w1.shape) h_wf2, ?_⟩
+      intro ell t hmem hlook
+      have hne1 : ell ≠ ell1 := by
+        intro hEq
+        subst hEq
+        exact hsep ell hmem (by simp [locRefs])
+      have hne2 : ell ≠ ell2 := by
+        intro hEq
+        subst hEq
+        exact hsep ell hmem (by simp [locRefs])
+      have hlook1 := storeTypLookup_remove_other Sigma ell1 ell t hlook hne1
+      have hlook2 := storeTypLookup_remove_other (storeTypRemove Sigma ell1) ell2 ell t hlook1 hne2
+      have hLive : (storeLookup s ell).isSome := StoreWf.lookup_isSome_of_typing h_wf hlook
+      have hneOut : ell ≠ ellOut := by
+        rw [hfresh]
+        exact storeFreshLoc_ne s ell hLive
+      exact storeTypLookup_extend_other
+        (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+        ell ellOut t (Typ.tensor w1.shape) hlook2 hneOut
+  | tmul s ell1 ell2 ellOut w1 w2 _h1 _h2 hfresh =>
+      have h_wf1 := StoreWf.remove ell1 h_wf
+      have h_wf2 := StoreWf.remove ell2 h_wf1
+      refine ⟨storeTypExtend
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor w1.shape),
+        StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor w1.shape) h_wf2, ?_⟩
+      intro ell t hmem hlook
+      have hne1 : ell ≠ ell1 := by
+        intro hEq
+        subst hEq
+        exact hsep ell hmem (by simp [locRefs])
+      have hne2 : ell ≠ ell2 := by
+        intro hEq
+        subst hEq
+        exact hsep ell hmem (by simp [locRefs])
+      have hlook1 := storeTypLookup_remove_other Sigma ell1 ell t hlook hne1
+      have hlook2 := storeTypLookup_remove_other (storeTypRemove Sigma ell1) ell2 ell t hlook1 hne2
+      have hLive : (storeLookup s ell).isSome := StoreWf.lookup_isSome_of_typing h_wf hlook
+      have hneOut : ell ≠ ellOut := by
+        rw [hfresh]
+        exact storeFreshLoc_ne s ell hLive
+      exact storeTypLookup_extend_other
+        (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+        ell ellOut t (Typ.tensor w1.shape) hlook2 hneOut
+  | tsum s ell ellOut w d hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+          (Typ.tensor (rem w.shape d)), ?_, ?_⟩
+      · have h_isSome : (storeLookup s ell).isSome := by
+          rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := rem w.shape d, data := w.data }
+          (Typ.tensor (rem w.shape d)) h_wf hfresh hne
+      · intro ell' t hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t (Typ.tensor (rem w.shape d))
+          hlookRem hneOut
+  | texpand s ell ellOut w d hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+          (Typ.tensor (ins w.shape d)), ?_, ?_⟩
+      · have h_isSome : (storeLookup s ell).isSome := by
+          rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := ins w.shape d, data := w.data }
+          (Typ.tensor (ins w.shape d)) h_wf hfresh hne
+      · intro ell' t hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t (Typ.tensor (ins w.shape d))
+          hlookRem hneOut
+  | tuniformLike s ell ellOut w lo hi hlook hfresh =>
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+          (Typ.tensor w.shape), ?_, ?_⟩
+      · have h_isSome : (storeLookup s ell).isSome := by
+          rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := w.shape, data := lo }
+          (Typ.tensor w.shape) h_wf hfresh hne
+      · intro ell' t hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t (Typ.tensor w.shape)
+          hlookRem hneOut
+  | ctx sigma sigma' E e e' h_inner ih =>
+      have hsepInner : LocRefsSeparated locs (locRefs e) := by
+        intro ell hmem hloc
+        exact hsep ell hmem ((mem_locRefs_plug E e ell).2 (Or.inr hloc))
+      exact ih h_wf hsepInner
+
 /-- Store-typing weakening: every `HasType` derivation remains valid
     under a monotone extension of the store typing. Unblocks every
     binary `EvalCtx` case of `plug_preserves_typing`, since after the
