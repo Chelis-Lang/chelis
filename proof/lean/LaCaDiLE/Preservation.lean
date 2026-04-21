@@ -2406,6 +2406,249 @@ theorem plug_preserves_typing_closed
           hb' hHsubB hClIn hClCov hcls')
         hsub_eps
 
+/-- Closed-program context transport that only assumes store-typing
+    agreement on the frame's untouched runtime locations. This is the
+    theorem shape needed by the strengthened `ctx` preservation proof:
+    sibling subterms never inspect the whole pre-step store typing, only
+    the explicit `Term.loc`s stored in the surrounding frame. -/
+theorem plug_preserves_typing_closed_on_ctxLocRefs
+    {Sigma : StoreTyp}
+    {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType [] Sigma [] (plug E e) t eps [])
+    (h_inner : ∀ {t0 : Typ} {eps0 : EffectRow},
+       HasType [] Sigma [] e t0 eps0 [] →
+       ∃ Sigma2, HasType [] Sigma2 [] e' t0 eps0 [] ∧
+                 StoreTypOn (ctxLocRefs E) Sigma Sigma2) :
+    ∃ Sigma2, HasType [] Sigma2 [] (plug E e') t eps [] := by
+  cases E with
+  | hole =>
+      rcases h_inner h with ⟨Sigma2, h_e', _h_on⟩
+      simpa [plug] using ⟨Sigma2, h_e'⟩
+  | fst =>
+      have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t t2 eps h_e'⟩
+  | snd =>
+      have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' t1 t eps h_e'⟩
+  | copy =>
+      have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      subst hteq
+      exact ⟨Sigma2, HasType.copy [] Sigma2 [] [] e' ds eps h_e'⟩
+  | sum d =>
+      have h' : HasType [] Sigma [] (Term.sum e d) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, hmem, h_e⟩ := HasType.sum_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      subst hteq
+      exact ⟨Sigma2, HasType.tsum [] Sigma2 [] [] e' ds d eps h_e' hmem⟩
+  | expand d =>
+      have h' : HasType [] Sigma [] (Term.expand e d) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.expand_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      subst hteq
+      exact ⟨Sigma2, HasType.texpand [] Sigma2 [] [] e' ds d eps h_e'⟩
+  | uniformLike lo hi =>
+      have h' : HasType [] Sigma [] (Term.uniformLike e lo hi) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, eps0, hteq, h_e, hsub_eps⟩ := HasType.uniformLike_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.uniformLike e' lo hi) (Typ.tensor ds)
+        (EffectRow.union eps0 [EffectLabel.random]) eps
+        (HasType.uniformLike [] Sigma2 [] [] e' ds lo hi eps0 h_e')
+        hsub_eps
+  | perform op =>
+      have h' : HasType [] Sigma [] (Term.perform op e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨tArg, eps0, h_e, hmatch, hsub_eps⟩ := HasType.perform_inv h'
+      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.perform op e') t (EffectRow.union [op] eps0) eps
+        (HasType.perform [] Sigma2 [] [] op e' tArg t eps0 h_e' hmatch)
+        hsub_eps
+  | appL e2 =>
+      have h' : HasType [] Sigma [] (Term.app e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.app e' e2) t
+        (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
+        (HasType.app [] Sigma2 [] [] [] e' e2 t1 t epsBody eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | appR v1 =>
+      have h' : HasType [] Sigma [] (Term.app v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.app v1 e') t
+        (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
+        (HasType.app [] Sigma2 [] [] [] v1 e' t1 t epsBody eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | pairL e2 =>
+      have h' : HasType [] Sigma [] (Term.pair e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.pair e' e2) (Typ.pair t1 t2) (EffectRow.union eps1 eps2) eps
+        (HasType.tpair [] Sigma2 [] [] [] e' e2 t1 t2 eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | pairR v1 =>
+      have h' : HasType [] Sigma [] (Term.pair v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.pair v1 e') (Typ.pair t1 t2) (EffectRow.union eps1 eps2) eps
+        (HasType.tpair [] Sigma2 [] [] [] v1 e' t1 t2 eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | addL e2 =>
+      have h' : HasType [] Sigma [] (Term.add e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.add e' e2) (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
+        (HasType.tadd [] Sigma2 [] [] [] e' e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | addR v1 =>
+      have h' : HasType [] Sigma [] (Term.add v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.add v1 e') (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
+        (HasType.tadd [] Sigma2 [] [] [] v1 e' ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | mulL e2 =>
+      have h' : HasType [] Sigma [] (Term.mul e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.mul e' e2) (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
+        (HasType.tmul [] Sigma2 [] [] [] e' e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | mulR v1 =>
+      have h' : HasType [] Sigma [] (Term.mul v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, Γmid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hΓmid
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      subst hteq
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.mul v1 e') (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
+        (HasType.tmul [] Sigma2 [] [] [] v1 e' ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | letBind x e2 =>
+      have h' : HasType [] Sigma [] (Term.letBind x e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, eps1, eps2, slot, h_e1, h_e2, hΓout, hsub_eps⟩ :=
+        HasType.plug_letBind_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      have hΓ3 : Γ3 = [] := by simpa using hΓout.symm
+      subst hΓmid
+      subst hΓ3
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.letBind x e' e2) t (EffectRow.union eps1 eps2) eps
+        (HasType.letBind [] Sigma2 [] [] [] x e' e2 t1 t eps1 eps2 slot h_e1' h_e2')
+        hsub_eps
+  | letpair x y e2 =>
+      have h' : HasType [] Sigma [] (Term.letpair x y e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, Γ3, t1, t2, eps1, eps2, slotX, slotY,
+              h_e1, h_e2, hΓout, hsub_eps⟩ :=
+        HasType.plug_letpair_inv h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
+      have hΓ3 : Γ3 = [] := by simpa using hΓout.symm
+      subst hΓmid
+      subst hΓ3
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.letpair x y e' e2) t (EffectRow.union eps1 eps2) eps
+        (HasType.letpair [] Sigma2 [] [] [] x y e' e2 t1 t2 t eps1 eps2
+          slotX slotY h_e1' h_e2')
+        hsub_eps
+  | handle epsH clauses =>
+      have h' : HasType [] Sigma [] (Term.handle epsH e clauses) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨Γmid, epsB, hb, hHsubB, hClIn, hClCov, hcls, hsub_eps⟩ :=
+        HasType.handle_inv_strong h'
+      have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input hb
+      subst hΓmid
+      rcases h_inner hb with ⟨Sigma2, hb', h_on⟩
+      have hcls' := clausesTyped_store_weaken_on_locRefs hcls (by simpa [ctxLocRefs] using h_on)
+      refine ⟨Sigma2, ?_⟩
+      exact HasType.subEff [] Sigma2 [] []
+        (Term.handle epsH e' clauses) t (EffectRow.removeOps epsB epsH) eps
+        (HasType.handle [] Sigma2 [] [] [] e' clauses t epsH epsB
+          hb' hHsubB hClIn hClCov hcls')
+        hsub_eps
+
 /-- Closed-program specialization of context preservation for
     multi-frame evaluation-context chains. -/
 theorem multiPlug_preserves_typing_closed
