@@ -245,6 +245,7 @@ inductive ClausesTypedDB :
          (t tArg tRet : Typ) (epsR : EffectRow)
          (op : EffectLabel) (hb : TermDB)
          (rest : List (EffectLabel × TermDB)) :
+         OpSigMatch op tArg tRet →
          HasTypeDB Delta Sigma
                    (some (Typ.arrow tRet t epsR) :: some tArg :: Gamma2)
                    hb t epsR

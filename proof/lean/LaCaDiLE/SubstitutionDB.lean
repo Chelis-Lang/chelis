@@ -387,7 +387,7 @@ theorem weakening_insert_clauses_db
   | ClausesTypedDB.nil Δ S Γ2 t epsR =>
     simp only [liftClausesAux]
     exact ClausesTypedDB.nil Δ S (LinearCtxDB.insertAt j (some t_new) Γ2) t epsR
-  | ClausesTypedDB.cons Δ S Γ2 Γ3 slot1 slot2 t tArg tRet epsR op hb rest hbody hrest =>
+  | ClausesTypedDB.cons Δ S Γ2 Γ3 slot1 slot2 t tArg tRet epsR op hb rest hmatch hbody hrest =>
     simp only [liftClausesAux]
     have ihb := weakening_insert_db hbody (j + 2) t_new
     have hctx_in :
@@ -399,7 +399,7 @@ theorem weakening_insert_clauses_db
     rw [hctx_in, hctx_out] at ihb
     exact ClausesTypedDB.cons Δ S (LinearCtxDB.insertAt j (some t_new) Γ2)
             (LinearCtxDB.insertAt j (some t_new) Γ3) slot1 slot2 t tArg tRet epsR op _ _
-            ihb (weakening_insert_clauses_db hrest j t_new)
+            hmatch ihb (weakening_insert_clauses_db hrest j t_new)
 
 end
 
@@ -482,7 +482,7 @@ theorem hasTypeDB_length_preservation_clauses
     (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls) : Γ2.length = Γ3.length := by
   match h with
   | ClausesTypedDB.nil _ _ _ _ _ => rfl
-  | ClausesTypedDB.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
+  | ClausesTypedDB.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
     exact hasTypeDB_length_preservation_clauses hrest
 
 end
@@ -570,7 +570,7 @@ theorem hasTypeDB_none_monotone_clauses
     (i : Nat) (hi : Γ2[i]? = some none) : Γ3[i]? = some none := by
   match h with
   | ClausesTypedDB.nil _ _ _ _ _ => exact hi
-  | ClausesTypedDB.cons _ _ Γ2 _ _ _ t tArg tRet epsR _ _ _ hbody hrest =>
+  | ClausesTypedDB.cons _ _ Γ2 _ _ _ t tArg tRet epsR _ _ _ _ hbody hrest =>
     have hi' :
         (some (Typ.arrow tRet t epsR) :: some tArg :: Γ2)[i + 2]? = some none := by
       simp [hi]
@@ -687,7 +687,7 @@ theorem hasTypeDB_live_slot_monotone_clauses
     Γ3[i]? = some (some t_slot) ∨ Γ3[i]? = some none := by
   match h with
   | ClausesTypedDB.nil _ _ _ _ _ => left; exact hi
-  | ClausesTypedDB.cons _ _ Γ2 _ _ _ _ _ _ _ _ _ _ _ hrest =>
+  | ClausesTypedDB.cons _ _ Γ2 _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
     -- hrest : ClausesTypedDB Γ2 Γ3 ...; recurse on it.
     exact hasTypeDB_live_slot_monotone_clauses hrest i t_slot hi
 
@@ -1216,7 +1216,7 @@ theorem tail_rebase_clauses_db
     have : pre = pre' := List.append_cancel_right hout
     subst this
     exact ClausesTypedDB.nil Δ_ S_ (pre ++ Γ_new) ty_ epsR_
-  | ClausesTypedDB.cons Δ_ S_ Γ2_ Γ3_ slot1 slot2 ty_ tArg tRet epsR_ op hb rest hbody hrest =>
+  | ClausesTypedDB.cons Δ_ S_ Γ2_ Γ3_ slot1 slot2 ty_ tArg tRet epsR_ op hb rest hmatch hbody hrest =>
     -- Γ2_ = pre ++ Γ_old, Γ3_ = pre' ++ Γ_old from hin/hout.
     have hin_b : some (Typ.arrow tRet ty_ epsR_) :: some tArg :: Γ2_ =
                  (some (Typ.arrow tRet ty_ epsR_) :: some tArg :: pre) ++ Γ_old := by
@@ -1229,7 +1229,7 @@ theorem tail_rebase_clauses_db
     have ihr := tail_rebase_clauses_db hrest pre pre' Γ_old Γ_new hin hout h_len
     simp [List.cons_append] at ihb
     exact ClausesTypedDB.cons Δ_ S_ (pre ++ Γ_new) (pre' ++ Γ_new) slot1 slot2
-            ty_ tArg tRet epsR_ op hb rest ihb ihr
+            ty_ tArg tRet epsR_ op hb rest hmatch ihb ihr
 termination_by structural h
 end
 
@@ -1783,11 +1783,11 @@ theorem hasTypeDB_cap_swap
       rename_i Δ_pre a b Δ_suf hΔ
       subst hΔ
       exact ClausesTypedDB.nil (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ2 t epsR
-  | cons Delta Sigma Γ2 Γ3 slot1 slot2 t tArg tRet epsR op hb rest hbody hrest ihb ihrest =>
+  | cons Delta Sigma Γ2 Γ3 slot1 slot2 t tArg tRet epsR op hb rest hmatch hbody hrest ihb ihrest =>
       rename_i Δ_pre a b Δ_suf hΔ
       subst hΔ
       exact ClausesTypedDB.cons (Δ_pre ++ b :: a :: Δ_suf) Sigma Γ2 Γ3 slot1 slot2 t tArg tRet epsR
-        op hb rest (ihb rfl) (ihrest rfl)
+        op hb rest hmatch (ihb rfl) (ihrest rfl)
 
 /-! ## substClausesDBAux op-preservation helpers (Wave 5l) -/
 
@@ -2046,9 +2046,9 @@ theorem hasTypeDB_cap_insert
   | subEff Δ S Γ Γ' e t ep ep' _ hS ih =>
       exact HasTypeDB.subEff _ S Γ Γ' e t ep ep' (ih n c) hS
   | nil Δ S Γ t epsR => intro n c; exact ClausesTypedDB.nil _ S Γ t epsR
-  | cons Δ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest _ _ ih_hb ih_rest =>
+  | cons Δ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest hmatch _ _ ih_hb ih_rest =>
       exact ClausesTypedDB.cons _ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest
-        (ih_hb n c) (ih_rest n c)
+        hmatch (ih_hb n c) (ih_rest n c)
 -/
 
 theorem clausesTypedDB_cap_insert
@@ -2060,9 +2060,9 @@ theorem clausesTypedDB_cap_insert
   match h with
   | ClausesTypedDB.nil _ _ Γ_ t_ epsR_ =>
       exact ClausesTypedDB.nil _ _ Γ_ t_ epsR_
-  | ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest hb_typ hrest =>
+  | ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest hmatch hb_typ hrest =>
       exact ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest
-        (hasTypeDB_cap_insert hb_typ n c)
+        hmatch (hasTypeDB_cap_insert hb_typ n c)
         (clausesTypedDB_cap_insert hrest n c)
 theorem hasTypeDB_cap_weaken_tgrad_body
     {Delta : CapCtx} {Sigma : StoreTyp} {Γ Γ' : LinearCtxDB}
@@ -2083,9 +2083,9 @@ theorem hasTypeDB_cap_weaken_clauses
   match h with
   | ClausesTypedDB.nil _ _ Γ ty epsR_ =>
       exact ClausesTypedDB.nil (c :: Delta) Sigma Γ ty epsR_
-  | ClausesTypedDB.cons _ _ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hb_typ hrest =>
+  | ClausesTypedDB.cons _ _ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest =>
       exact ClausesTypedDB.cons (c :: Delta) Sigma Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_
-        op hb rest (hasTypeDB_cap_weaken hb_typ c)
+        op hb rest hmatch (hasTypeDB_cap_weaken hb_typ c)
         (hasTypeDB_cap_weaken_clauses hrest c)
 
 end
@@ -2266,7 +2266,7 @@ theorem clauses_subst_decomp_h2
       rcases h_mid with hl | hd
       · left; exact ⟨hl, hs ▸ hl⟩
       · right; right; exact ⟨hd, hs ▸ hd⟩
-  | ClausesTypedDB.cons _ _ Γ2_inner Γ3_inner slot1 slot2 _ tArg tRet _ op hb rest hb_typ hrest =>
+  | ClausesTypedDB.cons _ _ Γ2_inner Γ3_inner slot1 slot2 _ tArg tRet _ op hb rest _hmatch hb_typ hrest =>
       -- The cons constructor: Γ1 = Γ2_inner, Γ2 = Γ3_inner.
       -- hb_typ : (some(arrow tRet t epsR) :: some tArg :: Γ2_inner) →
       --         (slot1 :: slot2 :: Γ3_inner)
@@ -2807,7 +2807,7 @@ theorem subst_preserves_typing_db_gen
       subst hΓ
       simp only [substClausesDBAux]
       exact ClausesTypedDB.nil Δ_ S_ Γ_in ty epsR_
-  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hb_typ hrest
+  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest
          ih_hb_typ ih_hrest =>
       intro v t_v j Γ_in Γ_out slot_in slot_out hj_in hj_out hin hout hslots h_v
       subst hin
@@ -2845,7 +2845,7 @@ theorem subst_preserves_typing_db_gen
       simp only [substClausesDBAux]
       exact ClausesTypedDB.cons Δ_ S_ Γ_in Γ_out slot1 slot2 ty tArg tRet epsR_
         op (substDBAux (j + 2) (lift (lift v)) hb) (substClausesDBAux j v rest)
-        hb_typ' hrest'
+        hmatch hb_typ' hrest'
 
 /-- Public substitution theorem (trajectory 2 specialization).
 

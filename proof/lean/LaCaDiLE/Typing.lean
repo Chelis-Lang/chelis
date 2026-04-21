@@ -362,6 +362,7 @@ inductive ClausesTyped :
          (op : EffectLabel) (x k : String) (hb : Term)
          (rest : List (EffectLabel × String × String × Term))
          (slotX slotK : Option Typ) :
+         OpSigMatch op tArg tRet →
          HasType Delta Sigma
                  (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
                  hb t epsR
@@ -478,7 +479,7 @@ theorem hasType_names_preserved
   | loc _ _ _ _ _ _ => rfl
   | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
   | nil _ _ _ _ _ => rfl
-  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest => exact ihRest
 
 /-- Linear-context domain is invariant across HasType derivations.
     Under tombstone semantics, linearCtxDom = map Prod.fst includes
@@ -491,93 +492,20 @@ theorem has_type_linear_shrinks
   simp only [linearCtxDom, hasType_names_preserved h]
   exact fun _ h => h
 
-/-- Linear-context outputs are not merely domain subsets of inputs;
-    they preserve the original order as actual list sublists. This is
-    the structural fact the TranslationDB bridge needs when it classifies
-    singleton and two-slot body outputs by shape. -/
+/-- Tombstone semantics preserves the ordered list of names. In
+    particular, the output-domain list is an ordered sublist of the
+    input-domain list. -/
 theorem has_type_sublist
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
-    List.Sublist Gamma' Gamma := by
-  induction h using HasType.rec
-    (motive_2 := fun (_Δ : CapCtx) (_S : StoreTyp)
-                     (Γ2 Γ3 : LinearCtx) (_ : Typ) (_ : EffectRow)
-                     (_ : List (EffectLabel × String × String × Term))
-                     (_ : _) => List.Sublist Γ3 Γ2) with
-  | var _ _ Γpre Γpost x tx =>
-      have hpost : List.Sublist Γpost ([(x, tx)] ++ Γpost) := by
-        simpa using (List.sublist_cons_self (x, tx) Γpost)
-      simpa [List.append_assoc] using
-        (List.Sublist.append (List.Sublist.refl Γpre) hpost)
-  | unit _ _ Γ =>
-      exact List.Sublist.refl Γ
-  | abs _ _ Γ1 Γ2 x t1 _ _ _ hBody ih =>
-      have hfilter :
-          List.Sublist
-            (Γ2.filter (fun p => p.1 ≠ x))
-            (Γ1.filter (fun p => p.1 ≠ x)) := by
-        simpa using (List.Sublist.filter (fun p => p.1 ≠ x) ih)
-      exact hfilter.trans
-        (show List.Sublist (Γ1.filter (fun p => p.1 ≠ x)) Γ1 from by
-          simpa using (List.Sublist.filter (fun p => p.1 ≠ x) (List.Sublist.refl Γ1)))
-  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      exact ih2.trans ih1
-  | letBind _ _ Γ1 Γ2 Γ3 x _ _ t1 _ _ _ _ _ ih1 ih2 =>
-      have hfilter :
-          List.Sublist
-            (Γ3.filter (fun p => p.1 ≠ x))
-            (Γ2.filter (fun p => p.1 ≠ x)) := by
-        simpa using (List.Sublist.filter (fun p => p.1 ≠ x) ih2)
-      exact (hfilter.trans
-        (show List.Sublist (Γ2.filter (fun p => p.1 ≠ x)) Γ2 from by
-          simpa using (List.Sublist.filter (fun p => p.1 ≠ x) (List.Sublist.refl Γ2)))).trans ih1
-  | copy _ _ Γ1 _ _ _ _ _ ih =>
-      exact ih
-  | letpair _ _ Γ1 Γ2 Γ3 x y _ _ t1 t2 _ _ _ _ _ ih1 ih2 =>
-      let p : (String × Typ) → Bool := fun q => q.1 ≠ x ∧ q.1 ≠ y
-      have hfilter : List.Sublist (Γ3.filter p) (Γ2.filter p) := by
-        simpa [p, and_left_comm, and_assoc] using (List.Sublist.filter p ih2)
-      exact (hfilter.trans (show List.Sublist (Γ2.filter p) Γ2 from by
-        simpa using (List.Sublist.filter p (List.Sublist.refl Γ2)))).trans ih1
-  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      exact ih2.trans ih1
-  | fst _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | snd _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | const _ _ Γ _ _ =>
-      exact List.Sublist.refl Γ
-  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      exact ih2.trans ih1
-  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
-      exact ih2.trans ih1
-  | tsum _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | texpand _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | uniformLike _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | perform _ _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihBody ihClauses =>
-      exact ihClauses.trans ihBody
-  | tgrad _ _ Γ _ _ _ _ _ _ _ _ =>
-      exact List.Sublist.refl Γ
-  | tvmap _ _ Γ _ _ _ _ _ _ _ =>
-      exact List.Sublist.refl Γ
-  | loc _ _ Γ _ _ _ =>
-      exact List.Sublist.refl Γ
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih
-  | nil _ _ Γ _ _ =>
-      exact List.Sublist.refl Γ
-  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest =>
-      exact ihRest
+    List.Sublist (linearCtxDom Gamma') (linearCtxDom Gamma) := by
+  simpa [linearCtxDom, hasType_names_preserved h] using
+    (List.Sublist.refl (linearCtxDom Gamma))
 
 private theorem mem_dom_of_mem_append_singleton_ne
     {Gamma : LinearCtx} {z x : String} {t : Typ}
-    (hz : z ∈ linearCtxDom (Gamma ++ [(x, t)]))
+    (hz : z ∈ linearCtxDom (Gamma ++ ([(x, some t)] : LinearCtx)))
     (hne : z ≠ x) :
     z ∈ linearCtxDom Gamma := by
   simp only [linearCtxDom, List.map_append, List.mem_append,
@@ -591,7 +519,7 @@ private theorem mem_dom_of_mem_append_singleton_ne
 
 private theorem mem_dom_of_mem_append_pair_ne
     {Gamma : LinearCtx} {z x y : String} {tx ty : Typ}
-    (hz : z ∈ linearCtxDom (Gamma ++ [(x, tx), (y, ty)]))
+    (hz : z ∈ linearCtxDom (Gamma ++ ([(x, some tx), (y, some ty)] : LinearCtx)))
     (hne_x : z ≠ x) (hne_y : z ≠ y) :
     z ∈ linearCtxDom Gamma := by
   simp only [linearCtxDom, List.map_append, List.mem_append,
@@ -606,130 +534,160 @@ private theorem mem_dom_of_mem_append_pair_ne
         exact hne_y hz
       · exact False.elim hz
 
-/-- Every free variable of a well-typed term comes from the input
-    linear context. Closed input derivations are therefore genuinely
-    closed in the syntax-level sense, not just context-closed. -/
-theorem has_type_free_vars
+mutual
+
+def has_type_free_vars_aux
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
     ∀ z, z ∈ freeVars e → z ∈ linearCtxDom Gamma := by
-  induction h using HasType.rec
-    (motive_2 := fun (_Δ : CapCtx) (_S : StoreTyp)
-                     (Γ2 Γ3 : LinearCtx) (_ : Typ) (_ : EffectRow)
-                     (cls : List (EffectLabel × String × String × Term))
-                     (_ : _) => ∀ z, z ∈ freeVarsClauses cls → z ∈ linearCtxDom Γ2) with
-  | var _ _ Γpre Γpost x t =>
+  match h with
+  | HasType.var _ _ Γpre Γpost x _ =>
       intro z hz
       simp [freeVars, linearCtxDom] at hz ⊢
       subst z
       simp [linearCtxDom]
-  | unit _ _ Γ =>
+  | HasType.unit _ _ _ =>
       intro z hz
       simp [freeVars] at hz
-  | abs _ _ Γ1 _ x t1 _ _ body hBody ih =>
+  | HasType.abs _ _ Γ1 _ x t1 _ _ body _ hBody =>
       intro z hz
       have hz' : z ∈ freeVars body ∧ z ≠ x := by
         simpa [freeVars] using hz
-      have hz_ctx : z ∈ linearCtxDom (Γ1 ++ [(x, t1)]) := ih z hz'.1
+      have hz_ctx : z ∈ linearCtxDom (Γ1 ++ ([(x, some t1)] : LinearCtx)) :=
+        has_type_free_vars_aux hBody z hz'.1
       exact mem_dom_of_mem_append_singleton_ne hz_ctx hz'.2
-  | app _ _ Γ1 Γ2 _ e1 e2 _ _ _ _ _ h1 h2 ih1 ih2 =>
+  | HasType.app _ _ Γ1 Γ2 _ _ _ _ _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ih1 z hz
-      · exact has_type_linear_shrinks h1 z (ih2 z hz)
-  | letBind _ _ Γ1 Γ2 _ x e1 e2 t1 _ _ _ h1 h2 ih1 ih2 =>
+      · exact has_type_free_vars_aux h1 z hz
+      · exact has_type_linear_shrinks h1 z (has_type_free_vars_aux h2 z hz)
+  | HasType.letBind _ _ Γ1 Γ2 _ x _ _ t1 _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ih1 z hz
-      · have hz_ctx : z ∈ linearCtxDom (Γ2 ++ [(x, t1)]) := ih2 z hz.1
+      · exact has_type_free_vars_aux h1 z hz
+      · have hz_ctx : z ∈ linearCtxDom (Γ2 ++ ([(x, some t1)] : LinearCtx)) :=
+          has_type_free_vars_aux h2 z hz.1
         have hz_mid : z ∈ linearCtxDom Γ2 :=
           mem_dom_of_mem_append_singleton_ne hz_ctx hz.2
         exact has_type_linear_shrinks h1 z hz_mid
-  | copy _ _ Γ1 _ e _ _ hBody ih =>
+  | HasType.copy _ _ _ _ _ _ _ hBody =>
       intro z hz
-      simpa [freeVars] using ih z hz
-  | letpair _ _ Γ1 Γ2 _ x y e1 e2 t1 t2 _ _ _ h1 h2 ih1 ih2 =>
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.letpair _ _ Γ1 Γ2 _ x y _ _ t1 t2 _ _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ih1 z hz
-      · have hz_ctx : z ∈ linearCtxDom (Γ2 ++ [(x, t1), (y, t2)]) := ih2 z hz.1
+      · exact has_type_free_vars_aux h1 z hz
+      · have hz_ctx :
+            z ∈ linearCtxDom (Γ2 ++ ([(x, some t1), (y, some t2)] : LinearCtx)) :=
+          has_type_free_vars_aux h2 z hz.1
         have hz_mid : z ∈ linearCtxDom Γ2 :=
           mem_dom_of_mem_append_pair_ne hz_ctx hz.2.1 hz.2.2
         exact has_type_linear_shrinks h1 z hz_mid
-  | tpair _ _ Γ1 Γ2 _ e1 e2 _ _ _ _ h1 h2 ih1 ih2 =>
+  | HasType.tpair _ _ Γ1 Γ2 _ _ _ _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ih1 z hz
-      · exact has_type_linear_shrinks h1 z (ih2 z hz)
-  | fst _ _ Γ1 _ e _ _ _ hBody ih =>
+      · exact has_type_free_vars_aux h1 z hz
+      · exact has_type_linear_shrinks h1 z (has_type_free_vars_aux h2 z hz)
+  | HasType.fst _ _ _ _ _ _ _ _ hBody =>
       intro z hz
-      simpa [freeVars] using ih z hz
-  | snd _ _ Γ1 _ e _ _ _ hBody ih =>
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.snd _ _ _ _ _ _ _ _ hBody =>
       intro z hz
-      simpa [freeVars] using ih z hz
-  | const _ _ Γ _ _ =>
-      intro z hz
-      simp [freeVars] at hz
-  | tadd _ _ Γ1 Γ2 _ e1 e2 _ _ _ h1 h2 ih1 ih2 =>
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.const _ _ _ _ _ =>
       intro z hz
       simp [freeVars] at hz
-      rcases hz with hz | hz
-      · exact ih1 z hz
-      · exact has_type_linear_shrinks h1 z (ih2 z hz)
-  | tmul _ _ Γ1 Γ2 _ e1 e2 _ _ _ h1 h2 ih1 ih2 =>
+  | HasType.tadd _ _ Γ1 Γ2 _ _ _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ih1 z hz
-      · exact has_type_linear_shrinks h1 z (ih2 z hz)
-  | tsum _ _ Γ1 _ e _ _ _ hBody _ ih =>
-      intro z hz
-      simpa [freeVars] using ih z hz
-  | texpand _ _ Γ1 _ e _ _ _ hBody ih =>
-      intro z hz
-      simpa [freeVars] using ih z hz
-  | uniformLike _ _ Γ1 _ e _ _ _ _ hBody ih =>
-      intro z hz
-      simpa [freeVars] using ih z hz
-  | perform _ _ Γ1 _ _ e _ _ _ hBody _ ih =>
-      intro z hz
-      simpa [freeVars] using ih z hz
-  | handle _ _ Γ1 Γ2 _ body clauses _ _ _ hBody _ _ _ _ ihBody ihClauses =>
+      · exact has_type_free_vars_aux h1 z hz
+      · exact has_type_linear_shrinks h1 z (has_type_free_vars_aux h2 z hz)
+  | HasType.tmul _ _ Γ1 Γ2 _ _ _ _ _ _ h1 h2 =>
       intro z hz
       simp [freeVars] at hz
       rcases hz with hz | hz
-      · exact ihBody z hz
-      · exact has_type_linear_shrinks hBody z (ihClauses z hz)
-  | tgrad _ _ Γ x ds dsOut body eps hBody hCompat ih =>
+      · exact has_type_free_vars_aux h1 z hz
+      · exact has_type_linear_shrinks h1 z (has_type_free_vars_aux h2 z hz)
+  | HasType.tsum _ _ _ _ _ _ _ _ hBody _ =>
+      intro z hz
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.texpand _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.uniformLike _ _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.perform _ _ _ _ _ _ _ _ _ hBody _ =>
+      intro z hz
+      simpa [freeVars] using has_type_free_vars_aux hBody z hz
+  | HasType.handle _ _ Γ1 Γ2 _ _ _ _ _ _ hBody _ _ _ hClauses =>
       intro z hz
       simp [freeVars] at hz
-      have hz_ctx : z ∈ linearCtxDom (Γ ++ [(x, Typ.tensor ds)]) := by
-        exact ih z hz.1
+      rcases hz with hz | hz
+      · exact has_type_free_vars_aux hBody z hz
+      · exact has_type_linear_shrinks hBody z (clauses_typed_free_vars_aux hClauses z hz)
+  | HasType.tgrad _ _ Γ x ds _ _ _ _ hBody _ =>
+      intro z hz
+      simp [freeVars] at hz
+      have hz_ctx :
+            z ∈ linearCtxDom (Γ ++ ([(x, some (Typ.tensor ds))] : LinearCtx)) :=
+        has_type_free_vars_aux hBody z hz.1
       exact mem_dom_of_mem_append_singleton_ne hz_ctx hz.2
-  | tvmap _ _ Γ x t1 t2 body eps d hBody ih =>
+  | HasType.tvmap _ _ Γ x t1 _ _ _ _ _ hBody =>
       intro z hz
       simp [freeVars] at hz
-      have hz_ctx : z ∈ linearCtxDom (Γ ++ [(x, t1)]) := by
-        exact ih z hz.1
+      have hz_ctx : z ∈ linearCtxDom (Γ ++ ([(x, some t1)] : LinearCtx)) :=
+        has_type_free_vars_aux hBody z hz.1
       exact mem_dom_of_mem_append_singleton_ne hz_ctx hz.2
-  | loc _ _ Γ _ _ _ =>
+  | HasType.loc _ _ _ _ _ _ =>
       intro z hz
       simp [freeVars] at hz
-  | subEff _ _ Γ _ e _ _ _ hBody _ ih =>
-      exact ih
-  | nil _ _ Γ _ _ z hz =>
+  | HasType.subEff _ _ _ _ _ _ _ _ hBody _ =>
+      exact has_type_free_vars_aux hBody
+
+def clauses_typed_free_vars_aux
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) :
+    ∀ z, z ∈ freeVarsClauses cls → z ∈ linearCtxDom Gamma2 := by
+  match h with
+  | ClausesTyped.nil _ _ _ _ _ =>
+      intro z hz
       simp [freeVarsClauses] at hz
-  | cons _ _ Γ2 _ t tArg tRet epsR op x k hb rest hBody hRest ihBody ihRest z hz =>
+  | ClausesTyped.cons _ _ Γ2 _ t tArg tRet epsR op x k _ _ _ _ hMatch hBody hRest =>
+      intro z hz
       simp [freeVarsClauses] at hz
       rcases hz with hz | hz
-      · have hz_ctx : z ∈ linearCtxDom (Γ2 ++ [(x, tArg), (k, Typ.arrow tRet t epsR)]) := ihBody z hz.1
+      · have hz_ctx :
+            z ∈ linearCtxDom
+              (Γ2 ++ ([(x, some tArg), (k, some (Typ.arrow tRet t epsR))] : LinearCtx)) :=
+          has_type_free_vars_aux hBody z hz.1
         exact mem_dom_of_mem_append_pair_ne hz_ctx hz.2.1 hz.2.2
-      · exact ihRest z hz
+      · exact clauses_typed_free_vars_aux hRest z hz
+
+end
+
+theorem has_type_free_vars
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    ∀ z, z ∈ freeVars e → z ∈ linearCtxDom Gamma :=
+  has_type_free_vars_aux h
+
+theorem clauses_typed_free_vars
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) :
+    ∀ z, z ∈ freeVarsClauses cls → z ∈ linearCtxDom Gamma2 :=
+  clauses_typed_free_vars_aux h
 
 theorem has_type_closed_term_of_closed_input
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
@@ -779,7 +737,7 @@ theorem hasType_length_preserved
   | loc _ _ _ _ _ _ => rfl
   | subEff _ _ _ _ _ _ _ _ _ _ ih => exact ih
   | nil _ _ _ _ _ => rfl
-  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih_rest => exact ih_rest
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest => exact ihRest
 
 theorem has_type_closed_output_of_closed_input
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}

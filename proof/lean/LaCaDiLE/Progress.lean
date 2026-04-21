@@ -108,6 +108,31 @@ theorem canonical_forms_arrow
       | subEff _ _ _ _ _ _ _ _ _ _ ih => intro he ht; exact ih he ht
       | _ => first | (intro he _; cases he) | exact True.intro
 
+theorem ClausesTyped.mem_sig
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hcls : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR clauses)
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    ∃ tArg, OpSigMatch op tArg Typ.unit := by
+  induction clauses generalizing Gamma2 Gamma3 with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      cases hcls with
+      | cons _ _ _ _ _ tArg tRet _ _ _ _ _ _ _ _ hMatch _ hRest =>
+          rcases List.mem_cons.mp hmem with h0 | htl
+          · cases h0
+            cases hMatch with
+            | accumTensor ds => exact ⟨Typ.tensor ds, OpSigMatch.accumTensor ds⟩
+            | accumUnit => exact ⟨Typ.unit, OpSigMatch.accumUnit⟩
+            | random => exact ⟨Typ.unit, OpSigMatch.random⟩
+            | resource => exact ⟨Typ.unit, OpSigMatch.resource⟩
+            | io => exact ⟨Typ.unit, OpSigMatch.io⟩
+            | fail => exact ⟨Typ.unit, OpSigMatch.fail⟩
+          · exact ih hRest htl
+
 /-- Canonical forms: a value of tensor type is a runtime location.
     Wave 2: case-split on `IsValue` then derive a contradiction from
     HasType for each non-loc value shape. The type-mismatch between
@@ -885,7 +910,7 @@ theorem progress_aux
         exact StuckOnPerform.mk (EvalCtx.uniformLike lo hi :: Es) v hv
           ⟨trivial, hEs⟩
   | handle epsH body clauses =>
-      obtain ⟨Γ2, epsB, h_body, _hHsubB, _hClIn, hClCov, _hcls, _hsub⟩ :=
+      obtain ⟨Γ2, epsB, h_body, _hHsubB, _hClIn, hClCov, hcls, _hsub⟩ :=
         HasType.handle_inv_strong h
       rcases progress_aux sigma Sigma h_wf h_store_wf body t Γ2 epsB h_body with
           hv | ⟨sigma', body', hstep⟩ | ⟨op, stk⟩
@@ -904,9 +929,10 @@ theorem progress_aux
           subst hcl
           simp only at hcl_eq
           subst hcl_eq
+          obtain ⟨tArg, hsig⟩ := ClausesTyped.mem_sig hcls hcl_mem
           refine Or.inr (Or.inl ⟨sigma, _,
             Step.handleOpCtxs sigma op' v epsH Es clauses xVar kVar hb Typ.unit
-              hv hcl_mem hopH hEs⟩)
+              hv ⟨tArg, hsig⟩ hcl_mem hopH hEs⟩)
         · -- op not caught: propagate stuck outward with the handle frame.
           refine Or.inr (Or.inr ⟨op, ?_⟩)
           have hrw : Term.handle epsH (multiPlug Es (Term.perform op v)) clauses =

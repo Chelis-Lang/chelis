@@ -2078,6 +2078,29 @@ theorem HasType.letpair_inv_sub_bridge
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- Perform inversion local to the DB bridge. -/
+theorem HasType.perform_inv_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {op : EffectLabel} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.perform op e) t eps Gamma2) :
+    ∃ tArg eps0,
+      HasType Delta Sigma Gamma1 e tArg eps0 Gamma2 ∧
+      OpSigMatch op tArg t ∧
+      SubEffRow (EffectRow.union [op] eps0) eps := by
+  generalize heq : Term.perform op e = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | perform _ _ _ _ _ _ tArg _ eps0 h' hmatch _ =>
+      cases heq
+      exact ⟨tArg, eps0, h', hmatch, fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨tArg, eps0, h', hmatch, hwit⟩ := ih heq
+      refine ⟨tArg, eps0, h', hmatch, ?_⟩
+      intro op' hop'
+      exact hSub op' (hwit op' hop')
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
 /-- Strong handle inversion local to the DB bridge. -/
 theorem HasType.handle_inv_strong_bridge
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
@@ -2116,6 +2139,7 @@ theorem ClausesTyped.mem_inv
     (hcls : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR clauses)
     (hmem : (op, x, k, hb) ∈ clauses) :
     ∃ tArg tRet slotX slotK,
+      OpSigMatch op tArg tRet ∧
       HasType Delta Sigma
         (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
         hb t epsR (Gamma3 ++ [(x, slotX), (k, slotK)]) := by
@@ -2124,10 +2148,10 @@ theorem ClausesTyped.mem_inv
       cases hmem
   | cons cl rest ih =>
       cases hcls with
-      | cons _ _ _ _ _ tArg tRet _ _ x' k' hb' rest' slotX slotK hHead hRest =>
+      | cons _ _ _ _ _ tArg tRet _ _ x' k' hb' rest' slotX slotK hMatch hHead hRest =>
           rcases List.mem_cons.mp hmem with h0 | htl
           · cases h0
-            exact ⟨tArg, tRet, slotX, slotK, hHead⟩
+            exact ⟨tArg, tRet, slotX, slotK, hMatch, hHead⟩
           · exact ih hRest htl
 
 /-- Values can be re-typed at any effect row with the same type and
@@ -2305,7 +2329,7 @@ theorem has_type_slotSubDB
       exact ih
   | nil _ _ Γ _ _ =>
       simpa using slotSubDB_refl (eraseCtx Γ)
-  | cons _ _ Γ2 Γ3 _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest =>
+  | cons _ _ Γ2 Γ3 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest =>
       exact ihRest
 
 theorem slotSubDB_singleton_cases
@@ -2722,7 +2746,7 @@ theorem transport_typing_lexical
   | nil Delta Sigma Gamma2 t epsR =>
       exact ⟨[], rfl, ClausesTypedDB.nil Delta Sigma (eraseCtx Gamma2) t epsR⟩
   | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
-      hBody hRest ihBody ihRest =>
+      hMatch hBody hRest ihBody ihRest =>
       rename_i hlex
       have hHeadLex :
           LexicallyScoped
@@ -2746,7 +2770,7 @@ theorem transport_typing_lexical
       refine ⟨(op, hbDB) :: restDB, ?_, ?_⟩
       · simp [eraseClauses, hEraseBody', hEraseRest]
       · exact ClausesTypedDB.cons Delta Sigma (eraseCtx Gamma2) (eraseCtx Gamma3)
-          slotK slotX t tArg tRet epsR op hbDB restDB hTyBody' hTyRest
+          slotK slotX t tArg tRet epsR op hbDB restDB hMatch hTyBody' hTyRest
 
 
 mutual
@@ -3462,6 +3486,7 @@ theorem preservation_handleOpDirect_via_db
     {x k : String} {hb : Term} {tRet t : Typ} {eps : EffectRow}
     (h_typ : HasType [] Sigma [] (Term.handle epsH (Term.perform op v) clauses) t eps [])
     (hv : IsValue v)
+    (hsig : ∃ tArg, OpSigMatch op tArg tRet)
     (hmem : (op, x, k, hb) ∈ clauses)
     (h_scope : WellScoped (Term.handle epsH (Term.perform op v) clauses)) :
     HasType [] Sigma []

@@ -613,16 +613,16 @@ theorem preservation
       -- preservation is still a Wave 2 task for the Γ2 = [] step.
       refine ⟨Sigma, ?_, h_wf⟩
       exact handleRet_value_preserves_typing hv h_typ
-  | handleOpDirect s op v epsH clauses x k hb tRet hv hmem =>
+  | handleOpDirect s op v epsH clauses x k hb tRet hv hsig hmem =>
       refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_handleOpDirect_via_db h_typ hv hmem h_scope
-  | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hmem hop hE =>
+      exact preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope
+  | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
       -- TODO Wave 2: paper-accurate captured-context handle-op case.
       -- Needs `subst_preserves_typing` plus a `plug`-typing inversion
       -- lemma for the captured evaluation context `E`. Grouped with
       -- the existing preservation omnibus sorry (header line 392).
       sorry
-  | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hmem hop hEs =>
+  | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
       -- TODO Wave 2: multi-frame captured-context handle-op case
       -- (Wave 1 P2). Needs `subst_preserves_typing` plus a
       -- `multiPlug`-typing inversion lemma for the chain `Es`,
@@ -838,9 +838,9 @@ theorem clausesTyped_store_weaken
   | ClausesTyped.nil _ _ Γ2 t_ epsR_ =>
       exact ClausesTyped.nil _ Sigma' Γ2 t_ epsR_
   | ClausesTyped.cons _ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
-                       slotX slotK h_body h_rest =>
+                       slotX slotK hmatch h_body h_rest =>
       exact ClausesTyped.cons _ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
-        slotX slotK (hasType_store_weaken h_body hsub)
+        slotX slotK hmatch (hasType_store_weaken h_body hsub)
         (clausesTyped_store_weaken h_rest hsub)
 /-  -- Wave 5r tombstone: store_weaken proof needs slot-param update.
   refine

@@ -234,6 +234,15 @@ inductive OpSigMatch : EffectLabel → Typ → Typ → Prop where
   | fail :
       OpSigMatch EffectLabel.fail Typ.unit Typ.unit
 
+/-- Operation signatures may vary in argument type, but the return
+    type is fixed by the operation label. -/
+theorem OpSigMatch.ret_unique
+    {op : EffectLabel} {tArg1 tArg2 tRet1 tRet2 : Typ}
+    (h1 : OpSigMatch op tArg1 tRet1)
+    (h2 : OpSigMatch op tArg2 tRet2) :
+    tRet1 = tRet2 := by
+  cases h1 <;> cases h2 <;> rfl
+
 /-! ## Locations and tensor values -/
 
 /-- Store locations. Phase 1 uses `Nat`; uniqueness of fresh locations is a

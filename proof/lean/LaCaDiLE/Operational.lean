@@ -323,6 +323,7 @@ inductive Step : Config → Config → Prop
       (clauses : List (EffectLabel × String × String × Term))
       (x k : String) (handlerBody : Term) (tRet : Typ) :
       IsValue v →
+      (∃ tArg, OpSigMatch op tArg tRet) →
       (op, x, k, handlerBody) ∈ clauses →
       Step ⟨sigma,
             Term.handle epsH (Term.perform op v) clauses⟩
@@ -350,6 +351,7 @@ inductive Step : Config → Config → Prop
       (clauses : List (EffectLabel × String × String × Term))
       (xVar kVar : String) (hb : Term) (tRet : Typ) :
       IsValue v →
+      (∃ tArg, OpSigMatch op tArg tRet) →
       (op, xVar, kVar, hb) ∈ clauses →
       op ∈ epsH →
       EvalCtx.noHandleFor op E →
@@ -391,6 +393,7 @@ inductive Step : Config → Config → Prop
       (clauses : List (EffectLabel × String × String × Term))
       (xVar kVar : String) (hb : Term) (tRet : Typ) :
       IsValue v →
+      (∃ tArg, OpSigMatch op tArg tRet) →
       (op, xVar, kVar, hb) ∈ clauses →
       op ∈ epsH →
       EvalCtxChain.noHandleFor op Es →
