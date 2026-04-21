@@ -382,268 +382,6 @@ theorem handleRet_value_preserves_typing
   subst hG2
   exact HasType.value_eff_polymorphic hb hv eps
 
-/-- Preservation: if a configuration is well-typed and steps, the
-    resulting configuration has the same type (under a possibly-extended
-    store typing) and preserves store well-formedness.
-
-    Wave 4 coverage: value-projection and handler-return cases closed;
-    store-allocating and substitution-dependent cases left as precise
-    TODO-annotated sorries (see file header). -/
-theorem preservation
-    (sigma sigma' : Store) (Sigma : StoreTyp)
-    (e e' : Term) (t : Typ) (eps : EffectRow)
-    (h_typ : HasType [] Sigma [] e t eps [])
-    (h_scope : WellScoped e)
-    (h_wf : StoreWf sigma Sigma)
-    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
-    ∃ Sigma',
-      HasType [] Sigma' [] e' t eps [] ∧ StoreWf sigma' Sigma' := by
-  -- Wave 3: restricted to the closed-program form (Γ = []). This
-  -- aligns with the standard Preservation theorem and enables the
-  -- value-case closures via `has_type_closed_output_of_closed_input`.
-  cases h_step with
-  | beta s x tv body v hv =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_beta_via_db h_typ hv h_scope
-  | letBind s x v body hv =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_letBind_via_db h_typ hv h_scope
-  | letpair s x y v1 v2 body hv1 hv2 =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_letpair_via_db h_typ hv1 hv2 h_scope
-  | fst s v1 v2 hv1 hv2 =>
-      -- E-Fst: fst (pair v1 v2) ↦ v1. With Γ = [], h1 is at [] → Γmid,
-      -- and has_type_closed_output_of_closed_input gives Γmid = [].
-      -- Then subEff widens h1 from eps1 to outer eps via the SubEffRow
-      -- witness from pair_inv.
-      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
-      obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
-      have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
-      subst hmid
-      refine ⟨Sigma, ?_, h_wf⟩
-      -- h1 : HasType [] Sigma [] v1 t eps1 [].
-      -- hsub : SubEffRow (union eps1 eps2) eps.
-      -- SubEffRow eps1 (union eps1 eps2) via SubEffRow.union_left,
-      -- then SubEffRow.trans with hsub.
-      have hsub1 : SubEffRow eps1 eps :=
-        SubEffRow.trans (SubEffRow.union_left eps1 eps2) hsub
-      exact HasType.subEff [] Sigma [] [] _ t eps1 eps h1 hsub1
-  | snd s v1 v2 hv1 hv2 =>
-      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h_typ
-      obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
-      have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
-      subst hmid
-      refine ⟨Sigma, ?_, h_wf⟩
-      -- h2 : HasType [] Sigma [] v2 t1 eps2 []. Widen eps2 to eps.
-      -- SubEffRow eps2 (union eps1 eps2) needs a union_right lemma;
-      -- easier: SubEffRow eps1 (union eps1 eps2) via union_left, and
-      -- by symmetry of union membership, every op in eps2 is also in
-      -- the union. Let's prove it directly.
-      have hsub2 : SubEffRow eps2 eps := by
-        intro op hop
-        -- op ∈ eps2; need op ∈ eps.
-        -- hsub says: op ∈ union eps1 eps2 → op ∈ eps.
-        apply hsub
-        -- Now: op ∈ union eps1 eps2 = eps1 ++ eps2.filter (!eps1.contains)
-        show op ∈ eps1 ++ eps2.filter (fun o => !eps1.contains o)
-        rw [List.mem_append]
-        by_cases hop1 : op ∈ eps1
-        · left; exact hop1
-        · right
-          rw [List.mem_filter]
-          refine ⟨hop, ?_⟩
-          simp [hop1]
-      exact HasType.subEff [] Sigma [] [] _ t eps2 eps h2 hsub2
-  | tconst s v ds ell hell =>
-      -- E-Const: const(v, ds) ↦ loc ell in extended store.
-      obtain ⟨ht, _hG⟩ := HasType.const_inv h_typ
-      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_, ?_⟩
-      · subst ht
-        have hlook := storeTypLookup_extend_self Sigma ell (Typ.tensor ds)
-        -- HasType.loc at [] for the extended Sigma, then widen to eps
-        -- via subEff since SubEffRow [] eps is trivially true.
-        have h_loc : HasType [] (storeTypExtend Sigma ell (Typ.tensor ds))
-                              [] (Term.loc ell) (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ _ ell (Typ.tensor ds) hlook
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_loc hsub
-      · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
-  | copy s ell ellNew w hlook hfresh =>
-      -- E-Copy: copy(loc ell) ↦ pair (loc ell) (loc ellNew).
-      -- Wave 3 update: T-Copy now requires tensor type, so copy_inv
-      -- gives a DimList ds with the inner at tensor[ds].
-      obtain ⟨ds, htEq, h_e⟩ := HasType.copy_inv h_typ
-      obtain ⟨hlookT, _hGE⟩ := HasType.loc_inv h_e
-      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor ds), ?_, ?_⟩
-      · subst htEq
-        have hlookSelf := storeTypLookup_extend_self Sigma ellNew (Typ.tensor ds)
-        have hlookEll :
-            storeTypLookup (storeTypExtend Sigma ellNew (Typ.tensor ds)) ell
-              = some (Typ.tensor ds) := by
-          by_cases hne : ell = ellNew
-          · rw [hne]; exact hlookSelf
-          · have hne' : ¬ (ellNew = ell) := fun he => hne he.symm
-            simp only [storeTypLookup, storeTypExtend, List.find?,
-                       hne', decide_false, Bool.false_eq_true, ite_false]
-            simpa [storeTypLookup] using hlookT
-        have h_l1 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
-                      (Term.loc ell) (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ _ ell (Typ.tensor ds) hlookEll
-        have h_l2 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
-                      (Term.loc ellNew) (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ _ ellNew (Typ.tensor ds) hlookSelf
-        have h_pair : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
-                        (Term.pair (Term.loc ell) (Term.loc ellNew))
-                        (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) [] [] :=
-          HasType.tpair [] _ [] [] []
-            _ _ (Typ.tensor ds) (Typ.tensor ds) [] [] h_l1 h_l2
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
-      · exact StoreWf.extend_fresh ellNew w (Typ.tensor ds) h_wf
-  | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
-      obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
-      obtain ⟨hLook2, hG2⟩ := HasType.loc_inv h_e2
-      refine ⟨storeTypExtend
-                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-                ellOut (Typ.tensor ds), ?_, ?_⟩
-      · subst htEq
-        -- Γ is already [] literal; hG1, hG2 are trivial.
-        have hlookNew := storeTypLookup_extend_self
-          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-          ellOut (Typ.tensor ds)
-        have h_locOut : HasType [] _ [] (Term.loc ellOut)
-                          (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_wf1 := StoreWf.remove ell1 h_wf
-        have h_wf2 := StoreWf.remove ell2 h_wf1
-        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
-          (Typ.tensor ds) h_wf2
-  | tmul s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.mul_inv h_typ
-      obtain ⟨hLook1, _hG1⟩ := HasType.loc_inv h_e1
-      obtain ⟨hLook2, _hG2⟩ := HasType.loc_inv h_e2
-      refine ⟨storeTypExtend
-                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-                ellOut (Typ.tensor ds), ?_, ?_⟩
-      · subst htEq
-        have hlookNew := storeTypLookup_extend_self
-          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-          ellOut (Typ.tensor ds)
-        have h_locOut : HasType [] _ [] (Term.loc ellOut)
-                          (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_wf1 := StoreWf.remove ell1 h_wf
-        have h_wf2 := StoreWf.remove ell2 h_wf1
-        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
-          (Typ.tensor ds) h_wf2
-  | tsum s ell ellOut w d hlook hfresh =>
-      -- sum_inv gives ds with t = tensor (rem ds d); loc_inv gives
-      -- storeTypLookup Sigma ell = some (tensor ds) + Gamma = [].
-      obtain ⟨ds, htEq, _hmem, h_loc_e⟩ := HasType.sum_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
-      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (rem ds d)), ?_, ?_⟩
-      · subst htEq
-        have hlookNew : storeTypLookup (storeTypExtend
-                          (storeTypRemove Sigma ell) ellOut
-                          (Typ.tensor (rem ds d))) ellOut
-                      = some (Typ.tensor (rem ds d)) :=
-          storeTypLookup_extend_self _ _ _
-        have h_locOut : HasType [] _ [] (Term.loc ellOut)
-                          (Typ.tensor (rem ds d)) [] [] :=
-          HasType.loc _ _ _ ellOut (Typ.tensor (rem ds d)) hlookNew
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
-        have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
-        exact StoreWf.remove_extend ell ellOut
-          { shape := rem w.shape d, data := w.data }
-          (Typ.tensor (rem ds d)) h_wf hfresh hne
-  | texpand s ell ellOut w d hlook hfresh =>
-      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.expand_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
-      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (ins ds d)), ?_, ?_⟩
-      · subst htEq
-        have hlookNew := storeTypLookup_extend_self
-          (storeTypRemove Sigma ell) ellOut (Typ.tensor (ins ds d))
-        have h_locOut : HasType [] _ [] (Term.loc ellOut)
-                          (Typ.tensor (ins ds d)) [] [] :=
-          HasType.loc _ _ _ ellOut (Typ.tensor (ins ds d)) hlookNew
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
-        have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
-        exact StoreWf.remove_extend ell ellOut
-          { shape := ins w.shape d, data := w.data }
-          (Typ.tensor (ins ds d)) h_wf hfresh hne
-  | tuniformLike s ell ellOut w lo hi hlook hfresh =>
-      obtain ⟨ds, eps0, htEq, h_loc_e, _hsub⟩ := HasType.uniformLike_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
-      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor ds), ?_, ?_⟩
-      · subst htEq
-        have hlookNew := storeTypLookup_extend_self
-          (storeTypRemove Sigma ell) ellOut (Typ.tensor ds)
-        have h_locOut : HasType [] _ [] (Term.loc ellOut)
-                          (Typ.tensor ds) [] [] :=
-          HasType.loc _ _ _ ellOut (Typ.tensor ds) hlookNew
-        have hsub : SubEffRow [] eps := fun _ h => by cases h
-        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
-        have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
-        exact StoreWf.remove_extend ell ellOut
-          { shape := w.shape, data := lo }
-          (Typ.tensor ds) h_wf hfresh hne
-  | handleRet s epsH v clauses hv =>
-      -- E-Handle-Ret: handle[εH] v clauses ↦ v when v is a value.
-      -- handle_inv gives us a sub-derivation for v at some interior
-      -- effect row epsB and intermediate context Γ2. We use subEff
-      -- to widen epsB to the outer eps, and (since the theorem's
-      -- output context is []) we rely on h_body directly when it
-      -- already lands at the right context shape. Full value-context-
-      -- preservation is still a Wave 2 task for the Γ2 = [] step.
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact handleRet_value_preserves_typing hv h_typ
-  | handleOpDirect s op v epsH clauses x k hb tRet hv hsig hmem =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope
-  | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
-      -- TODO Wave 2: paper-accurate captured-context handle-op case.
-      -- Needs `subst_preserves_typing` plus a `plug`-typing inversion
-      -- lemma for the captured evaluation context `E`. Grouped with
-      -- the existing preservation omnibus sorry (header line 392).
-      sorry
-  | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
-      -- TODO Wave 2: multi-frame captured-context handle-op case
-      -- (Wave 1 P2). Needs `subst_preserves_typing` plus a
-      -- `multiPlug`-typing inversion lemma for the chain `Es`,
-      -- which iterates the single-frame `plug` typing inversion.
-      -- Grouped under the existing preservation omnibus sorry.
-      sorry
-  | tgrad s x tv tOut body =>
-      -- TODO Wave 2: needs adjoint_preserves_typing (AdjointTyping.lean)
-      sorry
-  | tvmap s x tv body d =>
-      -- TODO Wave 2: needs addDim_preserves_typing tvmap case
-      sorry
-  | ctx _ _ E e0 e0' h_inner =>
-      -- E-Ctx: plug_preserves_typing + recursive preservation on h_inner.
-      -- The recursive call needs preservation generalized to open contexts
-      -- (the inner term lives under a non-empty context from the eval ctx).
-      -- Currently blocked: preservation is restricted to Γ = [].
-      -- The axiom plug_preserves_typing_fwd + a generalized preservation
-      -- closes this case structurally; the generalization is Wave 5u work.
-      sorry
-
 /-! ## Track C3: plug_preserves_typing
 
 Congruence-on-typing lemma for evaluation contexts: if `plug E e` is
@@ -734,7 +472,10 @@ theorem hasType_store_weaken
   | subEff Δ_ _ Γ_ Γ'' e0 tv eps0 eps1 _h hSub ih =>
       exact HasType.subEff Δ_ Sigma' Γ_ Γ'' e0 tv eps0 eps1 (ih hsub) hSub
   | nil => exact ClausesTyped.nil _ Sigma' _ _ _
-  | cons => sorry
+  | cons Δ_ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest slotX slotK
+      hmatch _h_body _h_rest ih_body ih_rest hs =>
+      exact ClausesTyped.cons Δ_ Sigma' Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest
+        slotX slotK hmatch (ih_body hs) (ih_rest hs)
 -- Wave 5r: original proof preserved below for reference.
 /-
   -- Term-mode recursor application with both motives pinned.
@@ -1574,6 +1315,241 @@ theorem multiPlug_preserves_typing_closed
       refine plug_preserves_typing_closed h' ?_
       intro t0 eps0 h_inner'
       exact ih h_inner' h_inner
+
+theorem wellScoped_plug_inner
+    {E : EvalCtx} {e : Term}
+    (h : WellScoped (plug E e)) :
+    WellScoped e := by
+  cases E
+  · simpa [plug] using h
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.1
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.2.1
+  · exact (wellScoped_letBind_body h).1
+  · simpa [plug] using h
+  · exact (wellScoped_letpair_body h).1
+  · exact wellScoped_pair_left h
+  · exact wellScoped_pair_right h
+  · simpa [plug] using h
+  · simpa [plug] using h
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.1
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.2.1
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.1
+  · simp [plug, WellScoped, boundVars, List.nodup_append] at h
+    exact h.2.1
+  · simpa [plug] using h
+  · simpa [plug] using h
+  · simpa [plug] using h
+  · exact wellScoped_handle_body h
+  · simpa [plug] using h
+
+/-- Preservation: if a configuration is well-typed and steps, the
+    resulting configuration has the same type (under a possibly-extended
+    store typing) and preserves store well-formedness.
+
+    Current in-scope open cases are the agreed captured-context and
+    calculus-level blockers only. -/
+theorem preservation
+    (sigma sigma' : Store) (Sigma : StoreTyp)
+    (e e' : Term) (t : Typ) (eps : EffectRow)
+    (h_typ : HasType [] Sigma [] e t eps [])
+    (h_scope : WellScoped e)
+    (h_wf : StoreWf sigma Sigma)
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    ∃ Sigma',
+      HasType [] Sigma' [] e' t eps [] ∧ StoreWf sigma' Sigma' := by
+  cases h_step with
+  | beta s x tv body v hv =>
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_beta_via_db h_typ hv h_scope
+  | letBind s x v body hv =>
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_letBind_via_db h_typ hv h_scope
+  | letpair s x y v1 v2 body hv1 hv2 =>
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_letpair_via_db h_typ hv1 hv2 h_scope
+  | fst s v1 v2 hv1 hv2 =>
+      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
+      obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
+      have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
+      subst hmid
+      refine ⟨Sigma, ?_, h_wf⟩
+      have hsub1 : SubEffRow eps1 eps :=
+        SubEffRow.trans (SubEffRow.union_left eps1 eps2) hsub
+      exact HasType.subEff [] Sigma [] [] _ t eps1 eps h1 hsub1
+  | snd s v1 v2 hv1 hv2 =>
+      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h_typ
+      obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
+      have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
+      subst hmid
+      refine ⟨Sigma, ?_, h_wf⟩
+      have hsub2 : SubEffRow eps2 eps := by
+        intro op hop
+        apply hsub
+        by_cases hop1 : op ∈ eps1
+        · simp [EffectRow.union, hop1]
+        · simp [EffectRow.union, hop, hop1]
+      exact HasType.subEff [] Sigma [] [] _ t eps2 eps h2 hsub2
+  | tconst s v ds ell hell =>
+      obtain ⟨ht, _hG⟩ := HasType.const_inv h_typ
+      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_, ?_⟩
+      · subst ht
+        have hlook := storeTypLookup_extend_self Sigma ell (Typ.tensor ds)
+        have h_loc : HasType [] (storeTypExtend Sigma ell (Typ.tensor ds))
+                              [] (Term.loc ell) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ell (Typ.tensor ds) hlook
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_loc hsub
+      · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
+  | copy s ell ellNew w hlook hfresh =>
+      obtain ⟨ds, htEq, h_e⟩ := HasType.copy_inv h_typ
+      obtain ⟨hlookT, _hGE⟩ := HasType.loc_inv h_e
+      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        have hlookSelf := storeTypLookup_extend_self Sigma ellNew (Typ.tensor ds)
+        have hlookEll :
+            storeTypLookup (storeTypExtend Sigma ellNew (Typ.tensor ds)) ell
+              = some (Typ.tensor ds) := by
+          by_cases hne : ell = ellNew
+          · rw [hne]; exact hlookSelf
+          · have hne' : ¬ (ellNew = ell) := fun he => hne he.symm
+            simp only [storeTypLookup, storeTypExtend, List.find?,
+                       hne', decide_false, Bool.false_eq_true, ite_false]
+            simpa [storeTypLookup] using hlookT
+        have h_l1 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
+                      (Term.loc ell) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ell (Typ.tensor ds) hlookEll
+        have h_l2 : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
+                      (Term.loc ellNew) (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ellNew (Typ.tensor ds) hlookSelf
+        have h_pair : HasType [] (storeTypExtend Sigma ellNew (Typ.tensor ds)) []
+                        (Term.pair (Term.loc ell) (Term.loc ellNew))
+                        (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) [] [] :=
+          HasType.tpair [] _ [] [] []
+            _ _ (Typ.tensor ds) (Typ.tensor ds) [] [] h_l1 h_l2
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
+      · exact StoreWf.extend_fresh ellNew w (Typ.tensor ds) h_wf
+  | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
+      obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
+      obtain ⟨hLook2, hG2⟩ := HasType.loc_inv h_e2
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_wf1 := StoreWf.remove ell1 h_wf
+        have h_wf2 := StoreWf.remove ell2 h_wf1
+        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor ds) h_wf2
+  | tmul s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.mul_inv h_typ
+      obtain ⟨hLook1, _hG1⟩ := HasType.loc_inv h_e1
+      obtain ⟨hLook2, _hG2⟩ := HasType.loc_inv h_e2
+      refine ⟨storeTypExtend
+                (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+                ellOut (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ [] ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_wf1 := StoreWf.remove ell1 h_wf
+        have h_wf2 := StoreWf.remove ell2 h_wf1
+        exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
+          (Typ.tensor ds) h_wf2
+  | tsum s ell ellOut w d hlook hfresh =>
+      obtain ⟨ds, htEq, _hmem, h_loc_e⟩ := HasType.sum_inv h_typ
+      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor (rem ds d)), ?_, ?_⟩
+      · subst htEq
+        have hlookNew : storeTypLookup (storeTypExtend
+                          (storeTypRemove Sigma ell) ellOut
+                          (Typ.tensor (rem ds d))) ellOut
+                      = some (Typ.tensor (rem ds d)) :=
+          storeTypLookup_extend_self _ _ _
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor (rem ds d)) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor (rem ds d)) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := rem w.shape d, data := w.data }
+          (Typ.tensor (rem ds d)) h_wf hfresh hne
+  | texpand s ell ellOut w d hlook hfresh =>
+      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.expand_inv h_typ
+      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor (ins ds d)), ?_, ?_⟩
+      · subst htEq
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove Sigma ell) ellOut (Typ.tensor (ins ds d))
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor (ins ds d)) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor (ins ds d)) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := ins w.shape d, data := w.data }
+          (Typ.tensor (ins ds d)) h_wf hfresh hne
+  | tuniformLike s ell ellOut w lo hi hlook hfresh =>
+      obtain ⟨ds, eps0, htEq, h_loc_e, _hsub⟩ := HasType.uniformLike_inv h_typ
+      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
+      refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
+                (Typ.tensor ds), ?_, ?_⟩
+      · subst htEq
+        have hlookNew := storeTypLookup_extend_self
+          (storeTypRemove Sigma ell) ellOut (Typ.tensor ds)
+        have h_locOut : HasType [] _ [] (Term.loc ellOut)
+                          (Typ.tensor ds) [] [] :=
+          HasType.loc _ _ _ ellOut (Typ.tensor ds) hlookNew
+        have hsub : SubEffRow [] eps := fun _ h => by cases h
+        exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
+      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+        have hne : ell ≠ ellOut := by
+          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+        exact StoreWf.remove_extend ell ellOut
+          { shape := w.shape, data := lo }
+          (Typ.tensor ds) h_wf hfresh hne
+  | handleRet s epsH v clauses hv =>
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact handleRet_value_preserves_typing hv h_typ
+  | handleOpDirect s op v epsH clauses x k hb tRet hv hsig hmem =>
+      refine ⟨Sigma, ?_, h_wf⟩
+      exact preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope
+  | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
+      sorry
+  | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
+      sorry
+  | tgrad s x tv tOut body =>
+      sorry
+  | tvmap s x tv body d =>
+      sorry
+  | ctx _ _ E e0 e0' h_inner =>
+      sorry
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
