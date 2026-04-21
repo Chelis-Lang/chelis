@@ -1050,6 +1050,27 @@ theorem plug_preserves_typing
           hb' hHsubB hClIn hClCov hcls')
         hsub_eps
 
+/-- Multi-frame variant of `plug_preserves_typing`. -/
+theorem multiPlug_preserves_typing
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {Es : EvalCtxChain} {e e' : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma (multiPlug Es e) t eps Gamma')
+    (h_inner : ∀ {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow},
+       HasType Delta Sigma Gamma0 e t0 eps0 Gamma0' →
+       ∃ Sigma2, HasType Delta Sigma2 Gamma0 e' t0 eps0 Gamma0' ∧
+                 StoreTypSub Sigma Sigma2) :
+    ∃ Sigma2, HasType Delta Sigma2 Gamma (multiPlug Es e') t eps Gamma' ∧
+              StoreTypSub Sigma Sigma2 := by
+  induction Es generalizing Sigma Gamma Gamma' t eps with
+  | nil =>
+      simpa [multiPlug] using h_inner h
+  | cons E Es ih =>
+      have h' : HasType Delta Sigma Gamma (plug E (multiPlug Es e)) t eps Gamma' := by
+        simpa [multiPlug] using h
+      refine plug_preserves_typing h' ?_
+      intro Gamma0 Gamma0' t0 eps0 h_inner'
+      exact ih h_inner' h_inner
+
 /-- Closed-program specialization of `plug_preserves_typing`.
     This is the form needed by top-level preservation: when the whole
     program is closed, every intermediate context exposed by the
