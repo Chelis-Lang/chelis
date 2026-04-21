@@ -74,8 +74,10 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
-    // First pass: collect deftype and defsig declarations
-    for expr in exprs {
+    // First pass: collect deftype and defsig declarations. Descend through
+    // `(module {} name ...)` wrappers so declarations in every idiomatic
+    // Surf source (every .ch starts with `module X`) get collected.
+    for expr in top_level_decl_items(exprs) {
         collect_declarations(
             expr,
             &mut env,
@@ -86,8 +88,10 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
         );
     }
 
-    // Second pass: infer def bodies
-    for expr in exprs {
+    // Second pass: infer def bodies. Same module-descent rationale as the
+    // declaration pass — without it, the entire HM checker is a no-op on
+    // module-wrapped programs.
+    for expr in top_level_decl_items(exprs) {
         infer_top_level(
             expr,
             &mut env,
@@ -161,7 +165,10 @@ fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEn
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
 
-    for expr in exprs {
+    // Descend through `(module {} name ...)` wrappers: every idiomatic
+    // Surf source wraps its declarations in `module X`, and without
+    // flattening none of the walkers below see any def/defsig/deftype.
+    for expr in top_level_decl_items(exprs) {
         collect_declarations(
             expr,
             &mut env,
@@ -178,7 +185,7 @@ fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEn
         env.bind(name.clone(), scheme);
     }
 
-    for expr in exprs {
+    for expr in top_level_decl_items(exprs) {
         infer_top_level(
             expr,
             &mut env,
@@ -213,7 +220,7 @@ type Phase0eTypeEnv = HashMap<String, deep::Expr>;
 
 fn build_phase0e_type_env(exprs: &[deep::Expr]) -> Phase0eTypeEnv {
     let mut env = HashMap::new();
-    for expr in exprs {
+    for expr in top_level_decl_items(exprs) {
         collect_phase0e_types(expr, &mut env);
     }
     env
@@ -244,7 +251,7 @@ fn validate_phase0e_program(
 ) {
     detect_top_level_binding_cycles(exprs, errors);
     let mut static_env = HashMap::new();
-    for expr in exprs {
+    for expr in top_level_decl_items(exprs) {
         validate_phase0e_expr(expr, type_env, &mut static_env, errors);
     }
 }
