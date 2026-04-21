@@ -10,13 +10,34 @@ chelis_bin="$1"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  echo "+ $*"
+  python3 - "$seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+cmd = sys.argv[2:]
+
+try:
+    subprocess.run(cmd, check=True, timeout=timeout)
+except subprocess.TimeoutExpired:
+    print(f"command timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+    sys.exit(124)
+PY
+}
+
 cat > "$tmpdir/matmul.ch" <<'EOF'
 a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
 EOF
 
-"$chelis_bin" build "$tmpdir/matmul.ch" --output "$tmpdir/out"
+echo "Generating C with chelis"
+run_with_timeout 30 "$chelis_bin" build "$tmpdir/matmul.ch" --output "$tmpdir/out"
+echo "Checking generated BLAS surface"
 grep -q 'cblas_sgemm' "$tmpdir/out/matmul.c"
 grep -q 'chelis_blas.h' "$tmpdir/out/matmul.c"
 
@@ -74,9 +95,13 @@ int main(void) {
 }
 EOF
 
-clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/matmul.c" -o "$tmpdir/out/matmul.o"
-clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/driver.c" -o "$tmpdir/out/driver.o"
-clang "$tmpdir/out/matmul.o" "$tmpdir/out/driver.o" \
+echo "Compiling generated C"
+run_with_timeout 30 clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/matmul.c" -o "$tmpdir/out/matmul.o"
+run_with_timeout 30 clang -O2 -I "$tmpdir/out" -c "$tmpdir/out/driver.c" -o "$tmpdir/out/driver.o"
+echo "Linking against Accelerate"
+run_with_timeout 30 clang "$tmpdir/out/matmul.o" "$tmpdir/out/driver.o" \
   "$tmpdir/out/libchelis_runtime.a" -framework Accelerate \
   -o "$tmpdir/out/matmul_bin"
-"$tmpdir/out/matmul_bin"
+echo "Running matmul smoke binary"
+run_with_timeout 30 "$tmpdir/out/matmul_bin"
+echo "macOS Accelerate smoke test passed"
