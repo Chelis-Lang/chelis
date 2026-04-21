@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List};
-use chelis_types::{CheckedProgram, LinearityInfo, types::Prim};
+use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use crate::grad::grad_dag;
@@ -1687,6 +1687,21 @@ impl LowerCtx {
         if let Some(Expr::Atom(Atom::Symbol(name), _)) = elems.get(2) {
             if let Some(id) = self.bindings.get(name) {
                 return id.clone();
+            }
+            // Reject `(var X)` where X is a known builtin name. The DAG
+            // emits a Load when it encounters a free var, but a builtin
+            // like `fold`, `map`, or `einsum` is a language-level operator,
+            // not a host value — emitting `fold` as a Load and then as a
+            // C identifier is meaningless. This happens most commonly
+            // during `grad(fn_using_fold)` lowering, where the fn body is
+            // inlined into a DAG context that can't represent the HOF.
+            if BUILTIN_NAMES.contains(&name.as_str()) {
+                panic!(
+                    "builtin `{name}` is not representable in the DAG as a \
+                     value — if this is the body of a fn passed to `grad`, \
+                     the grad pass needs to specialize around the builtin \
+                     rather than inlining it"
+                );
             }
             let ty = if explicit_ty == Self::default_type() {
                 self.program_types.get(name).cloned().unwrap_or(explicit_ty)

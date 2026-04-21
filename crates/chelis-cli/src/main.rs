@@ -778,8 +778,11 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
             other => {
                 return Err(format!(
-                    "`chelis build --target hip` only supports f32/bool tensors; \
-                     node {} has precision {}",
+                    "`chelis build --target hip` DAG path only supports f32/bool tensors; \
+                     node {} carries precision `{}`. \
+                     The HIP backend is single-entry and doesn't route through a \
+                     host-lane wrapper — rewrite the program to use f32 tensors or \
+                     build it with `--target c` instead.",
                     node.id.0,
                     other.name()
                 )
@@ -795,6 +798,11 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
 /// clean user-facing error BEFORE the backend panics, closing a
 /// check-pass/build-panic gap for programs like `def f() -> f64 = cast(1.0, f64)`
 /// that reach DAG lowering with a non-F32/Bool node.
+///
+/// Prefer reporting the node that first mismatches the user's declared
+/// output type (usually a scalar literal whose declared type is int64/f64
+/// vs an internal int32/f32 node) so the error line matches the source
+/// intent rather than the internal lowering.
 fn reject_unsupported_c_precisions(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -803,9 +811,11 @@ fn reject_unsupported_c_precisions(
             chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
             other => {
                 return Err(format!(
-                    "`chelis build --target c` only supports f32/bool tensors on the \
-                     DAG path; node {} has precision {}. Route through a host-lane \
-                     wrapper or cast to f32.",
+                    "`chelis build --target c` DAG path only supports f32/bool tensors; \
+                     node {} carries precision `{}`. \
+                     Non-f32/bool tensors must flow through the host-lane wrapper \
+                     (use `to_tensor([...])`/`pad_sequences` or declare a helper fn \
+                     that the host lane can emit as a real C symbol).",
                     node.id.0,
                     other.name()
                 )

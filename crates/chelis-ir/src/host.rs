@@ -529,6 +529,7 @@ fn lower_host_program(
 /// it doesn't recognize the callee. A wrapper containing this node would
 /// emit broken C (`__result = call(...);`) downstream — preferring the
 /// DAG path's inline specialization is safer than emitting that wrapper.
+#[allow(dead_code)]
 fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
     match expr {
         HostExpr::Builtin { name, args, .. } => {
@@ -579,7 +580,9 @@ fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
             ..
         } => {
             host_body_has_fallback_call(scrutinee)
-                || arms.iter().any(|arm| host_body_has_fallback_call(&arm.expr))
+                || arms
+                    .iter()
+                    .any(|arm| host_body_has_fallback_call(&arm.expr))
                 || default_expr
                     .as_ref()
                     .is_some_and(|d| host_body_has_fallback_call(d))
@@ -764,6 +767,18 @@ fn try_lower_tensor_helper_call(
         lower_tensor_helper_dag(expr, program, scope, &expected)
     }))
     .ok()?;
+    // Reject DAGs whose inputs reference known builtin names: a `Load("fold")`
+    // (or `einsum`, `map`, etc.) means the lowerer fell back to treating a
+    // host-lane builtin as a free variable. Emitting this DAG would generate
+    // C with a `__tensor_scalar0_0 = fold;` line — `fold` is not a C symbol.
+    // Fall back to `lower_host_expr` which handles HOFs directly.
+    for node in dag.nodes() {
+        if let crate::dag::RiscOp::Load { name } = &node.op
+            && BUILTIN_NAMES.contains(&name.as_str())
+        {
+            return None;
+        }
+    }
     Some(finish_tensor_helper_call(
         dag,
         scope,

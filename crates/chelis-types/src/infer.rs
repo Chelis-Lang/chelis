@@ -122,6 +122,7 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
     let mut result = infer_phase0e_program_with_env(exprs, &type_env);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     if result.errors.is_empty() {
         let annotated_exprs = annotate_phase0e_program(exprs);
         let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
@@ -153,7 +154,40 @@ pub fn infer_phase0e_program(exprs: &[deep::Expr]) -> InferResult {
     let mut result = infer_phase0e_program_with_env(exprs, &type_env);
     validate_phase0e_program(exprs, &type_env, &mut result.errors);
     validate_tensor_precisions_in_program(exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members(exprs, &mut result.errors);
     result
+}
+
+/// When a binding cycle is detected, the inference pass that processed
+/// the cycle in textual order often reports `UnboundVariable` for the
+/// later cycle members (the lookup landed before the subsequent def was
+/// elaborated). Those errors are spurious noise — the names ARE defined,
+/// they're just circularly. Drop any `UnboundVariable` whose name matches
+/// a top-level def.
+fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    let mut def_names: HashSet<String> = HashSet::new();
+    for expr in top_level_decl_items(exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            def_names.insert(name.to_string());
+        }
+    }
+    errors.retain(|err| {
+        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
+            return true;
+        }
+        let name_start = match err.message.find("unbound variable: ") {
+            Some(start) => start + "unbound variable: ".len(),
+            None => return true,
+        };
+        let name = err.message[name_start..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        !def_names.contains(name)
+    });
 }
 
 fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEnv) -> InferResult {
@@ -269,6 +303,12 @@ fn validate_phase0e_program(
 /// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
 /// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
 fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+    // Collect each def's "terminal callees" — the top-level fn names
+    // reached at every tail position of the body. `Some(set)` means
+    // every tail is a call; the set is who's called. `None` means the
+    // body has at least one non-call tail (a base case exists).
+    let mut terminal_callees: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+    let mut def_order: Vec<String> = Vec::new();
     for expr in top_level_decl_items(exprs) {
         let deep::Expr::List(list, _) = expr else {
             continue;
@@ -281,17 +321,93 @@ fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<Che
             continue;
         };
         let Some(body) = kids.get(1) else { continue };
-        if fn_body_is_direct_self_call(body, name) {
+        // Check params for a name that shadows the def — a body that
+        // terminal-calls a shadowed name is NOT self-recursion.
+        let mut shadows: HashSet<String> = HashSet::new();
+        if let deep::Expr::List(fn_list, _) = body
+            && get_tag(fn_list) == Some("fn")
+            && let Some(deep::Expr::List(params, _)) = children(fn_list).first()
+            && get_tag(params) == Some("params")
+        {
+            for param in children(params) {
+                if let Some(pname) = param_name_for_refs(param) {
+                    shadows.insert(pname);
+                }
+            }
+        }
+        let fn_body = match body {
+            deep::Expr::List(list, _) if get_tag(list) == Some("fn") => children(list).get(1),
+            _ => None,
+        };
+        let entry = if let Some(fn_body) = fn_body {
+            let mut callees: HashSet<String> = HashSet::new();
+            if collect_terminal_callees(fn_body, &shadows, &mut callees) {
+                Some(callees)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        def_order.push(name.to_string());
+        terminal_callees.insert(name.to_string(), entry);
+    }
+
+    // Greatest-fixed-point: start with ALL defs whose every tail is a
+    // call (no base case) and iteratively remove any def that calls out
+    // to a base-case def (outside the candidate set). What survives is
+    // a closed recursion group with no base case anywhere.
+    let mut non_terminating: HashSet<String> = terminal_callees
+        .iter()
+        .filter_map(|(name, callees)| {
+            callees.as_ref().and_then(|set| {
+                if set.is_empty() {
+                    None
+                } else {
+                    Some(name.clone())
+                }
+            })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        let snapshot: Vec<String> = non_terminating.iter().cloned().collect();
+        for name in &snapshot {
+            let Some(Some(callees)) = terminal_callees.get(name) else {
+                non_terminating.remove(name);
+                changed = true;
+                continue;
+            };
+            // Every callee must either be `name` itself OR remain in the
+            // non_terminating candidate set. If any callee has a known
+            // base case (isn't in non_terminating), this def has an
+            // escape route and isn't trivially non-terminating.
+            let ok = callees
+                .iter()
+                .all(|c| c == name || non_terminating.contains(c));
+            if !ok {
+                non_terminating.remove(name);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for name in &def_order {
+        if non_terminating.contains(name) {
             errors.push(CheckError::new(
                 CheckErrorKind::CycleDetected,
                 format!(
-                    "def `{name}` is a trivial self-call `{name}(...)` with no base case \
-                     and would not terminate at runtime; add an `if`/`match` guard that \
-                     can exit without recursing, or remove the def"
+                    "def `{name}` is trivially non-terminating — every tail position \
+                     calls back into the same recursion group `{name}` with no base case; \
+                     add an `if`/`match` exit that returns without recursing"
                 ),
                 vec![
-                    "Trivial self-recursion isn't representable in the Phase 0 DAG \
-                     lowering and would silently compile to an identity function."
+                    "Trivial (self- or mutual-) recursion without a base case isn't \
+                     representable in the Phase 0 DAG lowering and would compile to \
+                     an infinite loop or silent identity."
                         .to_string(),
                 ],
             ));
@@ -299,6 +415,78 @@ fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<Che
     }
 }
 
+/// Walk `expr` and, for every terminal (tail) position, record the name
+/// called (if the tail is `(app (var Y) ...)`). Returns `true` if EVERY
+/// terminal is a call (no base-case leaf); `false` if any terminal is a
+/// non-call (literal, var-read, tuple, etc.) — a base case exists.
+fn collect_terminal_callees(
+    expr: &deep::Expr,
+    shadowed: &HashSet<String>,
+    out: &mut HashSet<String>,
+) -> bool {
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => collect_terminal_callees(&meta.expr, shadowed, out),
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("app") => {
+                let kids = children(list);
+                let Some(callee) = kids.first() else {
+                    return false;
+                };
+                let deep::Expr::List(callee_list, _) = callee else {
+                    return false;
+                };
+                if get_tag(callee_list) != Some("var") {
+                    return false;
+                }
+                let Some(cname) = children(callee_list).first().and_then(symbol_name) else {
+                    return false;
+                };
+                if shadowed.contains(cname) {
+                    return false;
+                }
+                out.insert(cname.to_string());
+                true
+            }
+            Some("let") => {
+                let kids = children(list);
+                kids.get(1)
+                    .map(|body| collect_terminal_callees(body, shadowed, out))
+                    .unwrap_or(false)
+            }
+            Some("if") => {
+                let kids = children(list);
+                if kids.len() < 3 {
+                    return false;
+                }
+                let then_ok = collect_terminal_callees(&kids[1], shadowed, out);
+                let else_ok = collect_terminal_callees(&kids[2], shadowed, out);
+                then_ok && else_ok
+            }
+            Some("match") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return false;
+                }
+                kids.iter().skip(1).all(|arm| {
+                    if let deep::Expr::List(arm_list, _) = arm
+                        && get_tag(arm_list) == Some("arm")
+                    {
+                        children(arm_list)
+                            .get(2)
+                            .map(|body| collect_terminal_callees(body, shadowed, out))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                })
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[allow(dead_code)]
 fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
     let fn_list = match def_body {
         deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
@@ -320,28 +508,67 @@ fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
     let Some(body) = children(fn_list).get(1) else {
         return false;
     };
-    let mut current = body;
-    loop {
-        match current {
-            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
-            deep::Expr::List(list, _) => match get_tag(list) {
-                Some("app") => {
-                    let kids = children(list);
-                    let Some(callee) = kids.first() else {
-                        return false;
-                    };
-                    let deep::Expr::List(callee_list, _) = callee else {
-                        return false;
-                    };
-                    if get_tag(callee_list) != Some("var") {
-                        return false;
-                    }
-                    return children(callee_list).first().and_then(symbol_name) == Some(def_name);
+    every_terminal_is_self_call(body, def_name)
+}
+
+/// True when every terminal (tail) position of `expr` is a direct call
+/// to `def_name`. Walks through `let` bodies, both arms of `if`, and
+/// every `match` arm body. Any non-self-call terminal (a literal, a
+/// different fn call, a non-self var) makes this false — that terminal
+/// is a potential base case and the recursion isn't trivial.
+#[allow(dead_code)]
+fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => every_terminal_is_self_call(&meta.expr, def_name),
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some("app") => {
+                let kids = children(list);
+                let Some(callee) = kids.first() else {
+                    return false;
+                };
+                let deep::Expr::List(callee_list, _) = callee else {
+                    return false;
+                };
+                if get_tag(callee_list) != Some("var") {
+                    return false;
                 }
-                _ => return false,
-            },
-            _ => return false,
-        }
+                children(callee_list).first().and_then(symbol_name) == Some(def_name)
+            }
+            Some("let") => {
+                let kids = children(list);
+                kids.get(1)
+                    .map(|body| every_terminal_is_self_call(body, def_name))
+                    .unwrap_or(false)
+            }
+            Some("if") => {
+                let kids = children(list);
+                if kids.len() < 3 {
+                    return false;
+                }
+                every_terminal_is_self_call(&kids[1], def_name)
+                    && every_terminal_is_self_call(&kids[2], def_name)
+            }
+            Some("match") => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return false;
+                }
+                kids.iter().skip(1).all(|arm| {
+                    if let deep::Expr::List(arm_list, _) = arm
+                        && get_tag(arm_list) == Some("arm")
+                    {
+                        children(arm_list)
+                            .get(2)
+                            .map(|body| every_terminal_is_self_call(body, def_name))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                })
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -683,7 +910,11 @@ fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
         // the FIRST element and the meta map as the second. `children()`
         // skips first two (tag + meta) and returns nothing for a 2-elem
         // list, so read elements[0] directly.
-        deep::Expr::List(list, _) => list.elements.first().and_then(symbol_name).map(str::to_string),
+        deep::Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(symbol_name)
+            .map(str::to_string),
         _ => None,
     }
 }
