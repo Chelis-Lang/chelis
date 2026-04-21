@@ -1504,8 +1504,9 @@ The refreshed skill should teach:
 - numerical methods (`nautilus`), including the nalgebra-backed LinAlg surface
 - financial models (`shoals` overview, not exhaustive)
 - expanded `Std.Nn` surface from `3j-pre` (GELU, SiLU, RMSNorm, Conv1d/2d, attention, GQA)
-- `school` (classical ML) and `darwin` (evolutionary algorithms) shells are named but
-  scoped as stubs; SKILL.md mentions them as post-Phase-3 targets only
+- `school` (classical ML), `darwin` (evolutionary algorithms), and `hull`
+  (executable language specification) shells are named but scoped as stubs; SKILL.md
+  mentions them as post-Phase-3 targets only
 - the boundary between host-side preprocessing and tensor compute inside Chelis itself
 
 ### API Stability Labels
@@ -1568,13 +1569,18 @@ specifications above, not deferred post-phase work. The tier structure is:
 - `coral` (3k) — typed dataframes on top of `chelis-std`
 - `shoals` (3l) — finance on top of `chelis-std` + `nautilus` + `coral`
 
-Two further shells are named and reserved but scoped as stubs beyond Phase 3:
+Three further shells are named and reserved but scoped as stubs beyond Phase 3:
 
 - `school` — classical ML (scikit-learn competitor). Depends on `chelis-std` + `nautilus`
   + `coral`.
 - `darwin` — evolutionary algorithms (GA, genetic programming over the Deep AST, ES,
   PBT, NAS). Depends on `chelis-std` + `nautilus`; optionally uses `coral` for evolving
   feature-engineering pipelines over tabular data.
+- `hull` — executable language specification. Depends on `chelis-std` only. Provides a
+  self-hosted reference type checker, reference evaluator, and spec-driven random
+  program generation over Deep AST ADTs so the compiler can validate the spec and the
+  spec can validate the compiler. Blocked on LaCaDiLE rule finalization, a Deep parser
+  in Chelis, and `chelis fuzz` infrastructure. Phase 4/5 item, not a Phase 3 sub-phase.
 
 ---
 
@@ -1714,8 +1720,9 @@ surface and a reliable release binary. `3j` (nautilus) and `3k` (coral) can over
 mutual dependency). `3l` depends on both. `3f` goes truly last because it must cover the
 complete ecosystem including the domain shells.
 
-`school` (classical ML, sklearn competitor) and `darwin` (evolutionary algorithms) are
-post-Phase-3 shell stubs and do not appear in this table.
+`school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), and
+`hull` (executable language specification) are post-Phase-3 shell stubs and do not
+appear in this table.
 
 ---
 

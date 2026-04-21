@@ -709,6 +709,40 @@ but no Phase 3 sub-phase implements them.
   crossover are typed AST operations, and the compiler's 0–1 fitness score is literally
   the fitness function for evolutionary search. Requires `nautilus`; optionally uses
   `coral` for evolving feature-engineering pipelines over tabular data.
+- **`hull`** — executable language specification. Depends on `chelis-std` only. A
+  self-hosted executable specification shell: the specification of Chelis, written in
+  Chelis, checked by Chelis, used to test Chelis. The marine name: the hull defines the
+  shape of the vessel; the spec defines the shape of the language.
+
+  Hull implements the LaCaDiLE typing rules and operational semantics directly as
+  Chelis functions over an ADT representation of the Deep AST. The grammar becomes ADTs
+  (`type Expr = Var(String) | App(Expr, Expr) | Add(Expr, Expr) | ...`). The typing
+  rules become a reference type checker (`type_check(ctx, expr) -> Option[(Type,
+  List[Effect])]`) where each pattern-match arm corresponds to one typing rule from the
+  paper. The reduction rules become a step function (`step(expr) -> Option[Expr]`).
+  Because Deep is homoiconic (programs are data), Hull consumes actual Chelis programs
+  parsed from Deep source strings — no translation layer and no bridge to an external
+  tool.
+
+  Three capabilities:
+  1. **Reference type checker.** Given a Deep program, type-check it according to the
+     formal rules and compare the result against `chelis check`.
+  2. **Reference evaluator.** Given a well-typed Deep program, evaluate it by iterated
+     small-step reduction and compare the result against `chelis eval`.
+  3. **Spec-driven test generation.** Generate random well-typed Deep programs using
+     the typing rules as constraints, giving conformance tests for free.
+
+  The self-referential property is the key value: the Chelis compiler type-checks
+  Hull's reference type checker, and Hull's reference type checker type-checks Chelis
+  programs. The compiler validates the spec; the spec validates the compiler. This
+  closes the spec-implementation gap without requiring an external tool or a full
+  extraction from the Lean mechanization.
+
+  Prerequisites: LaCaDiLE typing rules finalized, a Deep parser in Chelis, and `chelis
+  fuzz` infrastructure for language-level random generation. Phase 4 or Phase 5 item —
+  not actively developed yet. Recorded because it is the natural answer to "how do you
+  know the compiler implements the spec?" and because it is a strong future-work story
+  for the OOPSLA paper.
 - **`octant-docs`** — Octant Phase 4 (from the design doc). Parses full LaTeX model
   documents, extracts `\begin{equation}` environments, and associates formulas with
   surrounding prose so model-validation teams can ingest an entire model document as

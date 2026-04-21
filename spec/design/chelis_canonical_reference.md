@@ -135,6 +135,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | LaTeX ↔ Deep bridge shell | **Octant** | Navigational instrument bridging celestial observation (math) and positional computation (code) |
 | Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
+| Language specification shell | **Hull** | The hull defines the shape of the vessel — the spec defines the shape of the language |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
@@ -146,9 +147,9 @@ parallel; `shoals` depends on both. `octant` Part A (LaTeX ↔ Deep bridge, pars
 deterministic lowering + rendering + provenance) has the same prerequisite as
 `shoals` (namely `nautilus` green) and runs **in parallel with `shoals`**; `octant`
 Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
-sequential after `shoals`. `school` (classical ML) and `darwin` (evolutionary
-algorithms) are post-Phase-3 stubs, as is `octant-docs` (full LaTeX document
-ingestion, Octant Phase 4).
+sequential after `shoals`. `school` (classical ML), `darwin` (evolutionary
+algorithms), and `hull` (executable language specification) are post-Phase-3 stubs, as
+is `octant-docs` (full LaTeX document ingestion, Octant Phase 4).
 
 | Shell | Depends On | Status | Contents |
 |---|---|---|---|
@@ -159,14 +160,16 @@ ingestion, Octant Phase 4).
 | `octant` | `chelis-std` + `nautilus` required; `shoals` required only for the Part B SDE / MC / curve lowering | Phase 3n (Part A) ∥ Phase 3l, Phase 3o (Part B) after Phase 3l | LaTeX ↔ Deep bridge for quantitative finance. Parses a bounded LaTeX subset, lowers to Deep deterministically (arithmetic, derivatives, special functions, integrals, matrix ops) in Part A plus LLM-assisted lowering (SDE, Monte Carlo expectation, calibration, yield curves) in Part B, round-trips through the compiler with type overlays, and carries provenance spans on every Deep node. Ships an interactive cell-based notebook in Part B. **NOT a CAS** — notation adapter only, no symbolic integration or simplification. |
 | `school` | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
 | `darwin` | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
+| `hull` | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
 
 Design rule: `chelis-std` covers what every Chelis program may need (tensors, neural
 primitives, time, decimal). `nautilus` owns general numerical methods. `coral` owns
 tabular data. `shoals` is finance-only. `school` is classical ML only. `darwin` is
-evolutionary search only. `octant` is a notation bridge layered on top of `nautilus`
-and (optionally) `shoals` — it consumes their APIs and adds no numerical capabilities
-of its own. Time and decimal stay in `chelis-std` because every domain needs dates
-and exact arithmetic.
+evolutionary search only. If it's about the language's own specification and
+conformance testing, it goes in `hull`. `octant` is a notation bridge layered on top
+of `nautilus` and (optionally) `shoals` — it consumes their APIs and adds no numerical
+capabilities of its own. Time and decimal stay in `chelis-std` because every domain
+needs dates and exact arithmetic.
 
 ### Cross-Cutting Design Decisions
 
