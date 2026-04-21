@@ -277,16 +277,88 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
         }
     }
 
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    // Phase 1: per-def, collect both the vars referenced EAGERLY (outside fn
+    // bodies) and the top-level fns APPLIED eagerly. Lazy refs inside fn
+    // bodies are captured separately so we can chain them in on demand.
+    let mut direct_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut applied_fns: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut fn_body_refs: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
     for name in &def_names {
         let Some(body) = def_bodies.get(name) else {
             continue;
         };
         let mut refs: HashSet<String> = HashSet::new();
+        let mut applied: HashSet<String> = HashSet::new();
         let mut bound: HashSet<String> = HashSet::new();
-        collect_free_var_refs(body, &mut bound, &mut refs);
+        collect_eager_refs(body, &mut bound, &mut refs, &mut applied);
+        direct_refs.insert(name.clone(), refs);
+        applied_fns.insert(name.clone(), applied);
+        // If this def's body IS itself a fn, also collect what its body
+        // references so callers of this def can chain.
+        if let deep::Expr::List(list, _) = body
+            && get_tag(list) == Some("fn")
+            && let Some(fn_body) = children(list).get(1)
+        {
+            let mut inner_refs: HashSet<String> = HashSet::new();
+            let mut inner_applied: HashSet<String> = HashSet::new();
+            let mut inner_bound: HashSet<String> = HashSet::new();
+            // Bind the fn's own params so they aren't flagged as refs.
+            if let Some(params_list) = children(list).first()
+                && let deep::Expr::List(params, _) = params_list
+                && get_tag(params) == Some("params")
+            {
+                for param in children(params) {
+                    if let Some(pname) = param_name_for_refs(param) {
+                        inner_bound.insert(pname);
+                    }
+                }
+            }
+            collect_eager_refs(
+                fn_body,
+                &mut inner_bound,
+                &mut inner_refs,
+                &mut inner_applied,
+            );
+            fn_body_refs.insert(name.clone(), (inner_refs, inner_applied));
+        }
+    }
+
+    // Phase 2: compute transitive eager-reachability. A def `a` has edge to
+    // `b` if `b` is reachable from `a`'s body by:
+    //   - a direct free-var reference, OR
+    //   - calling a top-level fn whose body eagerly references `b`.
+    // Fixed-point over (direct_refs, applied_fns, fn_body_refs).
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for name in &def_names {
+        let mut reachable: HashSet<String> = HashSet::new();
+        if let Some(refs) = direct_refs.get(name) {
+            for r in refs {
+                reachable.insert(r.clone());
+            }
+        }
+        let mut frontier: Vec<String> = applied_fns
+            .get(name)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut visited_fns: HashSet<String> = HashSet::new();
+        while let Some(called) = frontier.pop() {
+            if !visited_fns.insert(called.clone()) {
+                continue;
+            }
+            // Expanding a fn's body: its direct refs become ours (modulo
+            // the fn's own param scope, already filtered in phase 1), and
+            // any fns IT applies get queued.
+            if let Some((inner_refs, inner_applied)) = fn_body_refs.get(&called) {
+                for r in inner_refs {
+                    reachable.insert(r.clone());
+                }
+                for f in inner_applied {
+                    frontier.push(f.clone());
+                }
+            }
+        }
         let mut out = Vec::new();
-        for r in refs {
+        for r in reachable {
             // Distance-0 self-reference is the Nautilus external-input carve-out.
             if r == *name {
                 continue;
@@ -368,18 +440,43 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
     }
 }
 
-/// Collect names referenced via `(var {} name)` that are not locally bound and
-/// that are NOT inside an enclosing `fn` (function) body.
+fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
+    match param {
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.clone()),
+        deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
+        deep::Expr::List(list, _) => children(list)
+            .first()
+            .and_then(symbol_name)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Collect both eager references and top-level fn applications.
 ///
-/// References that appear under an enclosing `fn` are deferred — they only
-/// fire when the function is called, not at definition time, so mutual
-/// recursion between function definitions is permitted and does not count
-/// as a top-level binding cycle. This matches how Chelis actually evaluates
-/// a program: function bodies are not forced when the def is elaborated.
-fn collect_free_var_refs(
+/// `refs` gets free `(var name)` references that fire at definition time
+/// (i.e., NOT inside an enclosing `fn` body).
+///
+/// `applied` gets names of fns called as `(app (var F) ...)` at definition
+/// time (again, not inside a nested fn body). Callers use `applied` to
+/// chain in the called fn's own eager refs for cycle detection — this is
+/// what catches top-level value cycles that route through a fn call:
+///
+/// ```text
+/// a = f()
+/// b = g()
+/// def f() = b
+/// def g() = a
+/// ```
+///
+/// Plain `collect_free_var_refs` (kept below for backward compatibility)
+/// ignores fn bodies entirely, which correctly permits mutual recursion
+/// between fn defs never called eagerly — but misses the cycle above.
+fn collect_eager_refs(
     expr: &deep::Expr,
     bound: &mut HashSet<String>,
-    out: &mut HashSet<String>,
+    refs: &mut HashSet<String>,
+    applied: &mut HashSet<String>,
 ) {
     match expr {
         deep::Expr::List(list, _) => match get_tag(list) {
@@ -387,14 +484,29 @@ fn collect_free_var_refs(
                 if let Some(name) = children(list).first().and_then(symbol_name)
                     && !bound.contains(name)
                 {
-                    out.insert(name.to_string());
+                    refs.insert(name.to_string());
                 }
             }
             Some("fn") => {
-                // Do not descend into function bodies — those references are
-                // deferred until call time and cannot form a *top-level*
-                // value cycle. This is what allows legitimate mutual
-                // recursion like `f x = g(x); g y = f(y)` to pass.
+                // Skip fn body — only its application at this site (if any)
+                // is eager; the body itself is deferred.
+            }
+            Some("app") => {
+                let kids = children(list);
+                if let Some(callee) = kids.first()
+                    && let deep::Expr::List(clist, _) = callee
+                    && get_tag(clist) == Some("var")
+                    && let Some(fname) = children(clist).first().and_then(symbol_name)
+                    && !bound.contains(fname)
+                {
+                    applied.insert(fname.to_string());
+                    refs.insert(fname.to_string());
+                } else if let Some(callee) = kids.first() {
+                    collect_eager_refs(callee, bound, refs, applied);
+                }
+                for arg in kids.iter().skip(1) {
+                    collect_eager_refs(arg, bound, refs, applied);
+                }
             }
             Some("let") => {
                 let kids = children(list);
@@ -405,7 +517,7 @@ fn collect_free_var_refs(
                     let bind_kids = children(bind_list);
                     let mut i = 0;
                     while i + 1 < bind_kids.len() {
-                        collect_free_var_refs(&bind_kids[i + 1], bound, out);
+                        collect_eager_refs(&bind_kids[i + 1], bound, refs, applied);
                         if let Some(name) = symbol_name(&bind_kids[i])
                             && bound.insert(name.to_string())
                         {
@@ -415,7 +527,7 @@ fn collect_free_var_refs(
                     }
                 }
                 if let Some(body) = kids.get(1) {
-                    collect_free_var_refs(body, bound, out);
+                    collect_eager_refs(body, bound, refs, applied);
                 }
                 for name in added {
                     bound.remove(&name);
@@ -423,20 +535,20 @@ fn collect_free_var_refs(
             }
             _ => {
                 for elem in &list.elements {
-                    collect_free_var_refs(elem, bound, out);
+                    collect_eager_refs(elem, bound, refs, applied);
                 }
             }
         },
         deep::Expr::Map(map, _) => {
             for (_, v) in &map.entries {
-                collect_free_var_refs(v, bound, out);
+                collect_eager_refs(v, bound, refs, applied);
             }
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, v) in &meta.entries {
-                collect_free_var_refs(v, bound, out);
+                collect_eager_refs(v, bound, refs, applied);
             }
-            collect_free_var_refs(&meta.expr, bound, out);
+            collect_eager_refs(&meta.expr, bound, refs, applied);
         }
         deep::Expr::Atom(_, _) => {}
     }
@@ -451,19 +563,30 @@ fn collect_free_var_refs(
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
 fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
     for expr in exprs {
-        walk_for_tensor_precision(expr, errors, &mut seen);
+        let def_name = match expr {
+            deep::Expr::List(list, _) if matches!(get_tag(list), Some("def") | Some("defsig")) => {
+                children(list)
+                    .first()
+                    .and_then(symbol_name)
+                    .unwrap_or("")
+                    .to_string()
+            }
+            _ => String::new(),
+        };
+        walk_for_tensor_precision(expr, errors, &mut seen, &def_name);
     }
 }
 
 fn walk_for_tensor_precision(
     expr: &deep::Expr,
     errors: &mut Vec<CheckError>,
-    seen: &mut HashSet<String>,
+    seen: &mut HashSet<(String, String)>,
+    def_context: &str,
 ) {
     match expr {
-        deep::Expr::List(list, _) => {
+        deep::Expr::List(list, _span) => {
             // Check t-tensor nodes at this level.
             if get_tag(list) == Some("t-tensor") {
                 let kids = children(list);
@@ -473,7 +596,7 @@ fn walk_for_tensor_precision(
                     && let Some(name) = children(prec_list).first().and_then(symbol_name)
                     && let Some(prim) = Prim::parse_name(name)
                     && !prim.is_valid_tensor_precision()
-                    && seen.insert(format!("tensor:{name}"))
+                    && seen.insert((def_context.to_string(), name.to_string()))
                 {
                     errors.push(CheckError::new(
                         CheckErrorKind::UnsupportedTensorPrecision,
@@ -482,14 +605,19 @@ fn walk_for_tensor_precision(
                              Phase 0f backend (supported: f32, bool, int8, int32, int64)",
                             name
                         ),
-                        vec![
-                            format!(
-                                "Use tensor[..., f32] and cast host scalars explicitly, or keep `{name}` as a host scalar",
-                                name = name,
-                            ),
-                        ],
+                        vec![format!(
+                            "Use tensor[..., f32] and cast host scalars explicitly, or keep `{name}` as a host scalar",
+                            name = name,
+                        )],
                     ));
                 }
+            }
+
+            // `cast` is inferred by infer_cast which already emits a clearer
+            // site-local error for bad precisions. Skip the walker's recursion
+            // inside a cast so we don't duplicate the diagnostic.
+            if get_tag(list) == Some("cast") {
+                return;
             }
 
             // Recurse into metadata map (element[1]), which may carry
@@ -498,25 +626,25 @@ fn walk_for_tensor_precision(
                 && let deep::Expr::Map(map, _) = &list.elements[1]
             {
                 for (_, v) in &map.entries {
-                    walk_for_tensor_precision(v, errors, seen);
+                    walk_for_tensor_precision(v, errors, seen, def_context);
                 }
             }
 
             // Recurse into children (elements after index 1).
             for child in children(list) {
-                walk_for_tensor_precision(child, errors, seen);
+                walk_for_tensor_precision(child, errors, seen, def_context);
             }
         }
         deep::Expr::Map(map, _) => {
             for (_, v) in &map.entries {
-                walk_for_tensor_precision(v, errors, seen);
+                walk_for_tensor_precision(v, errors, seen, def_context);
             }
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, v) in &meta.entries {
-                walk_for_tensor_precision(v, errors, seen);
+                walk_for_tensor_precision(v, errors, seen, def_context);
             }
-            walk_for_tensor_precision(&meta.expr, errors, seen);
+            walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
         }
         deep::Expr::Atom(_, _) => {}
     }
@@ -6658,7 +6786,24 @@ fn infer_cast(
             }
             Type::Tensor(dims, new_prec)
         }
-        Type::Prim(_) => Type::Prim(new_prec),
+        Type::Prim(_) => {
+            // Scalar cast targets: supported widths are the same as
+            // valid tensor precisions plus host f64. Reject f16, bf16,
+            // f8e4m3 which have no scalar representation either.
+            if !new_prec.is_valid_scalar_cast_target() {
+                errors.push(CheckError::new(
+                    CheckErrorKind::UnsupportedTensorPrecision,
+                    format!(
+                        "cannot cast scalar to unsupported precision `{}` \
+                         (supported: f32, f64, bool, int8, int32, int64)",
+                        new_prec.name()
+                    ),
+                    vec!["Use a supported scalar precision".to_string()],
+                ));
+                return Type::Error;
+            }
+            Type::Prim(new_prec)
+        }
         Type::Error => Type::Error,
         _ => {
             errors.push(CheckError::new(

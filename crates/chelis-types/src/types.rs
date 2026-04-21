@@ -91,6 +91,17 @@ impl Prim {
             Prim::F32 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
         )
     }
+
+    /// Whether this precision is a legitimate target for `cast(scalar, p)`.
+    /// The host scalar lane supports full f64 plus everything tensors can
+    /// hold; reduced floats (f16, bf16, f8e4m3) have no scalar
+    /// representation and must be rejected at check time.
+    pub fn is_valid_scalar_cast_target(&self) -> bool {
+        matches!(
+            self,
+            Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
+        )
+    }
 }
 
 /// A tensor dimension.

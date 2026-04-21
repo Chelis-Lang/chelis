@@ -4542,12 +4542,15 @@ mod regression_tests {
         assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
     }
 
-    // Fix 9: Cast with (t-prim {} bf16) node.
+    // Fix 9: Cast with (t-prim {} int32) node. Exercises the lowerer's
+    // ability to read a `t-prim` precision out of a cast target. `bf16`
+    // is now a check-time error (UnsupportedTensorPrecision) so the
+    // regression uses int32 as a representative non-f32 scalar target.
     #[test]
     fn fix9_cast_with_tprim_node() {
         let src = r#"
             (def {} x (lit {} 1.0))
-            (def {} y (cast {} (var {} x) (t-prim {} bf16)))
+            (def {} y (cast {} (var {} x) (t-prim {} int32)))
         "#;
         let dag = parse_and_lower(src);
         let cast_node = dag
@@ -4558,10 +4561,10 @@ mod regression_tests {
         assert_eq!(
             cast_node.op,
             RiscOp::Cast {
-                new_precision: Prim::Bf16
+                new_precision: Prim::Int32
             }
         );
-        assert_eq!(cast_node.output_type.precision, Prim::Bf16);
+        assert_eq!(cast_node.output_type.precision, Prim::Int32);
     }
 
     #[test]
