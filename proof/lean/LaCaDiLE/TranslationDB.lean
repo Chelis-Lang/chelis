@@ -31,6 +31,7 @@ import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.TypingDB
 import LaCaDiLE.Operational
+import LaCaDiLE.Substitution
 import LaCaDiLE.SubstitutionDB
 
 namespace LaCaDiLE
@@ -1927,6 +1928,41 @@ theorem HasType.app_inv_bridge
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- App inversion with the outer `SubEffRow` witness retained. -/
+theorem HasType.app_inv_sub_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma3 : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.app e1 e2) t eps Gamma3) :
+    ∃ Gamma2 t1 epsBody eps1 eps2,
+      HasType Delta Sigma Gamma1 e1 (Typ.arrow t1 t epsBody) eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 t1 eps2 Gamma3 ∧
+      SubEffRow (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps := by
+  generalize heq : Term.app e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | app _ _ _ Gamma2 _ _ _ t1 _ epsBody eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, t1, epsBody, eps1, eps2, h1, h2, fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      rcases ih heq with ⟨Gamma2, t1, epsBody, eps1, eps2, h1, h2, hSub'⟩
+      exact ⟨Gamma2, t1, epsBody, eps1, eps2, h1, h2,
+        fun op hop => hSub op (hSub' op hop)⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- The right operand of an effect-row union embeds into the union. -/
+theorem SubEffRow.union_right
+    (epsLeft epsRight : EffectRow) :
+    SubEffRow epsRight (EffectRow.union epsLeft epsRight) := by
+  intro op hop
+  show op ∈ epsLeft ++ epsRight.filter (fun o => !epsLeft.contains o)
+  rw [List.mem_append]
+  by_cases hLeft : op ∈ epsLeft
+  · exact Or.inl hLeft
+  · right
+    rw [List.mem_filter]
+    exact ⟨hop, by simp [hLeft]⟩
+
 /-- LetBind inversion local to the DB bridge. -/
 theorem HasType.letBind_inv_bridge
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
@@ -1945,6 +1981,30 @@ theorem HasType.letBind_inv_bridge
       exact ⟨Gamma2, Gamma3, t1, eps1, eps2, slot, h1, h2, rfl⟩
   | subEff _ _ _ _ _ _ _ _ _ _ ih =>
       exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- LetBind inversion with the outer `SubEffRow` witness retained. -/
+theorem HasType.letBind_inv_sub_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
+    {x : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.letBind x e1 e2) t eps GammaOut) :
+    ∃ Gamma2 Gamma3 t1 eps1 eps2 slot,
+      HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
+      HasType Delta Sigma (Gamma2 ++ [(x, some t1)]) e2 t eps2
+        (Gamma3 ++ [(x, slot)]) ∧
+      GammaOut = Gamma3 ∧
+      SubEffRow (EffectRow.union eps1 eps2) eps := by
+  generalize heq : Term.letBind x e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letBind _ _ _ Gamma2 Gamma3 _ _ _ t1 _ eps1 eps2 slot h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, Gamma3, t1, eps1, eps2, slot, h1, h2, rfl, fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      rcases ih heq with ⟨Gamma2, Gamma3, t1, eps1, eps2, slot, h1, h2, hOut, hSub'⟩
+      exact ⟨Gamma2, Gamma3, t1, eps1, eps2, slot, h1, h2, hOut,
+        fun op hop => hSub op (hSub' op hop)⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -2020,6 +2080,51 @@ theorem ClausesTyped.mem_inv
           · cases h0
             exact ⟨tArg, tRet, slotX, slotK, hHead⟩
           · exact ih hRest htl
+
+/-- Values can be re-typed at any effect row with the same type and
+    contexts. Local copy of the preservation helper to avoid an import
+    cycle. -/
+theorem HasType.value_eff_polymorphic_bridge
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma v t eps Gamma')
+    (hv : IsValue v) :
+    ∀ eps', HasType Delta Sigma Gamma v t eps' Gamma' := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | unit Delta Sigma Gamma =>
+      intro eps'
+      exact HasType.subEff Delta Sigma Gamma Gamma _ _ [] eps'
+        (HasType.unit Delta Sigma Gamma) (by intro op hop; cases hop)
+  | abs Delta Sigma Gamma1 Gamma2 x t1 t2 epsBody body slot hBody =>
+      intro eps'
+      exact HasType.subEff Delta Sigma Gamma1 Gamma2 _ _ [] eps'
+        (HasType.abs Delta Sigma Gamma1 Gamma2 x t1 t2 epsBody body slot hBody)
+        (by intro op hop; cases hop)
+  | tpair Delta Sigma Gamma1 Gamma2 Gamma3 v1 v2 t1 t2 eps1 eps2 _ _ ih1 ih2 =>
+      intro eps'
+      cases hv with
+      | pair _ _ hv1 hv2 =>
+          have h1' := ih1 hv1 []
+          have h2' := ih2 hv2 []
+          exact HasType.subEff Delta Sigma Gamma1 Gamma3 _ _ _ eps'
+            (HasType.tpair Delta Sigma Gamma1 Gamma2 Gamma3 v1 v2 t1 t2 [] [] h1' h2')
+            (by intro op hop; cases hop)
+  | loc Delta Sigma Gamma ell t hLook =>
+      intro eps'
+      exact HasType.subEff Delta Sigma Gamma Gamma _ _ [] eps'
+        (HasType.loc Delta Sigma Gamma ell t hLook)
+        (by intro op hop; cases hop)
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      intro eps'
+      exact ih hv eps'
+  | nil _ _ _ _ _ =>
+      exact True.intro
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+      exact True.intro
+  | _ =>
+      exfalso
+      cases hv
 
 /-- Pointwise tombstone-preserving slot weakening on DB contexts:
     every output slot is either `none` or unchanged from the input slot
@@ -3029,7 +3134,31 @@ theorem preservation_beta_via_db
     (hv : IsValue v)
     (h_scope : WellScoped (Term.app (Term.abs x tArg body) v)) :
     HasType [] Sigma [] (subst body v x) tRet eps [] := by
-  sorry
+  rcases HasType.app_inv_sub_bridge h_typ with
+    ⟨GammaMid, t1, epsBody, epsFun, epsArg, hFun, hArg, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hFun
+  subst hMid
+  rcases HasType.abs_inv hFun with
+    ⟨tRet', epsBody', GammaBody, slot, hArrow, hBody, hOut⟩
+  injection hArrow with hT1 hRet hEff
+  subst t1
+  subst tRet'
+  subst epsBody'
+  subst GammaBody
+  have hClosed : Closed v := has_type_closed_term_of_closed_input hArg
+  have hArgNil : HasType [] Sigma [] v tArg [] [] :=
+    HasType.value_eff_polymorphic_bridge hArg hv []
+  rcases subst_preserves_typing [] Sigma [] [(x, slot)]
+      x tArg tRet epsBody body v hBody hArgNil hClosed with
+    ⟨GammaSub, hSubst⟩
+  have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
+  subst hGammaSub
+  have hSubBody :
+      SubEffRow epsBody eps := by
+    exact SubEffRow.trans
+      (SubEffRow.union_right (EffectRow.union epsFun epsArg) epsBody)
+      hSub
+  exact HasType.subEff [] Sigma [] [] _ _ epsBody eps hSubst hSubBody
 
 /-- Named-facing wrapper for the let-binding redex case in
     preservation. Same blocker profile as `preservation_beta_via_db`. -/
@@ -3040,7 +3169,23 @@ theorem preservation_letBind_via_db
     (hv : IsValue v)
     (h_scope : WellScoped (Term.letBind x v body)) :
     HasType [] Sigma [] (subst body v x) t eps [] := by
-  sorry
+  rcases HasType.letBind_inv_sub_bridge h_typ with
+    ⟨GammaMid, GammaBody, t1, epsVal, epsBody, slot, hVal, hBody, hOut, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hVal
+  subst hMid
+  subst GammaBody
+  have hClosed : Closed v := has_type_closed_term_of_closed_input hVal
+  have hValNil : HasType [] Sigma [] v t1 [] [] :=
+    HasType.value_eff_polymorphic_bridge hVal hv []
+  rcases subst_preserves_typing [] Sigma [] [(x, slot)]
+      x t1 t epsBody body v hBody hValNil hClosed with
+    ⟨GammaSub, hSubst⟩
+  have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
+  subst hGammaSub
+  have hSubBody :
+      SubEffRow epsBody eps := by
+    exact SubEffRow.trans (SubEffRow.union_right epsVal epsBody) hSub
+  exact HasType.subEff [] Sigma [] [] _ _ epsBody eps hSubst hSubBody
 
 /-- Named-facing wrapper for the pair-destruct redex case in
     preservation. This needs the 2-binder version of the same
