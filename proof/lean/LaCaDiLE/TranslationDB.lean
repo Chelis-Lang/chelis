@@ -2227,7 +2227,309 @@ theorem transport_typing_lexical
     ∃ eDB,
       eraseTerm (ctxEnv Gamma) e = some eDB ∧
       HasTypeDB Delta Sigma (eraseCtx Gamma) eDB t eps (eraseCtx GammaOut) := by
-  sorry
+  revert hlex
+  induction h using HasType.rec
+    (motive_2 := fun Delta Sigma GammaIn GammaOut t epsR clauses _ =>
+      ClausesLexical GammaIn t epsR clauses →
+      ∃ clausesDB,
+        eraseClauses (ctxEnv GammaIn) clauses = some clausesDB ∧
+        ClausesTypedDB Delta Sigma (eraseCtx GammaIn) (eraseCtx GammaOut) t epsR clausesDB)
+    with
+  | var Delta Sigma GammaPre GammaPost x tx =>
+      intro hlex
+      rcases hlex with ⟨hnd, _, _⟩
+      rcases
+        transport_var_lexical
+          (Delta := Delta) (Sigma := Sigma)
+          (GammaPre := GammaPre) (GammaPost := GammaPost)
+          (x := x) (t := tx) hnd with
+        ⟨hErase, hTy, _⟩
+      have hOutEq :
+          (eraseCtx (GammaPre ++ [(x, some tx)] ++ GammaPost)).set GammaPost.length none =
+            eraseCtx (GammaPre ++ [(x, none)] ++ GammaPost) := by
+        rw [eraseCtx_consume_target]
+        simp [eraseCtx, List.reverse_append, List.reverse_cons, List.map_append, List.append_assoc]
+      have hTy' :
+          HasTypeDB Delta Sigma (eraseCtx (GammaPre ++ [(x, some tx)] ++ GammaPost))
+            (TermDB.var GammaPost.length) tx []
+            (eraseCtx (GammaPre ++ [(x, none)] ++ GammaPost)) := by
+        rw [hOutEq] at hTy
+        exact hTy
+      exact ⟨TermDB.var GammaPost.length, hErase, hTy'⟩
+  | unit Delta Sigma Gamma =>
+      intro _hlex
+      exact ⟨TermDB.unit, rfl, HasTypeDB.unit Delta Sigma (eraseCtx Gamma)⟩
+  | abs Delta Sigma Gamma1 Gamma2 x t1 t2 epsBody body slot hBody ihBody =>
+      intro hlex
+      rcases ihBody (lexical_abs_body (tx := t1) hlex) with
+        ⟨bodyDB, hEraseBody, hTyBody⟩
+      have hEraseBody' :
+          eraseTerm (x :: ctxEnv Gamma1) body = some bodyDB := by
+        simpa using hEraseBody
+      have hTyBody' :
+          HasTypeDB Delta Sigma (some t1 :: eraseCtx Gamma1) bodyDB t2 epsBody
+            (slot :: eraseCtx Gamma2) := by
+        simpa [eraseCtx_append_singleton] using hTyBody
+      refine ⟨TermDB.abs t1 bodyDB, ?_, ?_⟩
+      · simp [eraseTerm, hEraseBody']
+      · exact HasTypeDB.abs Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          slot t1 t2 epsBody bodyDB hTyBody'
+  | app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 epsInner eps1 eps2 h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_app_left hlex) with ⟨e1DB, hErase1, hTy1⟩
+      rcases ih2 (lexical_output_of_typing h1 (lexical_app_right hlex)) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' : eraseTerm (ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2
+      refine ⟨TermDB.app e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2']
+      · exact HasTypeDB.app Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) e1DB e2DB t1 t2 epsInner eps1 eps2 hTy1 hTy2
+  | letBind Delta Sigma Gamma1 Gamma2 Gamma3 x e1 e2 t1 t2 eps1 eps2 slot h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_letBind_bound hlex) with ⟨e1DB, hErase1, hTy1⟩
+      have hlexBody1 : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e2 :=
+        lexical_letBind_body (tx := t1) hlex
+      have hEqBody :
+          (Gamma1 ++ [(x, some t1)]).map Prod.fst =
+            (Gamma2 ++ [(x, some t1)]).map Prod.fst := by
+        simp [List.map_append, hasType_names_preserved h1]
+      rcases ih2 (lexical_of_names_eq hEqBody hlexBody1) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' :
+          eraseTerm (x :: ctxEnv Gamma2) e2 = some e2DB := by
+        simpa using hErase2
+      have hErase2'' :
+          eraseTerm (x :: ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2'
+      have hTy2' :
+          HasTypeDB Delta Sigma (some t1 :: eraseCtx Gamma2) e2DB t2 eps2
+            (slot :: eraseCtx Gamma3) := by
+        simpa [eraseCtx_append_singleton] using hTy2
+      refine ⟨TermDB.letBind e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2'']
+      · exact HasTypeDB.letBind Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) slot e1DB e2DB t1 t2 eps1 eps2 hTy1 hTy2'
+  | copy Delta Sigma Gamma1 Gamma2 e ds eps hBody ih =>
+      intro hlex
+      rcases ih (lexical_copy_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.copy eDB, ?_, ?_⟩
+      · simp [eraseTerm, hErase]
+      · exact HasTypeDB.copy Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB ds eps hTy
+  | letpair Delta Sigma Gamma1 Gamma2 Gamma3 x y e1 e2 t1 t2 t eps1 eps2 slotX slotY h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_letpair_bound hlex) with ⟨e1DB, hErase1, hTy1⟩
+      have hlexBody1 : LexicallyScoped (Gamma1 ++ [(x, some t1), (y, some t2)]) e2 :=
+        lexical_letpair_body (tx := t1) (ty := t2) hlex
+      have hEqBody :
+          (Gamma1 ++ [(x, some t1), (y, some t2)]).map Prod.fst =
+            (Gamma2 ++ [(x, some t1), (y, some t2)]).map Prod.fst := by
+        simp [List.map_append, hasType_names_preserved h1]
+      rcases ih2 (lexical_of_names_eq hEqBody hlexBody1) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' :
+          eraseTerm (y :: x :: ctxEnv Gamma2) e2 = some e2DB := by
+        simpa using hErase2
+      have hErase2'' :
+          eraseTerm (y :: x :: ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2'
+      have hTy2' :
+          HasTypeDB Delta Sigma (some t2 :: some t1 :: eraseCtx Gamma2) e2DB t eps2
+            (slotY :: slotX :: eraseCtx Gamma3) := by
+        simpa [eraseCtx_append_pair] using hTy2
+      refine ⟨TermDB.letpair e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2'']
+      · exact HasTypeDB.letpair Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) slotY slotX e1DB e2DB t1 t2 t eps1 eps2 hTy1 hTy2'
+  | tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_pair_left hlex) with ⟨e1DB, hErase1, hTy1⟩
+      rcases ih2 (lexical_output_of_typing h1 (lexical_pair_right hlex)) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' : eraseTerm (ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2
+      refine ⟨TermDB.pair e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2']
+      · exact HasTypeDB.tpair Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) e1DB e2DB t1 t2 eps1 eps2 hTy1 hTy2
+  | fst Delta Sigma Gamma1 Gamma2 e t1 t2 eps hBody ih =>
+      intro hlex
+      rcases ih (lexical_fst_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.fst eDB, ?_, ?_⟩
+      · simp [eraseTerm, hErase]
+      · exact HasTypeDB.fst Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB t1 t2 eps hTy
+  | snd Delta Sigma Gamma1 Gamma2 e t1 t2 eps hBody ih =>
+      intro hlex
+      rcases ih (lexical_snd_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.snd eDB, ?_, ?_⟩
+      · simp [eraseTerm, hErase]
+      · exact HasTypeDB.snd Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB t1 t2 eps hTy
+  | const Delta Sigma Gamma v ds =>
+      intro _hlex
+      exact ⟨TermDB.const v ds, rfl,
+        HasTypeDB.const Delta Sigma (eraseCtx Gamma) v ds⟩
+  | tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_add_left hlex) with ⟨e1DB, hErase1, hTy1⟩
+      rcases ih2 (lexical_output_of_typing h1 (lexical_add_right hlex)) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' : eraseTerm (ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2
+      refine ⟨TermDB.add e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2']
+      · exact HasTypeDB.tadd Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) e1DB e2DB ds eps1 eps2 hTy1 hTy2
+  | tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro hlex
+      rcases ih1 (lexical_mul_left hlex) with ⟨e1DB, hErase1, hTy1⟩
+      rcases ih2 (lexical_output_of_typing h1 (lexical_mul_right hlex)) with
+        ⟨e2DB, hErase2, hTy2⟩
+      have hErase2' : eraseTerm (ctxEnv Gamma1) e2 = some e2DB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved h1)]
+        exact hErase2
+      refine ⟨TermDB.mul e1DB e2DB, ?_, ?_⟩
+      · simp [eraseTerm, hErase1, hErase2']
+      · exact HasTypeDB.tmul Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) e1DB e2DB ds eps1 eps2 hTy1 hTy2
+  | tsum Delta Sigma Gamma1 Gamma2 e ds d eps hBody hmem ih =>
+      intro hlex
+      rcases ih (lexical_sum_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.sum eDB (eraseDim d), ?_, ?_⟩
+      · rw [eraseTerm, hErase]
+        rfl
+      · exact HasTypeDB.tsum Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB ds (eraseDim d) eps hTy (rem ds d) trivial
+  | texpand Delta Sigma Gamma1 Gamma2 e ds d eps hBody ih =>
+      intro hlex
+      rcases ih (lexical_expand_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.expand eDB (eraseDim d) 0, ?_, ?_⟩
+      · rw [eraseTerm, hErase]
+        rfl
+      · exact HasTypeDB.texpand Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB ds (eraseDim d) 0 eps hTy (ins ds d) trivial
+  | uniformLike Delta Sigma Gamma1 Gamma2 e ds lo hi eps hBody ih =>
+      intro hlex
+      rcases ih (lexical_uniformLike_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.uniformLike eDB lo hi, ?_, ?_⟩
+      · rw [eraseTerm, hErase]
+        rfl
+      · exact HasTypeDB.uniformLike Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          eDB ds lo hi eps hTy
+  | perform Delta Sigma Gamma1 Gamma2 op e tArg tRet eps hBody hsig ih =>
+      intro hlex
+      rcases ih (lexical_perform_body hlex) with ⟨eDB, hErase, hTy⟩
+      refine ⟨TermDB.perform op eDB, ?_, ?_⟩
+      · simp [eraseTerm, hErase]
+      · exact HasTypeDB.perform Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          op eDB tArg tRet eps hTy hsig
+  | handle Delta Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
+      hBody hOpsIn hClsIn hCover hClauses ihBody ihClauses =>
+      intro hlex
+      rcases ihBody (lexical_handle_body hlex) with ⟨bodyDB, hEraseBody, hTyBody⟩
+      have hClausesLex :
+          ClausesLexical Gamma2 t (EffectRow.removeOps epsB epsH) clauses := by
+        intro op x k hb tArg tRet hmem
+        have hlex' :
+            LexicallyScoped
+              (Gamma1 ++ [(x, some tArg), (k, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))]) hb :=
+          lexical_handle_clause
+            (tx := tArg)
+            (tk := Typ.arrow tRet t (EffectRow.removeOps epsB epsH))
+            hlex hmem
+        have hEq :
+            List.map Prod.fst
+              (Gamma1 ++ [(x, some tArg), (k, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))]) =
+            List.map Prod.fst
+              (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))]) := by
+          simp [List.map_append, hasType_names_preserved hBody]
+        exact lexical_of_names_eq hEq hlex'
+      rcases ihClauses hClausesLex with ⟨clausesDB, hEraseClauses, hTyClauses⟩
+      have hEraseClauses' : eraseClauses (ctxEnv Gamma1) clauses = some clausesDB := by
+        rw [ctxEnv_eq_of_names_eq (hasType_names_preserved hBody)]
+        exact hEraseClauses
+      refine ⟨TermDB.handle epsH bodyDB clausesDB, ?_, ?_⟩
+      · simp [eraseTerm, hEraseBody, hEraseClauses']
+      · refine HasTypeDB.handle Delta Sigma (eraseCtx Gamma1) (eraseCtx Gamma2)
+          (eraseCtx Gamma3) bodyDB clausesDB t epsH epsB hTyBody hOpsIn ?_ ?_ hTyClauses
+        · intro clDB hmemDB
+          rcases eraseClauses_named_of_mem hEraseClauses hmemDB with ⟨cl, hcl, hEqCl⟩
+          simpa [hEqCl] using hClsIn cl hcl
+        · intro op hop
+          rcases hCover op hop with ⟨cl, hcl, hEqOp⟩
+          rcases eraseClauses_exists_of_mem_named hEraseClauses hcl with ⟨hbDB, hmemDB⟩
+          exact ⟨(op, hbDB), by simpa [hEqOp] using hmemDB, rfl⟩
+  | tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub ih =>
+      intro hlex
+      rcases ih (lexical_grad_body hlex) with ⟨bodyDB, hEraseBody, hTyBody⟩
+      have hEraseBody' :
+          eraseTerm (x :: ctxEnv Gamma) body = some bodyDB := by
+        simpa using hEraseBody
+      have hTyBody' :
+          HasTypeDB (Capability.diff :: Delta) Sigma (some (Typ.tensor ds) :: eraseCtx Gamma)
+            bodyDB (Typ.tensor dsOut) eps (slot :: eraseCtx Gamma) := by
+        simpa [eraseCtx_append_singleton] using hTyBody
+      refine ⟨TermDB.grad (Typ.tensor ds) (Typ.tensor dsOut) bodyDB, ?_, ?_⟩
+      · simp [eraseTerm, hEraseBody']
+      · exact HasTypeDB.tgrad Delta Sigma (eraseCtx Gamma) slot ds dsOut bodyDB eps
+          hTyBody' hsub
+  | tvmap Delta Sigma Gamma x t1 t2 body eps d slot hBody ih =>
+      intro hlex
+      rcases ih (lexical_vmap_body hlex) with ⟨bodyDB, hEraseBody, hTyBody⟩
+      have hEraseBody' :
+          eraseTerm (x :: ctxEnv Gamma) body = some bodyDB := by
+        simpa using hEraseBody
+      have hTyBody' :
+          HasTypeDB Delta Sigma (some t1 :: eraseCtx Gamma) bodyDB t2 eps
+            (slot :: eraseCtx Gamma) := by
+        simpa [eraseCtx_append_singleton] using hTyBody
+      refine ⟨TermDB.vmap t1 bodyDB, ?_, ?_⟩
+      · simp [eraseTerm, hEraseBody']
+      · exact HasTypeDB.tvmap Delta Sigma (eraseCtx Gamma) slot t1 t2 bodyDB eps d
+          hTyBody'
+  | loc Delta Sigma Gamma ell t hlook =>
+      intro _hlex
+      exact ⟨TermDB.loc ell, rfl, HasTypeDB.loc Delta Sigma (eraseCtx Gamma) ell t hlook⟩
+  | subEff Delta Sigma Gamma GammaOut e t eps eps' hBody hsub ih =>
+      intro hlex
+      rcases ih hlex with ⟨eDB, hErase, hTy⟩
+      exact ⟨eDB, hErase,
+        HasTypeDB.subEff Delta Sigma (eraseCtx Gamma) (eraseCtx GammaOut) eDB t eps eps' hTy hsub⟩
+  | nil Delta Sigma Gamma2 t epsR =>
+      exact ⟨[], rfl, ClausesTypedDB.nil Delta Sigma (eraseCtx Gamma2) t epsR⟩
+  | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
+      hBody hRest ihBody ihRest =>
+      rename_i hlex
+      have hHeadLex :
+          LexicallyScoped
+            (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))]) hb :=
+        hlex (op := op) (x := x) (k := k) (hb := hb) (tArg := tArg) (tRet := tRet) (by simp)
+      rcases ihBody hHeadLex with ⟨hbDB, hEraseBody, hTyBody⟩
+      have hEraseBody' :
+          eraseTerm (k :: x :: ctxEnv Gamma2) hb = some hbDB := by
+        simpa using hEraseBody
+      have hTyBody' :
+          HasTypeDB Delta Sigma
+            (some (Typ.arrow tRet t epsR) :: some tArg :: eraseCtx Gamma2)
+            hbDB t epsR (slotK :: slotX :: eraseCtx Gamma3) := by
+        simpa [eraseCtx_append_pair] using hTyBody
+      have hRestLex : ClausesLexical Gamma2 t epsR rest := by
+        intro op' x' k' hb' tArg' tRet' hmem
+        exact hlex
+          (op := op') (x := x') (k := k') (hb := hb')
+          (tArg := tArg') (tRet := tRet') (by simp [hmem])
+      rcases ihRest hRestLex with ⟨restDB, hEraseRest, hTyRest⟩
+      refine ⟨(op, hbDB) :: restDB, ?_, ?_⟩
+      · simp [eraseClauses, hEraseBody', hEraseRest]
+      · exact ClausesTypedDB.cons Delta Sigma (eraseCtx Gamma2) (eraseCtx Gamma3)
+          slotK slotX t tArg tRet epsR op hbDB restDB hTyBody' hTyRest
 
 
 mutual
