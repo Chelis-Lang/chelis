@@ -1720,21 +1720,33 @@ impl LowerCtx {
     }
 
     fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
+        self.resolve_callable_expr_inner(expr, &mut HashSet::new())
+    }
+
+    fn resolve_callable_expr_inner(
+        &self,
+        expr: &Expr,
+        visited: &mut HashSet<String>,
+    ) -> Option<CallableExpr> {
         let Expr::List(list, _) = expr else {
             return None;
         };
         match get_tag(list) {
             Some("fn") => Some(CallableExpr::Plain(expr.clone())),
-            Some("var") => children(list)
-                .first()
-                .and_then(|expr| match expr {
-                    Expr::Atom(Atom::Symbol(name), _) => self
-                        .local_callables
-                        .get(name)
-                        .or_else(|| self.program_defs.get(name)),
+            Some("var") => {
+                let name = children(list).first().and_then(|expr| match expr {
+                    Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
                     _ => None,
-                })
-                .and_then(|body| self.resolve_callable_expr(body)),
+                })?;
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let body = self
+                    .local_callables
+                    .get(&name)
+                    .or_else(|| self.program_defs.get(&name))?;
+                self.resolve_callable_expr_inner(body, visited)
+            }
             Some("vmap") => {
                 let kids = children(list);
                 let axis = kids
@@ -1746,7 +1758,7 @@ impl LowerCtx {
                 {
                     let wrt = self.extract_grad_wrt_indices(grad_list);
                     return self
-                        .resolve_callable_expr(children(grad_list).first()?)
+                        .resolve_callable_expr_inner(children(grad_list).first()?, visited)
                         .and_then(|inner| match inner {
                             CallableExpr::Plain(fn_expr) => {
                                 Some(CallableExpr::VmapGrad { fn_expr, wrt, axis })
@@ -1754,7 +1766,7 @@ impl LowerCtx {
                             _ => None,
                         });
                 }
-                self.resolve_callable_expr(kids.first()?)
+                self.resolve_callable_expr_inner(kids.first()?, visited)
                     .and_then(|inner| match inner {
                         CallableExpr::Plain(fn_expr) => Some(CallableExpr::Vmap { fn_expr, axis }),
                         CallableExpr::Vmap { .. } => None,
@@ -1765,7 +1777,7 @@ impl LowerCtx {
                     })
             }
             Some("grad") => self
-                .resolve_callable_expr(children(list).first()?)
+                .resolve_callable_expr_inner(children(list).first()?, visited)
                 .and_then(|inner| match inner {
                     CallableExpr::Plain(fn_expr) => Some(CallableExpr::Grad {
                         fn_expr,
@@ -2390,8 +2402,18 @@ impl LowerCtx {
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 // C5: CmpLt always produces Bool output regardless of input precision.
+                // When the caller's ty has no annotation (default), fall back to the
+                // input DAG node's dims so rank/shape propagates correctly.
+                let dims = if *ty == Self::default_type() {
+                    self.dag
+                        .get(a)
+                        .map(|node| node.output_type.dims.clone())
+                        .unwrap_or_else(|| ty.dims.clone())
+                } else {
+                    ty.dims.clone()
+                };
                 let bool_ty = TensorType {
-                    dims: ty.dims.clone(),
+                    dims,
                     precision: Prim::Bool,
                 };
                 self.dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty)

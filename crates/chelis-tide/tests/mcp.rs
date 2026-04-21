@@ -10,7 +10,7 @@ const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
 "#;
 const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
-out = (add(x, x) : tensor[4, f32])
+out = (add(copy(x), x) : tensor[4, f32])
 "#;
 const SIMPLE_DEEP: &str = r#"(def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
 "#;

@@ -587,8 +587,10 @@ fn cmd_build(
             .iter()
             .map(|binding| {
                 let mut binding = binding.clone();
-                binding.display_name =
-                    host_display_root_name(&binding.name, &entry_display_root_names);
+                binding.display_name = match binding.ty {
+                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    _ => host_display_root_name(&binding.name, &entry_display_root_names),
+                };
                 binding
             })
             .collect();

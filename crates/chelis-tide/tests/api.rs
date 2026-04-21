@@ -17,7 +17,7 @@ const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
 "#;
 const NON_SCALAR_PROGRAM: &str = r#"x = (x : tensor[4, f32])
-out = (add(x, x) : tensor[4, f32])
+out = (add(copy(x), x) : tensor[4, f32])
 "#;
 
 async fn post_json(app: Router, path: &str, value: Value) -> (u16, Value) {

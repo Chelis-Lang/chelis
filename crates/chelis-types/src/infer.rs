@@ -954,19 +954,33 @@ fn annotate_expr_with_scope(
             }
 
             let tag = get_tag(list);
-            let annotated_children = match tag {
-                Some("fn") => annotate_fn_children(list, env, vg, subst, adt_reg),
-                Some("let") => annotate_let_children(list, env, vg, subst, adt_reg),
-                Some("match") => annotate_match_children(list, env, vg, subst, adt_reg),
-                _ => children(list)
-                    .iter()
-                    .map(|child| annotate_expr_with_scope(child, env, vg, subst, adt_reg))
-                    .collect(),
+            let (annotated_children, fn_ty_override) = match tag {
+                Some("fn") => {
+                    let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg);
+                    (kids, Some(fn_ty))
+                }
+                Some("let") => (annotate_let_children(list, env, vg, subst, adt_reg), None),
+                Some("match") => (annotate_match_children(list, env, vg, subst, adt_reg), None),
+                _ => (
+                    children(list)
+                        .iter()
+                        .map(|child| annotate_expr_with_scope(child, env, vg, subst, adt_reg))
+                        .collect(),
+                    None,
+                ),
             };
 
             let mut elements = vec![
                 list.elements[0].clone(),
-                annotated_meta_map(list, expr, env, vg, subst, adt_reg),
+                annotated_meta_map_with_override(
+                    list,
+                    expr,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    fn_ty_override,
+                ),
             ];
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
@@ -980,10 +994,10 @@ fn annotate_fn_children(
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
-) -> Vec<deep::Expr> {
+) -> (Vec<deep::Expr>, Type) {
     let kids = children(list);
     if kids.is_empty() {
-        return vec![];
+        return (vec![], Type::Error);
     }
 
     let fn_ty = infer_expr_in_scope(
@@ -994,8 +1008,8 @@ fn annotate_fn_children(
         adt_reg,
     );
     let resolved_fn_ty = subst.apply(&fn_ty);
-    let param_types = match resolved_fn_ty {
-        Type::Fn(args, _) => args,
+    let param_types = match &resolved_fn_ty {
+        Type::Fn(args, _) => args.clone(),
         _ => Vec::new(),
     };
 
@@ -1014,7 +1028,7 @@ fn annotate_fn_children(
     if let Some(body) = kids.get(1) {
         result.push(annotate_expr_with_scope(body, &fn_env, vg, subst, adt_reg));
     }
-    result
+    (result, resolved_fn_ty)
 }
 
 fn annotate_let_children(
@@ -1122,13 +1136,14 @@ fn annotate_match_children(
     result
 }
 
-fn annotated_meta_map(
+fn annotated_meta_map_with_override(
     list: &deep::List,
     expr: &deep::Expr,
     env: &Env,
     vg: &VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    precomputed_ty: Option<Type>,
 ) -> deep::Expr {
     let meta_span = match list.elements.get(1) {
         Some(deep::Expr::Map(_, span)) => *span,
@@ -1138,17 +1153,26 @@ fn annotated_meta_map(
         .map(|meta| meta.entries.clone())
         .unwrap_or_default();
 
-    if let Some(tag) = get_tag(list)
-        && should_attach_type_metadata(tag)
-    {
-        let ty = infer_expr_in_scope(expr, env, vg, subst, adt_reg);
-        if !matches!(ty, Type::Error) {
-            let ty_expr = type_to_deep_expr(&ty);
-            if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
-                *existing = ty_expr;
-            } else {
-                entries.push(("type".to_string(), ty_expr));
+    let ty_for_meta = if let Some(tag) = get_tag(list) {
+        match (tag, precomputed_ty) {
+            ("fn", Some(ty)) => Some(ty),
+            (t, _) if should_attach_type_metadata(t) => {
+                Some(infer_expr_in_scope(expr, env, vg, subst, adt_reg))
             }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    if let Some(ty) = ty_for_meta
+        && !matches!(ty, Type::Error)
+    {
+        let ty_expr = type_to_deep_expr(&ty);
+        if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
+            *existing = ty_expr;
+        } else {
+            entries.push(("type".to_string(), ty_expr));
         }
     }
 
