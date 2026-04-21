@@ -638,7 +638,12 @@ fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<
     // every def lives under def_context="" and errors collapse).
     for expr in top_level_decl_items(exprs) {
         let def_name = match expr {
-            deep::Expr::List(list, _) if matches!(get_tag(list), Some("def") | Some("defsig")) => {
+            deep::Expr::List(list, _)
+                if matches!(
+                    get_tag(list),
+                    Some("def") | Some("defsig") | Some("deftype") | Some("typealias")
+                ) =>
+            {
                 children(list)
                     .first()
                     .and_then(symbol_name)
