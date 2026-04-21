@@ -655,6 +655,112 @@ theorem clausesTyped_store_weaken
               hb rest (ih_hb hs) (ih_rest hs)
 -/
 
+/-- Prefix a common outer context onto a typing derivation. This is the
+    named analogue of the DB-side tail-rebase step: the extra slots sit
+    outside every local binder introduced by the derivation, so the
+    constructor shape is preserved structurally. -/
+theorem hasType_prefix_weaken
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (outer : LinearCtx) :
+    HasType Delta Sigma (outer ++ Gamma) e t eps (outer ++ Gamma') := by
+  induction h using HasType.rec
+    (motive_2 := fun Δ_ S_ Γ2_ Γ3_ t_ εR_ cls_ _ =>
+      ClausesTyped Δ_ S_ (outer ++ Γ2_) (outer ++ Γ3_) t_ εR_ cls_) with
+  | var Δ_ S_ Γpre Γpost x tx =>
+      simpa [List.append_assoc] using
+        (HasType.var Δ_ S_ (outer ++ Γpre) Γpost x tx)
+  | unit Δ_ S_ Γ_ =>
+      simpa [List.append_assoc] using (HasType.unit Δ_ S_ (outer ++ Γ_))
+  | abs Δ_ S_ Γ1 Γ2 x t1 t2 eps_ body slot hbody ih =>
+      have ih' :
+          HasType Δ_ S_ ((outer ++ Γ1) ++ [(x, some t1)]) body t2 eps_
+            ((outer ++ Γ2) ++ [(x, slot)]) := by
+        simpa [List.append_assoc] using ih
+      exact HasType.abs Δ_ S_ (outer ++ Γ1) (outer ++ Γ2)
+        x t1 t2 eps_ body slot ih'
+  | app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 ih1 ih2 =>
+      exact HasType.app Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        e1 e2 t1 t2 eps_ eps1 eps2 ih1 ih2
+  | letBind Δ_ S_ Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot h1 h2 ih1 ih2 =>
+      have ih2' :
+          HasType Δ_ S_ ((outer ++ Γ2) ++ [(x, some t1)]) e2 t2 eps2
+            ((outer ++ Γ3) ++ [(x, slot)]) := by
+        simpa [List.append_assoc] using ih2
+      exact HasType.letBind Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        x e1 e2 t1 t2 eps1 eps2 slot ih1 ih2'
+  | copy Δ_ S_ Γ1 Γ2 e0 ds ep hbody ih =>
+      exact HasType.copy Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 ds ep ih
+  | letpair Δ_ S_ Γ1 Γ2 Γ3 x y e1 e2 t1 t2 tr eps1 eps2 slotX slotY
+      h1 h2 ih1 ih2 =>
+      have ih2' :
+          HasType Δ_ S_ ((outer ++ Γ2) ++ [(x, some t1), (y, some t2)]) e2 tr eps2
+            ((outer ++ Γ3) ++ [(x, slotX), (y, slotY)]) := by
+        simpa [List.append_assoc] using ih2
+      exact HasType.letpair Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        x y e1 e2 t1 t2 tr eps1 eps2 slotX slotY ih1 ih2'
+  | tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      exact HasType.tpair Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        e1 e2 t1 t2 eps1 eps2 ih1 ih2
+  | fst Δ_ S_ Γ1 Γ2 e0 t1 t2 ep hbody ih =>
+      exact HasType.fst Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 t1 t2 ep ih
+  | snd Δ_ S_ Γ1 Γ2 e0 t1 t2 ep hbody ih =>
+      exact HasType.snd Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 t1 t2 ep ih
+  | const Δ_ S_ Γ_ v ds =>
+      simpa [List.append_assoc] using (HasType.const Δ_ S_ (outer ++ Γ_) v ds)
+  | tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      exact HasType.tadd Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        e1 e2 ds eps1 eps2 ih1 ih2
+  | tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      exact HasType.tmul Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        e1 e2 ds eps1 eps2 ih1 ih2
+  | tsum Δ_ S_ Γ1 Γ2 e0 ds d ep hbody hmem ih =>
+      exact HasType.tsum Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 ds d ep ih hmem
+  | texpand Δ_ S_ Γ1 Γ2 e0 ds d ep hbody ih =>
+      exact HasType.texpand Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 ds d ep ih
+  | uniformLike Δ_ S_ Γ1 Γ2 e0 ds lo hi ep hbody ih =>
+      exact HasType.uniformLike Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) e0 ds lo hi ep ih
+  | perform Δ_ S_ Γ1 Γ2 op e0 tArg tRet ep hbody hM ih =>
+      exact HasType.perform Δ_ S_ (outer ++ Γ1) (outer ++ Γ2)
+        op e0 tArg tRet ep ih hM
+  | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses t_ epsH epsB hb hSubsH hClsH
+      hCover hcls ih_body ih_clauses =>
+      exact HasType.handle Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
+        body clauses t_ epsH epsB ih_body hSubsH hClsH hCover ih_clauses
+  | tgrad Δ_ S_ Γ_ x ds dsOut body ep slot hbody hsub_eff ih =>
+      have ih' :
+          HasType (Capability.diff :: Δ_) S_
+            ((outer ++ Γ_) ++ [(x, some (Typ.tensor ds))])
+            body (Typ.tensor dsOut) ep
+            ((outer ++ Γ_) ++ [(x, slot)]) := by
+        simpa [List.append_assoc] using ih
+      exact HasType.tgrad Δ_ S_ (outer ++ Γ_) x ds dsOut body ep slot ih' hsub_eff
+  | tvmap Δ_ S_ Γ_ x t1 t2 body ep d slot hbody ih =>
+      have ih' :
+          HasType Δ_ S_ ((outer ++ Γ_) ++ [(x, some t1)]) body t2 ep
+            ((outer ++ Γ_) ++ [(x, slot)]) := by
+        simpa [List.append_assoc] using ih
+      exact HasType.tvmap Δ_ S_ (outer ++ Γ_) x t1 t2 body ep d slot ih'
+  | loc Δ_ S_ Γ_ ell tv hlook =>
+      simpa [List.append_assoc] using (HasType.loc Δ_ S_ (outer ++ Γ_) ell tv hlook)
+  | subEff Δ_ S_ Γ_ Γ'' e0 tv eps0 eps1 hbody hSub ih =>
+      exact HasType.subEff Δ_ S_ (outer ++ Γ_) (outer ++ Γ'')
+        e0 tv eps0 eps1 ih hSub
+  | nil Δ_ S_ Γ2 t_ epsR_ =>
+      simpa [List.append_assoc] using (ClausesTyped.nil Δ_ S_ (outer ++ Γ2) t_ epsR_)
+  | cons Δ_ S_ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest slotX slotK
+      hmatch h_body h_rest ih_body ih_rest =>
+      have ih_body' :
+          HasType Δ_ S_
+            ((outer ++ Γ2) ++ [(x, some tArg), (k, some (Typ.arrow tRet t_ epsR_))])
+            hb t_ epsR_
+            ((outer ++ Γ3) ++ [(x, slotX), (k, slotK)]) := by
+        simpa [List.append_assoc] using ih_body
+      exact ClausesTyped.cons Δ_ S_ (outer ++ Γ2) (outer ++ Γ3)
+        t_ tArg tRet epsR_ op x k hb rest slotX slotK
+        hmatch ih_body' ih_rest
+
 /-- Plug-local app inversion: Preservation's sibling file Progress.lean
     depends on Preservation, so app_inv / letBind_inv / letpair_inv are
     defined there. We re-derive the shapes we need here under
