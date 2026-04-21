@@ -370,6 +370,33 @@ theorem storeTypLookup_extend_self
     storeTypLookup (storeTypExtend Sigma ell t) ell = some t := by
   simp [storeTypLookup, storeTypExtend]
 
+theorem storeTypLookup_remove_other
+    (Sigma : StoreTyp) (ellDead ell : Loc) (t : Typ)
+    (h : storeTypLookup Sigma ell = some t) (hne : ell ≠ ellDead) :
+    storeTypLookup (storeTypRemove Sigma ellDead) ell = some t := by
+  induction Sigma generalizing ell t with
+  | nil =>
+      simp [storeTypLookup, List.find?] at h
+  | cons hd tl ih =>
+      by_cases hhdDead : hd.1 = ellDead
+      · have htl : storeTypLookup tl ell = some t := by
+          have hhdNe : hd.1 ≠ ell := by
+            intro hEq
+            exact hne (by simpa [hhdDead] using hEq.symm)
+          simpa [storeTypLookup, List.find?, hhdNe] using h
+        simpa [storeTypRemove, hhdDead] using (ih ell t htl hne)
+      · by_cases hhdEll : hd.1 = ell
+        · have hty : hd.2 = t := by
+            simpa [storeTypLookup, List.find?, hhdEll] using h
+          subst t
+          have hne' : ell ≠ ellDead := hne
+          unfold storeTypLookup storeTypRemove
+          simp [List.find?, hhdEll, hne']
+        · have htl : storeTypLookup tl ell = some t := by
+            simpa [storeTypLookup, List.find?, hhdEll] using h
+          simpa [storeTypLookup, storeTypRemove, List.find?, hhdDead, hhdEll] using
+            (ih ell t htl hne)
+
 theorem storeTypLookup_mem_dom
     {Sigma : StoreTyp} {ell : Loc} {t : Typ}
     (h : storeTypLookup Sigma ell = some t) :
