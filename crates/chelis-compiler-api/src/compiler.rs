@@ -636,29 +636,58 @@ fn collect_checked_decl_names(
                 if lowered_names.is_some_and(|map| !map.get(name).copied().unwrap_or(false)) {
                     return;
                 }
-                extend_root_names(name, type_env.get(name), out);
+                let body = list.elements.get(3);
+                let ty = type_env.get(name).or_else(|| body.and_then(expr_type_metadata));
+                extend_root_names_from_value(name, ty, body, out);
             }
         }
         _ => {}
     }
 }
 
-fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
+fn extend_root_names_from_value(
+    name: &str,
+    ty: Option<&DeepExpr>,
+    value: Option<&DeepExpr>,
+    out: &mut Vec<String>,
+) {
     if let Some(DeepExpr::List(list, _)) = ty
         && let Some(tag) = list_tag(list)
     {
         if tag == "t-fn" {
-            extend_root_names(name, list.elements.last(), out);
+            extend_root_names_from_value(name, list.elements.last(), None, out);
             return;
         }
         if tag == "t-tuple" {
             for (index, child) in list.elements.iter().skip(2).enumerate() {
-                extend_root_names(&format!("{name}.{index}"), Some(child), out);
+                extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
             }
             return;
         }
     }
+    if let Some(DeepExpr::List(list, _)) = value
+        && list_tag(list) == Some("tuple")
+    {
+        for (index, child) in list.elements.iter().skip(2).enumerate() {
+            extend_root_names_from_value(&format!("{name}.{index}"), expr_type_metadata(child), Some(child), out);
+        }
+        return;
+    }
     out.push(name.to_string());
+}
+
+fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    match list.elements.get(1) {
+        Some(DeepExpr::Map(meta, _)) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }
 }
 
 fn list_tag(list: &chelis_deep::List) -> Option<&str> {

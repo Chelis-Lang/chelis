@@ -37,14 +37,17 @@ struct ConsumeSite {
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
     bindings: HashMap<String, Vec<BindingState>>,
+    types: HashMap<String, Vec<Option<Expr>>>,
 }
 
 impl LinearScope {
-    fn declare<S: Into<String>>(&mut self, name: S) {
+    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) {
+        let name = name.into();
         self.bindings
-            .entry(name.into())
+            .entry(name.clone())
             .or_default()
             .push(BindingState::Live);
+        self.types.entry(name).or_default().push(ty);
     }
 
     fn pop(&mut self, name: &str) {
@@ -54,10 +57,23 @@ impl LinearScope {
                 self.bindings.remove(name);
             }
         }
+        if let Some(stack) = self.types.get_mut(name) {
+            stack.pop();
+            if stack.is_empty() {
+                self.types.remove(name);
+            }
+        }
     }
 
     fn top(&self, name: &str) -> Option<&BindingState> {
         self.bindings.get(name).and_then(|stack| stack.last())
+    }
+
+    fn ty(&self, name: &str) -> Option<&Expr> {
+        self.types
+            .get(name)
+            .and_then(|stack| stack.last())
+            .and_then(|ty| ty.as_ref())
     }
 
     fn consume(&mut self, name: &str, site: ConsumeSite) {
@@ -76,12 +92,14 @@ impl LinearScope {
 struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
+    top_level_types: HashMap<String, Expr>,
 }
 
 pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
+        top_level_types: program.type_env().clone(),
     };
     let mut scope = LinearScope::default();
 
@@ -90,7 +108,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
             && get_tag(list) == Some("def")
             && let Some(name) = children(list).first().and_then(symbol_name)
         {
-            scope.declare(name);
+            scope.declare(name, program.type_env().get(name).cloned());
         }
     }
 
@@ -152,7 +170,7 @@ impl Checker {
 
     fn check_copy(&mut self, list: &List, scope: &mut LinearScope) {
         if let Some(child) = children(list).first() {
-            if is_var_expr(child) && expr_is_linear(child) {
+            if is_var_expr(child) && self.expr_is_linear(child, scope) {
                 self.read_var_expr(child, scope);
             } else {
                 self.check_expr(child, scope);
@@ -171,16 +189,16 @@ impl Checker {
                 self.check_borrow_arg(arg, borrowed, scope);
             } else if builtin_arg_is_observational(builtin, index - 1)
                 && is_var_expr(arg)
-                && expr_is_linear(arg)
+                && self.expr_is_linear(arg, scope)
             {
                 self.read_var_expr(arg, scope);
-            } else if is_var_expr(arg) && expr_is_linear(arg) {
+            } else if is_var_expr(arg) && self.expr_is_linear(arg, scope) {
                 self.consume_var_expr(arg, scope, app_site(expr, list));
             } else {
                 self.check_expr(arg, scope);
             }
         }
-        self.maybe_mark_reusable_app_input(expr, kids);
+        self.maybe_mark_reusable_app_input(expr, kids, scope);
     }
 
     fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
@@ -191,7 +209,7 @@ impl Checker {
             );
             return;
         }
-        if !expr_is_linear(inner) {
+        if !self.expr_is_linear(inner, scope) {
             self.invalid_borrow(
                 borrow_expr,
                 "borrowed arguments must be tensor or tensor-carrying values",
@@ -216,7 +234,7 @@ impl Checker {
                     continue;
                 };
                 let value = &bind_kids[index + 1];
-                if is_var_expr(value) && expr_is_linear(value) {
+                if is_var_expr(value) && self.expr_is_linear(value, scope) {
                     self.consume_var_expr(
                         value,
                         scope,
@@ -232,7 +250,7 @@ impl Checker {
                 } else {
                     self.check_expr(value, scope);
                 }
-                scope.declare(name);
+                scope.declare(name, self.expr_type(value, scope).cloned());
                 pushed.push(name.to_string());
                 index += 2;
             }
@@ -250,10 +268,10 @@ impl Checker {
         }
 
         let params = param_names(&kids[0]);
-        let captured = free_vars_with_linearity(&kids[1], &params);
+        let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
-        for (name, is_linear) in captured {
-            if is_linear {
+        for name in captured {
+            if outer_scope.ty(&name).is_some_and(type_expr_contains_tensor) {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(
                     &name,
@@ -261,14 +279,24 @@ impl Checker {
                         description: format!("closure capture at offset {}", expr.span().offset),
                     },
                 );
-                inner_scope.declare(name);
+                inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
             }
         }
 
         let mut pushed = Vec::new();
+        if let Some(params_list) = as_list(&kids[0]) {
+            for param in children(params_list) {
+                if let Some((name, ty)) = param_name_and_type(param) {
+                    inner_scope.declare(name, ty.cloned());
+                    pushed.push(name.to_string());
+                }
+            }
+        }
         for param in params {
-            inner_scope.declare(param.clone());
-            pushed.push(param);
+            if !pushed.iter().any(|p| p == &param) {
+                inner_scope.declare(param.clone(), None);
+                pushed.push(param);
+            }
         }
         self.check_expr(&kids[1], &mut inner_scope);
         for name in pushed.into_iter().rev() {
@@ -295,7 +323,7 @@ impl Checker {
         if kids.is_empty() {
             return;
         }
-        if is_var_expr(&kids[0]) && expr_is_linear(&kids[0]) {
+        if is_var_expr(&kids[0]) && self.expr_is_linear(&kids[0], scope) {
             self.consume_var_expr(
                 &kids[0],
                 scope,
@@ -323,7 +351,7 @@ impl Checker {
             let mut arm_scope = scope.clone();
             let pattern_names = pattern_names(&arm_kids[0]);
             for name in &pattern_names {
-                arm_scope.declare(name.clone());
+                arm_scope.declare(name.clone(), None);
             }
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
@@ -354,18 +382,22 @@ impl Checker {
         }
     }
 
-    fn maybe_mark_reusable_app_input(&mut self, expr: &Expr, kids: &[Expr]) {
-        if !expr_is_linear(expr) {
+    fn maybe_mark_reusable_app_input(&mut self, expr: &Expr, kids: &[Expr], scope: &LinearScope) {
+        if !self.expr_is_linear(expr, scope) {
             return;
         }
-        let Some(output_ty) = type_metadata(expr) else {
+        let Some(output_ty) = self.expr_type(expr, scope) else {
             return;
         };
         for (index, arg) in kids.iter().skip(1).enumerate() {
-            if borrow_inner(arg).is_some() || !is_var_expr(arg) || !expr_is_linear(arg) {
+            if borrow_inner(arg).is_some() || !is_var_expr(arg) || !self.expr_is_linear(arg, scope)
+            {
                 continue;
             }
-            if type_metadata(arg).is_some_and(|arg_ty| type_expr_eq(arg_ty, output_ty)) {
+            if self
+                .expr_type(arg, scope)
+                .is_some_and(|arg_ty| type_expr_eq(arg_ty, output_ty))
+            {
                 self.info.mark_reusable_input(expr.span(), index);
                 break;
             }
@@ -376,7 +408,7 @@ impl Checker {
         let Some(name) = var_name(expr) else {
             return;
         };
-        if !expr_is_linear(expr) {
+        if !self.expr_is_linear(expr, scope) {
             return;
         }
         match scope.top(name) {
@@ -403,7 +435,7 @@ impl Checker {
         let Some(name) = var_name(expr) else {
             return;
         };
-        if !expr_is_linear(expr) {
+        if !self.expr_is_linear(expr, scope) {
             return;
         }
         self.read_or_error(name, expr, scope);
@@ -434,6 +466,16 @@ impl Checker {
             with_macro_provenance(expr, format!("{message} (offset {})", expr.span().offset)),
             vec!["Use `&x` only as a direct function-call argument".to_string()],
         ));
+    }
+
+    fn expr_type<'a>(&'a self, expr: &'a Expr, scope: &'a LinearScope) -> Option<&'a Expr> {
+        type_metadata(expr).or_else(|| {
+            var_name(expr).and_then(|name| scope.ty(name).or_else(|| self.top_level_types.get(name)))
+        })
+    }
+
+    fn expr_is_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
+        self.expr_type(expr, scope).is_some_and(type_expr_contains_tensor)
     }
 }
 
@@ -485,6 +527,13 @@ fn children(list: &List) -> &[Expr] {
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn as_list(expr: &Expr) -> Option<&List> {
+    match expr {
+        Expr::List(list, _) => Some(list),
         _ => None,
     }
 }
@@ -567,17 +616,17 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
     }
 }
 
-fn free_vars_with_linearity(expr: &Expr, params: &[String]) -> HashMap<String, bool> {
+fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
     let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
-    let mut free = HashMap::new();
+    let mut free = HashSet::new();
     collect_free_vars(expr, &mut bound, &mut free);
-    free
+    free.into_iter().collect()
 }
 
 fn collect_free_vars(
     expr: &Expr,
     bound: &mut Vec<HashSet<String>>,
-    free: &mut HashMap<String, bool>,
+    free: &mut HashSet<String>,
 ) {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
@@ -587,10 +636,7 @@ fn collect_free_vars(
                 if let Some(name) = children(list).first().and_then(symbol_name)
                     && !bound.iter().rev().any(|scope| scope.contains(name))
                 {
-                    let is_linear = expr_is_linear(expr);
-                    free.entry(name.to_string())
-                        .and_modify(|existing| *existing |= is_linear)
-                        .or_insert(is_linear);
+                    free.insert(name.to_string());
                 }
             }
             Some("fn") => {
@@ -654,10 +700,6 @@ fn collect_free_vars(
     }
 }
 
-fn expr_is_linear(expr: &Expr) -> bool {
-    type_metadata(expr).is_some_and(type_expr_contains_tensor)
-}
-
 fn builtin_arg_is_observational(name: Option<&str>, arg_index: usize) -> bool {
     matches!(
         (name, arg_index),
@@ -677,6 +719,26 @@ fn type_metadata(expr: &Expr) -> Option<&Expr> {
             .iter()
             .find(|(key, _)| key == "type")
             .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
+    match param {
+        Expr::Atom(Atom::Symbol(name), _) => Some((name.as_str(), None)),
+        Expr::List(param_list, _) => Some((
+            param_list.elements.first().and_then(symbol_name)?,
+            get_meta(param_list)
+                .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
+                .map(|(_, value)| value),
+        )),
+        _ => None,
+    }
+}
+
+fn get_meta(list: &List) -> Option<&MetaMap> {
+    match list.elements.get(1) {
+        Some(Expr::Map(meta, _)) => Some(meta),
         _ => None,
     }
 }

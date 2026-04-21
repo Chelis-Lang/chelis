@@ -1142,7 +1142,7 @@ impl CEmitter {
         self.line(&format!("if (best_idx < 0 || v {cmp} best_val) {{"));
         self.indent += 1;
         self.line("best_val = v;");
-        self.line("best_idx = k;");
+        self.line("best_idx = __reduce_i;");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
