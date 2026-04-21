@@ -79,6 +79,41 @@ theorem HasType.value_eff_polymorphic
   | cons => exact True.intro
   | _ => intro _; cases hv
 
+/-- A value of type `unit` leaves the linear context unchanged. This is
+    the only shape needed by captured-handler preservation because the
+    current operation signatures all take `unit` arguments. -/
+theorem hasType_unit_value_preserves_context
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {v : Term} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma v Typ.unit eps Gamma')
+    (hv : IsValue v) :
+    Gamma' = Gamma := by
+  have hgen :
+      ∀ {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+        {v : Term} {t : Typ} {eps : EffectRow},
+        HasType Delta Sigma Gamma v t eps Gamma' →
+        t = Typ.unit → IsValue v → Gamma' = Gamma := by
+    intro Delta Sigma Gamma Gamma' v t eps h0
+    induction h0 using HasType.rec
+      (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+    | unit =>
+        intro _ _
+        rfl
+    | loc =>
+        intro _ _
+        rfl
+    | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+        intro hEq hv
+        exact ih hEq hv
+    | nil =>
+        exact True.intro
+    | cons =>
+        exact True.intro
+    | _ =>
+        intro hEq hv
+        cases hv <;> cases hEq
+  exact hgen h rfl hv
+
 -- (handleRet_value_preserves_typing moved below handle_inv)
 
 /-! ## HasType inversion lemmas
@@ -761,6 +796,28 @@ theorem hasType_prefix_weaken
         t_ tArg tRet epsR_ op x k hb rest slotX slotK
         hmatch ih_body' ih_rest
 
+theorem clausesTyped_prefix_weaken
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR clauses)
+    (outer : LinearCtx) :
+    ClausesTyped Delta Sigma (outer ++ Gamma2) (outer ++ Gamma3) t epsR clauses := by
+  induction clauses generalizing Gamma2 Gamma3 with
+  | nil =>
+      cases h
+      simpa [List.append_assoc] using
+        (ClausesTyped.nil Delta Sigma (outer ++ Gamma2) t epsR)
+  | cons cl rest ih =>
+      cases h with
+      | cons _ _ _ _ _ tArg tRet _ op x k hb rest slotX slotK hmatch hBody hRest =>
+          exact ClausesTyped.cons Delta Sigma (outer ++ Gamma2) (outer ++ Gamma3)
+            t tArg tRet epsR op x k hb rest slotX slotK hmatch
+            (by
+              simpa [List.append_assoc] using
+                hasType_prefix_weaken hBody outer)
+            (ih hRest)
+
 /-- Plug-local app inversion: Preservation's sibling file Progress.lean
     depends on Preservation, so app_inv / letBind_inv / letpair_inv are
     defined there. We re-derive the shapes we need here under
@@ -978,6 +1035,161 @@ theorem HasType.handle_inv_strong
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
+/-- Extract the typed hole term from a closed one-frame evaluation
+    context. The inner term may have a different type/effect row from
+    the whole plugged term, but because the outer derivation starts
+    from `[]`, every intermediate context exposed by inversion
+    collapses back to `[]`. -/
+theorem HasType.plug_inner_closed
+    {Sigma : StoreTyp} {E : EvalCtx} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType [] Sigma [] (plug E e) t eps []) :
+    ∃ t0 eps0, HasType [] Sigma [] e t0 eps0 [] := by
+  cases E with
+  | hole =>
+      exact ⟨t, eps, by simpa [plug] using h⟩
+  | fst =>
+      have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      exact ⟨Typ.pair t t2, eps, h_e⟩
+  | snd =>
+      have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      exact ⟨Typ.pair t1 t, eps, h_e⟩
+  | copy =>
+      have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
+      subst hteq
+      exact ⟨Typ.tensor ds, eps, h_e⟩
+  | sum d =>
+      have h' : HasType [] Sigma [] (Term.sum e d) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, _hmem, h_e⟩ := HasType.sum_inv h'
+      subst hteq
+      exact ⟨Typ.tensor ds, eps, h_e⟩
+  | expand d =>
+      have h' : HasType [] Sigma [] (Term.expand e d) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.expand_inv h'
+      subst hteq
+      exact ⟨Typ.tensor ds, eps, h_e⟩
+  | uniformLike lo hi =>
+      have h' : HasType [] Sigma [] (Term.uniformLike e lo hi) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, eps0, hteq, h_e, _hsub⟩ := HasType.uniformLike_inv h'
+      subst hteq
+      exact ⟨Typ.tensor ds, eps0, h_e⟩
+  | perform op =>
+      have h' : HasType [] Sigma [] (Term.perform op e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨tArg, eps0, h_e, _hmatch, _hsub⟩ := HasType.perform_inv h'
+      exact ⟨tArg, eps0, h_e⟩
+  | appL e2 =>
+      have h' : HasType [] Sigma [] (Term.app e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, epsBody, eps1, eps2, h_e1, _h_e2, _hsub⟩ :=
+        HasType.plug_app_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨Typ.arrow t1 t epsBody, eps1, h_e1⟩
+  | appR v1 =>
+      have h' : HasType [] Sigma [] (Term.app v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, _epsBody, _eps1, eps2, h_v1, h_e2, _hsub⟩ :=
+        HasType.plug_app_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_v1
+      subst hGammaMid
+      exact ⟨t1, eps2, h_e2⟩
+  | letBind x e2 =>
+      have h' : HasType [] Sigma [] (Term.letBind x e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, _Gamma3, t1, eps1, _eps2, _slot, h_e1, _h_e2, _hGammaOut, _hsub⟩ :=
+        HasType.plug_letBind_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨t1, eps1, h_e1⟩
+  | letpair x z e2 =>
+      have h' : HasType [] Sigma [] (Term.letpair x z e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, _Gamma3, t1, t2, eps1, _eps2, _slotX, _slotY,
+              h_e1, _h_e2, _hGammaOut, _hsub⟩ :=
+        HasType.plug_letpair_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨Typ.pair t1 t2, eps1, h_e1⟩
+  | pairL e2 =>
+      have h' : HasType [] Sigma [] (Term.pair e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, _t2, eps1, _eps2, _hteq, h_e1, _h_e2, _hsub⟩ :=
+        HasType.plug_pair_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨t1, eps1, h_e1⟩
+  | pairR v1 =>
+      have h' : HasType [] Sigma [] (Term.pair v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, _t1, t2, _eps1, eps2, _hteq, h_v1, h_e2, _hsub⟩ :=
+        HasType.plug_pair_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_v1
+      subst hGammaMid
+      exact ⟨t2, eps2, h_e2⟩
+  | addL e2 =>
+      have h' : HasType [] Sigma [] (Term.add e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, _eps2, _hteq, h_e1, _h_e2, _hsub⟩ :=
+        HasType.plug_add_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨Typ.tensor ds, eps1, h_e1⟩
+  | addR v1 =>
+      have h' : HasType [] Sigma [] (Term.add v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, _eps1, eps2, _hteq, h_v1, h_e2, _hsub⟩ :=
+        HasType.plug_add_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_v1
+      subst hGammaMid
+      exact ⟨Typ.tensor ds, eps2, h_e2⟩
+  | mulL e2 =>
+      have h' : HasType [] Sigma [] (Term.mul e e2) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, _eps2, _hteq, h_e1, _h_e2, _hsub⟩ :=
+        HasType.plug_mul_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_e1
+      subst hGammaMid
+      exact ⟨Typ.tensor ds, eps1, h_e1⟩
+  | mulR v1 =>
+      have h' : HasType [] Sigma [] (Term.mul v1 e) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, _eps1, eps2, _hteq, h_v1, h_e2, _hsub⟩ :=
+        HasType.plug_mul_inv h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_v1
+      subst hGammaMid
+      exact ⟨Typ.tensor ds, eps2, h_e2⟩
+  | handle epsH clauses =>
+      have h' : HasType [] Sigma [] (Term.handle epsH e clauses) t eps [] := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, epsB, h_body, _hHsubB, _hClIn, _hClCov, _hcls, _hsub⟩ :=
+        HasType.handle_inv_strong h'
+      have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input h_body
+      subst hGammaMid
+      exact ⟨t, epsB, h_body⟩
+
+/-- Multi-frame variant of `HasType.plug_inner_closed`. -/
+theorem HasType.multiPlug_inner_closed
+    {Sigma : StoreTyp} {Es : EvalCtxChain} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType [] Sigma [] (multiPlug Es e) t eps []) :
+    ∃ t0 eps0, HasType [] Sigma [] e t0 eps0 [] := by
+  induction Es generalizing Sigma t eps with
+  | nil =>
+      exact ⟨t, eps, by simpa [multiPlug] using h⟩
+  | cons E Es ih =>
+      have h' : HasType [] Sigma [] (plug E (multiPlug Es e)) t eps [] := by
+        simpa [multiPlug] using h
+      rcases HasType.plug_inner_closed h' with ⟨t0, eps0, h_inner⟩
+      exact ih h_inner
+
 theorem plug_preserves_typing
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
@@ -1176,6 +1388,390 @@ theorem multiPlug_preserves_typing
       refine plug_preserves_typing h' ?_
       intro Gamma0 Gamma0' t0 eps0 h_inner'
       exact ih h_inner' h_inner
+
+/-- Base replacement for the captured-continuation proof: under any
+    surrounding linear context, `perform op v` can be replaced by a
+    fresh variable of the operation's return type, consuming exactly
+    that fresh slot and preserving all pre-existing slots. -/
+theorem perform_to_var_preserves_typing_prefixed
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' outer : LinearCtx}
+    {op : EffectLabel} {v : Term} {t tRet : Typ}
+    {eps : EffectRow} {y : String}
+    (h : HasType Delta Sigma Gamma (Term.perform op v) t eps Gamma')
+    (hv : IsValue v)
+    (hsig : ∃ tArg, OpSigMatch op tArg tRet) :
+    HasType Delta Sigma ((outer ++ [(y, some tRet)]) ++ Gamma)
+      (Term.var y) t eps
+      ((outer ++ [(y, none)]) ++ Gamma') := by
+  obtain ⟨tArg, eps0, h_v, hmatch, hsub_eps⟩ := HasType.perform_inv h
+  have hArgUnit : tArg = Typ.unit := by
+    cases op <;> simpa [OpSigMatch, opArgType] using hmatch.1
+  subst hArgUnit
+  have hGamma : Gamma' = Gamma := hasType_unit_value_preserves_context h_v hv
+  subst hGamma
+  obtain ⟨tArgStep, hStepSig⟩ := hsig
+  have hRet : t = tRet := OpSigMatch.ret_unique hmatch hStepSig
+  subst hRet
+  have hVar0 :
+      HasType Delta Sigma ((outer ++ [(y, some t)]) ++ Gamma')
+        (Term.var y) t []
+        ((outer ++ [(y, none)]) ++ Gamma') := by
+    simpa [List.append_assoc] using
+      (HasType.var Delta Sigma outer Gamma' y t)
+  exact HasType.subEff Delta Sigma
+    (((outer ++ [(y, some t)]) ++ Gamma'))
+    (((outer ++ [(y, none)]) ++ Gamma'))
+    (Term.var y) t [] eps hVar0
+    (by
+      intro op' hop'
+      cases hop')
+
+/-- One-frame context transport for the captured-continuation proof.
+    The replacement theorem `h_inner` may change the hole's input and
+    output contexts by prefixing a live fresh slot on input and the
+    corresponding consumed slot on output. -/
+theorem plug_replace_with_prefixed_hole
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' outer : LinearCtx}
+    {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
+    {y : String} {ty : Typ}
+    (h : HasType Delta Sigma Gamma (plug E e) t eps Gamma')
+    (h_inner :
+      ∀ {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow},
+        HasType Delta Sigma Gamma0 e t0 eps0 Gamma0' →
+        HasType Delta Sigma ((outer ++ [(y, some ty)]) ++ Gamma0)
+          e' t0 eps0
+          ((outer ++ [(y, none)]) ++ Gamma0')) :
+    HasType Delta Sigma ((outer ++ [(y, some ty)]) ++ Gamma)
+      (plug E e') t eps
+      ((outer ++ [(y, none)]) ++ Gamma') := by
+  cases E with
+  | hole =>
+      simpa [plug] using h_inner h
+  | fst =>
+      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      exact HasType.fst Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        e' t t2 eps (h_inner h_e)
+  | snd =>
+      have h' : HasType Delta Sigma Gamma (Term.snd e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      exact HasType.snd Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        e' t1 t eps (h_inner h_e)
+  | copy =>
+      have h' : HasType Delta Sigma Gamma (Term.copy e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
+      subst hteq
+      exact HasType.copy Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        e' ds eps (h_inner h_e)
+  | sum d =>
+      have h' : HasType Delta Sigma Gamma (Term.sum e d) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, hmem, h_e⟩ := HasType.sum_inv h'
+      subst hteq
+      exact HasType.tsum Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        e' ds d eps (h_inner h_e) hmem
+  | expand d =>
+      have h' : HasType Delta Sigma Gamma (Term.expand e d) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, hteq, h_e⟩ := HasType.expand_inv h'
+      subst hteq
+      exact HasType.texpand Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        e' ds d eps (h_inner h_e)
+  | uniformLike lo hi =>
+      have h' : HasType Delta Sigma Gamma (Term.uniformLike e lo hi) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, eps0, hteq, h_e, hsub_eps⟩ := HasType.uniformLike_inv h'
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.uniformLike e' lo hi) (Typ.tensor ds)
+        (EffectRow.union eps0 [EffectLabel.random]) eps
+        (HasType.uniformLike Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' ds lo hi eps0 (h_inner h_e))
+        hsub_eps
+  | perform op =>
+      have h' : HasType Delta Sigma Gamma (Term.perform op e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨tArg, eps0, h_e, hmatch, hsub_eps⟩ := HasType.perform_inv h'
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.perform op e') t
+        (EffectRow.union [op] eps0) eps
+        (HasType.perform Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          op e' tArg t eps0 (h_inner h_e) hmatch)
+        hsub_eps
+  | appL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.app e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, epsBody, eps1, eps2, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.app e' e2) t
+        (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
+        (HasType.app Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' e2 t1 t epsBody eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | appR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.app v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, epsBody, eps1, eps2, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_app_inv h'
+      have h_v1' := hasType_prefix_weaken h_v1 (outer ++ [(y, some ty)])
+      have h_e2' := h_inner h_e2
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.app v1 e') t
+        (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
+        (HasType.app Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, some ty)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          v1 e' t1 t epsBody eps1 eps2 h_v1' h_e2')
+        hsub_eps
+  | letBind x e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.letBind x e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, Gamma3, t1, eps1, eps2, slot, h_e1, h_e2, hGammaOut, hsub_eps⟩ :=
+        HasType.plug_letBind_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      subst Gamma'
+      have h_e2'' :
+          HasType Delta Sigma
+            (((outer ++ [(y, none)]) ++ GammaMid) ++ [(x, some t1)])
+            e2 t eps2
+            (((outer ++ [(y, none)]) ++ Gamma3) ++ [(x, slot)]) := by
+        simpa [List.append_assoc] using h_e2'
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma3))
+        (Term.letBind x e' e2) t
+        (EffectRow.union eps1 eps2) eps
+        (HasType.letBind Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma3))
+          x e' e2 t1 t eps1 eps2 slot h_e1' h_e2'')
+        hsub_eps
+  | letpair x z e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.letpair x z e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, Gamma3, t1, t2, eps1, eps2, slotX, slotY,
+              h_e1, h_e2, hGammaOut, hsub_eps⟩ :=
+        HasType.plug_letpair_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      subst Gamma'
+      have h_e2'' :
+          HasType Delta Sigma
+            (((outer ++ [(y, none)]) ++ GammaMid) ++ [(x, some t1), (z, some t2)])
+            e2 t eps2
+            (((outer ++ [(y, none)]) ++ Gamma3) ++ [(x, slotX), (z, slotY)]) := by
+        simpa [List.append_assoc] using h_e2'
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma3))
+        (Term.letpair x z e' e2) t
+        (EffectRow.union eps1 eps2) eps
+        (HasType.letpair Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma3))
+          x z e' e2 t1 t2 t eps1 eps2 slotX slotY h_e1' h_e2'')
+        hsub_eps
+  | pairL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.pair e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, t2, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.pair e' e2) (Typ.pair t1 t2)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tpair Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' e2 t1 t2 eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | pairR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.pair v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, t1, t2, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_pair_inv h'
+      have h_v1' := hasType_prefix_weaken h_v1 (outer ++ [(y, some ty)])
+      have h_e2' := h_inner h_e2
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.pair v1 e') (Typ.pair t1 t2)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tpair Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, some ty)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          v1 e' t1 t2 eps1 eps2 h_v1' h_e2')
+        hsub_eps
+  | addL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.add e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.add e' e2) (Typ.tensor ds)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tadd Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | addR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.add v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_add_inv h'
+      have h_v1' := hasType_prefix_weaken h_v1 (outer ++ [(y, some ty)])
+      have h_e2' := h_inner h_e2
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.add v1 e') (Typ.tensor ds)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tadd Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, some ty)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          v1 e' ds eps1 eps2 h_v1' h_e2')
+        hsub_eps
+  | mulL e2 =>
+      have h' : HasType Delta Sigma Gamma (Term.mul e e2) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, eps2, hteq, h_e1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      have h_e1' := h_inner h_e1
+      have h_e2' := hasType_prefix_weaken h_e2 (outer ++ [(y, none)])
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.mul e' e2) (Typ.tensor ds)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tmul Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' e2 ds eps1 eps2 h_e1' h_e2')
+        hsub_eps
+  | mulR v1 =>
+      have h' : HasType Delta Sigma Gamma (Term.mul v1 e) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨ds, GammaMid, eps1, eps2, hteq, h_v1, h_e2, hsub_eps⟩ :=
+        HasType.plug_mul_inv h'
+      have h_v1' := hasType_prefix_weaken h_v1 (outer ++ [(y, some ty)])
+      have h_e2' := h_inner h_e2
+      subst hteq
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.mul v1 e') (Typ.tensor ds)
+        (EffectRow.union eps1 eps2) eps
+        (HasType.tmul Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, some ty)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          v1 e' ds eps1 eps2 h_v1' h_e2')
+        hsub_eps
+  | handle epsH clauses =>
+      have h' : HasType Delta Sigma Gamma (Term.handle epsH e clauses) t eps Gamma' := by
+        simpa [plug] using h
+      obtain ⟨GammaMid, epsB, h_body, hHsubB, hClIn, hClCov, hcls, hsub_eps⟩ :=
+        HasType.handle_inv_strong h'
+      have h_body' := h_inner h_body
+      have hcls' :=
+        clausesTyped_prefix_weaken hcls (outer ++ [(y, none)])
+      exact HasType.subEff Delta Sigma
+        (((outer ++ [(y, some ty)]) ++ Gamma))
+        (((outer ++ [(y, none)]) ++ Gamma'))
+        (Term.handle epsH e' clauses) t
+        (EffectRow.removeOps epsB epsH) eps
+        (HasType.handle Delta Sigma
+          (((outer ++ [(y, some ty)]) ++ Gamma))
+          (((outer ++ [(y, none)]) ++ GammaMid))
+          (((outer ++ [(y, none)]) ++ Gamma'))
+          e' clauses t epsH epsB h_body' hHsubB hClIn hClCov hcls')
+        hsub_eps
+
+/-- Multi-frame version of `plug_replace_with_prefixed_hole`. -/
+theorem multiPlug_replace_with_prefixed_hole
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' outer : LinearCtx}
+    {Es : EvalCtxChain} {e e' : Term} {t : Typ} {eps : EffectRow}
+    {y : String} {ty : Typ}
+    (h : HasType Delta Sigma Gamma (multiPlug Es e) t eps Gamma')
+    (h_inner :
+      ∀ {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow},
+        HasType Delta Sigma Gamma0 e t0 eps0 Gamma0' →
+        HasType Delta Sigma ((outer ++ [(y, some ty)]) ++ Gamma0)
+          e' t0 eps0
+          ((outer ++ [(y, none)]) ++ Gamma0')) :
+    HasType Delta Sigma ((outer ++ [(y, some ty)]) ++ Gamma)
+      (multiPlug Es e') t eps
+      ((outer ++ [(y, none)]) ++ Gamma') := by
+  revert Gamma Gamma' t eps h
+  induction Es with
+  | nil =>
+      intro Gamma Gamma' t eps h
+      simpa [multiPlug] using h_inner h
+  | cons E Es ih =>
+      intro Gamma Gamma' t eps h
+      have h' : HasType Delta Sigma Gamma (plug E (multiPlug Es e)) t eps Gamma' := by
+        simpa [multiPlug] using h
+      simpa [multiPlug] using
+        plug_replace_with_prefixed_hole h'
+          (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
+               (h_inner' : HasType Delta Sigma Gamma0 (multiPlug Es e) t0 eps0 Gamma0') =>
+            ih (Gamma := Gamma0) (Gamma' := Gamma0') (t := t0) (eps := eps0) h_inner')
 
 /-- Closed-program specialization of `plug_preserves_typing`.
     This is the form needed by top-level preservation: when the whole
@@ -1668,9 +2264,221 @@ theorem preservation
       refine ⟨Sigma, ?_, h_wf⟩
       exact preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope
   | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      rcases HasType.handle_inv_strong_bridge h_typ with
+        ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
+      have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
+      subst hGammaBody
+      rcases HasType.plug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
+      rcases HasType.perform_inv_bridge hPerform with
+        ⟨tArgV, epsV, hV, hPerfSig, _hSubPerf⟩
+      rcases ClausesTyped.mem_inv hClauses hmem with
+        ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
+      obtain ⟨tArgStep, hStepSig⟩ := hsig
+      have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
+      have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
+      subst tArgClause
+      subst tRetClause
+      have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+      have hVNil : HasType [] Sigma [] v tArgV [] [] := by
+        exact HasType.value_eff_polymorphic hV hv []
+      rcases wellScoped_handle_clause h_scope hmem with
+        ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+      let y := capturedContName (Term.handle epsH (plug E (Term.perform op v)) clauses)
+      rcases capturedContName_fresh_selected_clause
+          (epsH := epsH) (body := plug E (Term.perform op v))
+          (clauses := clauses) (op := op) (x := xVar) (k := kVar) (hb := hb) hmem with
+        ⟨_hyx, _hyk, _hyFreshHb⟩
+      have hPlugVar :
+          HasType [] Sigma [(y, some tRet)]
+            (plug E (Term.var y)) t epsB
+            [(y, none)] := by
+        simpa [List.append_assoc] using
+          (plug_replace_with_prefixed_hole
+            (Gamma := []) (Gamma' := []) (outer := [])
+            (E := E) (e := Term.perform op v) (e' := Term.var y)
+            (t := t) (eps := epsB) (y := y) (ty := tRet)
+            hPlugPerform
+            (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
+                 (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
+              perform_to_var_preserves_typing_prefixed
+                (outer := []) (tRet := tRet) (y := y) h_inner hv
+                ⟨tArgStep, hStepSig⟩))
+      have hClausesY :
+          ClausesTyped [] Sigma [(y, none)] [(y, none)]
+            t (EffectRow.removeOps epsB epsH) clauses := by
+        simpa [List.append_assoc] using
+          clausesTyped_prefix_weaken hClauses [(y, none)]
+      have hHandleY :
+          HasType [] Sigma [(y, some tRet)]
+            (Term.handle epsH (plug E (Term.var y)) clauses)
+            t (EffectRow.removeOps epsB epsH)
+            [(y, none)] := by
+        exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
+          (plug E (Term.var y)) clauses t epsH epsB
+          hPlugVar hHsubB hClIn hClCov
+          hClausesY
+      have hK0 :
+          HasType [] Sigma []
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses))
+            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
+        exact HasType.abs [] Sigma [] []
+          y tRet t (EffectRow.removeOps epsB epsH)
+          (Term.handle epsH (plug E (Term.var y)) clauses) none hHandleY
+      have hK :
+          HasType [] Sigma [(xVar, some tArgV)]
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses))
+            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
+            [(xVar, some tArgV)] := by
+        simpa [y] using
+          (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
+      have hKClosed :
+          Closed
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses)) :=
+        has_type_closed_term_of_closed_input hK0
+      rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
+          kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+          (EffectRow.removeOps epsB epsH) hb
+          (Term.abs y tRet
+            (Term.handle epsH (plug E (Term.var y)) clauses))
+          hBody hK hKClosed with
+        ⟨GammaAfterK, hAfterK⟩
+      rcases subst_preserves_typing [] Sigma [] GammaAfterK
+          xVar tArgV t (EffectRow.removeOps epsB epsH)
+          (subst hb
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
+          v
+          hAfterK hVNil hClosedV with
+        ⟨GammaFinal, hFinal⟩
+      have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
+      subst hGammaFinal
+      have hswap :
+          subst (subst hb v xVar)
+              (Term.abs y tRet
+                (Term.handle epsH (plug E (Term.var y)) clauses)) kVar =
+            subst
+              (subst hb
+                (Term.abs y tRet
+                  (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
+              v xVar := by
+        exact subst_commute_closed hb v
+          (Term.abs y tRet
+            (Term.handle epsH (plug E (Term.var y)) clauses))
+          xVar kVar hxk hClosedV hKClosed
+      simpa [y, hswap] using
+        (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub)
   | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
-      sorry
+      refine ⟨Sigma, ?_, h_wf⟩
+      rcases HasType.handle_inv_strong_bridge h_typ with
+        ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
+      have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
+      subst hGammaBody
+      rcases HasType.multiPlug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
+      rcases HasType.perform_inv_bridge hPerform with
+        ⟨tArgV, epsV, hV, hPerfSig, _hSubPerf⟩
+      rcases ClausesTyped.mem_inv hClauses hmem with
+        ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
+      obtain ⟨tArgStep, hStepSig⟩ := hsig
+      have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
+      have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
+      subst tArgClause
+      subst tRetClause
+      have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+      have hVNil : HasType [] Sigma [] v tArgV [] [] := by
+        exact HasType.value_eff_polymorphic hV hv []
+      rcases wellScoped_handle_clause h_scope hmem with
+        ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+      let y := capturedContName (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)
+      rcases capturedContName_fresh_selected_clause
+          (epsH := epsH) (body := multiPlug Es (Term.perform op v))
+          (clauses := clauses) (op := op) (x := xVar) (k := kVar) (hb := hb) hmem with
+        ⟨_hyx, _hyk, _hyFreshHb⟩
+      have hPlugVar :
+          HasType [] Sigma [(y, some tRet)]
+            (multiPlug Es (Term.var y)) t epsB
+            [(y, none)] := by
+        simpa [List.append_assoc] using
+          (multiPlug_replace_with_prefixed_hole
+            (Gamma := []) (Gamma' := []) (outer := [])
+            (Es := Es) (e := Term.perform op v) (e' := Term.var y)
+            (t := t) (eps := epsB) (y := y) (ty := tRet)
+            hPlugPerform
+            (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
+                 (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
+              perform_to_var_preserves_typing_prefixed
+                (outer := []) (tRet := tRet) (y := y) h_inner hv
+                ⟨tArgStep, hStepSig⟩))
+      have hClausesY :
+          ClausesTyped [] Sigma [(y, none)] [(y, none)]
+            t (EffectRow.removeOps epsB epsH) clauses := by
+        simpa [List.append_assoc] using
+          clausesTyped_prefix_weaken hClauses [(y, none)]
+      have hHandleY :
+          HasType [] Sigma [(y, some tRet)]
+            (Term.handle epsH (multiPlug Es (Term.var y)) clauses)
+            t (EffectRow.removeOps epsB epsH)
+            [(y, none)] := by
+        exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
+          (multiPlug Es (Term.var y)) clauses t epsH epsB
+          hPlugVar hHsubB hClIn hClCov
+          hClausesY
+      have hK0 :
+          HasType [] Sigma []
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
+        exact HasType.abs [] Sigma [] []
+          y tRet t (EffectRow.removeOps epsB epsH)
+          (Term.handle epsH (multiPlug Es (Term.var y)) clauses) none hHandleY
+      have hK :
+          HasType [] Sigma [(xVar, some tArgV)]
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
+            [(xVar, some tArgV)] := by
+        simpa [y] using
+          (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
+      have hKClosed :
+          Closed
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) :=
+        has_type_closed_term_of_closed_input hK0
+      rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
+          kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+          (EffectRow.removeOps epsB epsH) hb
+          (Term.abs y tRet
+            (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+          hBody hK hKClosed with
+        ⟨GammaAfterK, hAfterK⟩
+      rcases subst_preserves_typing [] Sigma [] GammaAfterK
+          xVar tArgV t (EffectRow.removeOps epsB epsH)
+          (subst hb
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
+          v
+          hAfterK hVNil hClosedV with
+        ⟨GammaFinal, hFinal⟩
+      have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
+      subst hGammaFinal
+      have hswap :
+          subst (subst hb v xVar)
+              (Term.abs y tRet
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar =
+            subst
+              (subst hb
+                (Term.abs y tRet
+                  (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
+              v xVar := by
+        exact subst_commute_closed hb v
+          (Term.abs y tRet
+            (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+          xVar kVar hxk hClosedV hKClosed
+      simpa [y, hswap] using
+        (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub)
   | tgrad s x tv tOut body =>
       sorry
   | tvmap s x tv body d =>
