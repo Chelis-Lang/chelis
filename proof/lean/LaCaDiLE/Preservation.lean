@@ -2437,75 +2437,78 @@ theorem plug_preserves_typing_closed
           hb' hHsubB hClIn hClCov hcls')
         hsub_eps
 
-/-- Closed-program context transport that only assumes store-typing
-    agreement on the frame's untouched runtime locations. This is the
-    theorem shape needed by the strengthened `ctx` preservation proof:
-    sibling subterms never inspect the whole pre-step store typing, only
-    the explicit `Term.loc`s stored in the surrounding frame. -/
+/-- Closed-program context transport that carries exactly the
+    frame-local store agreement needed by `ctx`, plus the post-step
+    store well-formedness witness for the chosen `Sigma2`. The extra
+    `locs` parameter lets recursive `ctx` steps thread outer-frame
+    location agreement through nested plugs. -/
 theorem plug_preserves_typing_closed_on_ctxLocRefs
-    {Sigma : StoreTyp}
+    {Sigma : StoreTyp} {sigma2 : Store} {locs : List Loc}
     {E : EvalCtx} {e e' : Term} {t : Typ} {eps : EffectRow}
     (h : HasType [] Sigma [] (plug E e) t eps [])
     (h_inner : ∀ {t0 : Typ} {eps0 : EffectRow},
        HasType [] Sigma [] e t0 eps0 [] →
        ∃ Sigma2, HasType [] Sigma2 [] e' t0 eps0 [] ∧
-                 StoreTypOn (ctxLocRefs E) Sigma Sigma2) :
-    ∃ Sigma2, HasType [] Sigma2 [] (plug E e') t eps [] := by
+                 StoreWf sigma2 Sigma2 ∧
+                 StoreTypOn (ctxLocRefs E ++ locs) Sigma Sigma2) :
+    ∃ Sigma2, HasType [] Sigma2 [] (plug E e') t eps [] ∧
+              StoreWf sigma2 Sigma2 ∧
+              StoreTypOn (ctxLocRefs E ++ locs) Sigma Sigma2 := by
   cases E with
   | hole =>
-      rcases h_inner h with ⟨Sigma2, h_e', _h_on⟩
-      simpa [plug] using ⟨Sigma2, h_e'⟩
+      rcases h_inner h with ⟨Sigma2, h_e', h_wf2, h_on⟩
+      simpa [plug] using ⟨Sigma2, h_e', h_wf2, h_on⟩
   | fst =>
       have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
         simpa [plug] using h
       obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
-      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t t2 eps h_e'⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
+      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t t2 eps h_e', h_wf2, h_on⟩
   | snd =>
       have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
         simpa [plug] using h
       obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
-      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' t1 t eps h_e'⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
+      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' t1 t eps h_e', h_wf2, h_on⟩
   | copy =>
       have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
         simpa [plug] using h
       obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
       subst hteq
-      exact ⟨Sigma2, HasType.copy [] Sigma2 [] [] e' ds eps h_e'⟩
+      exact ⟨Sigma2, HasType.copy [] Sigma2 [] [] e' ds eps h_e', h_wf2, h_on⟩
   | sum d =>
       have h' : HasType [] Sigma [] (Term.sum e d) t eps [] := by
         simpa [plug] using h
       obtain ⟨ds, hteq, hmem, h_e⟩ := HasType.sum_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
       subst hteq
-      exact ⟨Sigma2, HasType.tsum [] Sigma2 [] [] e' ds d eps h_e' hmem⟩
+      exact ⟨Sigma2, HasType.tsum [] Sigma2 [] [] e' ds d eps h_e' hmem, h_wf2, h_on⟩
   | expand d =>
       have h' : HasType [] Sigma [] (Term.expand e d) t eps [] := by
         simpa [plug] using h
       obtain ⟨ds, hteq, h_e⟩ := HasType.expand_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
       subst hteq
-      exact ⟨Sigma2, HasType.texpand [] Sigma2 [] [] e' ds d eps h_e'⟩
+      exact ⟨Sigma2, HasType.texpand [] Sigma2 [] [] e' ds d eps h_e', h_wf2, h_on⟩
   | uniformLike lo hi =>
       have h' : HasType [] Sigma [] (Term.uniformLike e lo hi) t eps [] := by
         simpa [plug] using h
       obtain ⟨ds, eps0, hteq, h_e, hsub_eps⟩ := HasType.uniformLike_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
-        (Term.uniformLike e' lo hi) (Typ.tensor ds)
-        (EffectRow.union eps0 [EffectLabel.random]) eps
-        (HasType.uniformLike [] Sigma2 [] [] e' ds lo hi eps0 h_e')
-        hsub_eps
+          (Term.uniformLike e' lo hi) (Typ.tensor ds)
+          (EffectRow.union eps0 [EffectLabel.random]) eps
+          (HasType.uniformLike [] Sigma2 [] [] e' ds lo hi eps0 h_e')
+          hsub_eps
   | perform op =>
       have h' : HasType [] Sigma [] (Term.perform op e) t eps [] := by
         simpa [plug] using h
       obtain ⟨tArg, eps0, h_e, hmatch, hsub_eps⟩ := HasType.perform_inv h'
-      rcases h_inner h_e with ⟨Sigma2, h_e', _h_on⟩
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.perform op e') t (EffectRow.union [op] eps0) eps
         (HasType.perform [] Sigma2 [] [] op e' tArg t eps0 h_e' hmatch)
@@ -2517,9 +2520,10 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_app_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.appL e2)) (locs2 := locs) h_on)
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.app e' e2) t
         (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
@@ -2532,9 +2536,10 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_app_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
-      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_wf2, h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.appR v1)) (locs2 := locs) h_on)
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.app v1 e') t
         (EffectRow.union (EffectRow.union eps1 eps2) epsBody) eps
@@ -2547,10 +2552,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_pair_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.pairL e2)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.pair e' e2) (Typ.pair t1 t2) (EffectRow.union eps1 eps2) eps
         (HasType.tpair [] Sigma2 [] [] [] e' e2 t1 t2 eps1 eps2 h_e1' h_e2')
@@ -2562,10 +2568,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_pair_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
-      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_wf2, h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.pairR v1)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.pair v1 e') (Typ.pair t1 t2) (EffectRow.union eps1 eps2) eps
         (HasType.tpair [] Sigma2 [] [] [] v1 e' t1 t2 eps1 eps2 h_e1' h_e2')
@@ -2577,10 +2584,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_add_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.addL e2)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.add e' e2) (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
         (HasType.tadd [] Sigma2 [] [] [] e' e2 ds eps1 eps2 h_e1' h_e2')
@@ -2592,10 +2600,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_add_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
-      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_wf2, h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.addR v1)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.add v1 e') (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
         (HasType.tadd [] Sigma2 [] [] [] v1 e' ds eps1 eps2 h_e1' h_e2')
@@ -2607,10 +2616,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_mul_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.mulL e2)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.mul e' e2) (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
         (HasType.tmul [] Sigma2 [] [] [] e' e2 ds eps1 eps2 h_e1' h_e2')
@@ -2622,10 +2632,11 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.plug_mul_inv h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input h_e1
       subst hΓmid
-      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_on⟩
-      have h_e1' := hasType_store_weaken_on_locRefs h_e1 (by simpa [ctxLocRefs] using h_on)
+      rcases h_inner h_e2 with ⟨Sigma2, h_e2', h_wf2, h_on⟩
+      have h_e1' := hasType_store_weaken_on_locRefs h_e1
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.mulR v1)) (locs2 := locs) h_on)
       subst hteq
-      refine ⟨Sigma2, ?_⟩
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.mul v1 e') (Typ.tensor ds) (EffectRow.union eps1 eps2) eps
         (HasType.tmul [] Sigma2 [] [] [] v1 e' ds eps1 eps2 h_e1' h_e2')
@@ -2639,9 +2650,10 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
       have hΓ3 : Γ3 = [] := by simpa using hΓout.symm
       subst hΓmid
       subst hΓ3
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.letBind x e2)) (locs2 := locs) h_on)
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.letBind x e' e2) t (EffectRow.union eps1 eps2) eps
         (HasType.letBind [] Sigma2 [] [] [] x e' e2 t1 t eps1 eps2 slot h_e1' h_e2')
@@ -2656,9 +2668,10 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
       have hΓ3 : Γ3 = [] := by simpa using hΓout.symm
       subst hΓmid
       subst hΓ3
-      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_on⟩
-      have h_e2' := hasType_store_weaken_on_locRefs h_e2 (by simpa [ctxLocRefs] using h_on)
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner h_e1 with ⟨Sigma2, h_e1', h_wf2, h_on⟩
+      have h_e2' := hasType_store_weaken_on_locRefs h_e2
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.letpair x y e2)) (locs2 := locs) h_on)
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.letpair x y e' e2) t (EffectRow.union eps1 eps2) eps
         (HasType.letpair [] Sigma2 [] [] [] x y e' e2 t1 t2 t eps1 eps2
@@ -2671,9 +2684,10 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
         HasType.handle_inv_strong h'
       have hΓmid : Γmid = [] := has_type_closed_output_of_closed_input hb
       subst hΓmid
-      rcases h_inner hb with ⟨Sigma2, hb', h_on⟩
-      have hcls' := clausesTyped_store_weaken_on_locRefs hcls (by simpa [ctxLocRefs] using h_on)
-      refine ⟨Sigma2, ?_⟩
+      rcases h_inner hb with ⟨Sigma2, hb', h_wf2, h_on⟩
+      have hcls' := clausesTyped_store_weaken_on_locRefs hcls
+        (by simpa [ctxLocRefs] using StoreTypOn.append_left (locs1 := ctxLocRefs (EvalCtx.handle epsH clauses)) (locs2 := locs) h_on)
+      refine ⟨Sigma2, ?_, h_wf2, h_on⟩
       exact HasType.subEff [] Sigma2 [] []
         (Term.handle epsH e' clauses) t (EffectRow.removeOps epsB epsH) eps
         (HasType.handle [] Sigma2 [] [] [] e' clauses t epsH epsB
@@ -2818,62 +2832,67 @@ theorem wellScoped_plug_inner
   · exact wellScoped_handle_body h
   · simpa [plug] using h
 
-/-- Preservation: if a configuration is well-typed and steps, the
-    resulting configuration has the same type (under a possibly-extended
-    store typing) and preserves store well-formedness.
-
-    Current in-scope open cases are the agreed calculus-level blockers
-    plus the generic `ctx` congruence case. `ctx` is blocked at theorem
-    shape: `plug_preserves_typing_closed` rebuilds sibling subterms via
-    `StoreTypSub Sigma Sigma2`, but inner preservation currently returns
-    only a post-step `Sigma2` plus `StoreWf`, and store-consuming steps
-    do not satisfy global monotonic extension. Closing `ctx` needs a
-    weaker frame-local store-agreement invariant, not more local proof
-    search in this theorem. -/
-theorem preservation
-    (sigma sigma' : Store) (Sigma : StoreTyp)
-    (e e' : Term) (t : Typ) (eps : EffectRow)
-    (h_typ : HasType [] Sigma [] e t eps [])
-    (h_scope : WellScoped e)
-    (h_wf : StoreWf sigma Sigma)
-    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
-    ∃ Sigma',
-      HasType [] Sigma' [] e' t eps [] ∧ StoreWf sigma' Sigma' := by
-  cases h_step with
+/-- Step-indexed preservation with the runtime-linearity and frame-local
+    store-agreement invariants made explicit. `locs` tracks the
+    locations mentioned by any outer frame surrounding the current redex;
+    the theorem returns store typing agreement on exactly those
+    untouched locations. -/
+private theorem preservation_aux
+    (Sigma : StoreTyp)
+    (c1 c2 : Config)
+    (h_wf : StoreWf c1.store Sigma)
+    (h_step : Step c1 c2) :
+    ∀ {locs : List Loc},
+      LocRefsSeparated locs (locRefs c1.term) →
+      RuntimeLinear c1.term →
+      ∀ {t : Typ} {eps : EffectRow},
+        HasType [] Sigma [] c1.term t eps [] →
+        WellScoped c1.term →
+        ∃ Sigma',
+          HasType [] Sigma' [] c2.term t eps [] ∧
+          StoreWf c2.store Sigma' ∧
+          StoreTypOn locs Sigma Sigma' := by
+  induction h_step with
   | beta s x tv body v hv =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_beta_via_db h_typ hv h_scope
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, preservation_beta_via_db h_typ hv h_scope, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | letBind s x v body hv =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_letBind_via_db h_typ hv h_scope
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, preservation_letBind_via_db h_typ hv h_scope, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | letpair s x y v1 v2 body hv1 hv2 =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_letpair_via_db h_typ hv1 hv2 h_scope
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, preservation_letpair_via_db h_typ hv1 hv2 h_scope, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | fst s v1 v2 hv1 hv2 =>
+      intro locs _hsep _hlinear t eps h_typ _h_scope
       obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
       obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
       have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
       subst hmid
-      refine ⟨Sigma, ?_, h_wf⟩
       have hsub1 : SubEffRow eps1 eps :=
         SubEffRow.trans (SubEffRow.union_left eps1 eps2) hsub
-      exact HasType.subEff [] Sigma [] [] _ t eps1 eps h1 hsub1
+      exact ⟨Sigma, HasType.subEff [] Sigma [] [] _ t eps1 eps h1 hsub1, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | snd s v1 v2 hv1 hv2 =>
+      intro locs _hsep _hlinear t eps h_typ _h_scope
       obtain ⟨t1, h_pair⟩ := HasType.snd_inv h_typ
       obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
       have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
       subst hmid
-      refine ⟨Sigma, ?_, h_wf⟩
       have hsub2 : SubEffRow eps2 eps := by
         intro op hop
         apply hsub
         by_cases hop1 : op ∈ eps1
         · simp [EffectRow.union, hop1]
         · simp [EffectRow.union, hop, hop1]
-      exact HasType.subEff [] Sigma [] [] _ t eps2 eps h2 hsub2
+      exact ⟨Sigma, HasType.subEff [] Sigma [] [] _ t eps2 eps h2 hsub2, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | tconst s v ds ell hell =>
+      intro locs _hsep _hlinear t eps h_typ _h_scope
       obtain ⟨ht, _hG⟩ := HasType.const_inv h_typ
-      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_, ?_⟩
+      refine ⟨storeTypExtend Sigma ell (Typ.tensor ds), ?_, ?_, ?_⟩
       · subst ht
         have hlook := storeTypLookup_extend_self Sigma ell (Typ.tensor ds)
         have h_loc : HasType [] (storeTypExtend Sigma ell (Typ.tensor ds))
@@ -2882,10 +2901,18 @@ theorem preservation
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_loc hsub
       · exact StoreWf.extend_fresh ell ⟨ds, v⟩ (Typ.tensor ds) h_wf
+      · intro ell' t' hmem hlook
+        have hLive : (storeLookup s ell').isSome :=
+          StoreWf.lookup_isSome_of_typing h_wf hlook
+        have hne : ell' ≠ ell := by
+          intro hEq
+          exact (storeFreshLoc_ne s ell' hLive) (by rw [hEq, hell])
+        exact storeTypLookup_extend_other Sigma ell' ell t' (Typ.tensor ds) hlook hne
   | copy s ell ellNew w hlook hfresh =>
+      intro locs _hsep _hlinear t eps h_typ _h_scope
       obtain ⟨ds, htEq, h_e⟩ := HasType.copy_inv h_typ
       obtain ⟨hlookT, _hGE⟩ := HasType.loc_inv h_e
-      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor ds), ?_, ?_⟩
+      refine ⟨storeTypExtend Sigma ellNew (Typ.tensor ds), ?_, ?_, ?_⟩
       · subst htEq
         have hlookSelf := storeTypLookup_extend_self Sigma ellNew (Typ.tensor ds)
         have hlookEll :
@@ -2911,13 +2938,19 @@ theorem preservation
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_pair hsub
       · exact StoreWf.extend_fresh ellNew w (Typ.tensor ds) h_wf
+      · intro ell' t' hmem hlookTy
+        have hLive : (storeLookup s ell').isSome :=
+          StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hne : ell' ≠ ellNew := by
+          intro hEq
+          exact (storeFreshLoc_ne s ell' hLive) (by rw [hEq, hfresh])
+        exact storeTypLookup_extend_other Sigma ell' ellNew t' (Typ.tensor ds) hlookTy hne
   | tadd s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
-      obtain ⟨hLook1, hG1⟩ := HasType.loc_inv h_e1
-      obtain ⟨hLook2, hG2⟩ := HasType.loc_inv h_e2
+      intro locs hsep _hlinear t eps h_typ _h_scope
+      obtain ⟨ds, _Γmid, _eps1, _eps2, htEq, h_e1, h_e2⟩ := HasType.add_inv h_typ
       refine ⟨storeTypExtend
                 (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-                ellOut (Typ.tensor ds), ?_, ?_⟩
+                ellOut (Typ.tensor ds), ?_, ?_, ?_⟩
       · subst htEq
         have hlookNew := storeTypLookup_extend_self
           (storeTypRemove (storeTypRemove Sigma ell1) ell2)
@@ -2931,13 +2964,30 @@ theorem preservation
         have h_wf2 := StoreWf.remove ell2 h_wf1
         exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
           (Typ.tensor ds) h_wf2
+      · intro ell t' hmem hlook
+        have hne1 : ell ≠ ell1 := by
+          intro hEq
+          subst hEq
+          exact hsep ell hmem (by simp [locRefs])
+        have hne2 : ell ≠ ell2 := by
+          intro hEq
+          subst hEq
+          exact hsep ell hmem (by simp [locRefs])
+        have hlook1 := storeTypLookup_remove_other Sigma ell1 ell t' hlook hne1
+        have hlook2 := storeTypLookup_remove_other (storeTypRemove Sigma ell1) ell2 ell t' hlook1 hne2
+        have hLive : (storeLookup s ell).isSome := StoreWf.lookup_isSome_of_typing h_wf hlook
+        have hneOut : ell ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ell ellOut t' (Typ.tensor ds) hlook2 hneOut
   | tmul s ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
-      obtain ⟨ds, Γmid, eps1, eps2, htEq, h_e1, h_e2⟩ := HasType.mul_inv h_typ
-      obtain ⟨hLook1, _hG1⟩ := HasType.loc_inv h_e1
-      obtain ⟨hLook2, _hG2⟩ := HasType.loc_inv h_e2
+      intro locs hsep _hlinear t eps h_typ _h_scope
+      obtain ⟨ds, _Γmid, _eps1, _eps2, htEq, h_e1, h_e2⟩ := HasType.mul_inv h_typ
       refine ⟨storeTypExtend
                 (storeTypRemove (storeTypRemove Sigma ell1) ell2)
-                ellOut (Typ.tensor ds), ?_, ?_⟩
+                ellOut (Typ.tensor ds), ?_, ?_, ?_⟩
       · subst htEq
         have hlookNew := storeTypLookup_extend_self
           (storeTypRemove (storeTypRemove Sigma ell1) ell2)
@@ -2951,11 +3001,29 @@ theorem preservation
         have h_wf2 := StoreWf.remove ell2 h_wf1
         exact StoreWf.extend_fresh ellOut (tensorOpPlaceholder w1 w2)
           (Typ.tensor ds) h_wf2
+      · intro ell t' hmem hlook
+        have hne1 : ell ≠ ell1 := by
+          intro hEq
+          subst hEq
+          exact hsep ell hmem (by simp [locRefs])
+        have hne2 : ell ≠ ell2 := by
+          intro hEq
+          subst hEq
+          exact hsep ell hmem (by simp [locRefs])
+        have hlook1 := storeTypLookup_remove_other Sigma ell1 ell t' hlook hne1
+        have hlook2 := storeTypLookup_remove_other (storeTypRemove Sigma ell1) ell2 ell t' hlook1 hne2
+        have hLive : (storeLookup s ell).isSome := StoreWf.lookup_isSome_of_typing h_wf hlook
+        have hneOut : ell ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove (storeTypRemove Sigma ell1) ell2)
+          ell ellOut t' (Typ.tensor ds) hlook2 hneOut
   | tsum s ell ellOut w d hlook hfresh =>
+      intro locs hsep _hlinear t eps h_typ _h_scope
       obtain ⟨ds, htEq, _hmem, h_loc_e⟩ := HasType.sum_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (rem ds d)), ?_, ?_⟩
+                (Typ.tensor (rem ds d)), ?_, ?_, ?_⟩
       · subst htEq
         have hlookNew : storeTypLookup (storeTypExtend
                           (storeTypRemove Sigma ell) ellOut
@@ -2967,17 +3035,30 @@ theorem preservation
           HasType.loc _ _ _ ellOut (Typ.tensor (rem ds d)) hlookNew
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+      · have h_isSome : (storeLookup s ell).isSome := by rw [hlook]; rfl
         have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+          rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
         exact StoreWf.remove_extend ell ellOut
           { shape := rem w.shape d, data := w.data }
           (Typ.tensor (rem ds d)) h_wf hfresh hne
+      · intro ell' t' hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t' hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t' (Typ.tensor (rem ds d))
+          hlookRem hneOut
   | texpand s ell ellOut w d hlook hfresh =>
-      obtain ⟨ds, htEq, h_loc_e⟩ := HasType.expand_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
+      intro locs hsep _hlinear t eps h_typ _h_scope
+      obtain ⟨ds, htEq, _h_loc_e⟩ := HasType.expand_inv h_typ
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor (ins ds d)), ?_, ?_⟩
+                (Typ.tensor (ins ds d)), ?_, ?_, ?_⟩
       · subst htEq
         have hlookNew := storeTypLookup_extend_self
           (storeTypRemove Sigma ell) ellOut (Typ.tensor (ins ds d))
@@ -2986,17 +3067,30 @@ theorem preservation
           HasType.loc _ _ _ ellOut (Typ.tensor (ins ds d)) hlookNew
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+      · have h_isSome : (storeLookup s ell).isSome := by rw [hlook]; rfl
         have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+          rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
         exact StoreWf.remove_extend ell ellOut
           { shape := ins w.shape d, data := w.data }
           (Typ.tensor (ins ds d)) h_wf hfresh hne
+      · intro ell' t' hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t' hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t' (Typ.tensor (ins ds d))
+          hlookRem hneOut
   | tuniformLike s ell ellOut w lo hi hlook hfresh =>
-      obtain ⟨ds, eps0, htEq, h_loc_e, _hsub⟩ := HasType.uniformLike_inv h_typ
-      obtain ⟨hLook, _hGE⟩ := HasType.loc_inv h_loc_e
+      intro locs hsep _hlinear t eps h_typ _h_scope
+      obtain ⟨ds, _eps0, htEq, _h_loc_e, _hsub⟩ := HasType.uniformLike_inv h_typ
       refine ⟨storeTypExtend (storeTypRemove Sigma ell) ellOut
-                (Typ.tensor ds), ?_, ?_⟩
+                (Typ.tensor ds), ?_, ?_, ?_⟩
       · subst htEq
         have hlookNew := storeTypLookup_extend_self
           (storeTypRemove Sigma ell) ellOut (Typ.tensor ds)
@@ -3005,249 +3099,291 @@ theorem preservation
           HasType.loc _ _ _ ellOut (Typ.tensor ds) hlookNew
         have hsub : SubEffRow [] eps := fun _ h => by cases h
         exact HasType.subEff _ _ _ _ _ _ [] eps h_locOut hsub
-      · have h_isSome : (storeLookup sigma ell).isSome := by rw [hlook]; rfl
+      · have h_isSome : (storeLookup s ell).isSome := by rw [hlook]; rfl
         have hne : ell ≠ ellOut := by
-          rw [hfresh]; exact storeFreshLoc_ne sigma ell h_isSome
+          rw [hfresh]; exact storeFreshLoc_ne s ell h_isSome
         exact StoreWf.remove_extend ell ellOut
           { shape := w.shape, data := lo }
           (Typ.tensor ds) h_wf hfresh hne
+      · intro ell' t' hmem hlookTy
+        have hneIn : ell' ≠ ell := by
+          intro hEq
+          subst hEq
+          exact hsep ell' hmem (by simp [locRefs])
+        have hlookRem := storeTypLookup_remove_other Sigma ell ell' t' hlookTy hneIn
+        have hLive : (storeLookup s ell').isSome := StoreWf.lookup_isSome_of_typing h_wf hlookTy
+        have hneOut : ell' ≠ ellOut := by
+          rw [hfresh]
+          exact storeFreshLoc_ne s ell' hLive
+        exact storeTypLookup_extend_other
+          (storeTypRemove Sigma ell) ell' ellOut t' (Typ.tensor ds)
+          hlookRem hneOut
   | handleRet s epsH v clauses hv =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact handleRet_value_preserves_typing hv h_typ
+      intro locs _hsep _hlinear t eps h_typ _h_scope
+      exact ⟨Sigma, handleRet_value_preserves_typing hv h_typ, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | handleOpDirect s op v epsH clauses x k hb tRet hv hsig hmem =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      exact preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, preservation_handleOpDirect_via_db h_typ hv hsig hmem h_scope, h_wf,
+        fun _ _ _ hlook => hlook⟩
   | handleOpCtx s op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      rcases HasType.handle_inv_strong_bridge h_typ with
-        ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
-      have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
-      subst hGammaBody
-      rcases HasType.plug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
-      rcases HasType.perform_inv_bridge hPerform with
-        ⟨tArgV, epsV, hV, hPerfSig, _hSubPerf⟩
-      rcases ClausesTyped.mem_inv hClauses hmem with
-        ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
-      obtain ⟨tArgStep, hStepSig⟩ := hsig
-      have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
-      have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
-      subst tArgClause
-      subst tRetClause
-      have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
-      have hVNil : HasType [] Sigma [] v tArgV [] [] := by
-        exact HasType.value_eff_polymorphic hV hv []
-      rcases wellScoped_handle_clause h_scope hmem with
-        ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
-      let y := capturedContName (Term.handle epsH (plug E (Term.perform op v)) clauses)
-      rcases capturedContName_fresh_selected_clause
-          (epsH := epsH) (body := plug E (Term.perform op v))
-          (clauses := clauses) (op := op) (x := xVar) (k := kVar) (hb := hb) hmem with
-        ⟨_hyx, _hyk, _hyFreshHb⟩
-      have hPlugVar :
-          HasType [] Sigma [(y, some tRet)]
-            (plug E (Term.var y)) t epsB
-            [(y, none)] := by
-        simpa [List.append_assoc] using
-          (plug_replace_with_prefixed_hole
-            (Gamma := []) (Gamma' := []) (outer := [])
-            (E := E) (e := Term.perform op v) (e' := Term.var y)
-            (t := t) (eps := epsB) (y := y) (ty := tRet)
-            hPlugPerform
-            (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
-                 (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
-              perform_to_var_preserves_typing_prefixed
-                (outer := []) (tRet := tRet) (y := y) h_inner hv
-                ⟨tArgStep, hStepSig⟩))
-      have hClausesY :
-          ClausesTyped [] Sigma [(y, none)] [(y, none)]
-            t (EffectRow.removeOps epsB epsH) clauses := by
-        simpa [List.append_assoc] using
-          clausesTyped_prefix_weaken hClauses [(y, none)]
-      have hHandleY :
-          HasType [] Sigma [(y, some tRet)]
-            (Term.handle epsH (plug E (Term.var y)) clauses)
-            t (EffectRow.removeOps epsB epsH)
-            [(y, none)] := by
-        exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
-          (plug E (Term.var y)) clauses t epsH epsB
-          hPlugVar hHsubB hClIn hClCov
-          hClausesY
-      have hK0 :
-          HasType [] Sigma []
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses))
-            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
-        exact HasType.abs [] Sigma [] []
-          y tRet t (EffectRow.removeOps epsB epsH)
-          (Term.handle epsH (plug E (Term.var y)) clauses) none hHandleY
-      have hK :
-          HasType [] Sigma [(xVar, some tArgV)]
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses))
-            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
-            [(xVar, some tArgV)] := by
-        simpa [y] using
-          (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
-      have hKClosed :
-          Closed
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses)) :=
-        has_type_closed_term_of_closed_input hK0
-      rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
-          kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
-          (EffectRow.removeOps epsB epsH) hb
-          (Term.abs y tRet
-            (Term.handle epsH (plug E (Term.var y)) clauses))
-          hBody hK hKClosed with
-        ⟨GammaAfterK, hAfterK⟩
-      rcases subst_preserves_typing [] Sigma [] GammaAfterK
-          xVar tArgV t (EffectRow.removeOps epsB epsH)
-          (subst hb
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
-          v
-          hAfterK hVNil hClosedV with
-        ⟨GammaFinal, hFinal⟩
-      have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
-      subst hGammaFinal
-      have hswap :
-          subst (subst hb v xVar)
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, by
+        rcases HasType.handle_inv_strong_bridge h_typ with
+          ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
+        have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
+        subst hGammaBody
+        rcases HasType.plug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
+        rcases HasType.perform_inv_bridge hPerform with
+          ⟨tArgV, _epsV, hV, hPerfSig, _hSubPerf⟩
+        rcases ClausesTyped.mem_inv hClauses hmem with
+          ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
+        obtain ⟨tArgStep, hStepSig⟩ := hsig
+        have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
+        have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
+        subst tArgClause
+        subst tRetClause
+        have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+        have hVNil : HasType [] Sigma [] v tArgV [] [] := by
+          exact HasType.value_eff_polymorphic hV hv []
+        rcases wellScoped_handle_clause h_scope hmem with
+          ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+        let y := capturedContName (Term.handle epsH (plug E (Term.perform op v)) clauses)
+        have hPlugVar :
+            HasType [] Sigma [(y, some tRet)]
+              (plug E (Term.var y)) t epsB
+              [(y, none)] := by
+          simpa [List.append_assoc] using
+            (plug_replace_with_prefixed_hole
+              (Gamma := []) (Gamma' := []) (outer := [])
+              (E := E) (e := Term.perform op v) (e' := Term.var y)
+              (t := t) (eps := epsB) (y := y) (ty := tRet)
+              hPlugPerform
+              (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
+                   (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
+                perform_to_var_preserves_typing_prefixed
+                  (outer := []) (tRet := tRet) (y := y) h_inner hv
+                  ⟨tArgStep, hStepSig⟩))
+        have hClausesY :
+            ClausesTyped [] Sigma [(y, none)] [(y, none)]
+              t (EffectRow.removeOps epsB epsH) clauses := by
+          simpa [List.append_assoc] using
+            clausesTyped_prefix_weaken hClauses [(y, none)]
+        have hHandleY :
+            HasType [] Sigma [(y, some tRet)]
+              (Term.handle epsH (plug E (Term.var y)) clauses)
+              t (EffectRow.removeOps epsB epsH)
+              [(y, none)] := by
+          exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
+            (plug E (Term.var y)) clauses t epsH epsB
+            hPlugVar hHsubB hClIn hClCov
+            hClausesY
+        have hK0 :
+            HasType [] Sigma []
               (Term.abs y tRet
-                (Term.handle epsH (plug E (Term.var y)) clauses)) kVar =
-            subst
-              (subst hb
+                (Term.handle epsH (plug E (Term.var y)) clauses))
+              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
+          exact HasType.abs [] Sigma [] []
+            y tRet t (EffectRow.removeOps epsB epsH)
+            (Term.handle epsH (plug E (Term.var y)) clauses) none hHandleY
+        have hK :
+            HasType [] Sigma [(xVar, some tArgV)]
+              (Term.abs y tRet
+                (Term.handle epsH (plug E (Term.var y)) clauses))
+              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
+              [(xVar, some tArgV)] := by
+          simpa [y] using
+            (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
+        have hKClosed :
+            Closed
+              (Term.abs y tRet
+                (Term.handle epsH (plug E (Term.var y)) clauses)) :=
+          has_type_closed_term_of_closed_input hK0
+        rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
+            kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+            (EffectRow.removeOps epsB epsH) hb
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses))
+            hBody hK hKClosed with
+          ⟨GammaAfterK, hAfterK⟩
+        rcases subst_preserves_typing [] Sigma [] GammaAfterK
+            xVar tArgV t (EffectRow.removeOps epsB epsH)
+            (subst hb
+              (Term.abs y tRet
+                (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
+            v
+            hAfterK hVNil hClosedV with
+          ⟨GammaFinal, hFinal⟩
+        have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
+        subst hGammaFinal
+        have hswap :
+            subst (subst hb v xVar)
                 (Term.abs y tRet
-                  (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
-              v xVar := by
-        exact subst_commute_closed hb v
-          (Term.abs y tRet
-            (Term.handle epsH (plug E (Term.var y)) clauses))
-          xVar kVar hxk hClosedV hKClosed
-      simpa [y, hswap] using
-        (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub)
+                  (Term.handle epsH (plug E (Term.var y)) clauses)) kVar =
+              subst
+                (subst hb
+                  (Term.abs y tRet
+                    (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
+                v xVar := by
+          exact subst_commute_closed hb v
+            (Term.abs y tRet
+              (Term.handle epsH (plug E (Term.var y)) clauses))
+            xVar kVar hxk hClosedV hKClosed
+        simpa [y, hswap] using
+          (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub),
+        h_wf, fun _ _ _ hlook => hlook⟩
   | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
-      refine ⟨Sigma, ?_, h_wf⟩
-      rcases HasType.handle_inv_strong_bridge h_typ with
-        ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
-      have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
-      subst hGammaBody
-      rcases HasType.multiPlug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
-      rcases HasType.perform_inv_bridge hPerform with
-        ⟨tArgV, epsV, hV, hPerfSig, _hSubPerf⟩
-      rcases ClausesTyped.mem_inv hClauses hmem with
-        ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
-      obtain ⟨tArgStep, hStepSig⟩ := hsig
-      have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
-      have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
-      subst tArgClause
-      subst tRetClause
-      have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
-      have hVNil : HasType [] Sigma [] v tArgV [] [] := by
-        exact HasType.value_eff_polymorphic hV hv []
-      rcases wellScoped_handle_clause h_scope hmem with
-        ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
-      let y := capturedContName (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)
-      rcases capturedContName_fresh_selected_clause
-          (epsH := epsH) (body := multiPlug Es (Term.perform op v))
-          (clauses := clauses) (op := op) (x := xVar) (k := kVar) (hb := hb) hmem with
-        ⟨_hyx, _hyk, _hyFreshHb⟩
-      have hPlugVar :
-          HasType [] Sigma [(y, some tRet)]
-            (multiPlug Es (Term.var y)) t epsB
-            [(y, none)] := by
-        simpa [List.append_assoc] using
-          (multiPlug_replace_with_prefixed_hole
-            (Gamma := []) (Gamma' := []) (outer := [])
-            (Es := Es) (e := Term.perform op v) (e' := Term.var y)
-            (t := t) (eps := epsB) (y := y) (ty := tRet)
-            hPlugPerform
-            (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
-                 (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
-              perform_to_var_preserves_typing_prefixed
-                (outer := []) (tRet := tRet) (y := y) h_inner hv
-                ⟨tArgStep, hStepSig⟩))
-      have hClausesY :
-          ClausesTyped [] Sigma [(y, none)] [(y, none)]
-            t (EffectRow.removeOps epsB epsH) clauses := by
-        simpa [List.append_assoc] using
-          clausesTyped_prefix_weaken hClauses [(y, none)]
-      have hHandleY :
-          HasType [] Sigma [(y, some tRet)]
-            (Term.handle epsH (multiPlug Es (Term.var y)) clauses)
-            t (EffectRow.removeOps epsB epsH)
-            [(y, none)] := by
-        exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
-          (multiPlug Es (Term.var y)) clauses t epsH epsB
-          hPlugVar hHsubB hClIn hClCov
-          hClausesY
-      have hK0 :
-          HasType [] Sigma []
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
-        exact HasType.abs [] Sigma [] []
-          y tRet t (EffectRow.removeOps epsB epsH)
-          (Term.handle epsH (multiPlug Es (Term.var y)) clauses) none hHandleY
-      have hK :
-          HasType [] Sigma [(xVar, some tArgV)]
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-            (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
-            [(xVar, some tArgV)] := by
-        simpa [y] using
-          (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
-      have hKClosed :
-          Closed
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) :=
-        has_type_closed_term_of_closed_input hK0
-      rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
-          kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
-          (EffectRow.removeOps epsB epsH) hb
-          (Term.abs y tRet
-            (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-          hBody hK hKClosed with
-        ⟨GammaAfterK, hAfterK⟩
-      rcases subst_preserves_typing [] Sigma [] GammaAfterK
-          xVar tArgV t (EffectRow.removeOps epsB epsH)
-          (subst hb
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
-          v
-          hAfterK hVNil hClosedV with
-        ⟨GammaFinal, hFinal⟩
-      have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
-      subst hGammaFinal
-      have hswap :
-          subst (subst hb v xVar)
+      intro locs _hsep _hlinear t eps h_typ h_scope
+      exact ⟨Sigma, by
+        rcases HasType.handle_inv_strong_bridge h_typ with
+          ⟨GammaBody, epsB, hPlugPerform, hHsubB, hClIn, hClCov, hClauses, hSub⟩
+        have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPlugPerform
+        subst hGammaBody
+        rcases HasType.multiPlug_inner_closed hPlugPerform with ⟨_tPerf, _epsPerf, hPerform⟩
+        rcases HasType.perform_inv_bridge hPerform with
+          ⟨tArgV, _epsV, hV, hPerfSig, _hSubPerf⟩
+        rcases ClausesTyped.mem_inv hClauses hmem with
+          ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
+        obtain ⟨tArgStep, hStepSig⟩ := hsig
+        have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
+        have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
+        subst tArgClause
+        subst tRetClause
+        have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+        have hVNil : HasType [] Sigma [] v tArgV [] [] := by
+          exact HasType.value_eff_polymorphic hV hv []
+        rcases wellScoped_handle_clause h_scope hmem with
+          ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+        let y := capturedContName (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)
+        have hPlugVar :
+            HasType [] Sigma [(y, some tRet)]
+              (multiPlug Es (Term.var y)) t epsB
+              [(y, none)] := by
+          simpa [List.append_assoc] using
+            (multiPlug_replace_with_prefixed_hole
+              (Gamma := []) (Gamma' := []) (outer := [])
+              (Es := Es) (e := Term.perform op v) (e' := Term.var y)
+              (t := t) (eps := epsB) (y := y) (ty := tRet)
+              hPlugPerform
+              (fun {Gamma0 Gamma0' : LinearCtx} {t0 : Typ} {eps0 : EffectRow}
+                   (h_inner : HasType [] Sigma Gamma0 (Term.perform op v) t0 eps0 Gamma0') =>
+                perform_to_var_preserves_typing_prefixed
+                  (outer := []) (tRet := tRet) (y := y) h_inner hv
+                  ⟨tArgStep, hStepSig⟩))
+        have hClausesY :
+            ClausesTyped [] Sigma [(y, none)] [(y, none)]
+              t (EffectRow.removeOps epsB epsH) clauses := by
+          simpa [List.append_assoc] using
+            clausesTyped_prefix_weaken hClauses [(y, none)]
+        have hHandleY :
+            HasType [] Sigma [(y, some tRet)]
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses)
+              t (EffectRow.removeOps epsB epsH)
+              [(y, none)] := by
+          exact HasType.handle [] Sigma [(y, some tRet)] [(y, none)] [(y, none)]
+            (multiPlug Es (Term.var y)) clauses t epsH epsB
+            hPlugVar hHsubB hClIn hClCov
+            hClausesY
+        have hK0 :
+            HasType [] Sigma []
               (Term.abs y tRet
-                (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar =
-            subst
-              (subst hb
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) [] [] := by
+          exact HasType.abs [] Sigma [] []
+            y tRet t (EffectRow.removeOps epsB epsH)
+            (Term.handle epsH (multiPlug Es (Term.var y)) clauses) none hHandleY
+        have hK :
+            HasType [] Sigma [(xVar, some tArgV)]
+              (Term.abs y tRet
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
+              [(xVar, some tArgV)] := by
+          simpa [y] using
+            (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
+        have hKClosed :
+            Closed
+              (Term.abs y tRet
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) :=
+          has_type_closed_term_of_closed_input hK0
+        rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
+            kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+            (EffectRow.removeOps epsB epsH) hb
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+            hBody hK hKClosed with
+          ⟨GammaAfterK, hAfterK⟩
+        rcases subst_preserves_typing [] Sigma [] GammaAfterK
+            xVar tArgV t (EffectRow.removeOps epsB epsH)
+            (subst hb
+              (Term.abs y tRet
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
+            v
+            hAfterK hVNil hClosedV with
+          ⟨GammaFinal, hFinal⟩
+        have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
+        subst hGammaFinal
+        have hswap :
+            subst (subst hb v xVar)
                 (Term.abs y tRet
-                  (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
-              v xVar := by
-        exact subst_commute_closed hb v
-          (Term.abs y tRet
-            (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-          xVar kVar hxk hClosedV hKClosed
-      simpa [y, hswap] using
-        (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub)
+                  (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar =
+              subst
+                (subst hb
+                  (Term.abs y tRet
+                    (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
+                v xVar := by
+          exact subst_commute_closed hb v
+            (Term.abs y tRet
+              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+            xVar kVar hxk hClosedV hKClosed
+        simpa [y, hswap] using
+          (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub),
+        h_wf, fun _ _ _ hlook => hlook⟩
   | tgrad s x tv tOut body =>
+      intro locs hsep h_linear t eps h_typ h_scope
       sorry
   | tvmap s x tv body d =>
+      intro locs hsep h_linear t eps h_typ h_scope
       sorry
-  | ctx _ _ E e0 e0' h_inner =>
-      -- Blocked on a frame-local store-agreement theorem. The natural
-      -- closed-context route wants `StoreTypSub Sigma Sigma2` so the
-      -- untouched sibling sub-derivations can be weakened, but inner
-      -- numeric/store steps remove consumed locations and therefore do
-      -- not preserve global `StoreTypSub`. `preservation_ctx_counterexample`
-      -- shows this is a real theorem-shape gap, not just missing local
-      -- proof search. Closing `ctx` needs a theorem that tracks agreement
-      -- only on the locations mentioned by the outer frame, or a stronger
-      -- store/term invariant tying loc mentions to linear ownership.
-      sorry
+  | ctx sigma sigma' E e0 e0' h_inner ih =>
+      intro locs hsep h_linear t eps h_typ h_scope
+      have h_scope_inner : WellScoped e0 := wellScoped_plug_inner h_scope
+      rcases runtimeLinear_plug (E := E) (e := e0) h_linear with
+        ⟨h_linear_inner, hsepCtx⟩
+      have hsepBoth : LocRefsSeparated (ctxLocRefs E ++ locs) (locRefs e0) := by
+        intro ell hmem hloc
+        rcases List.mem_append.mp hmem with hctx | houter
+        · exact hsepCtx ell hctx hloc
+        · exact hsep ell houter ((mem_locRefs_plug E e0 ell).2 (Or.inr hloc))
+      rcases plug_preserves_typing_closed_on_ctxLocRefs
+          (sigma2 := sigma') (locs := locs) h_typ
+          (fun {t0 : Typ} {eps0 : EffectRow} (h_inner_typ : HasType [] Sigma [] e0 t0 eps0 []) => by
+            rcases ih (locs := ctxLocRefs E ++ locs) h_wf hsepBoth h_linear_inner h_inner_typ h_scope_inner with
+              ⟨Sigma2, h_e0', h_wf2, h_onBoth⟩
+            exact ⟨Sigma2, h_e0', h_wf2, h_onBoth⟩) with
+        ⟨Sigma2, h_plug', h_wf2, h_onBoth⟩
+      exact ⟨Sigma2, h_plug', h_wf2,
+        StoreTypOn.append_right (locs1 := ctxLocRefs E) (locs2 := locs) h_onBoth⟩
+
+/-- Preservation for closed runtime-linear programs. The earlier
+    runtime-linear counterexample shows this extra hypothesis is not
+    optional: without it, the generic `ctx` case is false because a
+    sibling subterm may retain a consumed location. The remaining open
+    cases are only the agreed calculus-level blockers `tgrad` and
+    `tvmap`. -/
+theorem preservation
+    (sigma sigma' : Store) (Sigma : StoreTyp)
+    (e e' : Term) (t : Typ) (eps : EffectRow)
+    (h_typ : HasType [] Sigma [] e t eps [])
+    (h_scope : WellScoped e)
+    (h_linear : RuntimeLinear e)
+    (h_wf : StoreWf sigma Sigma)
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    ∃ Sigma',
+      HasType [] Sigma' [] e' t eps [] ∧ StoreWf sigma' Sigma' := by
+  rcases preservation_aux Sigma ⟨sigma, e⟩ ⟨sigma', e'⟩ h_wf h_step
+      (locs := []) (by intro ell hell; cases hell) h_linear h_typ h_scope with
+    ⟨Sigma', h_typ', h_wf', _h_on⟩
+  exact ⟨Sigma', h_typ', h_wf'⟩
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
