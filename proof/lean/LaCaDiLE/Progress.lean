@@ -116,22 +116,8 @@ theorem ClausesTyped.mem_sig
     (hcls : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR clauses)
     (hmem : (op, x, k, hb) ∈ clauses) :
     ∃ tArg, OpSigMatch op tArg Typ.unit := by
-  induction clauses generalizing Gamma2 Gamma3 with
-  | nil =>
-      cases hmem
-  | cons cl rest ih =>
-      cases hcls with
-      | cons _ _ _ _ _ tArg tRet _ _ _ _ _ _ _ _ hMatch _ hRest =>
-          rcases List.mem_cons.mp hmem with h0 | htl
-          · cases h0
-            cases hMatch with
-            | accumTensor ds => exact ⟨Typ.tensor ds, OpSigMatch.accumTensor ds⟩
-            | accumUnit => exact ⟨Typ.unit, OpSigMatch.accumUnit⟩
-            | random => exact ⟨Typ.unit, OpSigMatch.random⟩
-            | resource => exact ⟨Typ.unit, OpSigMatch.resource⟩
-            | io => exact ⟨Typ.unit, OpSigMatch.io⟩
-            | fail => exact ⟨Typ.unit, OpSigMatch.fail⟩
-          · exact ih hRest htl
+  refine ⟨opArgType op, ?_⟩
+  cases op <;> simp [OpSigMatch, opArgType, opRetType]
 
 /-- Canonical forms: a value of tensor type is a runtime location.
     Wave 2: case-split on `IsValue` then derive a contradiction from

@@ -364,9 +364,9 @@ inductive ClausesTyped :
          (slotX slotK : Option Typ) :
          OpSigMatch op tArg tRet →
          HasType Delta Sigma
-                 (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
-                 hb t epsR
-                 (Gamma3 ++ [(x, slotX), (k, slotK)]) →
+                (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
+                hb t epsR
+                (Gamma3 ++ [(x, slotX), (k, slotK)]) →
          ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR rest →
          ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR ((op, x, k, hb) :: rest)
 

@@ -184,64 +184,62 @@ def addDim (d : Dim) : Typ → Typ
   | Typ.unit            => Typ.unit
   | Typ.tyVar a         => Typ.tyVar a
 
-/-- Per-operation signature lookup for effect operations (Wave 0 P7).
-    `T-Perform op e` requires `e` to have type `(opSignature op).1` and
-    produces a term of type `(opSignature op).2`.
+/-- Canonical argument type for each built-in effect label.
+    Handler dispatch is by label only, so each label must determine a
+    unique argument type. -/
+def opArgType : EffectLabel → Typ
+  | EffectLabel.accum => Typ.unit
+  | EffectLabel.random => Typ.unit
+  | EffectLabel.resource => Typ.unit
+  | EffectLabel.io => Typ.unit
+  | EffectLabel.fail => Typ.unit
 
-    Phase 1 skeleton uses a uniform `(unit, unit)` signature for every
-    op. Phase 2 WS2.7 must refine this per-operation before Phase 2
-    WS2.2 (`adjoint_preserves_typing`) can discharge: the `adjoint`
-    function emits `Term.perform EffectLabel.accum gSeed` where
-    `gSeed : tensor[dsOut]`, but the current `opSignature` claims
-    `accum` takes a `unit` argument. That mismatch will block WS2.2.
+/-- Canonical return type for each built-in effect label. -/
+def opRetType : EffectLabel → Typ
+  | EffectLabel.accum => Typ.unit
+  | EffectLabel.random => Typ.unit
+  | EffectLabel.resource => Typ.unit
+  | EffectLabel.io => Typ.unit
+  | EffectLabel.fail => Typ.unit
 
-    Concrete Phase 2 refinements:
-      * `accum : (Loc × TensorVal) → unit` (via a location-tagged
-        pair or a type variable over tensor shapes)
-      * `fail : unit → α` (via type variables once polymorphism is
-        introduced)
-      * `random` / `resource` / `io` signatures as needed.
+/-- Per-operation signature lookup for effect operations. -/
+def opSignature (op : EffectLabel) : Typ × Typ :=
+  (opArgType op, opRetType op)
 
-    The refinement does not touch any typing rule — Phase 2 WS2.7 just
-    edits this `def` and re-runs `lake build`. -/
-def opSignature (_op : EffectLabel) : Typ × Typ :=
-  (Typ.unit, Typ.unit)
+/-- Functional operation-signature witness used by the typing and
+    operational rules. The witness is proof-irrelevant bookkeeping:
+    a clause-local `(tArg, tRet)` pair is accepted exactly when it
+    matches the canonical signature lookup for `op`. -/
+def OpSigMatch (op : EffectLabel) (tArg tRet : Typ) : Prop :=
+  tArg = opArgType op ∧ tRet = opRetType op
 
-/-- Wave 3 calculus refinement: a relational signature for effect
-    operations. `OpSigMatch op tArg tRet` says that the operation `op`
-    can be performed on an argument of type `tArg` producing a result
-    of type `tRet`. The default cases match the original
-    `opSignature`-based behavior; the `accum` case is polymorphic over
-    tensor shapes so that the adjoint transformation can emit
-    `perform accum gSeed` with `gSeed : tensor[ds]`.
+theorem opSignature_arg_unique
+    {op : EffectLabel} {tArg1 tArg2 : Typ}
+    (h1 : tArg1 = opArgType op)
+    (h2 : tArg2 = opArgType op) :
+    tArg1 = tArg2 := by
+  rw [h1, h2]
 
-    This is the calculus change unblocking `adjoint_preserves_typing`
-    (Wave 2 WS2.2): the old `opSignature accum = (unit, unit)` made
-    `perform accum gSeed` ill-typed whenever `gSeed` was a tensor. The
-    `accumTensor` constructor below allows accum to take any
-    `tensor[ds]` argument and produce `unit`. -/
-inductive OpSigMatch : EffectLabel → Typ → Typ → Prop where
-  | accumTensor (ds : DimList) :
-      OpSigMatch EffectLabel.accum (Typ.tensor ds) Typ.unit
-  | accumUnit :
-      OpSigMatch EffectLabel.accum Typ.unit Typ.unit
-  | random :
-      OpSigMatch EffectLabel.random Typ.unit Typ.unit
-  | resource :
-      OpSigMatch EffectLabel.resource Typ.unit Typ.unit
-  | io :
-      OpSigMatch EffectLabel.io Typ.unit Typ.unit
-  | fail :
-      OpSigMatch EffectLabel.fail Typ.unit Typ.unit
+theorem opSignature_ret_unique
+    {op : EffectLabel} {tRet1 tRet2 : Typ}
+    (h1 : tRet1 = opRetType op)
+    (h2 : tRet2 = opRetType op) :
+    tRet1 = tRet2 := by
+  rw [h1, h2]
 
-/-- Operation signatures may vary in argument type, but the return
-    type is fixed by the operation label. -/
+theorem OpSigMatch.arg_unique
+    {op : EffectLabel} {tArg1 tArg2 tRet1 tRet2 : Typ}
+    (h1 : OpSigMatch op tArg1 tRet1)
+    (h2 : OpSigMatch op tArg2 tRet2) :
+    tArg1 = tArg2 := by
+  exact opSignature_arg_unique h1.1 h2.1
+
 theorem OpSigMatch.ret_unique
     {op : EffectLabel} {tArg1 tArg2 tRet1 tRet2 : Typ}
     (h1 : OpSigMatch op tArg1 tRet1)
     (h2 : OpSigMatch op tArg2 tRet2) :
     tRet1 = tRet2 := by
-  cases h1 <;> cases h2 <;> rfl
+  exact opSignature_ret_unique h1.2 h2.2
 
 /-! ## Locations and tensor values -/
 
