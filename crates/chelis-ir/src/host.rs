@@ -447,6 +447,9 @@ fn lower_host_program(
                         HostType::Dict(k, v) => {
                             ty_has_non_dag_tensor(k) || ty_has_non_dag_tensor(v)
                         }
+                        HostType::Fn(params, ret) => {
+                            params.iter().any(ty_has_non_dag_tensor) || ty_has_non_dag_tensor(ret)
+                        }
                         _ => false,
                     }
                 }
