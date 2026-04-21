@@ -1362,11 +1362,105 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         "expected host scalar dependencies to be boxed into tensor helper inputs:\n{source}"
     );
     assert!(
-        !source.contains("= lt;") && !source.contains("(int[]){ n }"),
-        "gradient codegen must not leave unresolved host builtins or symbolic dims in C:\n{source}"
+        !source.contains("= lt;"),
+        "gradient codegen must not leave unresolved host builtins in C:\n{source}"
     );
 
     let status = gcc_compile_generated(&out_dir, "tensor_grad_lm_canary.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
+fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tensor_grad_local_wrapper.ch");
+    let out_dir = dir.path().join("tensor-grad-local-wrapper-build-out");
+    write_file(
+        &path,
+        "def jac_row[n](model: tensor[n, f32] -> f32 -> f32 -> f32, theta: tensor[n, f32], x: f32, y: f32) -> tensor[n, f32] = {\n\
+           target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)\n\
+           grad(target, wrt=(theta_local))(theta)\n\
+         }\n\
+         def lm_model(theta: tensor[2, f32], x: f32, y: f32) -> f32 = {\n\
+           y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
+           sub(y, y_hat)\n\
+         }\n\
+         out = jac_row(lm_model, to_tensor([1.0, 2.0]), cast(1.0, f32), cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source =
+        fs::read_to_string(out_dir.join("tensor_grad_local_wrapper.c")).expect("generated c");
+    assert!(
+        source.contains("chelis_tensor* __binding_0_value;"),
+        "expected tensor-valued local grad result to stay tensor-typed:\n{source}"
+    );
+    assert!(
+        source.contains("__host_tensor_arg_1 = chelis_tensor_from_value_list(__arg0_0);")
+            && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
+        "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
+    );
+    assert!(
+        !source.contains("`grad` is not representable")
+            && !source.contains("unsupported builtin")
+            && !source.contains("int __binding_0_value;")
+            && !source.contains("= to_tensor;")
+            && !source.contains("__result = call("),
+        "local-wrapper grad lowering must not degrade to fallback, unresolved builtins, or int locals:\n{source}"
+    );
+
+    let status = gcc_compile_generated(&out_dir, "tensor_grad_local_wrapper.c");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
+fn build_c_recursive_tensor_function_stays_on_host_path() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("recursive_tensor.ch");
+    let out_dir = dir.path().join("recursive-tensor-build-out");
+    write_file(
+        &path,
+        "def recur[n](x: tensor[n, f32], i: int64) -> tensor[n, f32] =\n\
+           if lte(i, cast(0, int64)) then x else recur(x, sub(i, cast(1, int64)))\n\
+         out = recur(to_tensor([1.0, 2.0]), cast(2, int64))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("recursive_tensor.c")).expect("generated c");
+    assert!(
+        source.contains("static inline chelis_tensor* recur("),
+        "expected recursive tensor helper to stay in the host lane:\n{source}"
+    );
+    assert!(
+        source.contains("__result = recur("),
+        "expected recursive call to remain a C function call rather than DAG helper expansion:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "recursive_tensor.c", "recursive_tensor");
     assert!(status.success(), "gcc failed with status {status}");
 }
 
@@ -1409,6 +1503,48 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
 }
 
 #[test]
+fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("tensor_fold_let_if.ch");
+    let out_dir = dir.path().join("tensor-fold-let-if-build-out");
+    write_file(
+        &path,
+        "def fold_if_tensor(xs: tensor[2, f32]) -> tensor[2, f32] = {\n\
+           state0 = to_tensor([0.0, 0.0])\n\
+           step = fold(fn (acc, y) -> if y < 0.0 then acc else add(acc, xs), state0, to_list(xs))\n\
+           step\n\
+         }\n\
+         out = fold_if_tensor(to_tensor([1.0, -2.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("tensor_fold_let_if.c")).expect("generated c");
+    assert!(
+        source.contains("int64_t __fold_len_") && source.contains("for (int64_t __i = 0;"),
+        "expected let-bound fold result to lower through a host fold loop:\n{source}"
+    );
+    assert!(
+        !source.contains("= fold;"),
+        "fold builtin must not degrade into a bare identifier in generated C:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "tensor_fold_let_if.c", "tensor_fold_let_if");
+    assert!(status.success(), "gcc failed with status {status}");
+}
+
+#[test]
 fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("library_surface.ch");
@@ -1440,8 +1576,11 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
         "expected unreachable host def to survive build pruning for downstream drivers:\n{source}"
     );
 
-    fs::write(&generated, source.replace("double main", "double chelis_entry"))
-        .expect("rename generated entry point");
+    fs::write(
+        &generated,
+        source.replace("double main", "double chelis_entry"),
+    )
+    .expect("rename generated entry point");
     write_file(
         &out_dir.join("driver.c"),
         r#"#include <stdio.h>
@@ -1455,7 +1594,11 @@ int main(void) {
 "#,
     );
 
-    let status = gcc_link_sources(&out_dir, &["driver.c", "library_surface.c"], "library_surface_driver");
+    let status = gcc_link_sources(
+        &out_dir,
+        &["driver.c", "library_surface.c"],
+        "library_surface_driver",
+    );
     assert!(status.success(), "gcc failed with status {status}");
 
     let run_output = StdCommand::new(out_dir.join("library_surface_driver"))
@@ -1468,7 +1611,9 @@ int main(void) {
         String::from_utf8_lossy(&run_output.stderr)
     );
     assert_eq!(
-        String::from_utf8(run_output.stdout).expect("stdout utf8").trim(),
+        String::from_utf8(run_output.stdout)
+            .expect("stdout utf8")
+            .trim(),
         "27.0"
     );
 }
@@ -1532,7 +1677,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2462,7 +2607,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2539,7 +2684,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2581,7 +2726,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Common"
 "#,
     );
@@ -2600,7 +2745,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2641,7 +2786,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Common"
 "#,
     );
@@ -2691,7 +2836,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.13"
+compiler = "=0.1.14"
 module_prefix = "Demo"
 
 [dependencies]

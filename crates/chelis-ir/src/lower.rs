@@ -112,7 +112,11 @@ pub fn remap_tensor_dim_symbols(
     }
 
     let mut specialized = dag.clone();
-    let node_ids = specialized.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+    let node_ids = specialized
+        .nodes()
+        .iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
     for id in node_ids {
         let Some(node) = specialized.get(id).cloned() else {
             continue;
@@ -1111,6 +1115,7 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 struct LowerCtx {
     dag: Dag,
     bindings: HashMap<String, LoweredValue>,
+    local_callables: HashMap<String, Expr>,
     program_types: HashMap<String, TensorType>,
     program_defs: HashMap<String, Expr>,
     random_seed: Option<u64>,
@@ -1126,6 +1131,7 @@ impl LowerCtx {
         Self {
             dag: Dag::new(),
             bindings: HashMap::new(),
+            local_callables: HashMap::new(),
             program_types,
             program_defs,
             random_seed: None,
@@ -1182,6 +1188,43 @@ impl LowerCtx {
         actual_args: &[TensorType],
     ) -> Dag {
         remap_tensor_dim_symbols(dag, formal_params, actual_args)
+    }
+
+    fn seed_subctx_with_lexical_scope(
+        &self,
+        subctx: &mut LowerCtx,
+        shadowed: &[String],
+    ) -> HashMap<String, NodeId> {
+        let shadowed = shadowed.iter().cloned().collect::<HashSet<_>>();
+        let mut captures = HashMap::new();
+        for (name, value) in self
+            .bindings
+            .iter()
+            .filter(|(name, _)| !shadowed.contains(*name))
+        {
+            let LoweredValue::Node(node_id) = value else {
+                continue;
+            };
+            let ty = self
+                .dag
+                .get(*node_id)
+                .map(|node| node.output_type.clone())
+                .unwrap_or_else(Self::default_type);
+            let load = subctx
+                .dag
+                .add_node(RiscOp::Load { name: name.clone() }, vec![], ty);
+            subctx
+                .bindings
+                .insert(name.clone(), LoweredValue::Node(load));
+            captures.insert(name.clone(), *node_id);
+        }
+        subctx.local_callables.extend(
+            self.local_callables
+                .iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        captures
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
@@ -1505,6 +1548,15 @@ impl LowerCtx {
         let body_id = self.lower_expr(&elems[3]);
         if !name.is_empty() {
             self.bindings.insert(name, body_id.clone());
+            if let Some(callable) = self.callable_binding_expr(&elems[3]) {
+                self.local_callables.insert(
+                    match &elems[2] {
+                        Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+                        _ => String::new(),
+                    },
+                    callable,
+                );
+            }
         }
         body_id
     }
@@ -1519,6 +1571,7 @@ impl LowerCtx {
             ));
         }
         let saved = self.bindings.clone();
+        let saved_callables = self.local_callables.clone();
 
         // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
         if let Expr::List(bind_list, _) = &elems[2] {
@@ -1527,8 +1580,12 @@ impl LowerCtx {
             let mut i = 0;
             while i + 1 < bind_kids.len() {
                 if let Expr::Atom(Atom::Symbol(name), _) = &bind_kids[i] {
-                    let val_id = self.lower_expr(&bind_kids[i + 1]);
-                    self.bindings.insert(name.clone(), val_id);
+                    if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
+                        self.local_callables.insert(name.clone(), callable);
+                    } else {
+                        let val_id = self.lower_expr(&bind_kids[i + 1]);
+                        self.bindings.insert(name.clone(), val_id);
+                    }
                 }
                 i += 2;
             }
@@ -1536,6 +1593,7 @@ impl LowerCtx {
 
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
+        self.local_callables = saved_callables;
         result
     }
 
@@ -1615,6 +1673,7 @@ impl LowerCtx {
             && func_tag == "var"
             && let Some(Expr::Atom(Atom::Symbol(func_name), _)) = func_list.elements.get(2)
             && !self.program_defs.contains_key(func_name)
+            && !self.local_callables.contains_key(func_name)
         {
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
@@ -1669,7 +1728,10 @@ impl LowerCtx {
             Some("var") => children(list)
                 .first()
                 .and_then(|expr| match expr {
-                    Expr::Atom(Atom::Symbol(name), _) => self.program_defs.get(name),
+                    Expr::Atom(Atom::Symbol(name), _) => self
+                        .local_callables
+                        .get(name)
+                        .or_else(|| self.program_defs.get(name)),
                     _ => None,
                 })
                 .and_then(|body| self.resolve_callable_expr(body)),
@@ -1713,6 +1775,10 @@ impl LowerCtx {
                 }),
             _ => None,
         }
+    }
+
+    fn callable_binding_expr(&self, expr: &Expr) -> Option<Expr> {
+        self.resolve_callable_expr(expr).map(|_| expr.clone())
     }
 
     fn extract_grad_wrt_indices(&self, list: &List) -> Option<Vec<usize>> {
@@ -1780,6 +1846,7 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let mut wrt = Vec::new();
         for (index, (name, param_ty)) in param_names
             .iter()
@@ -1810,6 +1877,7 @@ impl LowerCtx {
             .iter()
             .zip(actual_args.iter().copied())
             .map(|(name, arg)| (name.clone(), arg))
+            .chain(captured_bindings)
             .collect::<HashMap<_, _>>();
         let specialized_grad_dag =
             Self::remap_callable_dim_symbols(&grad_result.dag, &param_types, &actual_types);
@@ -1846,13 +1914,19 @@ impl LowerCtx {
             return self
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
-        let arg_ids: Vec<LoweredValue> = args.iter().map(|arg| self.lower_expr(arg)).collect();
         let saved = self.bindings.clone();
-        for (name, arg_id) in param_names.iter().zip(arg_ids.iter().cloned()) {
-            self.bindings.insert(name.clone(), arg_id);
+        let saved_callables = self.local_callables.clone();
+        for (name, arg_expr) in param_names.iter().zip(args.iter()) {
+            if let Some(callable) = self.callable_binding_expr(arg_expr) {
+                self.local_callables.insert(name.clone(), callable);
+            } else {
+                let arg_id = self.lower_expr(arg_expr);
+                self.bindings.insert(name.clone(), arg_id);
+            }
         }
         let result = self.lower_expr(body);
         self.bindings = saved;
+        self.local_callables = saved_callables;
         result
     }
 
@@ -1866,6 +1940,7 @@ impl LowerCtx {
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
         let saved = self.bindings.clone();
+        let saved_callables = self.local_callables.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             self.bindings.insert(name.clone(), arg_id);
         }
@@ -1875,6 +1950,7 @@ impl LowerCtx {
             self.repair_output_type_if_default(&result, &ret_ty);
         }
         self.bindings = saved;
+        self.local_callables = saved_callables;
         result
     }
 
@@ -1956,6 +2032,7 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
             let load = subctx
                 .dag
@@ -1987,6 +2064,7 @@ impl LowerCtx {
                 self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
             );
         }
+        arg_map.extend(captured_bindings);
 
         let specialized_vmapped =
             Self::remap_callable_dim_symbols(&vmapped, &param_types, &actual_types);
@@ -2089,6 +2167,7 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let mut wrt = Vec::new();
         for (index, (name, param_ty)) in param_names
             .iter()
@@ -2133,6 +2212,7 @@ impl LowerCtx {
                 self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
             );
         }
+        arg_map.extend(captured_bindings);
 
         let remap = self.splice_dag(&vmapped, &arg_map);
         let mut flattened = wrt
@@ -2973,6 +3053,7 @@ impl LowerCtx {
             ));
         }
         let saved = self.bindings.clone();
+        let saved_callables = self.local_callables.clone();
 
         // Register params as Load nodes.
         if let Expr::List(params_list, _) = &elems[2] {
@@ -2986,6 +3067,7 @@ impl LowerCtx {
 
         let result = self.lower_expr(&elems[3]);
         self.bindings = saved; // Restore scope
+        self.local_callables = saved_callables;
         result
     }
 
@@ -3328,14 +3410,18 @@ mod tests {
     use super::*;
     use crate::verify;
 
-    fn parse_and_lower(src: &str) -> Dag {
+    fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_phase0e_program(&exprs)
             .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
         let checked = chelis_effects::check_program(&checked)
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
-        let checked = chelis_types::check_linearity(&checked)
-            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
+        chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    fn parse_and_lower(src: &str) -> Dag {
+        let checked = parse_and_check(src);
         lower_program(&checked)
     }
 
@@ -3460,6 +3546,413 @@ mod tests {
             }
         );
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn lm_style_local_grad_wrapper_defs_are_marked_lowerable() {
+        let checked = parse_and_check(
+            r#"
+                (defsig {}
+                  jac_row
+                  (t-fn {}
+                    (t-fn {}
+                      (t-tensor {} (d-var {} n) (t-prim {} f32))
+                      (t-prim {} f32)
+                      (t-prim {} f32)
+                      (t-prim {} f32))
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+                (def {}
+                  jac_row
+                  (fn {}
+                    (params {}
+                      (model {type: (t-fn {}
+                                       (t-tensor {} (d-var {} n) (t-prim {} f32))
+                                       (t-prim {} f32)
+                                       (t-prim {} f32)
+                                       (t-prim {} f32))})
+                      (theta {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        target
+                        (fn {}
+                          (params {}
+                            (theta_local {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
+                          (app {} (var {} model) (var {} theta_local) (var {} x) (var {} y))))
+                      (app {}
+                        (grad {wrt: (var {} theta_local)}
+                          (var {} target)
+                          (lit {type: (t-prim {} int32)} 0))
+                        (var {} theta)))))
+                (defsig {}
+                  lm_model
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-prim {} f32)))
+                (def {}
+                  lm_model
+                  (fn {}
+                    (params {}
+                      (theta {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        y_hat
+                        (if {}
+                          (app {}
+                            (var {} lt)
+                            (var {} x)
+                            (cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32)))
+                          (app {}
+                            (var {} tensor_to_scalar)
+                            (app {}
+                              (var {} sum)
+                              (copy {} (var {} theta))
+                              (lit {type: (t-prim {} int32)} 0)))
+                          (app {}
+                            (var {} add)
+                            (app {}
+                              (var {} tensor_to_scalar)
+                              (app {}
+                                (var {} sum)
+                                (copy {} (var {} theta))
+                                (lit {type: (t-prim {} int32)} 0)))
+                            (var {} x))))
+                      (app {} (var {} sub) (var {} y) (var {} y_hat)))))
+                (def {}
+                  out
+                  (app {}
+                    (var {} jac_row)
+                    (var {} lm_model)
+                    (app {}
+                      (var {} to_tensor)
+                      (app {}
+                        (var {} Cons)
+                        (lit {type: (t-prim {} f32)} 1.0)
+                        (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
+                    (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
+                    (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
+            "#,
+        );
+        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+        assert_eq!(
+            lowered.get("jac_row"),
+            Some(&true),
+            "jac_row lowering map: {lowered:?}"
+        );
+        assert_eq!(
+            lowered.get("lm_model"),
+            Some(&false),
+            "lm_model lowering map: {lowered:?}"
+        );
+        assert_eq!(
+            lowered.get("out"),
+            Some(&false),
+            "out lowering map: {lowered:?}"
+        );
+    }
+
+    #[test]
+    fn lm_style_local_grad_wrapper_subexpr_does_not_load_callable_arg_as_data() {
+        let checked = parse_and_check(
+            r#"
+                (defsig {}
+                  jac_row
+                  (t-fn {}
+                    (t-fn {}
+                      (t-tensor {} (d-var {} n) (t-prim {} f32))
+                      (t-prim {} f32)
+                      (t-prim {} f32)
+                      (t-prim {} f32))
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+                (def {}
+                  jac_row
+                  (fn {}
+                    (params {}
+                      (model {type: (t-fn {}
+                                       (t-tensor {} (d-var {} n) (t-prim {} f32))
+                                       (t-prim {} f32)
+                                       (t-prim {} f32)
+                                       (t-prim {} f32))})
+                      (theta {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        target
+                        (fn {}
+                          (params {}
+                            (theta_local {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
+                          (app {} (var {} model) (var {} theta_local) (var {} x) (var {} y))))
+                      (app {}
+                        (grad {wrt: (var {} theta_local)}
+                          (var {} target)
+                          (lit {type: (t-prim {} int32)} 0))
+                        (var {} theta)))))
+                (defsig {}
+                  lm_model
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-prim {} f32)))
+                (def {}
+                  lm_model
+                  (fn {}
+                    (params {}
+                      (theta {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        y_hat
+                        (if {}
+                          (app {}
+                            (var {} lt)
+                            (var {} x)
+                            (cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32)))
+                          (app {}
+                            (var {} tensor_to_scalar)
+                            (app {}
+                              (var {} sum)
+                              (copy {} (var {} theta))
+                              (lit {type: (t-prim {} int32)} 0)))
+                          (app {}
+                            (var {} add)
+                            (app {}
+                              (var {} tensor_to_scalar)
+                              (app {}
+                                (var {} sum)
+                                (copy {} (var {} theta))
+                                (lit {type: (t-prim {} int32)} 0)))
+                            (var {} x))))
+                      (app {} (var {} sub) (var {} y) (var {} y_hat)))))
+                (def {}
+                  out
+                  (app {}
+                    (var {} jac_row)
+                    (var {} lm_model)
+                    (app {}
+                      (var {} to_tensor)
+                      (app {}
+                        (var {} Cons)
+                        (lit {type: (t-prim {} f32)} 1.0)
+                        (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
+                    (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
+                    (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
+            "#,
+        );
+        let out_expr = checked
+            .exprs()
+            .iter()
+            .find(|expr| top_level_expr_name(expr) == Some("out"))
+            .expect("out def");
+        let out_body = match out_expr {
+            Expr::List(list, _) => children(list).get(1).expect("out body"),
+            _ => panic!("out def must be a list"),
+        };
+        let mut ctx = LowerCtx::new(
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                .collect(),
+            collect_top_level_defs(checked.exprs()),
+            LinearityInfo::default(),
+        );
+        let out_kids = match out_body {
+            Expr::List(list, _) => children(list),
+            _ => panic!("out body must be app"),
+        };
+        assert!(
+            matches!(
+                ctx.resolve_callable_expr(&out_kids[0]),
+                Some(CallableExpr::Plain(_))
+            ),
+            "expected jac_row callee to resolve as callable"
+        );
+        assert!(
+            matches!(
+                ctx.resolve_callable_expr(&out_kids[1]),
+                Some(CallableExpr::Plain(_))
+            ),
+            "expected lm_model arg to resolve as callable"
+        );
+        let lowered_value = ctx.lower_expr(out_body);
+        let dag = ctx.dag;
+        for id in lowered_value.flatten_nodes() {
+            // rootless DAGs are hard to inspect in assertions; mirror lower_subexpr_program.
+            // This is test-only.
+            let _ = id;
+        }
+        assert!(
+            !dag.nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
+            "specialized local grad wrapper must not leave callable arg as a data load: {dag:#?}"
+        );
+    }
+
+    #[test]
+    fn nested_callable_param_app_in_grad_body_resolves_named_function_arg() {
+        let checked = parse_and_check(
+            r#"
+                (defsig {}
+                  jac_row
+                  (t-fn {}
+                    (t-fn {}
+                      (t-tensor {} (d-var {} n) (t-prim {} f32))
+                      (t-prim {} f32)
+                      (t-prim {} f32)
+                      (t-prim {} f32))
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+                (def {}
+                  jac_row
+                  (fn {}
+                    (params {}
+                      (model {type: (t-fn {}
+                                       (t-tensor {} (d-var {} n) (t-prim {} f32))
+                                       (t-prim {} f32)
+                                       (t-prim {} f32)
+                                       (t-prim {} f32))})
+                      (theta {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        target
+                        (fn {}
+                          (params {}
+                            (theta_local {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
+                          (app {} (var {} model) (var {} theta_local) (var {} x) (var {} y))))
+                      (app {}
+                        (grad {wrt: (var {} theta_local)}
+                          (var {} target)
+                          (lit {type: (t-prim {} int32)} 0))
+                        (var {} theta)))))
+                (defsig {}
+                  lm_model
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-prim {} f32)))
+                (def {}
+                  lm_model
+                  (fn {}
+                    (params {}
+                      (theta {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (app {} (var {} sub) (var {} y) (var {} x))))
+            "#,
+        );
+        let program_defs = collect_top_level_defs(checked.exprs());
+        let jac_fn = match program_defs.get("jac_row") {
+            Some(expr) => expr.clone(),
+            None => panic!("missing jac_row"),
+        };
+        let (param_names, jac_body) = {
+            let ctx = LowerCtx::new(
+                checked
+                    .type_env()
+                    .iter()
+                    .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                    .collect(),
+                program_defs.clone(),
+                LinearityInfo::default(),
+            );
+            ctx.extract_fn_parts(&jac_fn).expect("jac_row fn parts")
+        };
+        let mut inline_ctx = LowerCtx::new(
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                .collect(),
+            program_defs.clone(),
+            LinearityInfo::default(),
+        );
+        let app_exprs = chelis_deep::parser::parse_str(
+            "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
+        )
+        .expect("parse app expr");
+        let out_call_args = match &app_exprs[0] {
+            Expr::List(list, _) => children(list)[1..].to_vec(),
+            _ => panic!("expected app"),
+        };
+        for (name, arg_expr) in param_names.iter().zip(out_call_args.iter()) {
+            if let Some(callable) = inline_ctx.callable_binding_expr(arg_expr) {
+                inline_ctx.local_callables.insert(name.clone(), callable);
+            } else {
+                let arg_id = inline_ctx.lower_expr(arg_expr);
+                inline_ctx.bindings.insert(name.clone(), arg_id);
+            }
+        }
+        let let_kids = match jac_body {
+            Expr::List(list, _) => children(list),
+            _ => panic!("expected let body"),
+        };
+        let target_fn = match &let_kids[0] {
+            Expr::List(bind_list, _) => children(bind_list)[1].clone(),
+            _ => panic!("expected bind list"),
+        };
+        inline_ctx
+            .local_callables
+            .insert("target".to_string(), target_fn.clone());
+        let inner_app = match &target_fn {
+            Expr::List(list, _) => children(list)[1].clone(),
+            _ => panic!("expected target fn"),
+        };
+        let mut subctx = LowerCtx::new(
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                .collect(),
+            program_defs,
+            LinearityInfo::default(),
+        );
+        subctx.local_callables = inline_ctx.local_callables.clone();
+        let theta_local_ty = extract_param_type(&target_fn, 0).expect("theta_local type");
+        let theta_local = subctx.lower_fn_param_binding("theta_local", Some(theta_local_ty));
+        subctx
+            .bindings
+            .insert("theta_local".to_string(), theta_local);
+        let inner_callee = match &inner_app {
+            Expr::List(list, _) => children(list).first().expect("inner app callee"),
+            _ => panic!("expected inner app"),
+        };
+        assert!(
+            matches!(
+                subctx.resolve_callable_expr(inner_callee),
+                Some(CallableExpr::Plain(_))
+            ),
+            "expected nested callee `(var model)` to resolve as callable before lowering"
+        );
+        let _ = subctx.lower_expr(&inner_app);
+        assert!(
+            !subctx
+                .dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
+            "nested callable param app must inline named function arg rather than load `model`: {:#?}",
+            subctx.dag
+        );
     }
 
     #[test]

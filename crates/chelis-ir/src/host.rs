@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 
 use crate::dag::TensorType;
-use crate::lower::{expr_is_dag_lowerable, lower_program, top_level_lowering_map};
+use crate::lower::{lower_program, top_level_lowering_map};
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
@@ -401,13 +402,28 @@ fn lower_host_program(
         // wrapper per def in that case so each gets its own C symbol.
         let is_fn_body = matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
-        let needs_host_wrapper = is_fn_body && (has_any_host_lane_def || lowered_fn_def_count > 1);
+        let has_callable_params = lookup_declared_fn_type(program, name)
+            .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
+        let needs_host_wrapper = is_fn_body
+            && !has_callable_params
+            && (has_any_host_lane_def || lowered_fn_def_count > 1);
         let skip_for_lowered =
             lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
         if skip_for_lowered {
             continue;
         }
         if let Some(function) = lower_host_function(name, body, ty_expr, program) {
+            global_scope.insert(
+                name.to_string(),
+                HostType::Fn(
+                    function
+                        .params
+                        .iter()
+                        .map(|param| param.ty.clone())
+                        .collect(),
+                    Box::new(function.ret_ty.clone()),
+                ),
+            );
             host.functions.push(function);
         } else {
             let value = lower_host_expr(
@@ -515,13 +531,12 @@ fn lower_host_function(
     // `Std.Tensor.Reduce.min` get a real C function symbol rather than a
     // fallthrough `HostExpr::Builtin` with an "unsupported builtin"
     // placeholder (Phase 3j-pre Batch 5b bug 4).
-    let callable_body_is_synthetic =
-        !matches!(body, Expr::List(list, _) if tag(list) == Some("fn"));
     let host_body = if let HostType::Tensor(expected) = ret_ty.clone()
+        && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
         && !should_keep_tensor_expr_in_host_lane(&body_expr)
-        && (callable_body_is_synthetic || expr_is_dag_lowerable(&body_expr, program))
     {
-        lower_tensor_helper_call(&body_expr, program, &scope, &mut tensor_helpers, expected)
+        try_lower_tensor_helper_call(&body_expr, program, &scope, &mut tensor_helpers, expected)
+            .unwrap_or_else(|| lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers))
     } else {
         lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers)
     };
@@ -587,28 +602,54 @@ fn synthesize_callable_application(
 /// `lower_host_function` so that pure-tensor wrapper function bodies get a
 /// real C function definition even when downstream type metadata is
 /// missing on the reef'd deep AST's `app` nodes.
-fn lower_tensor_helper_call(
+fn try_lower_tensor_helper_call(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected: TensorType,
-) -> HostExpr {
+) -> Option<HostExpr> {
     if let Expr::List(list, _) = expr
         && tag(list) == Some("var")
         && let Some(name) = children(list).first().and_then(symbol_name)
     {
-        return HostExpr::Var(name.to_string(), HostType::Tensor(expected));
+        return Some(HostExpr::Var(name.to_string(), HostType::Tensor(expected)));
     }
-    let helper_index = tensor_helpers.len();
-    let helper_name = format!("__host_tensor_helper_{helper_index}");
+    let dag = catch_unwind(AssertUnwindSafe(|| {
+        lower_tensor_helper_dag(expr, program, scope, &expected)
+    }))
+    .ok()?;
+    Some(finish_tensor_helper_call(
+        dag,
+        scope,
+        tensor_helpers,
+        expected,
+    ))
+}
+
+fn lower_tensor_helper_dag(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    expected: &TensorType,
+) -> crate::Dag {
     let dag = crate::lower::lower_subexpr_program(
         expr,
         collect_tensor_scope(scope),
         program.type_env().clone(),
         collect_program_defs(program.exprs()),
     );
-    let dag = remap_tensor_helper_dim_symbols(&dag, scope, &expected);
+    remap_tensor_helper_dim_symbols(&dag, scope, expected)
+}
+
+fn finish_tensor_helper_call(
+    dag: crate::Dag,
+    scope: &HashMap<String, HostType>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected: TensorType,
+) -> HostExpr {
+    let helper_index = tensor_helpers.len();
+    let helper_name = format!("__host_tensor_helper_{helper_index}");
     let inputs = tensor_helper_inputs(&dag);
     let output = dag
         .roots()
@@ -636,44 +677,14 @@ fn lower_host_expr(
     scope: &HashMap<String, HostType>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
-    if let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
-        && expr_is_dag_lowerable(expr, program)
+    let is_app_expr = matches!(expr, Expr::List(list, _) if tag(list) == Some("app"));
+    if !is_app_expr
+        && let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
         && !should_keep_tensor_expr_in_host_lane(expr)
+        && let Some(tensor_call) =
+            try_lower_tensor_helper_call(expr, program, scope, tensor_helpers, tensor_ty.clone())
     {
-        if let Expr::List(list, _) = expr
-            && tag(list) == Some("var")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            return HostExpr::Var(name.to_string(), HostType::Tensor(tensor_ty));
-        }
-        let helper_index = tensor_helpers.len();
-        let helper_name = format!("__host_tensor_helper_{helper_index}");
-        let dag = crate::lower::lower_subexpr_program(
-            expr,
-            collect_tensor_scope(scope),
-            program.type_env().clone(),
-            collect_program_defs(program.exprs()),
-        );
-        let dag = remap_tensor_helper_dim_symbols(&dag, scope, &tensor_ty);
-        let inputs = tensor_helper_inputs(&dag);
-        let output = dag
-            .roots()
-            .first()
-            .and_then(|id| dag.get(*id))
-            .map(|node| node.output_type.clone())
-            .unwrap_or_else(|| tensor_ty.clone());
-        let args = tensor_helper_args(&inputs, scope);
-        tensor_helpers.push(HostTensorHelper {
-            name: helper_name,
-            dag,
-            inputs,
-            output,
-        });
-        return HostExpr::TensorCall {
-            helper: helper_index,
-            args,
-            ty: HostType::Tensor(tensor_ty),
-        };
+        return tensor_call;
     }
 
     match expr {
@@ -1700,13 +1711,6 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         return false;
     }
     let name = children(callee).first().and_then(symbol_name);
-    if let Some(name) = name
-        && !BUILTIN_NAMES.contains(&name)
-        && name != "Some"
-        && name != "None"
-    {
-        return true;
-    }
     matches!(
         name,
         Some(
@@ -1722,6 +1726,12 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
                 | "scatter"
                 | "where"
                 | "cumsum"
+                | "map"
+                | "filter"
+                | "fold"
+                | "scan"
+                | "partition"
+                | "flat_map"
                 | "sort"
                 | "diagonal"
                 | "trace"
@@ -2138,13 +2148,6 @@ fn lower_app_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> HostExpr {
     let app_expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
-    if let Some(tensor_ty) = expr_tensor_type(&app_expr, program, scope)
-        && expr_is_dag_lowerable(&app_expr, program)
-        && !should_keep_tensor_expr_in_host_lane(&app_expr)
-    {
-        return lower_tensor_helper_call(&app_expr, program, scope, tensor_helpers, tensor_ty);
-    }
-
     let kids = children(list);
     let name = kids
         .first()
@@ -2163,8 +2166,8 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
-    let ctor_info = lookup_adt_ctor(program, &name);
     let explicit_ty = expr_host_type(&app_expr, program, scope);
+    let ctor_info = lookup_adt_ctor(program, &name);
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
@@ -2308,6 +2311,58 @@ fn lower_app_host_expr(
             ty,
         };
     }
+    let helper_tensor_ty = expr_tensor_type(&app_expr, program, scope).or_else(|| {
+        if let HostType::Tensor(tensor_ty) = &inferred_ret_ty {
+            Some(tensor_ty.clone())
+        } else if let HostType::Tensor(tensor_ty) = &explicit_ty {
+            Some(tensor_ty.clone())
+        } else {
+            None
+        }
+    });
+    let (helper_expr, helper_scope, helper_bindings) =
+        hoist_host_lane_tensor_bindings(&app_expr, program, scope, fn_sig.as_ref(), tensor_helpers);
+    if let Some(tensor_ty) = helper_tensor_ty.clone()
+        && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
+        && !should_keep_tensor_expr_in_host_lane(&app_expr)
+        && let Some(tensor_call) = try_lower_tensor_helper_call(
+            &helper_expr,
+            program,
+            &helper_scope,
+            tensor_helpers,
+            tensor_ty.clone(),
+        )
+    {
+        if helper_bindings.is_empty() {
+            return tensor_call;
+        }
+        let ty = host_expr_type(&tensor_call);
+        return HostExpr::Let {
+            bindings: helper_bindings,
+            body: Box::new(tensor_call),
+            ty,
+        };
+    }
+    if let Some(tensor_ty) = helper_tensor_ty
+        && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
+        && !should_keep_tensor_expr_in_host_lane(&app_expr)
+        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+        && let Some(tensor_call) =
+            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty)
+    {
+        return tensor_call;
+    }
+    let has_callable_params = fn_sig
+        .as_ref()
+        .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostType::Fn(..))));
+    let tensor_result = matches!(explicit_ty, HostType::Tensor(_))
+        || matches!(inferred_ret_ty, HostType::Tensor(_));
+    if has_callable_params
+        && tensor_result
+        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+    {
+        return lower_host_expr(&specialized, program, scope, tensor_helpers);
+    }
     let args = kids[1..]
         .iter()
         .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
@@ -2353,6 +2408,396 @@ fn lower_app_host_expr(
         infer_builtin_host_type(&name, &args).unwrap_or(HostType::Unknown)
     };
     HostExpr::Builtin { name, args, ty }
+}
+
+fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<Expr> {
+    let Expr::List(app_list, _span) = expr else {
+        return None;
+    };
+    if tag(app_list) != Some("app") {
+        return None;
+    }
+    let kids = children(app_list);
+    let callee_name = kids
+        .first()
+        .and_then(as_list)
+        .filter(|callee| tag(callee) == Some("var"))
+        .and_then(|callee| children(callee).first().and_then(symbol_name))?;
+    let defs = collect_program_defs(program.exprs());
+    let body = lookup_program_def(&defs, callee_name)?;
+    let Expr::List(fn_list, _) = body else {
+        return None;
+    };
+    if tag(fn_list) != Some("fn") {
+        return None;
+    }
+    let fn_kids = children(fn_list);
+    let params_list = fn_kids.first().and_then(as_list)?;
+    if tag(params_list) != Some("params") {
+        return None;
+    }
+    let args = kids.get(1..)?;
+    if args.len() != children(params_list).len() {
+        return None;
+    }
+    let substitutions = children(params_list)
+        .iter()
+        .zip(args.iter())
+        .filter_map(|(param, arg)| param_name(param).map(|name| (name, arg.clone())))
+        .collect::<HashMap<_, _>>();
+    Some(inline_local_callable_lets(&substitute_expr(
+        fn_kids.get(1)?,
+        &substitutions,
+        &HashSet::new(),
+    )))
+}
+
+fn substitute_expr(
+    expr: &Expr,
+    substitutions: &HashMap<String, Expr>,
+    shadowed: &HashSet<String>,
+) -> Expr {
+    match expr {
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                entries: meta.entries.clone(),
+                expr: Box::new(substitute_expr(&meta.expr, substitutions, shadowed)),
+            },
+            *span,
+        ),
+        Expr::List(list, _span) if tag(list) == Some("var") => {
+            if let Some(name) = children(list).first().and_then(symbol_name)
+                && !shadowed.contains(name)
+                && let Some(replacement) = substitutions.get(name)
+            {
+                return replacement.clone();
+            }
+            expr.clone()
+        }
+        Expr::List(list, span) if tag(list) == Some("fn") => {
+            let kids = children(list);
+            let mut next_shadowed = shadowed.clone();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        next_shadowed.insert(name);
+                    }
+                }
+            }
+            let mut elements = Vec::with_capacity(list.elements.len());
+            elements.push(list.elements[0].clone());
+            elements.push(list.elements[1].clone());
+            if let Some(params) = kids.first() {
+                elements.push(params.clone());
+            }
+            if let Some(body) = kids.get(1) {
+                elements.push(substitute_expr(body, substitutions, &next_shadowed));
+            }
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) if tag(list) == Some("let") => {
+            let kids = children(list);
+            let mut next_shadowed = shadowed.clone();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some("bind")
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    if let Some(name) = bind_kids.get(index).and_then(symbol_name) {
+                        next_shadowed.insert(name.to_string());
+                    }
+                }
+            }
+            let elements = list
+                .elements
+                .iter()
+                .map(|child| substitute_expr(child, substitutions, shadowed))
+                .collect();
+            if kids.len() >= 2 {
+                let mut rebuilt = list.elements.clone();
+                rebuilt[2] = substitute_expr(&list.elements[2], substitutions, shadowed);
+                rebuilt[3] = substitute_expr(&list.elements[3], substitutions, &next_shadowed);
+                Expr::List(List { elements: rebuilt }, *span)
+            } else {
+                Expr::List(List { elements }, *span)
+            }
+        }
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .map(|child| substitute_expr(child, substitutions, shadowed))
+                    .collect(),
+            },
+            *span,
+        ),
+        _ => expr.clone(),
+    }
+}
+
+fn inline_local_callable_lets(expr: &Expr) -> Expr {
+    let Expr::List(list, span) = expr else {
+        return expr.clone();
+    };
+    if tag(list) != Some("let") {
+        return Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .map(inline_local_callable_lets)
+                    .collect(),
+            },
+            *span,
+        );
+    }
+
+    let kids = children(list);
+    let Some(bind_list) = kids.first().and_then(as_list) else {
+        return expr.clone();
+    };
+    if tag(bind_list) != Some("bind") {
+        return expr.clone();
+    }
+
+    let bind_kids = children(bind_list);
+    let mut rebuilt_pairs = Vec::<(String, Expr)>::new();
+    let mut body = kids
+        .get(1)
+        .map(inline_local_callable_lets)
+        .unwrap_or_else(|| {
+            Expr::List(
+                List {
+                    elements: Vec::new(),
+                },
+                *span,
+            )
+        });
+
+    for index in (0..bind_kids.len()).step_by(2).rev() {
+        let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
+            continue;
+        };
+        let Some(value) = bind_kids.get(index + 1) else {
+            continue;
+        };
+        let value = inline_local_callable_lets(value);
+        if matches!(&value, Expr::List(inner, _) if tag(inner) == Some("fn")) {
+            body = substitute_expr(
+                &body,
+                &HashMap::from([(name.to_string(), value)]),
+                &HashSet::new(),
+            );
+        } else {
+            rebuilt_pairs.push((name.to_string(), value));
+        }
+    }
+
+    if rebuilt_pairs.is_empty() {
+        return body;
+    }
+
+    rebuilt_pairs.reverse();
+    let mut rebuilt_bind = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
+    for (name, value) in rebuilt_pairs {
+        rebuilt_bind.push(Expr::Atom(Atom::Symbol(name), *span));
+        rebuilt_bind.push(value);
+    }
+    Expr::List(
+        List {
+            elements: vec![
+                list.elements[0].clone(),
+                list.elements[1].clone(),
+                Expr::List(
+                    List {
+                        elements: rebuilt_bind,
+                    },
+                    *span,
+                ),
+                body,
+            ],
+        },
+        *span,
+    )
+}
+
+fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &CheckedProgram) -> bool {
+    let graph = top_level_fn_call_graph(program);
+    let recursive = recursive_top_level_fn_names_from_graph(&graph);
+    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
+    collect_called_top_level_fns(expr, &fn_names)
+        .into_iter()
+        .any(|name| call_graph_reaches_any(&graph, &name, &recursive))
+}
+
+fn top_level_fn_needs_host_lane_tensor_lowering(program: &CheckedProgram, name: &str) -> bool {
+    let graph = top_level_fn_call_graph(program);
+    let recursive = recursive_top_level_fn_names_from_graph(&graph);
+    call_graph_reaches_any(&graph, name, &recursive)
+}
+
+fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<String>> {
+    let defs = collect_program_defs(program.exprs());
+    let fn_names = defs
+        .iter()
+        .filter_map(|(name, body)| {
+            matches!(body, Expr::List(list, _) if tag(list) == Some("fn")).then(|| name.clone())
+        })
+        .collect::<HashSet<_>>();
+
+    let graph = fn_names
+        .iter()
+        .map(|name| {
+            let callees = defs
+                .get(name)
+                .map(|body| collect_called_top_level_fns(body, &fn_names))
+                .unwrap_or_default();
+            (name.clone(), callees)
+        })
+        .collect();
+    graph
+}
+
+fn recursive_top_level_fn_names_from_graph(
+    graph: &HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
+    graph
+        .keys()
+        .filter(|name| call_graph_reaches_any(graph, name, &HashSet::from([(*name).clone()])))
+        .cloned()
+        .collect()
+}
+
+fn collect_called_top_level_fns(expr: &Expr, fn_names: &HashSet<String>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack = vec![expr];
+    while let Some(current) = stack.pop() {
+        match current {
+            Expr::MetaExpr(meta, _) => stack.push(&meta.expr),
+            Expr::List(list, _) => {
+                if tag(list) == Some("app")
+                    && let Some(callee) = children(list).first().and_then(as_list)
+                    && tag(callee) == Some("var")
+                    && let Some(name) = children(callee).first().and_then(symbol_name)
+                    && fn_names.contains(name)
+                {
+                    out.insert(name.to_string());
+                }
+                stack.extend(children(list).iter());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn call_graph_reaches_any(
+    graph: &HashMap<String, HashSet<String>>,
+    start: &str,
+    targets: &HashSet<String>,
+) -> bool {
+    if targets.contains(start) {
+        return true;
+    }
+    let mut visited = HashSet::new();
+    let mut stack = graph
+        .get(start)
+        .into_iter()
+        .flat_map(|callees| callees.iter().cloned())
+        .collect::<Vec<_>>();
+    while let Some(name) = stack.pop() {
+        if targets.contains(&name) {
+            return true;
+        }
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(next) = graph.get(&name) {
+            stack.extend(next.iter().cloned());
+        }
+    }
+    false
+}
+
+fn hoist_host_lane_tensor_bindings(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostType>,
+    fn_sig: Option<&(Vec<HostType>, HostType)>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> (Expr, HashMap<String, HostType>, Vec<HostBinding>) {
+    let Expr::List(list, span) = expr else {
+        return (expr.clone(), scope.clone(), Vec::new());
+    };
+    if tag(list) != Some("app") {
+        return (expr.clone(), scope.clone(), Vec::new());
+    }
+
+    let kids = children(list);
+    if kids.is_empty() {
+        return (expr.clone(), scope.clone(), Vec::new());
+    }
+
+    let mut new_elements = vec![
+        list.elements[0].clone(),
+        list.elements[1].clone(),
+        kids[0].clone(),
+    ];
+    let mut scoped = scope.clone();
+    let mut bindings = Vec::new();
+
+    for (index, arg) in kids.iter().enumerate().skip(1) {
+        if should_keep_tensor_expr_in_host_lane(arg) {
+            let value = lower_host_expr(arg, program, scope, tensor_helpers);
+            let preferred_ty = fn_sig
+                .and_then(|(param_tys, _)| param_tys.get(index - 1))
+                .cloned()
+                .or_else(|| expr_tensor_type(arg, program, scope).map(HostType::Tensor))
+                .or_else(|| {
+                    let ty = expr_host_type(arg, program, scope);
+                    (ty != HostType::Unknown).then_some(ty)
+                });
+            let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
+            let value = force_host_expr_type(value, ty.clone());
+            let name = format!("__host_tensor_arg_{index}");
+            bindings.push(HostBinding {
+                name: name.clone(),
+                display_name: None,
+                ty: ty.clone(),
+                value,
+            });
+            scoped.insert(name.clone(), ty);
+            new_elements.push(Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Symbol("var".to_string()), *span),
+                        Expr::Map(
+                            chelis_deep::ast::MetaMap {
+                                entries: Vec::new(),
+                            },
+                            *span,
+                        ),
+                        Expr::Atom(Atom::Symbol(name), *span),
+                    ],
+                },
+                *span,
+            ));
+        } else {
+            new_elements.push(arg.clone());
+        }
+    }
+
+    (
+        Expr::List(
+            List {
+                elements: new_elements,
+            },
+            *span,
+        ),
+        scoped,
+        bindings,
+    )
 }
 
 fn host_fn_signature(ty: &HostType) -> Option<(Vec<HostType>, HostType)> {
@@ -2406,10 +2851,17 @@ fn lower_host_callback(
         }
         Expr::List(list, _) if tag(list) == Some("var") => {
             let name = children(list).first().and_then(symbol_name)?;
-            let (param_tys, ret_ty) = lookup_declared_fn_type(program, name).or_else(|| {
-                lookup_program_def(&collect_program_defs(program.exprs()), name)
-                    .and_then(expr_fn_type)
-            })?;
+            let (param_tys, ret_ty) = scope
+                .get(name)
+                .and_then(host_fn_signature)
+                .or_else(|| {
+                    lookup_declared_host_type(program, name).and_then(|ty| host_fn_signature(&ty))
+                })
+                .or_else(|| lookup_declared_fn_type(program, name))
+                .or_else(|| {
+                    lookup_program_def(&collect_program_defs(program.exprs()), name)
+                        .and_then(expr_fn_type)
+                })?;
             let params = param_tys
                 .into_iter()
                 .enumerate()
@@ -2561,7 +3013,11 @@ fn actualize_tensor_helper_types(
     dag: &crate::Dag,
     scope: &HashMap<String, HostType>,
 ) -> crate::Dag {
-    fn inferred_load_type(name: &str, scope: &HashMap<String, HostType>, fallback: &TensorType) -> TensorType {
+    fn inferred_load_type(
+        name: &str,
+        scope: &HashMap<String, HostType>,
+        fallback: &TensorType,
+    ) -> TensorType {
         match scope.get(name) {
             Some(HostType::Tensor(actual)) => actual.clone(),
             _ => fallback.clone(),
@@ -2585,9 +3041,17 @@ fn actualize_tensor_helper_types(
     }
 
     let mut inferred = HashMap::<crate::dag::NodeId, TensorType>::new();
+    let mut uses = HashMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
+    for node in dag.nodes() {
+        for input in &node.inputs {
+            uses.entry(*input).or_default().push(node.id);
+        }
+    }
     for node in dag.nodes() {
         let actual = match &node.op {
-            crate::dag::RiscOp::Load { name } => Some(inferred_load_type(name, scope, &node.output_type)),
+            crate::dag::RiscOp::Load { name } => {
+                Some(inferred_load_type(name, scope, &node.output_type))
+            }
             crate::dag::RiscOp::Add
             | crate::dag::RiscOp::Mul
             | crate::dag::RiscOp::CmpLt
@@ -2635,9 +3099,48 @@ fn actualize_tensor_helper_types(
                     precision: node.output_type.precision,
                 }),
             _ => None,
-        };
+        }
+        .or_else(|| {
+            node.reusable_input
+                .and_then(|id| inferred.get(&id))
+                .filter(|input| input.dims.len() == node.output_type.dims.len())
+                .map(|input| precision_like(input, node.output_type.precision))
+        });
         if let Some(actual) = actual {
             inferred.insert(node.id, actual);
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for node in dag.nodes() {
+            if !matches!(node.op, crate::dag::RiscOp::Expand { .. })
+                || !synthetic_dims(&node.output_type)
+            {
+                continue;
+            }
+            let Some(actual) = uses.get(&node.id).and_then(|user_ids| {
+                user_ids
+                    .iter()
+                    .filter_map(|user_id| inferred.get(user_id))
+                    .find(|user_ty| user_ty.dims.len() == node.output_type.dims.len())
+                    .cloned()
+            }) else {
+                continue;
+            };
+            let entry = inferred
+                .entry(node.id)
+                .or_insert_with(|| node.output_type.clone());
+            if entry.dims != actual.dims {
+                *entry = TensorType {
+                    dims: actual.dims,
+                    precision: node.output_type.precision,
+                };
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -2707,7 +3210,9 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 fn collect_tensor_scope(scope: &HashMap<String, HostType>) -> HashMap<String, TensorType> {
     scope
         .iter()
-        .filter_map(|(name, ty)| tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor)))
+        .filter_map(|(name, ty)| {
+            tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
+        })
         .collect()
 }
 
@@ -2843,12 +3348,13 @@ fn host_type_has_synthetic_tensor_dims(ty: &HostType) -> bool {
     }
 
     match ty {
-        HostType::Tensor(tensor_ty) => tensor_ty
-            .dims
-            .iter()
-            .any(|dim| matches!(dim, crate::dag::DimInfo::Named(name, None) if synthetic_dim_name(name))),
+        HostType::Tensor(tensor_ty) => tensor_ty.dims.iter().any(
+            |dim| matches!(dim, crate::dag::DimInfo::Named(name, None) if synthetic_dim_name(name)),
+        ),
         HostType::Tuple(items) => items.iter().any(host_type_has_synthetic_tensor_dims),
-        HostType::List(inner) | HostType::Option(inner) => host_type_has_synthetic_tensor_dims(inner),
+        HostType::List(inner) | HostType::Option(inner) => {
+            host_type_has_synthetic_tensor_dims(inner)
+        }
         _ => false,
     }
 }
@@ -2862,7 +3368,10 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
 
     let mut labels = HashMap::<char, crate::dag::DimInfo>::new();
     for (spec, tensor) in input_specs.iter().zip(tensors.iter()) {
-        let axes = spec.chars().filter(|ch| !ch.is_whitespace()).collect::<Vec<_>>();
+        let axes = spec
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<Vec<_>>();
         if axes.len() != tensor.dims.len() {
             return None;
         }
@@ -3699,5 +4208,172 @@ fn param_host_type(expr: &Expr) -> Option<HostType> {
             .or_else(|| param_host_type(&meta.expr)),
         Expr::List(_, _) => expr_type(expr).filter(|ty| *ty != HostType::Unknown),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_types::types::Prim;
+
+    fn parse_and_check(src: &str) -> CheckedProgram {
+        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+        let checked = chelis_types::check_phase0e_program(&exprs)
+            .unwrap_or_else(|result| panic!("phase 0e check failed: {:?}", result.errors));
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    #[test]
+    fn tensor_helper_hoists_host_lane_tensor_args_with_f32_type() {
+        let checked = parse_and_check(
+            r#"
+                (defsig {}
+                  jac_row
+                  (t-fn {}
+                    (t-fn {}
+                      (t-tensor {} (d-var {} n) (t-prim {} f32))
+                      (t-prim {} f32)
+                      (t-prim {} f32)
+                      (t-prim {} f32))
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-tensor {} (d-var {} n) (t-prim {} f32))))
+                (def {}
+                  jac_row
+                  (fn {}
+                    (params {}
+                      (model {type: (t-fn {}
+                                       (t-tensor {} (d-var {} n) (t-prim {} f32))
+                                       (t-prim {} f32)
+                                       (t-prim {} f32)
+                                       (t-prim {} f32))})
+                      (theta {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        target
+                        (fn {}
+                          (params {}
+                            (theta_local {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
+                          (app {} (var {} model) (var {} theta_local) (var {} x) (var {} y))))
+                      (app {}
+                        (grad {wrt: (var {} theta_local)}
+                          (var {} target)
+                          (lit {type: (t-prim {} int32)} 0))
+                        (var {} theta)))))
+                (defsig {}
+                  lm_model
+                  (t-fn {}
+                    (t-tensor {} (d-lit {} 2) (t-prim {} f32))
+                    (t-prim {} f32)
+                    (t-prim {} f32)
+                    (t-prim {} f32)))
+                (def {}
+                  lm_model
+                  (fn {}
+                    (params {}
+                      (theta {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))})
+                      (x {type: (t-prim {} f32)})
+                      (y {type: (t-prim {} f32)}))
+                    (let {}
+                      (bind {}
+                        y_hat
+                        (if {}
+                          (app {}
+                            (var {} lt)
+                            (var {} x)
+                            (cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32)))
+                          (app {}
+                            (var {} tensor_to_scalar)
+                            (app {}
+                              (var {} sum)
+                              (copy {} (var {} theta))
+                              (lit {type: (t-prim {} int32)} 0)))
+                          (app {}
+                            (var {} add)
+                            (app {}
+                              (var {} tensor_to_scalar)
+                              (app {}
+                                (var {} sum)
+                                (copy {} (var {} theta))
+                                (lit {type: (t-prim {} int32)} 0)))
+                            (var {} x))))
+                      (app {} (var {} sub) (var {} y) (var {} y_hat)))))
+                (def {}
+                  out
+                  (app {}
+                    (var {} jac_row)
+                    (var {} lm_model)
+                    (app {}
+                      (var {} to_tensor)
+                      (app {}
+                        (var {} Cons)
+                        (lit {type: (t-prim {} f32)} 1.0)
+                        (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil))))
+                    (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
+                    (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
+            "#,
+        );
+        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
+        let host = lower_host_program(&checked, &lowered);
+        let out_binding = host
+            .globals
+            .iter()
+            .find(|binding| binding.name == "out")
+            .expect("out host binding");
+        let (bindings, body) = match &out_binding.value {
+            HostExpr::Let { bindings, body, .. } => (bindings, body.as_ref()),
+            other => panic!("expected out to hoist host-lane tensor arg into let, got {other:?}"),
+        };
+        let theta_binding = bindings
+            .iter()
+            .find(|binding| binding.name.starts_with("__host_tensor_arg_"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "theta temp binding missing; hoisted bindings were {:?}",
+                    bindings
+                        .iter()
+                        .map(|binding| (&binding.name, &binding.ty))
+                        .collect::<Vec<_>>()
+                )
+            });
+        match &theta_binding.ty {
+            HostType::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
+            other => panic!("expected hoisted theta binding to be tensor-typed, got {other:?}"),
+        }
+        let helper_index = match body {
+            HostExpr::TensorCall { helper, .. } => *helper,
+            other => panic!("expected hoisted body to call tensor helper, got {other:?}"),
+        };
+        let helper = host
+            .global_tensor_helpers
+            .get(helper_index)
+            .expect("helper index in range");
+        assert!(
+            helper
+                .inputs
+                .iter()
+                .any(|input| input.name == theta_binding.name),
+            "helper inputs should reference hoisted tensor temp: {:?}",
+            helper
+                .inputs
+                .iter()
+                .map(|input| (&input.name, &input.ty))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            helper.inputs.iter().all(|input| input.name != "to_tensor"),
+            "helper inputs must not contain raw `to_tensor` load: {:?}",
+            helper
+                .inputs
+                .iter()
+                .map(|input| (&input.name, &input.ty))
+                .collect::<Vec<_>>()
+        );
     }
 }

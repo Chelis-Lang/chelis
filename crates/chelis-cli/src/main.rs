@@ -546,17 +546,18 @@ fn cmd_build(
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
-    let preserve_host_library_surface = if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
-        let full_checked = checked_program_with_effects(&full_deep_exprs)
-            .map_err(|e| format!("Check errors: {e}"))?;
-        chelis_ir::host::lower_compiled_program(&full_checked)
-            .host
-            .as_ref()
-            .map(chelis_ir::host::host_program_requires_host_backend)
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let preserve_host_library_surface =
+        if target == "c" && pruned_deep_exprs.len() != full_deep_exprs.len() {
+            let full_checked = checked_program_with_effects(&full_deep_exprs)
+                .map_err(|e| format!("Check errors: {e}"))?;
+            chelis_ir::host::lower_compiled_program(&full_checked)
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false)
+        } else {
+            false
+        };
     let deep_exprs = if preserve_host_library_surface {
         full_deep_exprs
     } else {
