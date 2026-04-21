@@ -370,6 +370,29 @@ theorem storeTypLookup_extend_self
     storeTypLookup (storeTypExtend Sigma ell t) ell = some t := by
   simp [storeTypLookup, storeTypExtend]
 
+theorem storeTypLookup_mem_dom
+    {Sigma : StoreTyp} {ell : Loc} {t : Typ}
+    (h : storeTypLookup Sigma ell = some t) :
+    ell ∈ storeTypDom Sigma := by
+  unfold storeTypLookup at h
+  rcases hfind : Sigma.find? (fun p => p.1 = ell) with _ | ⟨ell', t'⟩
+  · rw [hfind] at h
+    simp at h
+  · have hmem_pair : (ell', t') ∈ Sigma := List.mem_of_find?_eq_some hfind
+    have hpred : decide (ell' = ell) = true := by
+      have hp := @List.find?_some _ (fun p : Loc × Typ => decide (p.1 = ell))
+        (ell', t') Sigma hfind
+      simpa using hp
+    have hell_eq : ell' = ell := of_decide_eq_true hpred
+    exact List.mem_map.mpr ⟨(ell', t'), hmem_pair, hell_eq⟩
+
+theorem StoreWf.lookup_isSome_of_typing
+    {sigma : Store} {Sigma : StoreTyp} {ell : Loc} {t : Typ}
+    (h_wf : StoreWf sigma Sigma)
+    (h : storeTypLookup Sigma ell = some t) :
+    (storeLookup sigma ell).isSome := by
+  exact h_wf.1 ell (storeTypLookup_mem_dom h)
+
 -- storeLookup_isSome_remove_ne, mem_storeTypDom_remove_iff, and
 -- StoreWf.remove_extend all moved to Store.lean so LinearitySoundness
 -- can use them without cross-file imports.
@@ -2039,6 +2062,87 @@ theorem multiPlug_preserves_typing_closed
       intro t0 eps0 h_inner'
       exact ih h_inner' h_inner
 
+private def ctxCounterTensor : TensorVal :=
+  { shape := DimList.empty, data := 0.0 }
+
+private def ctxCounterSigma : Store :=
+  [(1, ctxCounterTensor), (2, ctxCounterTensor)]
+
+private def ctxCounterStoreTyp : StoreTyp :=
+  [(1, Typ.tensor DimList.empty), (2, Typ.tensor DimList.empty)]
+
+private def ctxCounterTerm : Term :=
+  Term.pair (Term.add (Term.loc 1) (Term.loc 2)) (Term.loc 1)
+
+private def ctxCounterTerm' : Term :=
+  Term.pair (Term.loc 3) (Term.loc 1)
+
+/-- Concrete witness that the current top-level `ctx` theorem shape is
+    too strong: an inner numeric step can consume locations still
+    mentioned by sibling subterms in the surrounding frame. -/
+theorem preservation_ctx_counterexample :
+    HasType [] ctxCounterStoreTyp [] ctxCounterTerm
+      (Typ.pair (Typ.tensor DimList.empty) (Typ.tensor DimList.empty)) [] [] ∧
+    WellScoped ctxCounterTerm ∧
+    StoreWf ctxCounterSigma ctxCounterStoreTyp ∧
+    Step ⟨ctxCounterSigma, ctxCounterTerm⟩
+      ⟨[(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)], ctxCounterTerm'⟩ ∧
+    (∀ Sigma', ¬
+      (HasType [] Sigma' [] ctxCounterTerm'
+         (Typ.pair (Typ.tensor DimList.empty) (Typ.tensor DimList.empty)) [] [] ∧
+       StoreWf [(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)] Sigma')) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · have hLoc1 :
+        HasType [] ctxCounterStoreTyp [] (Term.loc 1) (Typ.tensor DimList.empty) [] [] := by
+      exact HasType.loc [] ctxCounterStoreTyp [] 1 (Typ.tensor DimList.empty) (by
+        simp [ctxCounterStoreTyp, storeTypLookup])
+    have hLoc2 :
+        HasType [] ctxCounterStoreTyp [] (Term.loc 2) (Typ.tensor DimList.empty) [] [] := by
+      exact HasType.loc [] ctxCounterStoreTyp [] 2 (Typ.tensor DimList.empty) (by
+        simp [ctxCounterStoreTyp, storeTypLookup])
+    have hAdd :
+        HasType [] ctxCounterStoreTyp []
+          (Term.add (Term.loc 1) (Term.loc 2))
+          (Typ.tensor DimList.empty) [] [] := by
+      simpa using
+        (HasType.tadd [] ctxCounterStoreTyp [] [] []
+          (Term.loc 1) (Term.loc 2) DimList.empty [] [] hLoc1 hLoc2)
+    simpa [ctxCounterTerm] using
+      (HasType.tpair [] ctxCounterStoreTyp [] [] []
+        (Term.add (Term.loc 1) (Term.loc 2)) (Term.loc 1)
+        (Typ.tensor DimList.empty) (Typ.tensor DimList.empty) [] [] hAdd hLoc1)
+  · simp [ctxCounterTerm, WellScoped, boundVars, List.nodup_append]
+  · refine ⟨?_, ?_⟩
+    · intro ell hmem
+      simp [ctxCounterSigma, ctxCounterStoreTyp, storeTypDom, storeLookup] at hmem ⊢
+      rcases hmem with rfl | rfl
+      · simp [ctxCounterSigma, storeLookup]
+      · simp [ctxCounterSigma, storeLookup]
+    · intro ell hsome
+      simp [ctxCounterSigma, storeLookup] at hsome
+      simpa [ctxCounterStoreTyp, storeTypDom, eq_comm] using hsome
+  · refine Step.ctx ctxCounterSigma
+      [(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)]
+      (EvalCtx.pairL (Term.loc 1))
+      (Term.add (Term.loc 1) (Term.loc 2))
+      (Term.loc 3) ?_
+    simpa [ctxCounterSigma, ctxCounterTensor, storeLookup, storeRemove, storeExtend, List.find?] using
+      (Step.tadd ctxCounterSigma 1 2 3 ctxCounterTensor ctxCounterTensor
+        (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+        (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+        (by simp [ctxCounterSigma, storeFreshLoc]))
+  · intro Sigma' hpost
+    rcases hpost with ⟨hTy, hWf⟩
+    obtain ⟨GammaMid, eps1, eps2, hLeft, hRight, _hSub⟩ := HasType.pair_inv hTy
+    have hGammaMid : GammaMid = [] := has_type_closed_output_of_closed_input hLeft
+    subst hGammaMid
+    have hLookup1 :
+        storeTypLookup Sigma' 1 = some (Typ.tensor DimList.empty) :=
+      (HasType.loc_inv hRight).1
+    have hLive1 : (storeLookup [(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)] 1).isSome :=
+      StoreWf.lookup_isSome_of_typing hWf hLookup1
+    simp [storeLookup, List.find?] at hLive1
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
@@ -2494,10 +2598,11 @@ theorem preservation
       -- closed-context route wants `StoreTypSub Sigma Sigma2` so the
       -- untouched sibling sub-derivations can be weakened, but inner
       -- numeric/store steps remove consumed locations and therefore do
-      -- not preserve global `StoreTypSub`. This needs a theorem that
-      -- tracks agreement only on the locations mentioned by the outer
-      -- frame, or a stronger store/term invariant tying loc mentions to
-      -- linear ownership.
+      -- not preserve global `StoreTypSub`. `preservation_ctx_counterexample`
+      -- shows this is a real theorem-shape gap, not just missing local
+      -- proof search. Closing `ctx` needs a theorem that tracks agreement
+      -- only on the locations mentioned by the outer frame, or a stronger
+      -- store/term invariant tying loc mentions to linear ownership.
       sorry
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
