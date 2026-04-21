@@ -304,6 +304,19 @@ fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
         deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
         _ => return false,
     };
+    // If any fn param shadows the def name, the callee reference inside
+    // the body refers to the param (a callable HOF argument), not the def
+    // itself. This is a legitimate HOF call, not recursion.
+    if let Some(params_list) = children(fn_list).first()
+        && let deep::Expr::List(params, _) = params_list
+        && get_tag(params) == Some("params")
+    {
+        for param in children(params) {
+            if param_name_for_refs(param).as_deref() == Some(def_name) {
+                return false;
+            }
+        }
+    }
     let Some(body) = children(fn_list).get(1) else {
         return false;
     };
@@ -666,10 +679,11 @@ fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
     match param {
         deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.clone()),
         deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
-        deep::Expr::List(list, _) => children(list)
-            .first()
-            .and_then(symbol_name)
-            .map(str::to_string),
+        // A Deep param is `(name {type: ...})` — a List with the name as
+        // the FIRST element and the meta map as the second. `children()`
+        // skips first two (tag + meta) and returns nothing for a 2-elem
+        // list, so read elements[0] directly.
+        deep::Expr::List(list, _) => list.elements.first().and_then(symbol_name).map(str::to_string),
         _ => None,
     }
 }

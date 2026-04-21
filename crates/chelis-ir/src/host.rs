@@ -456,11 +456,16 @@ fn lower_host_program(
                 params.iter().any(ty_has_non_dag_tensor) || ty_has_non_dag_tensor(&ret)
             });
         // `has_callable_params` blocks the wrapper for fn-taking-fn signatures
-        // because the host emitter doesn't lower a higher-order wrapper
-        // cleanly. But if the signature ALSO contains a non-F32/Bool tensor,
-        // the DAG-only fallback panics — so in that specific combination
-        // still force the wrapper and accept degraded higher-order support
-        // over a hard backend panic.
+        // because the host emitter doesn't lower higher-order wrappers
+        // cleanly in every shape (grad specialization etc.). But if the
+        // signature ALSO contains a non-F32/Bool tensor, the DAG-only
+        // fallback panics — so in that combination still force the wrapper.
+        //
+        // Known limitation: when a caller references a callable-param fn by
+        // name and that fn's body doesn't lower cleanly through the host
+        // wrapper, the def gets dropped from emission and the caller will
+        // fail gcc with `implicit declaration`. Tracked as a residual HOF
+        // emission issue (red-team A20.1).
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
@@ -469,6 +474,14 @@ fn lower_host_program(
         if skip_for_lowered {
             continue;
         }
+        // The wrapper emitter doesn't know every pattern the DAG-path
+        // specializer does (e.g. `grad(local_fn)(theta)`). When the host
+        // lowering would degrade to a fallback `Builtin { name: "call" }`,
+        // emitting the wrapper produces broken C (`__result = call(...)`).
+        // In that case prefer the DAG path if it's available (lowered_names
+        // says so); otherwise we have no good lowering and must drop the
+        // def — at least the caller will get `implicit declaration` rather
+        // than `call(…)` undefined-symbol.
         if let Some(function) = lower_host_function(name, body, ty_expr, program) {
             global_scope.insert(
                 name.to_string(),
@@ -509,6 +522,71 @@ fn lower_host_program(
         }
     }
     host
+}
+
+/// Walk a HostExpr and report whether any node is the generic-fallback
+/// `Builtin { name: "call", ... }` that `lower_app_host_expr` emits when
+/// it doesn't recognize the callee. A wrapper containing this node would
+/// emit broken C (`__result = call(...);`) downstream — preferring the
+/// DAG path's inline specialization is safer than emitting that wrapper.
+fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
+    match expr {
+        HostExpr::Builtin { name, args, .. } => {
+            name == "call" || args.iter().any(host_body_has_fallback_call)
+        }
+        HostExpr::Call { args, .. } => args.iter().any(host_body_has_fallback_call),
+        HostExpr::Let { bindings, body, .. } => {
+            bindings
+                .iter()
+                .any(|b| host_body_has_fallback_call(&b.value))
+                || host_body_has_fallback_call(body)
+        }
+        HostExpr::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            host_body_has_fallback_call(cond)
+                || host_body_has_fallback_call(then_expr)
+                || host_body_has_fallback_call(else_expr)
+        }
+        HostExpr::Tuple(items, _) | HostExpr::List(items, _) => {
+            items.iter().any(host_body_has_fallback_call)
+        }
+        HostExpr::Map { list, .. }
+        | HostExpr::Filter { list, .. }
+        | HostExpr::Fold { list, .. }
+        | HostExpr::Scan { list, .. }
+        | HostExpr::Partition { list, .. }
+        | HostExpr::FlatMap { list, .. } => host_body_has_fallback_call(list),
+        HostExpr::TensorCall { args, .. } => args.iter().any(host_body_has_fallback_call),
+        HostExpr::AdtFieldAccess { base, .. } => host_body_has_fallback_call(base),
+        HostExpr::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            host_body_has_fallback_call(scrutinee)
+                || host_body_has_fallback_call(some_expr)
+                || host_body_has_fallback_call(none_expr)
+        }
+        HostExpr::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            host_body_has_fallback_call(scrutinee)
+                || arms.iter().any(|arm| host_body_has_fallback_call(&arm.expr))
+                || default_expr
+                    .as_ref()
+                    .is_some_and(|d| host_body_has_fallback_call(d))
+        }
+        HostExpr::AdtConstruct { fields, .. } => fields.iter().any(host_body_has_fallback_call),
+        _ => false,
+    }
 }
 
 fn lower_host_function(
