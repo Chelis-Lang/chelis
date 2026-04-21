@@ -442,6 +442,17 @@ end
 def freshInTerm (y : String) (e : Term) : Prop :=
   y ∉ freeVars e ∧ y ∉ boundVars e
 
+theorem freshInTerm_of_closed_not_bound
+    {y : String} {e : Term}
+    (hclosed : Closed e)
+    (hbound : y ∉ boundVars e) :
+    freshInTerm y e := by
+  unfold freshInTerm
+  refine ⟨?_, hbound⟩
+  unfold Closed at hclosed
+  rw [hclosed]
+  simp
+
 /-- Global binder-distinctness for named terms. This is the scoping
     side condition used by the TranslationDB bridge to align lexical
     named substitution with positional DB substitution under the current
