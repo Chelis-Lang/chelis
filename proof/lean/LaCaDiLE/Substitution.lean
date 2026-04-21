@@ -442,6 +442,26 @@ theorem freshInTerm_clauses_cons {y : String} {epsH : EffectRow} {body : Term}
     · exact hbnd_body h1
     · exact hbnd_rest h1
 
+theorem freshInTerm_handle_clause
+    {y : String} {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (h : freshInTerm y (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    y ≠ x ∧ y ≠ k ∧ freshInTerm y hb := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases cl with ⟨op0, x0, k0, hb0⟩
+      rcases freshInTerm_clauses_cons
+          (op := op0) (x := x0) (k := k0) (hb := hb0) (rest := rest) h with
+        ⟨hneqX0, hneqK0, hFreshHb0, hFreshRest⟩
+      rcases List.mem_cons.mp hmem with hhead | htail
+      · cases hhead
+        exact ⟨hneqX0, hneqK0, hFreshHb0⟩
+      · exact ih hFreshRest htail
+
 
 /-! ### Append split analysis for the var case -/
 
