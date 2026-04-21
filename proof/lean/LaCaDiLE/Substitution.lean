@@ -462,6 +462,24 @@ theorem freshInTerm_handle_clause
         exact ⟨hneqX0, hneqK0, hFreshHb0⟩
       · exact ih hFreshRest htail
 
+theorem capturedContName_fresh_handle_body
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)} :
+    freshInTerm (capturedContName (Term.handle epsH body clauses))
+      (Term.handle epsH body clauses) := by
+  exact capturedContName_freshInTerm _
+
+theorem capturedContName_fresh_selected_clause
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    capturedContName (Term.handle epsH body clauses) ≠ x ∧
+    capturedContName (Term.handle epsH body clauses) ≠ k ∧
+    freshInTerm (capturedContName (Term.handle epsH body clauses)) hb := by
+  exact freshInTerm_handle_clause
+    (capturedContName_freshInTerm (Term.handle epsH body clauses)) hmem
+
 
 /-! ### Append split analysis for the var case -/
 
