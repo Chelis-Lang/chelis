@@ -213,6 +213,11 @@ def ctxEnv (Gamma : LinearCtx) : BinderEnv :=
     eraseCtx (Gamma ++ [(x, some t)]) = some t :: eraseCtx Gamma := by
   simpa [eraseCtx] using (eraseCtx_append Gamma [(x, some t)])
 
+@[simp] theorem eraseCtx_append_dead
+    (Gamma : LinearCtx) (x : String) :
+    eraseCtx (Gamma ++ [(x, none)]) = none :: eraseCtx Gamma := by
+  simpa [eraseCtx] using (eraseCtx_append Gamma [(x, none)])
+
 @[simp] theorem eraseCtx_append_pair
     (Gamma : LinearCtx) (x : String) (tx : Typ) (y : String) (ty : Typ) :
     eraseCtx (Gamma ++ [(x, some tx), (y, some ty)]) = some ty :: some tx :: eraseCtx Gamma := by
@@ -1074,7 +1079,16 @@ theorem transport_var_lexical
     HasTypeDB Delta Sigma (eraseCtx Gamma) (TermDB.var i) t []
       ((eraseCtx Gamma).set i none) ∧
     CtxCorr (GammaPre ++ [(x, none)] ++ GammaPost) ((eraseCtx Gamma).set i none) := by
-  sorry
+  dsimp
+  have hxPost : x ∉ linearCtxDom GammaPost :=
+    noDupNames_middle_fresh_suffix hnd
+  refine ⟨?_, ?_, ?_⟩
+  · simpa [eraseTerm] using
+      (lookupBinder_ctxEnv_append_target
+        (GammaPre := GammaPre) (GammaPost := GammaPost) (x := x) (t := t) hxPost)
+  · exact HasTypeDB.var Delta Sigma (eraseCtx (GammaPre ++ [(x, some t)] ++ GammaPost))
+      GammaPost.length t (eraseCtx_get_target GammaPre GammaPost x t)
+  · exact ctxCorr_consume_target GammaPre GammaPost x t
 
 /-- Local invariant for the narrow wrapper bridge: the named context is
     a lexical binder stack with pairwise-distinct names, every stack
@@ -1184,11 +1198,37 @@ theorem HasType.var_output_consume_of_eq
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {tau : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e tau eps Gamma')
-    (hnd : NoDupNames Gamma) :
-    ∀ {x : String} {t : Typ},
+    :
+    ∀ (hnd : NoDupNames Gamma) {x : String} {t : Typ},
       e = Term.var x -> tau = t ->
       Gamma' = consumeNameCtx Gamma x := by
-  sorry
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | var _ _ GammaPre GammaPost y ty =>
+      intro hnd x t heq hty
+      cases heq
+      cases hty
+      have hyPre : y ∉ linearCtxDom GammaPre :=
+        noDupNames_middle_fresh_prefix hnd
+      have hyPost : y ∉ linearCtxDom GammaPost :=
+        noDupNames_middle_fresh_suffix hnd
+      calc
+        GammaPre ++ [(y, none)] ++ GammaPost
+            = consumeNameCtx GammaPre y ++ [(y, none)] ++ consumeNameCtx GammaPost y := by
+                simp [consumeNameCtx_eq_self_of_fresh hyPre,
+                  consumeNameCtx_eq_self_of_fresh hyPost]
+        _ = consumeNameCtx (GammaPre ++ [(y, some ty)] ++ GammaPost) y := by
+              simp [consumeNameCtx_append, consumeNameCtx, List.append_assoc]
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      intro hnd x t heq hty
+      exact ih hnd heq hty
+  | nil _ _ _ _ _ =>
+      exact True.intro
+  | cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+      exact True.intro
+  | _ =>
+      intro hnd x t heq hty
+      cases heq
 
 theorem HasType.var_output_consume_of_noDup
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
@@ -1211,13 +1251,33 @@ theorem lexical_sublist
     exact (hsub.map Prod.fst).subset hx
   exact hdom x hx'
 
-theorem lexical_output_of_typing
-    {Delta : CapCtx} {Sigma : StoreTyp}
-    {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma e t eps Gamma')
+theorem ctxEnv_eq_of_names_eq
+    {Gamma Gamma' : LinearCtx}
+    (hEq : Gamma.map Prod.fst = Gamma'.map Prod.fst) :
+    ctxEnv Gamma = ctxEnv Gamma' := by
+  simpa [ctxEnv, linearCtxDom] using congrArg List.reverse hEq
+
+theorem lexical_of_names_eq
+    {Gamma Gamma' : LinearCtx} {e : Term}
+    (hEq : Gamma.map Prod.fst = Gamma'.map Prod.fst)
     (hlex : LexicallyScoped Gamma e) :
     LexicallyScoped Gamma' e := by
-  sorry
+  rcases hlex with ⟨hnd, hdom, hws⟩
+  refine ⟨?_, ?_, hws⟩
+  · unfold NoDupNames at hnd ⊢
+    simpa [linearCtxDom, hEq] using hnd
+  · intro x hx
+    have hx' : x ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom, hEq] using hx
+    exact hdom x hx'
+
+theorem lexical_output_of_typing
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' : LinearCtx} {e : Term} {e' : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (hlex : LexicallyScoped Gamma e') :
+    LexicallyScoped Gamma' e' :=
+  lexical_of_names_eq (hasType_names_preserved h) hlex
 
 theorem lexical_app_left
     {Gamma : LinearCtx} {e1 e2 : Term}
@@ -1772,7 +1832,16 @@ theorem HasType.abs_inv
       HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) body t2 epsBody
         (GammaBody ++ [(x, slot)]) ∧
       GammaOut = GammaBody := by
-  sorry
+  generalize heq : Term.abs x t1 body = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | abs _ _ _ GammaBody _ _ t2 epsBody _ slot hBody =>
+      cases heq
+      exact ⟨t2, epsBody, GammaBody, slot, rfl, hBody, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- App inversion local to the DB bridge. `TranslationDB` cannot import
     `Progress.lean` because `Progress` already imports `Preservation`,
@@ -1784,7 +1853,16 @@ theorem HasType.app_inv_bridge
     ∃ Gamma2 t1 eps1 eps2 epsInner,
       HasType Delta Sigma Gamma1 e1 (Typ.arrow t1 t epsInner) eps1 Gamma2 ∧
       HasType Delta Sigma Gamma2 e2 t1 eps2 Gamma3 := by
-  sorry
+  generalize heq : Term.app e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | app _ _ _ Gamma2 _ _ _ t1 _ epsInner eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, t1, eps1, eps2, epsInner, h1, h2⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- LetBind inversion local to the DB bridge. -/
 theorem HasType.letBind_inv_bridge
@@ -1796,7 +1874,16 @@ theorem HasType.letBind_inv_bridge
       HasType Delta Sigma (Gamma2 ++ [(x, some t1)]) e2 t eps2
         (Gamma3 ++ [(x, slot)]) ∧
       GammaOut = Gamma3 := by
-  sorry
+  generalize heq : Term.letBind x e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letBind _ _ _ Gamma2 Gamma3 _ _ _ t1 _ eps1 eps2 slot h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, Gamma3, t1, eps1, eps2, slot, h1, h2, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- LetPair inversion local to the DB bridge. -/
 theorem HasType.letpair_inv_bridge
@@ -1808,7 +1895,16 @@ theorem HasType.letpair_inv_bridge
       HasType Delta Sigma (Gamma2 ++ [(x, some t1), (y, some t2)]) e2 t eps2
         (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
       GammaOut = Gamma3 := by
-  sorry
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Gamma2 Gamma3 _ _ _ _ t1 t2 _ eps1 eps2 slotX slotY h1 h2 _ _ =>
+      cases heq
+      exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- Strong handle inversion local to the DB bridge. -/
 theorem HasType.handle_inv_strong_bridge
@@ -1824,7 +1920,19 @@ theorem HasType.handle_inv_strong_bridge
       ClausesTyped Delta Sigma Gamma2 Gamma3 t
         (EffectRow.removeOps epsB epsH) clauses ∧
       SubEffRow (EffectRow.removeOps epsB epsH) eps := by
-  sorry
+  generalize heq : Term.handle epsH body clauses = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | handle _ _ _ Gamma2 _ _ _ _ _ epsB hBody hOpsIn hClsIn hCover hClauses _ _ =>
+      cases heq
+      exact ⟨Gamma2, epsB, hBody, hOpsIn, hClsIn, hCover, hClauses, fun _ hop => hop⟩
+  | subEff _ _ _ _ _ _ _ _ _ hSub ih =>
+      obtain ⟨Gamma2, epsB, hBody, hOpsIn, hClsIn, hCover, hClauses, hSub'⟩ := ih heq
+      refine ⟨Gamma2, epsB, hBody, hOpsIn, hClsIn, hCover, hClauses, ?_⟩
+      intro op hop
+      exact hSub op (hSub' op hop)
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
 
 /-- Membership inversion for handler clauses. Extract the typing
     derivation attached to a specific clause body from `ClausesTyped`. -/
@@ -1839,70 +1947,190 @@ theorem ClausesTyped.mem_inv
       HasType Delta Sigma
         (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
         hb t epsR (Gamma3 ++ [(x, slotX), (k, slotK)]) := by
-  sorry
+  induction clauses generalizing Gamma2 Gamma3 with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      cases hcls with
+      | cons _ _ _ _ _ tArg tRet _ _ x' k' hb' rest' slotX slotK hHead hRest =>
+          rcases List.mem_cons.mp hmem with h0 | htl
+          · cases h0
+            exact ⟨tArg, tRet, slotX, slotK, hHead⟩
+          · exact ih hRest htl
 
-/-- Pair-level shrinkage: every output binding is literally one of the
-    input bindings, with the same name and type. This is the stronger
-    form of `has_type_linear_shrinks` needed by the narrow DB bridge,
-    because the singleton / two-slot wrapper bodies must recover the
-    exact surviving slot types, not just the surviving names. -/
-def CtxPairSub (G1 G2 : LinearCtx) : Prop :=
-  ∀ p, p ∈ G1 → p ∈ G2
+/-- Pointwise tombstone-preserving slot weakening on DB contexts:
+    every output slot is either `none` or unchanged from the input slot
+    at the same position. -/
+def SlotSubDB : LinearCtxDB → LinearCtxDB → Prop
+  | [], [] => True
+  | out :: outs, inp :: inps => (out = none ∨ out = inp) ∧ SlotSubDB outs inps
+  | _, _ => False
 
-private theorem mem_of_mem_append_singleton_ne
-    {Gamma : LinearCtx} {p : String × Option Typ} {x : String} {t : Typ}
-    (hmem : p ∈ Gamma ++ [(x, some t)])
-    (hne : p.1 ≠ x) :
-    p ∈ Gamma := by
-  sorry
+theorem slotSubDB_refl :
+    ∀ ρ : LinearCtxDB, SlotSubDB ρ ρ
+  | [] => by simp [SlotSubDB]
+  | x :: xs => by
+      simp [SlotSubDB, slotSubDB_refl xs]
 
-private theorem mem_of_mem_append_pair_ne
-    {Gamma : LinearCtx} {p : String × Option Typ}
-    {x y : String} {tx ty : Typ}
-    (hmem : p ∈ Gamma ++ [(x, some tx), (y, some ty)])
-    (hne_x : p.1 ≠ x) (hne_y : p.1 ≠ y) :
-    p ∈ Gamma := by
-  sorry
+theorem slotSubDB_tail
+    {out inp : Option Typ} {outs inps : LinearCtxDB}
+    (h : SlotSubDB (out :: outs) (inp :: inps)) :
+    SlotSubDB outs inps :=
+  h.2
 
-theorem has_type_pair_shrinks
+theorem slotSubDB_append
+    {out1 out2 inp1 inp2 : LinearCtxDB}
+    (h1 : SlotSubDB out1 inp1)
+    (h2 : SlotSubDB out2 inp2) :
+    SlotSubDB (out1 ++ out2) (inp1 ++ inp2) := by
+  revert out2 inp2 h2
+  induction out1 generalizing inp1 with
+  | nil =>
+      intro out2 inp2 h2
+      cases inp1 with
+      | nil =>
+          simpa [SlotSubDB] using h2
+      | cons i is =>
+          cases h1
+  | cons o os ih =>
+      intro out2 inp2 h2
+      cases inp1 with
+      | nil =>
+          cases h1
+      | cons i is =>
+          rcases h1 with ⟨hhd, htl⟩
+          exact ⟨hhd, ih htl h2⟩
+
+theorem slotSubDB_trans
+    {out mid inp : LinearCtxDB}
+    (h1 : SlotSubDB out mid)
+    (h2 : SlotSubDB mid inp) :
+    SlotSubDB out inp := by
+  induction out generalizing mid inp with
+  | nil =>
+      cases mid <;> cases inp <;> simp [SlotSubDB] at h1 h2 ⊢
+  | cons o os ih =>
+      cases mid with
+      | nil =>
+          cases h1
+      | cons m ms =>
+          cases inp with
+          | nil =>
+              cases h2
+          | cons i is =>
+              rcases h1 with ⟨h1hd, h1tl⟩
+              rcases h2 with ⟨h2hd, h2tl⟩
+              refine ⟨?_, ih h1tl h2tl⟩
+              rcases h1hd with rfl | rfl
+              · exact Or.inl rfl
+              · exact h2hd
+
+theorem has_type_slotSubDB
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
-    CtxPairSub Gamma' Gamma := by
-  sorry
+    SlotSubDB (eraseCtx Gamma') (eraseCtx Gamma) := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ Γ2 Γ3 _ _ _ _ => SlotSubDB (eraseCtx Γ3) (eraseCtx Γ2)) with
+  | var _ _ Γpre Γpost _ tx =>
+      have hpost : SlotSubDB (eraseCtx Γpost) (eraseCtx Γpost) := slotSubDB_refl _
+      have hmid : SlotSubDB [none] [some tx] := by simp [SlotSubDB]
+      have hpre : SlotSubDB (eraseCtx Γpre) (eraseCtx Γpre) := slotSubDB_refl _
+      simpa [eraseCtx, List.reverse_append, List.reverse_cons, List.map_append, List.append_assoc] using
+        slotSubDB_append hpost (slotSubDB_append hmid hpre)
+  | unit _ _ Γ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | abs _ _ Γ1 Γ2 x t1 _ _ _ slot _ ih =>
+      have hbody : SlotSubDB (slot :: eraseCtx Γ2) (some t1 :: eraseCtx Γ1) := by
+        simpa [eraseCtx_append_singleton] using ih
+      exact slotSubDB_tail hbody
+  | app _ _ _ Γ2 _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSubDB_trans ih2 ih1
+  | letBind _ _ _ Γ2 Γ3 _ _ _ t1 _ _ _ slot _ _ ih1 ih2 =>
+      have hbody : SlotSubDB (slot :: eraseCtx Γ3) (some t1 :: eraseCtx Γ2) := by
+        simpa [eraseCtx_append_singleton] using ih2
+      exact slotSubDB_trans (slotSubDB_tail hbody) ih1
+  | copy _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1 t2 _ _ _ slotX slotY _ _ ih1 ih2 =>
+      have hbody : SlotSubDB (slotY :: slotX :: eraseCtx Γ3) (some t2 :: some t1 :: eraseCtx Γ2) := by
+        simpa [eraseCtx_append_pair] using ih2
+      exact slotSubDB_trans (slotSubDB_tail (slotSubDB_tail hbody)) ih1
+  | tpair _ _ _ Γ2 _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSubDB_trans ih2 ih1
+  | fst _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | snd _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | const _ _ Γ _ _ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | tadd _ _ _ Γ2 _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSubDB_trans ih2 ih1
+  | tmul _ _ _ Γ2 _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSubDB_trans ih2 ih1
+  | tsum _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | texpand _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | uniformLike _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | perform _ _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihBody ihClauses =>
+      exact slotSubDB_trans ihClauses ihBody
+  | tgrad _ _ Γ _ _ _ _ _ _ _ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | tvmap _ _ Γ _ _ _ _ _ _ _ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | loc _ _ Γ _ _ _ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | nil _ _ Γ _ _ =>
+      simpa using slotSubDB_refl (eraseCtx Γ)
+  | cons _ _ Γ2 Γ3 _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest =>
+      exact ihRest
 
-theorem singleton_output_pair_eq
-    {Sigma : StoreTyp} {x : String} {tx : Typ}
-    {e : Term} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx} {p : String × Option Typ}
-    (h : HasType [] Sigma [(x, some tx)] e t eps GammaOut)
-    (hp : p ∈ GammaOut) :
-    p = (x, none) ∨ p = (x, some tx) := by
-  sorry
+theorem slotSubDB_singleton_cases
+    {out : LinearCtxDB} {t : Typ}
+    (h : SlotSubDB out [some t]) :
+    out = [none] ∨ out = [some t] := by
+  cases out with
+  | nil =>
+      cases h
+  | cons o rest =>
+      cases rest with
+      | nil =>
+          rcases h.1 with ho | ho
+          · exact Or.inl (by cases ho; rfl)
+          · exact Or.inr (by cases ho; rfl)
+      | cons o' rest' =>
+          cases h.2
 
-theorem singleton_output_shape
-    {Sigma : StoreTyp} {x : String} {tx : Typ}
-    {e : Term} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
-    (h : HasType [] Sigma [(x, some tx)] e t eps GammaOut) :
-    GammaOut = [(x, none)] ∨ GammaOut = [(x, some tx)] := by
-  sorry
-
-theorem singleton_output_shape_of_noDup
-    {Sigma : StoreTyp} {x : String} {tx : Typ}
-    {e : Term} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
-    (h : HasType [] Sigma [(x, some tx)] e t eps GammaOut)
-    (_hnd : NoDupNames GammaOut) :
-    GammaOut = [(x, none)] ∨ GammaOut = [(x, some tx)] :=
-  singleton_output_shape h
-
-theorem pair_output_shape
-    {Sigma : StoreTyp} {x y : String} {tx ty : Typ}
-    {e : Term} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
-    (h : HasType [] Sigma [(x, some tx), (y, some ty)] e t eps GammaOut) :
-    GammaOut = [(x, none), (y, none)] ∨
-      GammaOut = [(x, some tx), (y, none)] ∨
-      GammaOut = [(x, none), (y, some ty)] ∨
-      GammaOut = [(x, some tx), (y, some ty)] := by
-  sorry
+theorem slotSubDB_pair_cases
+    {out : LinearCtxDB} {tx ty : Typ}
+    (h : SlotSubDB out [some ty, some tx]) :
+    out = [none, none] ∨
+      out = [none, some tx] ∨
+      out = [some ty, none] ∨
+      out = [some ty, some tx] := by
+  cases out with
+  | nil =>
+      cases h
+  | cons o1 rest =>
+      cases rest with
+      | nil =>
+          cases h.2
+      | cons o2 rest' =>
+          cases rest' with
+          | nil =>
+              rcases h.1 with h1 | h1 <;> rcases h.2.1 with h2 | h2
+              · exact Or.inl (by cases h1; cases h2; rfl)
+              · exact Or.inr (Or.inl (by cases h1; cases h2; rfl))
+              · exact Or.inr (Or.inr (Or.inl (by cases h1; cases h2; rfl)))
+              · exact Or.inr (Or.inr (Or.inr (by cases h1; cases h2; rfl)))
+          | cons o3 rest'' =>
+              cases h.2.2
 
 theorem singleton_output_db_shape
     {Sigma : StoreTyp} {x : String} {tx : Typ}
@@ -1911,7 +2139,10 @@ theorem singleton_output_db_shape
     ∃ GammaOutDB,
       CtxCorr GammaOut GammaOutDB ∧
       (GammaOutDB = [none] ∨ GammaOutDB = [some tx]) := by
-  sorry
+  refine ⟨eraseCtx GammaOut, ctxCorr_eraseCtx GammaOut, ?_⟩
+  have hsub : SlotSubDB (eraseCtx GammaOut) [some tx] := by
+    simpa [eraseCtx] using has_type_slotSubDB h
+  exact slotSubDB_singleton_cases hsub
 
 theorem pair_output_db_shape
     {Sigma : StoreTyp} {x y : String} {tx ty : Typ}
@@ -1923,7 +2154,81 @@ theorem pair_output_db_shape
         GammaOutDB = [none, some tx] ∨
         GammaOutDB = [some ty, none] ∨
         GammaOutDB = [some ty, some tx]) := by
+  refine ⟨eraseCtx GammaOut, ctxCorr_eraseCtx GammaOut, ?_⟩
+  have hsub : SlotSubDB (eraseCtx GammaOut) [some ty, some tx] := by
+    simpa [eraseCtx] using has_type_slotSubDB h
+  exact slotSubDB_pair_cases hsub
+
+theorem eraseClauses_exists_of_mem_named
+    {ρ : BinderEnv}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {clausesDB : List (EffectLabel × TermDB)}
+    {cl : EffectLabel × String × String × Term}
+    (hErase : eraseClauses ρ clauses = some clausesDB)
+    (hMem : cl ∈ clauses) :
+    ∃ hbDB, (cl.1, hbDB) ∈ clausesDB := by
+  induction clauses generalizing clausesDB with
+  | nil =>
+      cases hMem
+  | cons hd rest ih =>
+      rcases hd with ⟨op, x, k, hb⟩
+      rcases hhb : eraseTerm (k :: x :: ρ) hb with _ | hbDB <;>
+        simp [eraseClauses, hhb] at hErase
+      rcases hrest : eraseClauses ρ rest with _ | restDB <;>
+        simp [eraseClauses, hhb, hrest] at hErase
+      cases hErase
+      simp only [List.mem_cons] at hMem
+      rcases hMem with rfl | hMem
+      · exact ⟨hbDB, by simp⟩
+      · rcases ih hrest hMem with ⟨hbDB', hmemDB⟩
+        exact ⟨hbDB', by simp [hmemDB]⟩
+
+theorem eraseClauses_named_of_mem
+    {ρ : BinderEnv}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {clausesDB : List (EffectLabel × TermDB)}
+    {clDB : EffectLabel × TermDB}
+    (hErase : eraseClauses ρ clauses = some clausesDB)
+    (hMem : clDB ∈ clausesDB) :
+    ∃ cl ∈ clauses, cl.1 = clDB.1 := by
+  induction clauses generalizing clausesDB with
+  | nil =>
+      cases hErase
+      cases hMem
+  | cons hd rest ih =>
+      rcases hd with ⟨op, x, k, hb⟩
+      rcases hhb : eraseTerm (k :: x :: ρ) hb with _ | hbDB <;>
+        simp [eraseClauses, hhb] at hErase
+      rcases hrest : eraseClauses ρ rest with _ | restDB <;>
+        simp [eraseClauses, hhb, hrest] at hErase
+      cases hErase
+      simp only [List.mem_cons] at hMem
+      rcases hMem with hMem | hMem
+      · cases hMem
+        exact ⟨(op, x, k, hb), by simp, rfl⟩
+      · rcases ih hrest hMem with ⟨cl, hcl, hEq⟩
+        exact ⟨cl, by simp [hcl], hEq⟩
+
+/-- Every handler clause body is lexically scoped under the current
+    base context plus its two binders. -/
+def ClausesLexical
+    (Gamma : LinearCtx) (t : Typ) (epsR : EffectRow)
+    (clauses : List (EffectLabel × String × String × Term)) : Prop :=
+  ∀ {op x k hb tArg tRet},
+    (op, x, k, hb) ∈ clauses →
+    LexicallyScoped
+      (Gamma ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))]) hb
+
+theorem transport_typing_lexical
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma GammaOut : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps GammaOut)
+    (hlex : LexicallyScoped Gamma e) :
+    ∃ eDB,
+      eraseTerm (ctxEnv Gamma) e = some eDB ∧
+      HasTypeDB Delta Sigma (eraseCtx Gamma) eDB t eps (eraseCtx GammaOut) := by
   sorry
+
 
 mutual
 
