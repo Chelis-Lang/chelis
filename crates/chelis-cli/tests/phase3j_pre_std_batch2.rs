@@ -63,7 +63,7 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.1.15"
+compiler = "=0.1.16"
 module_prefix = "Demo"
 
 [dependencies]
