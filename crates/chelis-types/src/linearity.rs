@@ -470,12 +470,14 @@ impl Checker {
 
     fn expr_type<'a>(&'a self, expr: &'a Expr, scope: &'a LinearScope) -> Option<&'a Expr> {
         type_metadata(expr).or_else(|| {
-            var_name(expr).and_then(|name| scope.ty(name).or_else(|| self.top_level_types.get(name)))
+            var_name(expr)
+                .and_then(|name| scope.ty(name).or_else(|| self.top_level_types.get(name)))
         })
     }
 
     fn expr_is_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
-        self.expr_type(expr, scope).is_some_and(type_expr_contains_tensor)
+        self.expr_type(expr, scope)
+            .is_some_and(type_expr_contains_tensor)
     }
 }
 
@@ -623,11 +625,7 @@ fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
     free.into_iter().collect()
 }
 
-fn collect_free_vars(
-    expr: &Expr,
-    bound: &mut Vec<HashSet<String>>,
-    free: &mut HashSet<String>,
-) {
+fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut HashSet<String>) {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_free_vars(&meta.expr, bound, free),

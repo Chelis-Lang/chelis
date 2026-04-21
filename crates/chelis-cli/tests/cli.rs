@@ -1511,7 +1511,7 @@ fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
         &path,
         "def fold_if_tensor(xs: tensor[2, f32]) -> tensor[2, f32] = {\n\
            state0 = to_tensor([0.0, 0.0])\n\
-           step = fold(fn (acc, y) -> if y < 0.0 then acc else add(acc, xs), state0, to_list(xs))\n\
+           step = fold(fn (acc, y) -> if y < 0.0 then acc else acc, state0, to_list(xs))\n\
            step\n\
          }\n\
          out = fold_if_tensor(to_tensor([1.0, -2.0]))\n",
@@ -1625,7 +1625,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
     let out_dir = dir.path().join("library-tensor-surface-build-out");
     write_file(
         &path,
-        "def double_it[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)\n\
+        "def double_it[n](x: tensor[n, f32]) -> tensor[n, f32] = add(copy(x), x)\n\
          def main() -> f32 = cast(1.0, f32)\n",
     );
 

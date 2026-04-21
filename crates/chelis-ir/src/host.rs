@@ -1807,24 +1807,21 @@ fn lower_match_host_expr(
                     none_expr = lower_host_expr(&arm_kids[2], program, scope, tensor_helpers);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields = lookup_adt_ctor_details_for_type(
-                        program,
-                        ctor_name,
-                        Some(&scrutinee_ty),
-                    )
-                        .map(|(_, fields)| fields)
-                        .or_else(|| {
-                            program
-                                .type_env()
-                                .get(ctor_name)
-                                .and_then(parse_fn_type_expr)
-                                .map(|(args, _)| {
-                                    args.into_iter()
-                                        .map(|ty| HostAdtField { name: None, ty })
-                                        .collect::<Vec<_>>()
-                                })
-                        })
-                        .unwrap_or_default();
+                    let ctor_fields =
+                        lookup_adt_ctor_details_for_type(program, ctor_name, Some(&scrutinee_ty))
+                            .map(|(_, fields)| fields)
+                            .or_else(|| {
+                                program
+                                    .type_env()
+                                    .get(ctor_name)
+                                    .and_then(parse_fn_type_expr)
+                                    .map(|(args, _)| {
+                                        args.into_iter()
+                                            .map(|ty| HostAdtField { name: None, ty })
+                                            .collect::<Vec<_>>()
+                                    })
+                            })
+                            .unwrap_or_default();
                     let mut scoped = scope.clone();
                     let mut bindings = Vec::new();
                     for (field_index, subpat, field_ty) in
@@ -2645,12 +2642,11 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
     let defs = collect_program_defs(program.exprs());
     let fn_names = defs
         .iter()
-        .filter_map(|(name, body)| {
-            matches!(body, Expr::List(list, _) if tag(list) == Some("fn")).then(|| name.clone())
-        })
+        .filter(|(_, body)| matches!(body, Expr::List(list, _) if tag(list) == Some("fn")))
+        .map(|(name, _)| name.clone())
         .collect::<HashSet<_>>();
 
-    let graph = fn_names
+    fn_names
         .iter()
         .map(|name| {
             let callees = defs
@@ -2659,8 +2655,7 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
                 .unwrap_or_default();
             (name.clone(), callees)
         })
-        .collect();
-    graph
+        .collect()
 }
 
 fn recursive_top_level_fn_names_from_graph(
@@ -3956,7 +3951,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             })),
             Some(HostType::Float64) => Some(HostType::Tensor(TensorType {
                 dims: vec![],
-                precision: chelis_types::types::Prim::F64,
+                precision: chelis_types::types::Prim::F32,
             })),
             _ => None,
         },
@@ -3968,7 +3963,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 })),
                 HostType::Float64 => Some(HostType::Tensor(TensorType {
                     dims: vec![crate::dag::DimInfo::Named("list".to_string(), None)],
-                    precision: chelis_types::types::Prim::F64,
+                    precision: chelis_types::types::Prim::F32,
                 })),
                 _ => Some(HostType::Unknown),
             },
@@ -4008,7 +4003,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
-                        precision: chelis_types::types::Prim::F64,
+                        precision: chelis_types::types::Prim::F32,
                     })),
                     _ => Some(HostType::Unknown),
                 },
@@ -4031,7 +4026,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                             crate::dag::DimInfo::Named("batch".to_string(), None),
                             crate::dag::DimInfo::Named("seq".to_string(), None),
                         ],
-                        precision: chelis_types::types::Prim::F64,
+                        precision: chelis_types::types::Prim::F32,
                     })),
                     _ => Some(HostType::Unknown),
                 },
@@ -4164,7 +4159,11 @@ fn lookup_adt_field_on_type(
         if kids.first().and_then(symbol_name) != Some(adt_name) {
             continue;
         }
-        let subst = adt_type_substitution(children(list).get(1), adt_name, Some(&HostType::Adt(adt_name.to_string(), args.to_vec())));
+        let subst = adt_type_substitution(
+            children(list).get(1),
+            adt_name,
+            Some(&HostType::Adt(adt_name.to_string(), args.to_vec())),
+        );
         for variant in kids.iter().skip(2) {
             let Some(variant_list) = as_list(variant) else {
                 continue;

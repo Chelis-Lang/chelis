@@ -645,10 +645,10 @@ fn cmd_build(
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_hip_host(result, func_name, output)
             } else {
-                let mut hip_dag = if !dag.roots().is_empty() {
-                    dag.clone()
-                } else if let Some(entry_dag) = preferred_entry_dag {
+                let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
+                } else if !dag.roots().is_empty() {
+                    dag.clone()
                 } else {
                     chelis_ir::lower::lower_program(&checked)
                 };
@@ -1298,7 +1298,12 @@ fn collect_lowered_root_names_from_expr(
                 return;
             }
             if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
-                extend_root_names_from_value(name, type_env.get(name), top_level_def_body(expr), out);
+                extend_root_names_from_value(
+                    name,
+                    type_env.get(name),
+                    top_level_def_body(expr),
+                    out,
+                );
             }
         }
     }

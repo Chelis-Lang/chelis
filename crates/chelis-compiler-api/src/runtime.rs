@@ -1402,7 +1402,7 @@ impl<'a> EvalContext<'a> {
                 })),
                 Some(RuntimeValue::Float(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::scalar(*value),
-                    precision: Prim::F64,
+                    precision: Prim::F32,
                 })),
                 Some(RuntimeValue::Bool(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
@@ -1971,8 +1971,8 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
                 data.push(*value as f64);
             }
             RuntimeValue::Float(value) => {
-                precision.get_or_insert(Prim::F64);
-                if precision != Some(Prim::F64) {
+                precision.get_or_insert(Prim::F32);
+                if precision != Some(Prim::F32) {
                     return Err("to_tensor requires homogeneous numeric list elements".to_string());
                 }
                 data.push(*value);
@@ -1984,7 +1984,7 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
             }
         }
     }
-    Ok((precision.unwrap_or(Prim::F64), data))
+    Ok((precision.unwrap_or(Prim::F32), data))
 }
 
 fn tensor_to_list_values(tensor: &RuntimeTensorValue) -> Result<Vec<RuntimeValue>, String> {
@@ -2018,7 +2018,7 @@ fn pad_sequences_value(
 ) -> Result<(Prim, Vec<f64>, usize, usize), String> {
     let pad_precision = match pad {
         RuntimeValue::Int(_) => Prim::Int64,
-        RuntimeValue::Float(_) => Prim::F64,
+        RuntimeValue::Float(_) => Prim::F32,
         other => {
             return Err(format!(
                 "pad_sequences expects numeric pad value, got {other:?}"
@@ -2069,7 +2069,7 @@ fn pad_sequences_to_value(
     }
     let pad_precision = match pad {
         RuntimeValue::Int(_) => Prim::Int64,
-        RuntimeValue::Float(_) => Prim::F64,
+        RuntimeValue::Float(_) => Prim::F32,
         other => {
             return Err(format!(
                 "pad_sequences_to expects numeric pad value, got {other:?}"

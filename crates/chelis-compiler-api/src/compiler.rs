@@ -637,7 +637,9 @@ fn collect_checked_decl_names(
                     return;
                 }
                 let body = list.elements.get(3);
-                let ty = type_env.get(name).or_else(|| body.and_then(expr_type_metadata));
+                let ty = type_env
+                    .get(name)
+                    .or_else(|| body.and_then(expr_type_metadata));
                 extend_root_names_from_value(name, ty, body, out);
             }
         }
@@ -669,7 +671,12 @@ fn extend_root_names_from_value(
         && list_tag(list) == Some("tuple")
     {
         for (index, child) in list.elements.iter().skip(2).enumerate() {
-            extend_root_names_from_value(&format!("{name}.{index}"), expr_type_metadata(child), Some(child), out);
+            extend_root_names_from_value(
+                &format!("{name}.{index}"),
+                expr_type_metadata(child),
+                Some(child),
+                out,
+            );
         }
         return;
     }
@@ -2078,7 +2085,7 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         assert_eq!(
             find_ret("load_tokenizer"),
             Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::Adt("Tokenizer".to_string())
+                chelis_ir::host::HostType::Adt("Tokenizer".to_string(), Vec::new())
             ))),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
