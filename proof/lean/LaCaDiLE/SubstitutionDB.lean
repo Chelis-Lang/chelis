@@ -10,8 +10,97 @@
 
 import LaCaDiLE.SyntaxDB
 import LaCaDiLE.TypingDB
+import LaCaDiLE.Operational
 
 namespace LaCaDiLE
+
+private theorem locRefsSeparated_left_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated (xs ++ ys) zs) :
+    LocRefsSeparated xs zs := by
+  intro ell hx hz
+  exact h ell (List.mem_append.mpr (Or.inl hx)) hz
+
+private theorem locRefsSeparated_right_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated (xs ++ ys) zs) :
+    LocRefsSeparated ys zs := by
+  intro ell hy hz
+  exact h ell (List.mem_append.mpr (Or.inr hy)) hz
+
+private theorem locRefsSeparated_append
+    {xs ys zs : List Loc}
+    (hx : LocRefsSeparated xs zs)
+    (hy : LocRefsSeparated ys zs) :
+    LocRefsSeparated (xs ++ ys) zs := by
+  intro ell hxy hz
+  rcases List.mem_append.mp hxy with hxmem | hymem
+  · exact hx ell hxmem hz
+  · exact hy ell hymem hz
+
+private theorem nodup_append_of_runtimeLinear_separated
+    {xs ys : List Loc}
+    (hxs : xs.Nodup)
+    (hys : ys.Nodup)
+    (hsep : LocRefsSeparated xs ys) :
+    (xs ++ ys).Nodup := by
+  refine List.nodup_append.mpr ?_
+  refine ⟨hxs, hys, ?_⟩
+  intro ell hx _ hy hEq
+  subst hEq
+  exact hsep ell hx hy
+
+private theorem runtimeLinearDB_append_inv
+    {xs ys : List Loc}
+    (h : (xs ++ ys).Nodup) :
+    xs.Nodup ∧ ys.Nodup ∧ LocRefsSeparated xs ys := by
+  rcases List.nodup_append.mp h with ⟨hxs, hys, hsep⟩
+  refine ⟨hxs, hys, ?_⟩
+  intro ell hx hy
+  exact hsep ell hx ell hy rfl
+
+@[simp] theorem runtimeLinearDB_lift
+    (e : TermDB) :
+    RuntimeLinearDB (lift e) ↔ RuntimeLinearDB e := by
+  simp [RuntimeLinearDB, locRefsDB_lift]
+
+private theorem runtimeLinearDB_abs_body
+    {t : Typ} {body : TermDB}
+    (h : RuntimeLinearDB (TermDB.abs t body)) :
+    RuntimeLinearDB body := by
+  simpa [RuntimeLinearDB, locRefsDB] using h
+
+private theorem runtimeLinearDB_grad_body
+    {t tOut : Typ} {body : TermDB}
+    (h : RuntimeLinearDB (TermDB.grad t tOut body)) :
+    RuntimeLinearDB body := by
+  simpa [RuntimeLinearDB, locRefsDB] using h
+
+private theorem runtimeLinearDB_vmap_body
+    {t : Typ} {body : TermDB}
+    (h : RuntimeLinearDB (TermDB.vmap t body)) :
+    RuntimeLinearDB body := by
+  simpa [RuntimeLinearDB, locRefsDB] using h
+
+private theorem runtimeLinearDB_append_term
+    {e1 e2 : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : locRefsDB (mk e1 e2) = locRefsDB e1 ++ locRefsDB e2)
+    (h : RuntimeLinearDB (mk e1 e2)) :
+    RuntimeLinearDB e1 ∧ RuntimeLinearDB e2 ∧
+      LocRefsSeparated (locRefsDB e1) (locRefsDB e2) := by
+  have happ : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+    simpa [RuntimeLinearDB, hshape] using h
+  exact runtimeLinearDB_append_inv happ
+
+private theorem runtimeLinearDB_handle_inv
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (h : RuntimeLinearDB (TermDB.handle epsH body clauses)) :
+    RuntimeLinearDB body ∧ (locRefsClausesDB clauses).Nodup ∧
+      LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses) := by
+  have happ : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
+    simpa [RuntimeLinearDB, locRefsDB] using h
+  exact runtimeLinearDB_append_inv happ
 
 /-! ## Positional insertion on DB linear contexts -/
 
