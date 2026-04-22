@@ -2953,4 +2953,334 @@ theorem subst_preserves_typing_db
   subst_preserves_typing_db_gen h_e j Γ Γ (some t_v) none hj hj
     rfl rfl (Or.inr (Or.inl ⟨rfl, rfl⟩)) h_v
 
+/-- Motive bundle for the "dead slot does not insert locations"
+theorem. When the substituted slot is already `none` on input and
+remains `none` on output, substitution may still renumber variables
+above the cutoff, but it cannot introduce any runtime locations from
+the substituted value. -/
+@[reducible] def LocRefsSubstNoneMotive1 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 : LinearCtxDB) → (e : TermDB) → (t : Typ) →
+    (eps : EffectRow) → (Γ2 : LinearCtxDB) →
+    HasTypeDB Δ' S' Γ1 e t eps Γ2 → Prop :=
+  fun _Δ' _S' Γ1 e _t _eps Γ2 _ =>
+    ∀ (v : TermDB) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j none →
+      Γ2 = Γ_out.insertAt j none →
+      locRefsDB (substDBAux j v e) = locRefsDB e
+
+@[reducible] def LocRefsSubstNoneMotive2 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 Γ2 : LinearCtxDB) → (t : Typ) → (epsR : EffectRow) →
+    (cls : List (EffectLabel × TermDB)) →
+    ClausesTypedDB Δ' S' Γ1 Γ2 t epsR cls → Prop :=
+  fun _Δ' _S' Γ1 Γ2 _t _epsR cls _ =>
+    ∀ (v : TermDB) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j none →
+      Γ2 = Γ_out.insertAt j none →
+      locRefsClausesDB (substClausesDBAux j v cls) = locRefsClausesDB cls
+
+theorem locRefsDB_subst_none_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (v : TermDB) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j none)
+    (hout : Γ2 = Γ_out.insertAt j none) :
+    locRefsDB (substDBAux j v e) = locRefsDB e := by
+  revert v j Γ_in Γ_out hj_in hj_out hin hout
+  change LocRefsSubstNoneMotive1 Δ S Γ1 e t eps Γ2 h
+  induction h using HasTypeDB.rec (motive_2 := LocRefsSubstNoneMotive2) with
+  | var Δ_ S_ Γ i ti hlook =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      by_cases hij : i = j
+      · subst hij
+        rw [hin, LinearCtxDB.getElem?_insertAt_eq Γ_in i none (by simpa using hj_in)] at hlook
+        cases hlook
+      · by_cases hlt : i < j
+        · simp [substDBAux, locRefsDB, hij, hlt]
+        · simp [substDBAux, locRefsDB, hij, hlt]
+  | unit Δ_ S_ Γ =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, locRefsDB]
+  | abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have hin_body : some t1 :: Γ1 =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      simpa [substDBAux, locRefsDB] using
+        ih_body (lift v) (j + 1) (some t1 :: Γ_in) (slot :: Γ_out)
+          hj_in_body hj_out_body hin_body hout_body
+  | app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.arrow t1 t2 eps_) eps1 Γ2 :=
+        hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 t1 eps2
+                    (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, locRefsDB, h1', h2']
+  | letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hin_body : some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_mid_base) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+      have hout_body : slot :: Γ3 =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_mid_body : j + 1 ≤ (some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 (lift v) (j + 1) (some t1 :: Γ_mid_base) (slot :: Γ_out)
+        hj_mid_body hj_out_body hin_body hout_body
+      simp [substDBAux, locRefsDB, h1', h2', locRefsDB_lift]
+  | copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape :
+          HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.pair t1 t2) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hin_body : some t2 :: some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 2) none (some t2 :: some t1 :: Γ_mid_base) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← h_Γ2_eq]
+      have hout_body : slot1 :: slot2 :: Γ3 =
+          LinearCtxDB.insertAt (j + 2) none (slot1 :: slot2 :: Γ_out) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hout]
+      have hj_mid_body : j + 2 ≤ (some t2 :: some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by simp; omega
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 (lift (lift v)) (j + 2)
+        (some t2 :: some t1 :: Γ_mid_base) (slot1 :: slot2 :: Γ_out)
+        hj_mid_body hj_out_body hin_body hout_body
+      simp [substDBAux, locRefsDB, h1', h2', locRefsDB_lift]
+  | tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 t2 eps2
+                    (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, locRefsDB, h1', h2']
+  | fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | const Δ_ S_ Γ v_ ds =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, locRefsDB]
+  | tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, locRefsDB, h1', h2']
+  | tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, locRefsDB, h1', h2']
+  | tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' hds' ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ih_hb ih_hcls =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have hb_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) body ty epsB Γ2 := hin ▸ hb
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in hb_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hcls_shape :
+          ClausesTypedDB Δ_ S_ (Γ_mid_base.insertAt j none)
+            (Γ_out.insertAt j none) ty
+            (EffectRow.removeOps epsB epsH) clauses := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ hcls
+      have hb' := ih_hb v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have hcls' := ih_hcls v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, locRefsDB, hb', hcls']
+  | tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have heq : Γ_in.insertAt j none = Γ_out.insertAt j none := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some (Typ.tensor ds) :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (some (Typ.tensor ds) :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some (Typ.tensor ds) :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      simpa [substDBAux, locRefsDB, locRefsDB_lift] using
+        ih_body (lift v) (j + 1) (some (Typ.tensor ds) :: Γ_in) (slot :: Γ_in)
+          hj_in_body hj_out_body hin_body hout_body
+  | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have heq : Γ_in.insertAt j none = Γ_out.insertAt j none := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some t1 :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      simpa [substDBAux, locRefsDB, locRefsDB_lift] using
+        ih_body (lift v) (j + 1) (some t1 :: Γ_in) (slot :: Γ_in)
+          hj_in_body hj_out_body hin_body hout_body
+  | loc Δ_ S_ Γ ell ti hlook =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, locRefsDB]
+  | subEff Δ_ S_ Γ Γ' e_ ti eps_ eps'_ hbody hSub ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, locRefsDB] using
+        ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+  | nil Δ_ S_ Γ ty epsR_ =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substClausesDBAux, locRefsClausesDB]
+  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest
+      ih_hb_typ ih_hrest =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout
+      have hin_body :
+          some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ2 =
+            LinearCtxDB.insertAt (j + 2) none
+              (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) := by
+        subst hin
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hout_body :
+          slot1 :: slot2 :: Γ3 =
+            LinearCtxDB.insertAt (j + 2) none
+              (slot1 :: slot2 :: Γ_out) := by
+        subst hout
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hj_in_body :
+          j + 2 ≤ (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in).length := by
+        simp; omega
+      have hj_out_body :
+          j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have hb' := ih_hb_typ (lift (lift v)) (j + 2)
+        (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+        (slot1 :: slot2 :: Γ_out) hj_in_body hj_out_body hin_body hout_body
+      have hrest' := ih_hrest v j Γ_in Γ_out hj_in hj_out (by simpa using hin) (by simpa using hout)
+      simp [substClausesDBAux, locRefsClausesDB, hb', hrest', locRefsDB_lift]
+
+theorem locRefsDB_subst_none
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none)) :
+    locRefsDB (substDBAux j v e) = locRefsDB e :=
+  locRefsDB_subst_none_gen h_e v j Γ Γ hj hj rfl rfl
+
 end LaCaDiLE
