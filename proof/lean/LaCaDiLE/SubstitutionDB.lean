@@ -78,12 +78,34 @@ private theorem locRefsSeparated_substDBAux
   · exact hsep_e ell hel hrhs
   · exact hsep_v ell hel hrhs
 
+private theorem locRefsSeparated_substDBAux_list
+    {e v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (hsep_e : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_v : LocRefsSeparated (locRefsDB v) rhsRefs) :
+    LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs := by
+  intro ell hmem hrhs
+  rcases mem_locRefsDB_substDBAux j v e ell hmem with hel | hel
+  · exact hsep_e ell hel hrhs
+  · exact hsep_v ell hel hrhs
+
 private theorem locRefsSeparated_substClausesDBAux
     {clauses : List (EffectLabel × TermDB)} {v rhs : TermDB}
     (j : Nat)
     (hsep_cls : LocRefsSeparated (locRefsClausesDB clauses) (locRefsDB rhs))
     (hsep_v : LocRefsSeparated (locRefsDB v) (locRefsDB rhs)) :
     LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v clauses)) (locRefsDB rhs) := by
+  intro ell hmem hrhs
+  rcases mem_locRefsClausesDB_substClausesDBAux j v clauses ell hmem with hel | hel
+  · exact hsep_cls ell hel hrhs
+  · exact hsep_v ell hel hrhs
+
+private theorem locRefsSeparated_substClausesDBAux_list
+    {clauses : List (EffectLabel × TermDB)} {v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (hsep_cls : LocRefsSeparated (locRefsClausesDB clauses) rhsRefs)
+    (hsep_v : LocRefsSeparated (locRefsDB v) rhsRefs) :
+    LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v clauses)) rhsRefs := by
   intro ell hmem hrhs
   rcases mem_locRefsClausesDB_substClausesDBAux j v clauses ell hmem with hel | hel
   · exact hsep_cls ell hel hrhs
@@ -185,12 +207,34 @@ private theorem locRefsSeparated_rhs_substDBAux
   · exact hsep_rhs_e ell hrhs he
   · exact hsep_rhs_v ell hrhs hv
 
+private theorem locRefsSeparated_rhs_substDBAux_list
+    {e v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e))
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  intro ell hrhs hsubst
+  rcases mem_locRefsDB_substDBAux j v e ell hsubst with he | hv
+  · exact hsep_rhs_e ell hrhs he
+  · exact hsep_rhs_v ell hrhs hv
+
 private theorem locRefsSeparated_rhs_substClausesDBAux
     {clauses : List (EffectLabel × TermDB)} {v rhs : TermDB}
     (j : Nat)
     (hsep_rhs_cls : LocRefsSeparated (locRefsDB rhs) (locRefsClausesDB clauses))
     (hsep_rhs_v : LocRefsSeparated (locRefsDB rhs) (locRefsDB v)) :
     LocRefsSeparated (locRefsDB rhs) (locRefsClausesDB (substClausesDBAux j v clauses)) := by
+  intro ell hrhs hsubst
+  rcases mem_locRefsClausesDB_substClausesDBAux j v clauses ell hsubst with hcls | hv
+  · exact hsep_rhs_cls ell hrhs hcls
+  · exact hsep_rhs_v ell hrhs hv
+
+private theorem locRefsSeparated_rhs_substClausesDBAux_list
+    {clauses : List (EffectLabel × TermDB)} {v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (hsep_rhs_cls : LocRefsSeparated rhsRefs (locRefsClausesDB clauses))
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    LocRefsSeparated rhsRefs (locRefsClausesDB (substClausesDBAux j v clauses)) := by
   intro ell hrhs hsubst
   rcases mem_locRefsClausesDB_substClausesDBAux j v clauses ell hsubst with hcls | hv
   · exact hsep_rhs_cls ell hrhs hcls
