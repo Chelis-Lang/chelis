@@ -38,6 +38,28 @@ private theorem locRefsSeparated_append
   · exact hx ell hxmem hz
   · exact hy ell hymem hz
 
+private theorem locRefsSeparated_substDBAux
+    {e v rhs : TermDB}
+    (j : Nat)
+    (hsep_e : LocRefsSeparated (locRefsDB e) (locRefsDB rhs))
+    (hsep_v : LocRefsSeparated (locRefsDB v) (locRefsDB rhs)) :
+    LocRefsSeparated (locRefsDB (substDBAux j v e)) (locRefsDB rhs) := by
+  intro ell hmem hrhs
+  rcases mem_locRefsDB_substDBAux j v e ell hmem with hel | hel
+  · exact hsep_e ell hel hrhs
+  · exact hsep_v ell hel hrhs
+
+private theorem locRefsSeparated_substClausesDBAux
+    {clauses : List (EffectLabel × TermDB)} {v rhs : TermDB}
+    (j : Nat)
+    (hsep_cls : LocRefsSeparated (locRefsClausesDB clauses) (locRefsDB rhs))
+    (hsep_v : LocRefsSeparated (locRefsDB v) (locRefsDB rhs)) :
+    LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v clauses)) (locRefsDB rhs) := by
+  intro ell hmem hrhs
+  rcases mem_locRefsClausesDB_substClausesDBAux j v clauses ell hmem with hel | hel
+  · exact hsep_cls ell hel hrhs
+  · exact hsep_v ell hel hrhs
+
 private theorem nodup_append_of_runtimeLinear_separated
     {xs ys : List Loc}
     (hxs : xs.Nodup)
