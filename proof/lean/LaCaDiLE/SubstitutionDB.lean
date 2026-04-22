@@ -206,6 +206,16 @@ private theorem runtimeLinearDB_handle_inv
     simpa [RuntimeLinearDB, locRefsDB] using h
   exact runtimeLinearDB_append_inv happ
 
+private theorem runtimeLinearDB_handle_inv_both
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (h : RuntimeLinearDB (TermDB.handle epsH body clauses)) :
+    RuntimeLinearDB body ∧ (locRefsClausesDB clauses).Nodup ∧
+      LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses) ∧
+      LocRefsSeparated (locRefsClausesDB clauses) (locRefsDB body) := by
+  have happ : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
+    simpa [RuntimeLinearDB, locRefsDB] using h
+  exact runtimeLinearDB_append_inv_both happ
+
 private theorem runtimeLinearDB_append_term_of
     {e1 e2 : TermDB}
     {mk : TermDB → TermDB → TermDB}
@@ -271,6 +281,14 @@ private theorem locRefsClausesDB_nodup_cons_of
     (locRefsClausesDB ((op, hb) :: rest)).Nodup := by
   simpa [locRefsClausesDB] using
     nodup_append_of_runtimeLinear_separated hhb hrest hsep
+
+private theorem locRefsClausesDB_cons_inv
+    {op : EffectLabel} {hb : TermDB} {rest : List (EffectLabel × TermDB)}
+    (h : (locRefsClausesDB ((op, hb) :: rest)).Nodup) :
+    RuntimeLinearDB hb ∧ (locRefsClausesDB rest).Nodup ∧
+      LocRefsSeparated (locRefsDB hb) (locRefsClausesDB rest) ∧
+      LocRefsSeparated (locRefsClausesDB rest) (locRefsDB hb) := by
+  simpa [locRefsClausesDB] using runtimeLinearDB_append_inv_both h
 
 private theorem locRefsSeparated_rhs_substDBAux
     {e v rhs : TermDB}
