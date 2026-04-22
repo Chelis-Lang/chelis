@@ -38,6 +38,27 @@ private theorem locRefsSeparated_append
   · exact hx ell hxmem hz
   · exact hy ell hymem hz
 
+private theorem locRefsSeparated_symm
+    {xs ys : List Loc}
+    (h : LocRefsSeparated xs ys) :
+    LocRefsSeparated ys xs := by
+  intro ell hy hx
+  exact h ell hx hy
+
+private theorem locRefsSeparated_left_of_rhs_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated xs (ys ++ zs)) :
+    LocRefsSeparated xs ys := by
+  intro ell hx hy
+  exact h ell hx (List.mem_append.mpr (Or.inl hy))
+
+private theorem locRefsSeparated_right_of_rhs_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated xs (ys ++ zs)) :
+    LocRefsSeparated xs zs := by
+  intro ell hx hz
+  exact h ell hx (List.mem_append.mpr (Or.inr hz))
+
 private theorem locRefsSeparated_right_of_nodup_append
     {xs ys : List Loc}
     (h : (xs ++ ys).Nodup) :
