@@ -1,7 +1,7 @@
 [package]
 name = "phase3g-text-pipeline"
 version = "0.1.0"
-compiler = "=0.1.17"
+compiler = "=0.1.18"
 module_prefix = "Demo"
 
 [dependencies]

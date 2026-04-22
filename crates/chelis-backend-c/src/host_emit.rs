@@ -735,6 +735,10 @@ impl HostEmitter {
                     self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "-");
                     return;
                 }
+                "not" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_elementwise(target, &arg_vars[0].0, "!");
+                    return;
+                }
                 "exp" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
                     self.assign_tensor_unary_func_elementwise(target, &arg_vars[0].0, "expf");
                     return;

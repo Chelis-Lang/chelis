@@ -644,11 +644,19 @@ fn cmd_build(
                 let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
                 if !unresolved.is_empty() {
                     return Err(format!(
-                        "`chelis build --target c` can't lower these defs — their \
-                         body contains a higher-order application whose callee isn't \
-                         a named fn (commonly `grad(f)(args)` where f isn't a plain \
-                         top-level symbol). Add a named wrapper, pass the fn directly \
-                         as an argument, or rewrite the callsite: {}",
+                        "`chelis build --target c` can't lower these defs — their body \
+                         applies/binds `grad` (or `vmap`) in a position the host lane \
+                         can't resolve (inline `grad(f)(x)` or `g = grad(f); g(x)`). \
+                         Workaround that compiles today: make the function you want to \
+                         differentiate a parameter of the enclosing def, then call \
+                         `grad(local, wrt=(arg))(arg)` where `local` is a locally-bound \
+                         fn that uses the parameter; and make sure that function uses \
+                         only pure tensor ops (sum, add, mul, einsum, etc.) — `grad` \
+                         through host-lane `fold`/`map` is not currently supported, \
+                         rewrite to `tensor_to_scalar(sum(mul(v, v), 0))` or `einsum`. \
+                         See `build_c_tensor_grad_local_wrapper_over_function_param_builds` \
+                         in crates/chelis-cli/tests/cli.rs for a compiling example. \
+                         Affected defs: {}",
                         unresolved.join(", ")
                     )
                     .into());

@@ -594,7 +594,9 @@ fn host_type_contains_unknown(ty: &HostType) -> bool {
 fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
     match expr {
         HostExpr::Builtin { name, args, .. } => {
-            name == "call" || args.iter().any(host_body_has_fallback_call)
+            name == "call"
+                || name.starts_with("__unresolved_")
+                || args.iter().any(host_body_has_fallback_call)
         }
         HostExpr::Call { function, args, .. } => {
             function == "call" || args.iter().any(host_body_has_fallback_call)
@@ -1085,6 +1087,54 @@ fn lower_host_expr(
             }
         }
         Expr::MetaExpr(meta, _) => lower_host_expr(&meta.expr, program, scope, tensor_helpers),
+        Expr::List(list, _) if matches!(tag(list), Some("grad" | "vmap" | "vmap-grad")) => {
+            // Higher-order differentiation/vmap expressions aren't representable
+            // as host-lane values. When one appears in host position (e.g.
+            // `g = grad(f)` bound to a local), lowering silently fell through
+            // to `HostExpr::Unit`, which later produced `int g = 0` and a
+            // no-op `/* unsupported builtin g */` in the emitted C — a silent
+            // wrong-answer. Produce a recognizable marker Builtin instead so
+            // `host_program_unresolved_call_sites` can surface it as a clean
+            // pre-codegen error.
+            let tag_name = tag(list).unwrap_or("grad").to_string();
+            HostExpr::Builtin {
+                name: format!("__unresolved_{tag_name}"),
+                args: Vec::new(),
+                ty: expr_host_type(expr, program, scope),
+            }
+        }
+        Expr::List(list, _) if tag(list) == Some("copy") => {
+            // `(copy {} x)` exists for linearity bookkeeping. In the host
+            // lane, lower as a tagged Builtin whose C emission is a direct
+            // tensor-copy or a pass-through for non-tensors. Without this
+            // arm the `copy` tag silently fell through to `HostExpr::Unit`,
+            // which caused tensor-if bodies in folds to collapse to
+            // `int new_t; new_t = 0;` (Nautilus P2 tensor-if-in-fold).
+            let inner = children(list)
+                .first()
+                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
+                .unwrap_or(HostExpr::Unit);
+            let inner_ty = host_expr_type(&inner);
+            let explicit = expr_host_type(expr, program, scope);
+            let ty = if explicit == HostType::Unknown {
+                inner_ty
+            } else {
+                explicit
+            };
+            HostExpr::Builtin {
+                name: "copy".to_string(),
+                args: vec![inner],
+                ty,
+            }
+        }
+        Expr::List(list, _) if tag(list) == Some("realize") => {
+            // Passthrough for phase-0 semantics: realize is an identity in
+            // host lane.
+            children(list)
+                .first()
+                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
+                .unwrap_or(HostExpr::Unit)
+        }
         _ => HostExpr::Unit,
     }
 }
@@ -2087,11 +2137,32 @@ fn lower_match_host_expr(
             scope,
         );
         if explicit == HostType::Unknown {
-            let some_ty = host_expr_type(&some_expr);
-            if some_ty == HostType::Unknown {
-                host_expr_type(&none_expr)
+            // For ADT matches with multiple arms, Some/None exprs aren't set —
+            // the arm bodies live in `generic_arms` / `generic_default`. Fall
+            // back through those first so the match's result type reflects the
+            // arms' actual shape. Otherwise Unit propagates and the match
+            // target is emitted as `int`, which is the wrong C type for any
+            // pointer-valued arm (regression hit by Coral groupby's
+            // `next = match agg_spec { ... }` ADT match).
+            let arm_ty = generic_arms
+                .iter()
+                .map(|arm| host_expr_type(&arm.expr))
+                .find(|ty| *ty != HostType::Unknown)
+                .or_else(|| {
+                    generic_default
+                        .as_deref()
+                        .map(host_expr_type)
+                        .filter(|ty| *ty != HostType::Unknown)
+                });
+            if let Some(ty) = arm_ty {
+                ty
             } else {
-                some_ty
+                let some_ty = host_expr_type(&some_expr);
+                if some_ty == HostType::Unknown {
+                    host_expr_type(&none_expr)
+                } else {
+                    some_ty
+                }
             }
         } else {
             explicit
