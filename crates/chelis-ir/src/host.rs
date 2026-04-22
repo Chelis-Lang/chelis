@@ -828,10 +828,16 @@ fn try_lower_tensor_helper_call(
     {
         return Some(HostExpr::Var(name.to_string(), HostType::Tensor(expected)));
     }
-    let dag = catch_unwind(AssertUnwindSafe(|| {
-        lower_tensor_helper_dag(expr, program, scope, &expected)
-    }))
-    .ok()?;
+    // Mark this catch_unwind scope so the DAG lowerer's `lower_unrepresentable`
+    // can abort quietly instead of printing a stderr panic-location trace.
+    // The outer host-lane fallback handles the un-representable case cleanly;
+    // the panic message itself was pure noise.
+    let result = crate::lower::with_suppress_unrepresentable_panic(|| {
+        catch_unwind(AssertUnwindSafe(|| {
+            lower_tensor_helper_dag(expr, program, scope, &expected)
+        }))
+    });
+    let dag = result.ok()?;
     // Reject DAGs whose inputs reference known builtin names: a `Load("fold")`
     // (or `einsum`, `map`, etc.) means the lowerer fell back to treating a
     // host-lane builtin as a free variable. Emitting this DAG would generate

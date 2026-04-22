@@ -223,6 +223,7 @@ enum ReefCommand {
 }
 
 fn main() {
+    chelis_ir::lower::install_chelis_panic_hook();
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Deep {

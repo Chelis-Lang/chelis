@@ -2,7 +2,56 @@
 //!
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+thread_local! {
+    /// When set, `lower_unrepresentable` panics with a quiet empty payload
+    /// that `catch_unwind` catches without printing a backtrace. Scoped
+    /// via `with_suppress_unrepresentable_panic`, which always clears the
+    /// flag on exit. Used by the host-lane tensor-helper fallback path:
+    /// it runs the DAG lowerer speculatively, catches any un-representable
+    /// panic, and proceeds with host lowering — we don't want that
+    /// speculative attempt to write a misleading panic to stderr.
+    static SUPPRESS_UNREPRESENTABLE_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.set(false));
+        }
+    }
+    SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.set(true));
+    let _guard = Guard;
+    f()
+}
+
+fn unrepresentable_panic_suppressed() -> bool {
+    SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get())
+}
+
+/// Marker payload for a suppressed un-representable-DAG unwind.
+struct UnrepresentableDag;
+
+static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Install a one-time global panic hook that suppresses panic output when the
+/// current thread is inside a `with_suppress_unrepresentable_panic` scope.
+/// Safe to call multiple times — the hook is installed at most once.
+pub fn install_chelis_panic_hook() {
+    CHELIS_PANIC_HOOK_INSTALLED.get_or_init(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get()) {
+                return;
+            }
+            prev(info);
+        }));
+    });
+}
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List};
@@ -3426,6 +3475,13 @@ impl LowerCtx {
     fn lower_unrepresentable(&mut self, tag: &str, elems: &[Expr]) -> LoweredValue {
         for expr in elems.iter().skip(2) {
             let _ = self.lower_expr(expr);
+        }
+        if unrepresentable_panic_suppressed() {
+            // Speculative DAG attempt from the host-lane fallback — unwind
+            // without writing a stderr panic-location trace. `catch_unwind`
+            // in the caller turns this into an `Err` and falls back to
+            // host lowering.
+            std::panic::panic_any(UnrepresentableDag);
         }
         panic!("`{tag}` is not representable in the Phase 0e RISC DAG")
     }
