@@ -3463,6 +3463,28 @@ theorem runtimeLinearDB_subst_none
   rw [locRefsDB_subst_none j hj h_e]
   exact h_linear
 
+theorem runtimeLinearDB_subst_none_separated
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none))
+    (h_linear : RuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  have hlocs : locRefsDB (substDBAux j v e) = locRefsDB e :=
+    locRefsDB_subst_none j hj h_e
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
 /-- Motive bundle for the "live slot stays live" location theorem.
 If the distinguished slot is live on both input and output, the term
 cannot have consumed that slot, so substitution still introduces no
@@ -3841,5 +3863,27 @@ theorem runtimeLinearDB_subst_live
   unfold RuntimeLinearDB at h_linear ⊢
   rw [locRefsDB_subst_live j hj h_e]
   exact h_linear
+
+theorem runtimeLinearDB_subst_live_separated
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v)))
+    (h_linear : RuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  have hlocs : locRefsDB (substDBAux j v e) = locRefsDB e :=
+    locRefsDB_subst_live j hj h_e
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
 
 end LaCaDiLE
