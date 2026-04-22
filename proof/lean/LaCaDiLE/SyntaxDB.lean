@@ -70,6 +70,48 @@ inductive TermDB where
   | loc     (ell : Loc)
   deriving Repr
 
+/-! ## Runtime-location references
+
+The DB term language preserves runtime locations verbatim under erasure
+from named terms, so we mirror the named `locRefs` accounting here.
+This is the right surface for substitution-side runtime-linearity
+arguments, because the DB metatheory already tracks the exact slot
+trajectory of substituted binders. -/
+mutual
+
+def locRefsDB : TermDB → List Loc
+  | TermDB.var _ => []
+  | TermDB.abs _ body => locRefsDB body
+  | TermDB.app e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.letBind e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.copy e => locRefsDB e
+  | TermDB.letpair e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.pair e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.fst e => locRefsDB e
+  | TermDB.snd e => locRefsDB e
+  | TermDB.unit => []
+  | TermDB.const _ _ => []
+  | TermDB.add e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.mul e1 e2 => locRefsDB e1 ++ locRefsDB e2
+  | TermDB.sum e _ => locRefsDB e
+  | TermDB.expand e _ _ => locRefsDB e
+  | TermDB.uniformLike e _ _ => locRefsDB e
+  | TermDB.grad _ _ body => locRefsDB body
+  | TermDB.vmap _ body => locRefsDB body
+  | TermDB.handle _ body clauses => locRefsDB body ++ locRefsClausesDB clauses
+  | TermDB.perform _ e => locRefsDB e
+  | TermDB.loc ell => [ell]
+
+def locRefsClausesDB : List (EffectLabel × TermDB) → List Loc
+  | [] => []
+  | (_, hb) :: rest => locRefsDB hb ++ locRefsClausesDB rest
+
+end
+
+/-- DB-side runtime linearity: no explicit location is mentioned twice. -/
+def RuntimeLinearDB (e : TermDB) : Prop :=
+  (locRefsDB e).Nodup
+
 -- ## Lifting (shift)
 --
 -- `liftAux c d e` adds `d` to every free variable index in `e` that
@@ -229,5 +271,196 @@ theorem substDBAux_var_gt {j i : Nat} (v : TermDB) (h : j < i) :
   have hne : i ≠ j := (Nat.ne_of_lt h).symm
   have hnlt : ¬ i < j := Nat.not_lt.mpr (Nat.le_of_lt h)
   simp [substDBAux, hne, hnlt]
+
+/-! ## Runtime-location flow through lifting and substitution -/
+
+mutual
+
+theorem locRefsDB_liftAux
+    (c d : Nat) (e : TermDB) :
+    locRefsDB (liftAux c d e) = locRefsDB e := by
+  match e with
+  | TermDB.var i =>
+      by_cases h : i < c <;> simp [liftAux, locRefsDB, h]
+  | TermDB.abs t body =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux (c + 1) d body]
+  | TermDB.app e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux c d e2]
+  | TermDB.letBind e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux (c + 1) d e2]
+  | TermDB.copy e =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.letpair e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux (c + 2) d e2]
+  | TermDB.pair e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux c d e2]
+  | TermDB.fst e =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.snd e =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.unit =>
+      simp [liftAux, locRefsDB]
+  | TermDB.const v ds =>
+      simp [liftAux, locRefsDB]
+  | TermDB.add e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux c d e2]
+  | TermDB.mul e1 e2 =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e1, locRefsDB_liftAux c d e2]
+  | TermDB.sum e i =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.expand e i k =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.uniformLike e lo hi =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.grad t tOut body =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux (c + 1) d body]
+  | TermDB.vmap t body =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux (c + 1) d body]
+  | TermDB.handle epsH body clauses =>
+      simp [liftAux, locRefsDB,
+        locRefsDB_liftAux c d body, locRefsClausesDB_liftClausesAux c d clauses]
+  | TermDB.perform op e =>
+      simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
+  | TermDB.loc ell =>
+      simp [liftAux, locRefsDB]
+
+theorem locRefsClausesDB_liftClausesAux
+    (c d : Nat) (clauses : List (EffectLabel × TermDB)) :
+    locRefsClausesDB (liftClausesAux c d clauses) = locRefsClausesDB clauses := by
+  match clauses with
+  | [] =>
+      simp [liftClausesAux, locRefsClausesDB]
+  | (_, hb) :: rest =>
+      simp [liftClausesAux, locRefsClausesDB,
+        locRefsDB_liftAux (c + 2) d hb, locRefsClausesDB_liftClausesAux c d rest]
+
+end
+
+@[simp] theorem locRefsDB_lift (e : TermDB) :
+    locRefsDB (lift e) = locRefsDB e := by
+  simpa [lift] using locRefsDB_liftAux 0 1 e
+
+mutual
+
+theorem mem_locRefsDB_substDBAux
+    (j : Nat) (v e : TermDB) (ell : Loc)
+    (hmem : ell ∈ locRefsDB (substDBAux j v e)) :
+    ell ∈ locRefsDB e ∨ ell ∈ locRefsDB v := by
+  match e with
+  | TermDB.var i =>
+      by_cases hij : i = j
+      · simp [substDBAux, locRefsDB, hij] at hmem ⊢
+        exact hmem
+      · by_cases hlt : i < j
+        · simp [substDBAux, locRefsDB, hij, hlt] at hmem
+        · simp [substDBAux, locRefsDB, hij, hlt] at hmem
+  | TermDB.abs t body =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa using h))
+  | TermDB.app e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.letBind e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr (by simpa using h))
+  | TermDB.copy e =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.letpair e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux (j + 2) (lift (lift v)) e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr (by simpa using h))
+  | TermDB.pair e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.fst e =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.snd e =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.unit =>
+      simp [substDBAux, locRefsDB] at hmem
+  | TermDB.const c ds =>
+      simp [substDBAux, locRefsDB] at hmem
+  | TermDB.add e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.mul e1 e2 =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.sum e i =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.expand e i k =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.uniformLike e lo hi =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.grad t tOut body =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa using h))
+  | TermDB.vmap t body =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa using h))
+  | TermDB.handle epsH body clauses =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefsDB_substDBAux j v body ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefsClausesDB_substClausesDBAux j v clauses ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.perform op e =>
+      simp [substDBAux, locRefsDB] at hmem ⊢
+      exact mem_locRefsDB_substDBAux j v e ell hmem
+  | TermDB.loc ell' =>
+      simp [substDBAux, locRefsDB] at hmem
+      exact Or.inl (by simp [locRefsDB, hmem])
+
+theorem mem_locRefsClausesDB_substClausesDBAux
+    (j : Nat) (v : TermDB) (clauses : List (EffectLabel × TermDB)) (ell : Loc)
+    (hmem : ell ∈ locRefsClausesDB (substClausesDBAux j v clauses)) :
+    ell ∈ locRefsClausesDB clauses ∨ ell ∈ locRefsDB v := by
+  match clauses with
+  | [] =>
+      simp [substClausesDBAux, locRefsClausesDB] at hmem
+  | (_, hb) :: rest =>
+      simp [substClausesDBAux, locRefsClausesDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim
+          (mem_locRefsDB_substDBAux (j + 2) (lift (lift v)) hb ell hmem)
+          (fun h => Or.inl (Or.inl h))
+          (fun h => Or.inr (by simpa using h))
+      · exact Or.elim (mem_locRefsClausesDB_substClausesDBAux j v rest ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+
+end
 
 end LaCaDiLE
