@@ -179,6 +179,165 @@ theorem substClauses_notFree
 
 end
 
+mutual
+
+/-- Every runtime location appearing after substitution already came
+    from the original term or from the substituted value. -/
+theorem mem_locRefs_subst
+    (e v : Term) (x : String) (ell : Loc)
+    (hmem : ell ∈ locRefs (subst e v x)) :
+    ell ∈ locRefs e ∨ ell ∈ locRefs v := by
+  match e with
+  | Term.var y =>
+      by_cases hy : y = x
+      · simp [subst, hy] at hmem ⊢
+        exact Or.inr hmem
+      · simp [subst, hy, locRefs] at hmem
+  | Term.abs y t body =>
+      by_cases hy : y = x
+      · simp [subst, hy] at hmem
+        exact Or.inl hmem
+      · simp [subst, hy] at hmem
+        exact mem_locRefs_subst body v x ell hmem
+  | Term.app e1 e2 =>
+      simp [subst, locRefs] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.letBind y e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, locRefs] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+            (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+        · exact Or.inl (Or.inr hmem)
+      · simp [subst, hy, locRefs] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+            (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+        · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+            (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.copy e =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.letpair y z e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, locRefs] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+            (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+        · exact Or.inl (Or.inr hmem)
+      · by_cases hz : z = x
+        · simp [subst, hy, hz, locRefs] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+              (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+          · exact Or.inl (Or.inr hmem)
+        · simp [subst, hy, hz, locRefs] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+              (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+          · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+              (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.pair e1 e2 =>
+      simp [subst, locRefs] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.fst e =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.snd e =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.unit =>
+      simp [subst, locRefs] at hmem
+  | Term.const _ _ =>
+      simp [subst, locRefs] at hmem
+  | Term.add e1 e2 =>
+      simp [subst, locRefs] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.mul e1 e2 =>
+      simp [subst, locRefs] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefs_subst e1 v x ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.sum e d =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.expand e d =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.uniformLike e lo hi =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.grad y t tOut body =>
+      by_cases hy : y = x
+      · simp [subst, hy] at hmem
+        exact Or.inl hmem
+      · simp [subst, hy] at hmem
+        exact mem_locRefs_subst body v x ell hmem
+  | Term.vmap y t body =>
+      by_cases hy : y = x
+      · simp [subst, hy] at hmem
+        exact Or.inl hmem
+      · simp [subst, hy] at hmem
+        exact mem_locRefs_subst body v x ell hmem
+  | Term.handle epsH body clauses =>
+      simp [subst, locRefs] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_locRefs_subst body v x ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_locRefs_substClauses clauses v x ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.perform op e =>
+      simp [subst, locRefs] at hmem ⊢
+      exact mem_locRefs_subst e v x ell hmem
+  | Term.loc ell' =>
+      simp [subst, locRefs] at hmem
+      exact Or.inl (by simpa [locRefs, hmem])
+
+/-- Clause-list version of `mem_locRefs_subst`. -/
+theorem mem_locRefs_substClauses
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x : String) (ell : Loc)
+    (hmem : ell ∈ locRefsClauses (substClauses clauses v x)) :
+    ell ∈ locRefsClauses clauses ∨ ell ∈ locRefs v := by
+  match clauses with
+  | [] =>
+      simp [substClauses, locRefsClauses] at hmem
+  | (op, y, k, hb) :: rest =>
+      by_cases hy : y = x
+      · simp [substClauses, subst, hy, locRefsClauses] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · exact Or.elim (mem_locRefs_substClauses rest v x ell hmem)
+            (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+      · by_cases hk : k = x
+        · simp [substClauses, subst, hy, hk, locRefsClauses] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inl hmem)
+          · exact Or.elim (mem_locRefs_substClauses rest v x ell hmem)
+              (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+        · simp [substClauses, subst, hy, hk, locRefsClauses] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.elim (mem_locRefs_subst hb v x ell hmem)
+              (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+          · exact Or.elim (mem_locRefs_substClauses rest v x ell hmem)
+              (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+
+end
+
 /-- Substitution on a closed term is a no-op: a closed term has no
     free variables, so `subst e v x` equals `e` regardless of `v`/`x`. -/
 theorem subst_closed
