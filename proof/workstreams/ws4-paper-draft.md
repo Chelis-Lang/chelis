@@ -68,7 +68,13 @@ Reduction rules including heap store. Figures. The interesting rules:
 
 ## WS4.6 — §5 Metatheory (~3 pages)
 
-All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant. Full proofs in supplementary appendix.
+All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant, and the runtime-linearity invariant needed to iterate preservation. Full proofs in supplementary appendix.
+
+The current Lean development forces one important correction to the paper statement of preservation: the honest runtime theorem is preservation for well-typed runtime-linear configurations, not unconditional runtime preservation. The section should therefore:
+
+1. state preservation with the `RuntimeLinear` premise
+2. explain the closed well-typed counterexample showing why the unconditional statement is false for arbitrary runtime terms with duplicated explicit locations
+3. immediately follow with the theorem that checked source programs remain in runtime-linear configurations, so the strengthened preservation theorem still composes over evaluation sequences
 
 ## WS4.7 — §6 Implementation (~1.5 pages)
 

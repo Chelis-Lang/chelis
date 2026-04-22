@@ -47,11 +47,25 @@ Case analysis on the typing derivation. Depends on WS3.1–WS3.4.
 
 ## WS3.10 — `Preservation.lean`
 
-Case analysis on the reduction relation + typing derivation. Depends on WS3.6 (substitution), WS3.7 (adjoint typing), WS3.8 (addDim). The `grad` case uses WS3.7. The `vmap` case uses WS3.8. The `handle` case uses WS3.6 + the linear continuation property.
+Case analysis on the reduction relation + typing derivation. Depends on WS3.6 (substitution), WS3.7 (adjoint typing), WS3.8 (addDim). The mechanized theorem has now been strengthened to the honest runtime statement:
+
+- if `HasType [] Sigma [] e t eps []`
+- and `e` is `WellScoped`
+- and `e` is `RuntimeLinear`
+- and `⟨sigma, e⟩ ↦ ⟨sigma', e'⟩`
+
+then typing is preserved for some post-step store typing `Sigma'`.
+
+This extra `RuntimeLinear` premise is necessary: the Lean tree contains a concrete closed, well-typed counterexample showing that unconditional runtime preservation is false once explicit store locations can be duplicated in sibling subterms. The `ctx` case was closed by weakening the store-side transport to frame-local agreement on the untouched context locations rather than global store monotonicity.
+
+The remaining open preservation cases are the agreed calculus-level blockers:
+
+- `tgrad`, still upstream of `AdjointTyping.lean`
+- `tvmap`, still upstream of `AddDim.lean`
 
 ## WS3.11 — `DimSafety.lean`
 
-Corollary of preservation + dimension-specific lemmas. Relatively small.
+Corollary of preservation + dimension-specific lemmas. Relatively small once the `tvmap` / `addDim` blocker is resolved, but it now also depends on re-establishing the `RuntimeLinear` premise across steps so preservation can be iterated over multi-step execution.
 
 ## WS3.12 — `EffectCorrectness.lean`
 
@@ -60,6 +74,13 @@ Corollary of preservation + effect monotonicity lemma. Relatively small.
 ## WS3.13 — `LinearitySoundness.lean`
 
 Store invariant maintenance proof. Case analysis on reduction rules showing the live-location invariant is preserved. Depends on WS3.3 (store model).
+
+This workstream now also carries the runtime-side invariant needed to make the strengthened preservation theorem compositional:
+
+- one-step preservation of `RuntimeLinear` for checked runtime configurations, or
+- an equivalent theorem showing all configurations reachable from checked source programs are `RuntimeLinear`
+
+Without that extra theorem, the current `Preservation.lean` result can be applied once but not iterated through an execution sequence.
 
 ## WS3.14 — `ADCorrectness.lean`
 

@@ -38,11 +38,21 @@ For each typing rule, show a well-typed non-value can step. Interesting cases:
 
 ## WS2.5 — Preservation (Theorem 1b)
 
-For each reduction rule, show the result is well-typed. The hard cases:
+For each reduction rule, show the result is well-typed. The current mechanized statement is the honest one:
+
+- if `Δ; ∅ ⊢ e : τ ! ε` and the runtime configuration is `RuntimeLinear`, then a reduction step preserves typing
+
+This extra premise is not cosmetic. The Lean development now contains a concrete closed, well-typed counterexample showing that unconditional preservation is false for runtime terms with duplicated explicit locations in sibling subterms. The paper proof therefore has to split the argument into two pieces:
+
+1. preservation under the `RuntimeLinear` premise
+2. a separate invariant showing evaluation from checked source programs stays in runtime-linear configurations
+
+The hard cases:
 
 - `grad` reduction: the reduced term is `λx. handle[Accum] adjoint(e, x) with {...}`. The adjoint typing lemma (WS2.2) shows the adjoint body is well-typed with `Accum` in its effect row. The explicit `Accum` handler is well-typed by the standard `handle` rule, removing `Accum` from the effect row. This is clean because `grad`'s reduction reuses existing handle machinery.
 - Effect handling with one-shot continuation: the continuation captures linear context. One-shot consumption (continuation is linear) preserves linearity. Uses the substitution lemma (WS2.1).
 - Store operations: allocation extends `σ` consistently; deallocation removes entries consumed linearly. `copy` allocates a fresh location with duplicated data. The store typing relation must be maintained.
+- Congruence (`ctx`): the proof needs frame-local store agreement, not global store monotonicity. The preserved invariant is agreement only on locations still mentioned by untouched sibling subterms.
 
 ## WS2.6 — Dimension safety (Theorem 2)
 
@@ -55,6 +65,12 @@ If `Δ; ⊢ e : τ ! ∅` then evaluation never encounters an unhandled `perform
 ## WS2.8 — Linearity soundness (Theorem 4)
 
 Using the heap store semantics. If a binding at location `ℓ` is consumed (not borrowed, not copied), then `σ(ℓ)` is accessed exactly once and `ℓ` is deallocated. The theorem: no well-typed program accesses a deallocated location. Proof: maintain an invariant that the set of live locations in `σ` corresponds exactly to the live bindings in `Γ`. Linear consumption removes from both `Γ` and `σ`. Borrowing reads without removing from either. The invariant is preserved by each reduction step (by case analysis on the reduction rules).
+
+This workstream now also needs the runtime-location side invariant that closes the preservation loop:
+
+- if a checked runtime configuration is `RuntimeLinear`, one reduction step preserves `RuntimeLinear`
+
+Without this lemma, preservation cannot be iterated across multi-step evaluation because the strengthened premise would only be available for the first step.
 
 ## WS2.9 — AD correctness (Theorem 5)
 

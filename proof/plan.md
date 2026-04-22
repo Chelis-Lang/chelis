@@ -4,8 +4,9 @@
 
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
-- Current proof state: the branch builds cleanly with 4 active `sorry` declarations in `AdjointTyping.lean`, `Preservation.lean`, and `Substitution.lean` (2x)
-- Immediate critical path: finish or retire the remaining `Substitution.lean` admissions, then discharge the substitution-dependent `Preservation.lean` cases; `AdjointTyping.lean` and `AddDim.lean` remain the calculus-level blockers after that
+- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, and `Preservation.lean` is reduced to the agreed calculus-level blockers `tgrad` and `tvmap`
+- The preservation theorem is now intentionally stronger in hypotheses and more honest in conclusion shape: it requires `RuntimeLinear e` for closed runtime terms
+- Immediate critical path: prove the runtime-linearity invariant that re-establishes that premise across steps, then return to the upstream tensor blockers in `AdjointTyping.lean` (`tgrad`) and `AddDim.lean` (`tvmap`)
 
 This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
 
@@ -36,7 +37,7 @@ WS1 → WS2 + WS3 (parallel per-theorem) → WS4 §3–§5 → WS5 + WS6
 The critical path runs through WS3, specifically:
 
 - **WS3.6 (`Substitution.lean`):** always the most painful mechanized PL proof. Linear context splitting makes it worse.
-- **WS3.10 (`Preservation.lean`):** depends on substitution + adjoint typing + addDim. Many cases.
+- **WS3.10 (`Preservation.lean`):** the substitution-dependent and context cases are now closed, but the theorem statement changed. The remaining work is the runtime-linearity loop plus the tensor blockers.
 - **WS3.14 (`ADCorrectness.lean`):** the hardest individual file. Requires denotational semantics layer.
 
 If WS3.14 proves intractable, the fallback is: state Theorem 5 in Lean, `sorry` the proof, provide the paper proof in the appendix, and note this in the README. This is honest and still a strong paper — four fully mechanized theorems plus a paper proof of the fifth is a substantial contribution. But attempt the full mechanization first.
