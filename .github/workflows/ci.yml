@@ -16,8 +16,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check, Test, Lint
+  lint-and-unit:
+    name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,25 +33,48 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      - name: Test
-        run: cargo test --workspace
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+  integration:
+    name: Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Integration tests
+        run: cargo test --workspace --tests
+
+  loc-report:
+    name: LOC Report
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint-and-unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Install uv
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: astral-sh/setup-uv@v4
 
       - name: Generate LOC report
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cd py && uv run loc-report
 
       - name: Commit LOC report
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -63,10 +86,10 @@ jobs:
           git commit -m "Update LOC report"
           git push || echo "LOC report push skipped: token lacks write access"
 
-  check-macos:
-    name: Build and Test (macOS)
+  macos-smoke:
+    name: macOS Smoke
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -76,11 +99,8 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      - name: Test
-        run: cargo test --workspace
-
-      - name: Build macOS smoke-test toolchain
-        run: cargo build -p chelis-cli -p chelis-runtime
+      - name: Build workspace
+        run: cargo build --workspace
 
       - name: Assert Apple Silicon runner
         run: |
