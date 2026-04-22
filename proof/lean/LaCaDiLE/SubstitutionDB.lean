@@ -191,10 +191,41 @@ private theorem runtimeLinearDB_handle_inv
     {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
     (h : RuntimeLinearDB (TermDB.handle epsH body clauses)) :
     RuntimeLinearDB body ∧ (locRefsClausesDB clauses).Nodup ∧
-    LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses) := by
+      LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses) := by
   have happ : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
     simpa [RuntimeLinearDB, locRefsDB] using h
   exact runtimeLinearDB_append_inv happ
+
+private theorem runtimeLinearDB_append_term_of
+    {e1 e2 : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : locRefsDB (mk e1 e2) = locRefsDB e1 ++ locRefsDB e2)
+    (h1 : RuntimeLinearDB e1)
+    (h2 : RuntimeLinearDB e2)
+    (hsep : LocRefsSeparated (locRefsDB e1) (locRefsDB e2)) :
+    RuntimeLinearDB (mk e1 e2) := by
+  have happ : (locRefsDB e1 ++ locRefsDB e2).Nodup :=
+    nodup_append_of_runtimeLinear_separated h1 h2 hsep
+  simpa [RuntimeLinearDB, hshape] using happ
+
+private theorem runtimeLinearDB_handle_of
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (hbody : RuntimeLinearDB body)
+    (hclauses : (locRefsClausesDB clauses).Nodup)
+    (hsep : LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses)) :
+    RuntimeLinearDB (TermDB.handle epsH body clauses) := by
+  have happ : (locRefsDB body ++ locRefsClausesDB clauses).Nodup :=
+    nodup_append_of_runtimeLinear_separated hbody hclauses hsep
+  simpa [RuntimeLinearDB, locRefsDB] using happ
+
+private theorem locRefsClausesDB_nodup_cons_of
+    {op : EffectLabel} {hb : TermDB} {rest : List (EffectLabel × TermDB)}
+    (hhb : RuntimeLinearDB hb)
+    (hrest : (locRefsClausesDB rest).Nodup)
+    (hsep : LocRefsSeparated (locRefsDB hb) (locRefsClausesDB rest)) :
+    (locRefsClausesDB ((op, hb) :: rest)).Nodup := by
+  simpa [locRefsClausesDB] using
+    nodup_append_of_runtimeLinear_separated hhb hrest hsep
 
 private theorem locRefsSeparated_rhs_substDBAux
     {e v rhs : TermDB}
@@ -3421,6 +3452,17 @@ theorem locRefsDB_subst_none
     locRefsDB (substDBAux j v e) = locRefsDB e :=
   locRefsDB_subst_none_gen h_e v j Γ Γ hj hj rfl rfl
 
+theorem runtimeLinearDB_subst_none
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none))
+    (h_linear : RuntimeLinearDB e) :
+    RuntimeLinearDB (substDBAux j v e) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  rw [locRefsDB_subst_none j hj h_e]
+  exact h_linear
+
 /-- Motive bundle for the "live slot stays live" location theorem.
 If the distinguished slot is live on both input and output, the term
 cannot have consumed that slot, so substitution still introduces no
@@ -3788,5 +3830,16 @@ theorem locRefsDB_subst_live
     (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v))) :
     locRefsDB (substDBAux j v e) = locRefsDB e :=
   locRefsDB_subst_live_gen h_e v t_v j Γ Γ hj hj rfl rfl
+
+theorem runtimeLinearDB_subst_live
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v)))
+    (h_linear : RuntimeLinearDB e) :
+    RuntimeLinearDB (substDBAux j v e) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  rw [locRefsDB_subst_live j hj h_e]
+  exact h_linear
 
 end LaCaDiLE
