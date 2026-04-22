@@ -1770,6 +1770,17 @@ theorem subst_var_case_live_dead
   subst hbase
   exact h_v
 
+theorem runtimeLinearDB_subst_var_live_dead_separated
+    {v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (h_linear : RuntimeLinearDB v)
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    RuntimeLinearDB (substDBAux j v (TermDB.var j)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.var j))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var j))) := by
+  simp [substDBAux, h_linear, hsep_v_rhs, hsep_rhs_v]
+
 /-- Wave 5g var case, `i < j` (index to the left of the cutoff):
     substitution preserves the var index and the sub-derivation
     re-applies the var constructor at the same index over the base
