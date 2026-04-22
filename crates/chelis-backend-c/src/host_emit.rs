@@ -1411,17 +1411,28 @@ impl HostEmitter {
                     let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
                     self.lines
                         .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
-                    let boxed = match inferred_ty {
-                        HostType::Int64 => {
-                            format!("chelis_scalar_tensor_from_i64({value_name})")
-                        }
-                        HostType::Bool => {
-                            format!("chelis_scalar_tensor_from_i64({value_name} ? 1 : 0)")
-                        }
-                        _ => format!("chelis_scalar_tensor_from_f64({value_name})"),
+                    // Scalar inputs to tensor helpers must be rank-1 shape-[1] tensors
+                    // (DAG helper ABI always expects ndim >= 1; rank-0 triggers the
+                    // ndim check guard and causes an abort at runtime).
+                    let (dtype, store) = match inferred_ty {
+                        HostType::Int64 => (
+                            "CHELIS_I64",
+                            format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
+                        ),
+                        HostType::Bool => (
+                            "CHELIS_BOOL",
+                            format!("{tensor_name}->data[0] = {value_name} ? 1.0f : 0.0f;"),
+                        ),
+                        _ => (
+                            "CHELIS_F32",
+                            format!("{tensor_name}->data[0] = (float)({value_name});"),
+                        ),
                     };
-                    self.lines
-                        .push(format!("{}{tensor_name} = {boxed};", self.indent));
+                    self.lines.push(format!(
+                        "{}{tensor_name} = chelis_alloc(1, (int[]){{1}}, {dtype});",
+                        self.indent
+                    ));
+                    self.lines.push(format!("{}{store}", self.indent));
                     (tensor_name.clone(), Some(tensor_name))
                 }
             })

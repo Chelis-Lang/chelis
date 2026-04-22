@@ -1358,8 +1358,9 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         "expected a host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
-        source.contains("chelis_scalar_tensor_from_f64(__tensor_scalar1_"),
-        "expected host scalar dependencies to be boxed into tensor helper inputs:\n{source}"
+        source.contains("__tensor_arg1_")
+            && source.contains("chelis_alloc(1, (int[]){1}, CHELIS_F32)"),
+        "expected host scalar dependencies to be boxed as rank-1 tensor helper inputs:\n{source}"
     );
     assert!(
         !source.contains("= lt;"),
@@ -1677,7 +1678,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
         r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2633,7 +2634,7 @@ fn phase3a_reef_std_acceptance_oracle() {
         r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2710,7 +2711,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
         r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2752,7 +2753,7 @@ fn reef_check_accepts_path_dependencies() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Common"
 "#,
     );
@@ -2771,7 +2772,7 @@ def shared(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Demo"
 
 [dependencies]
@@ -2812,7 +2813,7 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
         r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Common"
 "#,
     );
@@ -2862,7 +2863,7 @@ def hidden(x: f32) -> f32 = x
         r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.1.19"
+compiler = "=0.1.20"
 module_prefix = "Demo"
 
 [dependencies]
