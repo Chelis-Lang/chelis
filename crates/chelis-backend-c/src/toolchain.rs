@@ -41,7 +41,7 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
     let compiler = resolve_compiler(override_vars);
     let openmp_enabled = requirements.wants_openmp && is_real_gcc(&compiler);
 
-    let mut compile_flags = Vec::new();
+    let mut compile_flags = vec!["-march=native".to_string()];
     let mut link_flags = vec!["-lm".to_string()];
     if !cfg!(target_os = "macos") {
         link_flags.push("-lpthread".to_string());
