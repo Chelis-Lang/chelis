@@ -90,8 +90,8 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_header_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
+fn cpu_runtime_include_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
 fn cpu_runtime_library_path() -> PathBuf {
@@ -129,11 +129,15 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    write_temp_file(
-        dst,
-        "chelis_runtime.h",
-        &fs::read_to_string(cpu_runtime_header_path()).expect("cpu runtime header"),
-    );
+    let include = cpu_runtime_include_dir();
+    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+        write_temp_file(
+            dst,
+            header,
+            &fs::read_to_string(include.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
+        );
+    }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
         .expect("copy rust runtime library");
 }

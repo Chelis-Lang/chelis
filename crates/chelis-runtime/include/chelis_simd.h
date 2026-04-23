@@ -4,7 +4,15 @@
 /* Self-contained SIMD reduction helpers for Chelis generated C code.
  * All functions are static inline — no external linkage.
  * Include order: this file is included by chelis_runtime.h unconditionally.
+ *
+ * `restrict` is a C99 keyword only; guard it so this header compiles in C++
+ * contexts (e.g. HIP/CUDA host wrappers that include chelis_runtime.h).
  */
+#ifdef __cplusplus
+#define CHELIS_RESTRICT
+#else
+#define CHELIS_RESTRICT restrict
+#endif
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -17,7 +25,7 @@
 /* ------------------------------------------------------------------ */
 /* chelis_sum_f32                                                       */
 /* ------------------------------------------------------------------ */
-static inline float chelis_sum_f32(const float * restrict data, int n) {
+static inline float chelis_sum_f32(const float * CHELIS_RESTRICT data, int n) {
 #ifdef __AVX2__
     __m256 vacc = _mm256_setzero_ps();
     int i = 0;
@@ -60,7 +68,7 @@ static inline float chelis_sum_f32(const float * restrict data, int n) {
 /* ------------------------------------------------------------------ */
 /* chelis_max_f32                                                       */
 /* ------------------------------------------------------------------ */
-static inline float chelis_max_f32(const float * restrict data, int n) {
+static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return -__builtin_inff();
 #ifdef __AVX2__
     __m256 vacc = _mm256_set1_ps(-__builtin_inff());
@@ -103,7 +111,7 @@ static inline float chelis_max_f32(const float * restrict data, int n) {
 /* ------------------------------------------------------------------ */
 /* chelis_min_f32                                                       */
 /* ------------------------------------------------------------------ */
-static inline float chelis_min_f32(const float * restrict data, int n) {
+static inline float chelis_min_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return __builtin_inff();
 #ifdef __AVX2__
     __m256 vacc = _mm256_set1_ps(__builtin_inff());
@@ -145,7 +153,7 @@ static inline float chelis_min_f32(const float * restrict data, int n) {
 /* chelis_argmax_f32                                                    */
 /* AVX2 index tracking is complex — scalar scan for correctness.       */
 /* ------------------------------------------------------------------ */
-static inline int chelis_argmax_f32(const float * restrict data, int n) {
+static inline int chelis_argmax_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return -1;
     int best = 0;
     float best_val = data[0];
@@ -161,7 +169,7 @@ static inline int chelis_argmax_f32(const float * restrict data, int n) {
 /* ------------------------------------------------------------------ */
 /* chelis_argmin_f32                                                    */
 /* ------------------------------------------------------------------ */
-static inline int chelis_argmin_f32(const float * restrict data, int n) {
+static inline int chelis_argmin_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return -1;
     int best = 0;
     float best_val = data[0];

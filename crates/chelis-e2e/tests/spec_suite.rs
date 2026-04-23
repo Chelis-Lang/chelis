@@ -401,17 +401,16 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     let result = chelis_backend_c::codegen(dag, func_name);
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
-    let h_src = std::fs::read_to_string(rt_dir.join("chelis_runtime.h")).unwrap();
-    let blas_h_src = std::fs::read_to_string(rt_dir.join("chelis_blas.h")).unwrap();
-
     let write = |name: &str, content: &str| {
         let path = tmp.path().join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
     };
-    write("chelis_runtime.h", &h_src);
-    write("chelis_blas.h", &blas_h_src);
+    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+        let src = std::fs::read_to_string(rt_dir.join(header)).unwrap();
+        write(header, &src);
+    }
     std::fs::copy(
         runtime_library_path(),
         tmp.path().join("libchelis_runtime.a"),

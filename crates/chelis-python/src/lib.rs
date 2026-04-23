@@ -24,6 +24,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+const RUNTIME_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime.h"
+));
+const BLAS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_blas.h"
+));
+const SIMD_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_simd.h"
+));
+const MATH_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_math.h"
+));
+
 const CHELIS_F32: i32 = 0;
 const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
@@ -665,6 +682,7 @@ fn run_compile_and_load_job(
     })?;
 
     write_generated_files_inner(&artifact_root, &artifact).map_err(CompileAndLoadError::Message)?;
+    write_runtime_headers_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
     let runtime_library =
         stage_runtime_library_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
     let lib_path = compile_shared_library_inner(
@@ -737,6 +755,20 @@ fn write_generated_files_inner(
         let path = root.join(&file.path);
         fs::write(&path, &file.contents)
             .map_err(|err| format!("write {} failed: {err}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
+    for (name, content) in [
+        ("chelis_runtime.h", RUNTIME_H),
+        ("chelis_blas.h", BLAS_H),
+        ("chelis_simd.h", SIMD_H),
+        ("chelis_math.h", MATH_H),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, content)
+            .map_err(|err| format!("write {name} failed: {err}"))?;
     }
     Ok(())
 }

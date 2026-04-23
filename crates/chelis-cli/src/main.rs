@@ -19,6 +19,14 @@ const BLAS_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_blas.h"
 ));
+const SIMD_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_simd.h"
+));
+const MATH_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_math.h"
+));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
@@ -92,6 +100,8 @@ fn copy_runtime_artifacts(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
     fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
+    fs::write(runtime_dir.join("chelis_simd.h"), SIMD_H)?;
+    fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
     if include_hip_runtime {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
     }

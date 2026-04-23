@@ -1226,18 +1226,14 @@ int main(void) {
 
 fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
     let cpu_runtime = cpu_runtime_dir();
-    fs::write(
-        dir.join("chelis_runtime.h"),
-        fs::read_to_string(cpu_runtime.join("chelis_runtime.h"))
-            .map_err(|e| format!("read chelis_runtime.h failed: {e}"))?,
-    )
-    .map_err(|e| format!("write chelis_runtime.h failed: {e}"))?;
-    fs::write(
-        dir.join("chelis_blas.h"),
-        fs::read_to_string(cpu_runtime.join("chelis_blas.h"))
-            .map_err(|e| format!("read chelis_blas.h failed: {e}"))?,
-    )
-    .map_err(|e| format!("write chelis_blas.h failed: {e}"))?;
+    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+        fs::write(
+            dir.join(header),
+            fs::read_to_string(cpu_runtime.join(header))
+                .map_err(|e| format!("read {header} failed: {e}"))?,
+        )
+        .map_err(|e| format!("write {header} failed: {e}"))?;
+    }
     fs::copy(cpu_runtime_library(), dir.join("libchelis_runtime.a"))
         .map_err(|e| format!("copy libchelis_runtime.a failed: {e}"))?;
     if hip {
