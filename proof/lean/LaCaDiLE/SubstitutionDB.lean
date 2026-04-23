@@ -563,6 +563,56 @@ private theorem locRefsClausesDB_cons_inv
       LocRefsSeparated (locRefsClausesDB rest) (locRefsDB hb) := by
   simpa [locRefsClausesDB] using runtimeLinearDB_append_inv_both h
 
+private theorem locRefsClausesDB_head_consuming_premises
+    {op : EffectLabel} {hb : TermDB} {rest : List (EffectLabel × TermDB)}
+    {rhsRefs : List Loc}
+    (hlin : (locRefsClausesDB ((op, hb) :: rest)).Nodup)
+    (hsep_cls_rhs : LocRefsSeparated (locRefsClausesDB ((op, hb) :: rest)) rhsRefs)
+    (hsep_rhs_cls : LocRefsSeparated rhsRefs (locRefsClausesDB ((op, hb) :: rest))) :
+    RuntimeLinearDB hb ∧
+      (locRefsClausesDB rest).Nodup ∧
+      LocRefsSeparated (locRefsDB hb) (locRefsClausesDB rest ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsClausesDB rest ++ rhsRefs) (locRefsDB hb) ∧
+      LocRefsSeparated (locRefsClausesDB rest) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsClausesDB rest) := by
+  rcases locRefsClausesDB_cons_inv hlin with ⟨hhb, hrest, hsep_hb_rest, hsep_rest_hb⟩
+  have hsep_hb_rhs : LocRefsSeparated (locRefsDB hb) rhsRefs := by
+    simpa [locRefsClausesDB] using locRefsSeparated_left_of_append hsep_cls_rhs
+  have hsep_rest_rhs : LocRefsSeparated (locRefsClausesDB rest) rhsRefs := by
+    simpa [locRefsClausesDB] using locRefsSeparated_right_of_append hsep_cls_rhs
+  have hsep_rhs_hb : LocRefsSeparated rhsRefs (locRefsDB hb) := by
+    simpa [locRefsClausesDB] using locRefsSeparated_left_of_rhs_append hsep_rhs_cls
+  have hsep_rhs_rest : LocRefsSeparated rhsRefs (locRefsClausesDB rest) := by
+    simpa [locRefsClausesDB] using locRefsSeparated_right_of_rhs_append hsep_rhs_cls
+  refine ⟨hhb, hrest, ?_, ?_, hsep_rest_rhs, hsep_rhs_rest⟩
+  · exact locRefsSeparated_lhs_append hsep_hb_rest hsep_hb_rhs
+  · exact locRefsSeparated_append hsep_rest_hb hsep_rhs_hb
+
+private theorem locRefsClausesDB_tail_consuming_premises
+    {op : EffectLabel} {hb : TermDB} {rest : List (EffectLabel × TermDB)}
+    {rhsRefs : List Loc}
+    (hlin : (locRefsClausesDB ((op, hb) :: rest)).Nodup)
+    (hsep_cls_rhs : LocRefsSeparated (locRefsClausesDB ((op, hb) :: rest)) rhsRefs)
+    (hsep_rhs_cls : LocRefsSeparated rhsRefs (locRefsClausesDB ((op, hb) :: rest))) :
+    RuntimeLinearDB hb ∧
+      (locRefsClausesDB rest).Nodup ∧
+      LocRefsSeparated (locRefsDB hb) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB hb) ∧
+      LocRefsSeparated (locRefsClausesDB rest) (locRefsDB hb ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsDB hb ++ rhsRefs) (locRefsClausesDB rest) := by
+  rcases locRefsClausesDB_cons_inv hlin with ⟨hhb, hrest, hsep_hb_rest, hsep_rest_hb⟩
+  have hsep_hb_rhs : LocRefsSeparated (locRefsDB hb) rhsRefs := by
+    simpa [locRefsClausesDB] using locRefsSeparated_left_of_append hsep_cls_rhs
+  have hsep_rest_rhs : LocRefsSeparated (locRefsClausesDB rest) rhsRefs := by
+    simpa [locRefsClausesDB] using locRefsSeparated_right_of_append hsep_cls_rhs
+  have hsep_rhs_hb : LocRefsSeparated rhsRefs (locRefsDB hb) := by
+    simpa [locRefsClausesDB] using locRefsSeparated_left_of_rhs_append hsep_rhs_cls
+  have hsep_rhs_rest : LocRefsSeparated rhsRefs (locRefsClausesDB rest) := by
+    simpa [locRefsClausesDB] using locRefsSeparated_right_of_rhs_append hsep_rhs_cls
+  refine ⟨hhb, hrest, hsep_hb_rhs, hsep_rhs_hb, ?_, ?_⟩
+  · exact locRefsSeparated_lhs_append hsep_rest_hb hsep_rest_rhs
+  · exact locRefsSeparated_append hsep_hb_rest hsep_rhs_rest
+
 private theorem locRefsClausesDB_cons_of_head_consuming
     {op : EffectLabel} {hb' : TermDB} {rest : List (EffectLabel × TermDB)}
     {rhsRefs : List Loc}
