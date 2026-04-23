@@ -2456,62 +2456,10 @@ theorem hasTypeDB_cap_insert
   | subEff _ _ _ _ e t ep ep' _ hS ih =>
       intro n c; exact HasTypeDB.subEff _ _ _ _ e t ep ep' (ih n c) hS
   | nil _ _ Γ_ t_ epsR_ => exact ClausesTypedDB.nil _ _ Γ_ t_ epsR_
-  | cons => sorry
-/-  -- Wave 5t: full proof by induction on HasTypeDB.rec with ∀ n c
-  -- motive. The tgrad case uses IH at n+1 via CapCtx.insertAt_cons_succ.
-  -- Proof structure established; sorry'd pending case-count debugging.
-  induction h using HasTypeDB.rec
-    (motive_2 := fun Δ S Γ2 Γ3 t epsR cls _ =>
-      ∀ n c, ClausesTypedDB (CapCtx.insertAt n c Δ) S Γ2 Γ3 t epsR cls) with
-  | var Δ S Γ i ti hl => intro n c; exact HasTypeDB.var _ S Γ i ti hl
-  | unit Δ S Γ => intro n c; exact HasTypeDB.unit _ S Γ
-  | abs Δ S Γ1 Γ2 sl t1 t2 ep b _ ih =>
-      exact HasTypeDB.abs _ S Γ1 Γ2 sl t1 t2 ep b (ih n c)
-  | app Δ S Γ1 Γ2 Γ3 e1 e2 t1 t2 ep ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.app _ S Γ1 Γ2 Γ3 e1 e2 t1 t2 ep ep1 ep2 (ih1 n c) (ih2 n c)
-  | letBind Δ S Γ1 Γ2 Γ3 sl e1 e2 t1 t2 ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.letBind _ S Γ1 Γ2 Γ3 sl e1 e2 t1 t2 ep1 ep2 (ih1 n c) (ih2 n c)
-  | copy Δ S Γ1 Γ2 e ds ep _ ih =>
-      exact HasTypeDB.copy _ S Γ1 Γ2 e ds ep (ih n c)
-  | letpair Δ S Γ1 Γ2 Γ3 s1 s2 e1 e2 t1 t2 t ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.letpair _ S Γ1 Γ2 Γ3 s1 s2 e1 e2 t1 t2 t ep1 ep2 (ih1 n c) (ih2 n c)
-  | tpair Δ S Γ1 Γ2 Γ3 e1 e2 t1 t2 ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.tpair _ S Γ1 Γ2 Γ3 e1 e2 t1 t2 ep1 ep2 (ih1 n c) (ih2 n c)
-  | fst Δ S Γ1 Γ2 e t1 t2 ep _ ih =>
-      exact HasTypeDB.fst _ S Γ1 Γ2 e t1 t2 ep (ih n c)
-  | snd Δ S Γ1 Γ2 e t1 t2 ep _ ih =>
-      exact HasTypeDB.snd _ S Γ1 Γ2 e t1 t2 ep (ih n c)
-  | const Δ S Γ v ds => intro n c; exact HasTypeDB.const _ S Γ v ds
-  | tadd Δ S Γ1 Γ2 Γ3 e1 e2 ds ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.tadd _ S Γ1 Γ2 Γ3 e1 e2 ds ep1 ep2 (ih1 n c) (ih2 n c)
-  | tmul Δ S Γ1 Γ2 Γ3 e1 e2 ds ep1 ep2 _ _ ih1 ih2 =>
-      exact HasTypeDB.tmul _ S Γ1 Γ2 Γ3 e1 e2 ds ep1 ep2 (ih1 n c) (ih2 n c)
-  | tsum Δ S Γ1 Γ2 e ds i ep _ ds' hds' ih =>
-      exact HasTypeDB.tsum _ S Γ1 Γ2 e ds i ep (ih n c) ds' hds'
-  | texpand Δ S Γ1 Γ2 e ds i k ep _ ds' hds' ih =>
-      exact HasTypeDB.texpand _ S Γ1 Γ2 e ds i k ep (ih n c) ds' hds'
-  | uniformLike Δ S Γ1 Γ2 e ds lo hi ep _ ih =>
-      exact HasTypeDB.uniformLike _ S Γ1 Γ2 e ds lo hi ep (ih n c)
-  | perform Δ S Γ1 Γ2 op e tA tR ep _ hM ih =>
-      exact HasTypeDB.perform _ S Γ1 Γ2 op e tA tR ep (ih n c) hM
-  | handle Δ S Γ1 Γ2 Γ3 b cls t epsH epsB _ hSub hCl hCov _ ih_b ih_cls =>
-      exact HasTypeDB.handle _ S Γ1 Γ2 Γ3 b cls t epsH epsB
-        (ih_b n c) hSub hCl hCov (ih_cls n c)
-  | tgrad Δ S Γ sl ds dsOut b ep _ hsub_eff ih =>
-      intro n c
-      have ih_body := ih (n + 1) c
-      rw [CapCtx.insertAt_cons_succ] at ih_body
-      exact HasTypeDB.tgrad _ S Γ sl ds dsOut b ep ih_body hsub_eff
-  | tvmap Δ S Γ sl t1 t2 b ep d _ ih =>
-      exact HasTypeDB.tvmap _ S Γ sl t1 t2 b ep d (ih n c)
-  | loc Δ S Γ ell t hl => intro n c; exact HasTypeDB.loc _ S Γ ell t hl
-  | subEff Δ S Γ Γ' e t ep ep' _ hS ih =>
-      exact HasTypeDB.subEff _ S Γ Γ' e t ep ep' (ih n c) hS
-  | nil Δ S Γ t epsR => intro n c; exact ClausesTypedDB.nil _ S Γ t epsR
-  | cons Δ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest hmatch _ _ ih_hb ih_rest =>
-      exact ClausesTypedDB.cons _ S Γ2 Γ3 s1 s2 t tA tR eR op hb rest
-        hmatch (ih_hb n c) (ih_rest n c)
--/
+  | cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest hmatch _ _
+      ih_hb ih_rest =>
+      exact ClausesTypedDB.cons _ _ Γ2_ Γ3_ s1 s2 t_ tA tR eR op hb rest
+        hmatch (ih_hb _ _) (ih_rest _ _)
 
 theorem clausesTypedDB_cap_insert
     {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
