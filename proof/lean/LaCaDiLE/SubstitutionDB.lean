@@ -162,6 +162,21 @@ private theorem runtimeLinearDB_abs_body
     RuntimeLinearDB body := by
   simpa [RuntimeLinearDB, locRefsDB] using h
 
+private theorem runtimeLinearDB_unary_of_separated
+    {e : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB}
+    (hshape : locRefsDB (mk e) = locRefsDB e)
+    (hlin : RuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (mk e) ∧
+      LocRefsSeparated (locRefsDB (mk e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (mk e)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · simpa [RuntimeLinearDB, hshape] using hlin
+  · simpa [hshape] using hsep_erhs
+  · simpa [hshape] using hsep_rhs_e
+
 private theorem runtimeLinearDB_grad_body
     {t tOut : Typ} {body : TermDB}
     (h : RuntimeLinearDB (TermDB.grad t tOut body)) :
