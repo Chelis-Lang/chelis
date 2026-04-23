@@ -42,7 +42,12 @@ fn c_fused_codegen_compiles() {
 
     let include_dir =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         let src = std::fs::read_to_string(include_dir.join(header)).unwrap();
         std::fs::write(dir.join(header), &src).unwrap();
     }
@@ -187,7 +192,12 @@ fn c_fused_reduce_compiles() {
 
     let include_dir =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         let src = std::fs::read_to_string(include_dir.join(header)).unwrap();
         std::fs::write(dir.join(header), &src).unwrap();
     }

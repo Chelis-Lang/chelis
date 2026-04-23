@@ -767,8 +767,7 @@ fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
         ("chelis_math.h", MATH_H),
     ] {
         let path = root.join(name);
-        fs::write(&path, content)
-            .map_err(|err| format!("write {name} failed: {err}"))?;
+        fs::write(&path, content).map_err(|err| format!("write {name} failed: {err}"))?;
     }
     Ok(())
 }

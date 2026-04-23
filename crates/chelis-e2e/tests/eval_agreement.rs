@@ -83,7 +83,12 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
 
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         let src = std::fs::read_to_string(rt_dir.join(header)).unwrap();
         write_temp_file(tmp.path(), header, &src);
     }
