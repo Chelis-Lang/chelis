@@ -13,6 +13,7 @@
 #define CHELIS_F64 1
 #define CHELIS_I32 2
 #define CHELIS_BOOL 3
+#define CHELIS_I64 4
 #define CHELIS_MAX_DIM 8
 
 typedef struct {
@@ -90,6 +91,7 @@ chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
 chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
+void chelis_fill_i64(chelis_tensor *t, int64_t val);
 chelis_tensor *chelis_scalar_tensor_from_i64(int64_t value);
 chelis_tensor *chelis_scalar_tensor_from_f64(double value);
 double chelis_tensor_to_f64(const chelis_tensor *t);

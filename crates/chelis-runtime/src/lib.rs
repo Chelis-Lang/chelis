@@ -16,6 +16,7 @@ const CHELIS_F32: c_int = 0;
 const CHELIS_F64: c_int = 1;
 const CHELIS_I32: c_int = 2;
 const CHELIS_BOOL: c_int = 3;
+const CHELIS_I64: c_int = 4;
 const CHELIS_MAX_DIM: usize = 8;
 
 macro_rules! runtime_fail {
@@ -414,7 +415,12 @@ pub unsafe extern "C" fn chelis_alloc(
     if tensor.size == 0 {
         tensor.size = 1;
     }
-    let bytes = tensor.size as usize * std::mem::size_of::<f32>();
+    let elem_size = if dtype == CHELIS_I64 {
+        std::mem::size_of::<i64>()
+    } else {
+        std::mem::size_of::<f32>()
+    };
+    let bytes = tensor.size as usize * elem_size;
     let mut ptr: *mut libc::c_void = std::ptr::null_mut();
     let ret = libc::posix_memalign(&mut ptr, 32, bytes.max(1));
     if ret != 0 || (ptr.is_null() && bytes != 0) {
@@ -476,6 +482,14 @@ pub unsafe extern "C" fn chelis_free(t: *mut chelis_tensor) {
 pub unsafe extern "C" fn chelis_fill_f32(t: *mut chelis_tensor, val: f32) {
     for i in 0..(*t).size as isize {
         *(*t).data.offset(i) = val;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_i64(t: *mut chelis_tensor, val: i64) {
+    let ptr = (*t).data as *mut i64;
+    for i in 0..(*t).size as isize {
+        *ptr.offset(i) = val;
     }
 }
 
