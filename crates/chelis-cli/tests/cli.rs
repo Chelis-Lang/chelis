@@ -1409,7 +1409,8 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         "expected tensor-valued local grad result to stay tensor-typed:\n{source}"
     );
     assert!(
-        source.contains("__host_tensor_arg_1 = chelis_tensor_from_value_list(__arg0_0);")
+        source.contains("chelis_tensor_from_value_list(")
+            && source.contains("__host_tensor_arg_1")
             && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
         "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
     );

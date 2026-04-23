@@ -583,7 +583,20 @@ impl HostEmitter {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 for binding in bindings {
-                    self.emit_expr_to_var(&binding.value, &binding.name, &binding.ty);
+                    // Compute the value into a temp before declaring the binding name.
+                    // If the compiler inlines a recursive call that reuses a binding
+                    // name from the outer scope (e.g. two nested `let jtj_new = ...`),
+                    // declaring the inner name first would shadow the outer variable
+                    // before its value is read, yielding a NULL pointer at runtime.
+                    let temp = self.next_temp("let");
+                    self.emit_expr_to_var(&binding.value, &temp, &binding.ty);
+                    self.lines.push(format!(
+                        "{}{};",
+                        self.indent,
+                        c_decl(&binding.ty, &binding.name)
+                    ));
+                    self.lines
+                        .push(format!("{}{} = {};", self.indent, binding.name, temp));
                 }
                 self.assign_expr(target, body, effective_ty);
                 self.indent = previous;
