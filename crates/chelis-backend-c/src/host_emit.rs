@@ -8,10 +8,12 @@ use chelis_ir::dag::RiscOp;
 use std::collections::HashMap;
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
-    let mut out = Vec::<String>::new();
-    out.push("#include \"chelis_runtime.h\"".to_string());
-    out.push("#include <math.h>".to_string());
-    out.push(String::new());
+    let mut out: Vec<String> = vec![
+        "#include \"chelis_runtime.h\"".to_string(),
+        "#include <assert.h>".to_string(),
+        "#include <math.h>".to_string(),
+        String::new(),
+    ];
     append_tensor_reshape_helper(&mut out);
     out.push(String::new());
     append_tensor_print_helper(&mut out);

@@ -54,6 +54,7 @@ impl CEmitter {
         };
 
         e.line("#include \"chelis_runtime.h\"");
+        e.line("#include <assert.h>");
         if e.use_blas {
             e.line("#include \"chelis_blas.h\"");
         }
@@ -612,6 +613,25 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
+        self.line(&format!("const float* restrict __in_b_{id} = t{b}->data;"));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = __in_a_{id}[i] {op} __in_b_{id}[i];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -630,6 +650,8 @@ impl CEmitter {
         ));
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Binary func (fmaxf etc.) ----
@@ -642,6 +664,25 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
+        self.line(&format!("const float* restrict __in_b_{id} = t{b}->data;"));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = {func}(__in_a_{id}[i], __in_b_{id}[i]);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -660,6 +701,8 @@ impl CEmitter {
         ));
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- CmpLt ----
@@ -672,6 +715,25 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("assert(t{a}->size == t{id}->size);"));
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
+        self.line(&format!("const float* restrict __in_b_{id} = t{b}->data;"));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "__out_{id}[i] = (__in_a_{id}[i] < __in_b_{id}[i]) ? 1.0f : 0.0f;"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -690,6 +752,8 @@ impl CEmitter {
         ));
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Unary elementwise ----
@@ -701,6 +765,19 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("__out_{id}[i] = {op}__in_a_{id}[i];"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -714,6 +791,8 @@ impl CEmitter {
         self.line(&format!("t{id}->data[i] = {op}t{a}->data[idx];"));
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Unary func (expf, logf, sinf, sqrtf) ----
@@ -725,6 +804,19 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -736,6 +828,8 @@ impl CEmitter {
             "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
         ));
         self.line(&format!("t{id}->data[i] = {func}(t{a}->data[idx]);"));
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
     }
@@ -772,6 +866,103 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+
+        // Build contiguity guard for all external inputs.
+        let contiguity_cond: String = if inputs.is_empty() {
+            "1".to_string()
+        } else {
+            inputs
+                .iter()
+                .map(|n| format!("chelis_is_contiguous(t{})", n.0))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        };
+        self.line(&format!("if ({contiguity_cond}) {{"));
+        self.indent += 1;
+
+        // Fast path: declare restrict pointers for each external input.
+        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        for (ext_idx, ext_node) in inputs.iter().enumerate() {
+            let ext_id = ext_node.0;
+            self.line(&format!(
+                "const float* restrict __ext{ext_idx}_{id} = t{ext_id}->data;"
+            ));
+        }
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+
+        // Load each external input into a local float.
+        for (ext_idx, _ext_node) in inputs.iter().enumerate() {
+            self.line(&format!(
+                "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
+            ));
+        }
+
+        // Emit each fused step using fast-path locals.
+        let resolve_fast = |fi: &FusedInput| -> String {
+            match fi {
+                FusedInput::External(i) => format!("__in_ext{i}"),
+                FusedInput::PreviousStep(j) => format!("v{j}"),
+            }
+        };
+
+        for (s, step) in ops.iter().enumerate() {
+            let expr = match &step.op {
+                FusedStepOp::Add => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    let b = resolve_fast(&step.input_indices[1]);
+                    format!("{a} + {b}")
+                }
+                FusedStepOp::Mul => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    let b = resolve_fast(&step.input_indices[1]);
+                    format!("{a} * {b}")
+                }
+                FusedStepOp::MaxElem => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    let b = resolve_fast(&step.input_indices[1]);
+                    format!("fmaxf({a}, {b})")
+                }
+                FusedStepOp::CmpLt => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    let b = resolve_fast(&step.input_indices[1]);
+                    format!("({a} < {b}) ? 1.0f : 0.0f")
+                }
+                FusedStepOp::Neg => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    format!("-{a}")
+                }
+                FusedStepOp::Exp => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    format!("expf({a})")
+                }
+                FusedStepOp::Log => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    format!("logf({a})")
+                }
+                FusedStepOp::Sin => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    format!("sinf({a})")
+                }
+                FusedStepOp::Sqrt => {
+                    let a = resolve_fast(&step.input_indices[0]);
+                    format!("sqrtf({a})")
+                }
+            };
+            self.line(&format!("float v{s} = {expr};"));
+        }
+
+        // Store last step's result.
+        let last = ops.len() - 1;
+        self.line(&format!("__out_{id}[i] = v{last};"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+
+        // Slow path: existing index-conversion loop.
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -788,8 +979,8 @@ impl CEmitter {
             ));
         }
 
-        // Emit each fused step.
-        let resolve = |fi: &FusedInput| -> String {
+        // Emit each fused step using slow-path indexed access.
+        let resolve_slow = |fi: &FusedInput| -> String {
             match fi {
                 FusedInput::External(i) => {
                     let ext_id = inputs[*i].0;
@@ -802,43 +993,43 @@ impl CEmitter {
         for (s, step) in ops.iter().enumerate() {
             let expr = match &step.op {
                 FusedStepOp::Add => {
-                    let a = resolve(&step.input_indices[0]);
-                    let b = resolve(&step.input_indices[1]);
+                    let a = resolve_slow(&step.input_indices[0]);
+                    let b = resolve_slow(&step.input_indices[1]);
                     format!("{a} + {b}")
                 }
                 FusedStepOp::Mul => {
-                    let a = resolve(&step.input_indices[0]);
-                    let b = resolve(&step.input_indices[1]);
+                    let a = resolve_slow(&step.input_indices[0]);
+                    let b = resolve_slow(&step.input_indices[1]);
                     format!("{a} * {b}")
                 }
                 FusedStepOp::MaxElem => {
-                    let a = resolve(&step.input_indices[0]);
-                    let b = resolve(&step.input_indices[1]);
+                    let a = resolve_slow(&step.input_indices[0]);
+                    let b = resolve_slow(&step.input_indices[1]);
                     format!("fmaxf({a}, {b})")
                 }
                 FusedStepOp::CmpLt => {
-                    let a = resolve(&step.input_indices[0]);
-                    let b = resolve(&step.input_indices[1]);
+                    let a = resolve_slow(&step.input_indices[0]);
+                    let b = resolve_slow(&step.input_indices[1]);
                     format!("({a} < {b}) ? 1.0f : 0.0f")
                 }
                 FusedStepOp::Neg => {
-                    let a = resolve(&step.input_indices[0]);
+                    let a = resolve_slow(&step.input_indices[0]);
                     format!("-{a}")
                 }
                 FusedStepOp::Exp => {
-                    let a = resolve(&step.input_indices[0]);
+                    let a = resolve_slow(&step.input_indices[0]);
                     format!("expf({a})")
                 }
                 FusedStepOp::Log => {
-                    let a = resolve(&step.input_indices[0]);
+                    let a = resolve_slow(&step.input_indices[0]);
                     format!("logf({a})")
                 }
                 FusedStepOp::Sin => {
-                    let a = resolve(&step.input_indices[0]);
+                    let a = resolve_slow(&step.input_indices[0]);
                     format!("sinf({a})")
                 }
                 FusedStepOp::Sqrt => {
-                    let a = resolve(&step.input_indices[0]);
+                    let a = resolve_slow(&step.input_indices[0]);
                     format!("sqrtf({a})")
                 }
             };
@@ -846,8 +1037,9 @@ impl CEmitter {
         }
 
         // Store last step's result.
-        let last = ops.len() - 1;
         self.line(&format!("t{id}->data[i] = v{last};"));
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
     }
@@ -2063,5 +2255,115 @@ mod tests {
             },
         );
         let _ = CEmitter::emit_dag(&dag, "test_fn");
+    }
+
+    // ---- SIMD Level 1b fast-path tests ----
+
+    /// Binary add for two contiguous-capable inputs must emit the fast path
+    /// containing restrict pointers, #pragma omp parallel for simd, and chelis_is_contiguous.
+    #[test]
+    fn binary_add_fast_path_emits_restrict_and_simd() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(
+            c.contains("restrict"),
+            "fast path should declare restrict pointers"
+        );
+        assert!(
+            c.contains("#pragma omp parallel for simd"),
+            "fast path should emit #pragma omp parallel for simd"
+        );
+        assert!(
+            c.contains("chelis_is_contiguous"),
+            "fast path should be guarded by chelis_is_contiguous"
+        );
+    }
+
+    /// When inputs have non-unit strides (via Expand with stride 0),
+    /// chelis_is_contiguous returns false at runtime, so the emitted C must
+    /// include the slow-path chelis_flat_to_indices fallback code.
+    #[test]
+    fn binary_add_with_expanded_input_includes_slow_path() {
+        let mut dag = Dag::new();
+        // Build a broadcast-style input: Const [1] expanded to [4] via stride=0
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1));
+        let a_exp = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: chelis_ir::dag::DimExpr::Concrete(4),
+            },
+            vec![a],
+            vec_f32(4),
+        );
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+        dag.add_node(RiscOp::Add, vec![a_exp, b], vec_f32(4));
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        // The slow path (index-conversion fallback) must always be present in the
+        // emitted C; at runtime, chelis_is_contiguous(t_expanded) == 0 directs
+        // execution into this branch.
+        assert!(
+            c.contains("chelis_flat_to_indices"),
+            "slow path must contain chelis_flat_to_indices for non-contiguous inputs"
+        );
+        // The fast-path guard is still emitted (as code text), but contains the
+        // contiguity check, which will be false at runtime for the expanded input.
+        assert!(
+            c.contains("chelis_is_contiguous"),
+            "contiguity guard must still appear in the emitted code"
+        );
+    }
+
+    /// Unary neg fast path must emit restrict pointers and #pragma omp parallel for simd.
+    #[test]
+    fn unary_neg_fast_path_emits_restrict_and_simd() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], vec_f32(4));
+        dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("restrict"), "unary fast path must use restrict");
+        assert!(
+            c.contains("#pragma omp parallel for simd"),
+            "unary fast path must have #pragma omp parallel for simd"
+        );
+        assert!(
+            c.contains("chelis_is_contiguous"),
+            "unary fast path must be guarded by chelis_is_contiguous"
+        );
+    }
+
+    /// Fused elementwise fast path must emit restrict pointers and #pragma omp parallel for simd.
+    #[test]
+    fn fused_elem_fast_path_emits_restrict_and_simd() {
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+        // Fused: add(a, b)
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Add,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], vec_f32(4));
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(
+            c.contains("restrict"),
+            "fused fast path must use restrict pointers"
+        );
+        assert!(
+            c.contains("#pragma omp parallel for simd"),
+            "fused fast path must have #pragma omp parallel for simd"
+        );
+        assert!(
+            c.contains("chelis_is_contiguous"),
+            "fused fast path must be guarded by chelis_is_contiguous"
+        );
+        // Slow path must also be present as a fallback
+        assert!(
+            c.contains("chelis_flat_to_indices"),
+            "fused slow path must still be present"
+        );
     }
 }
