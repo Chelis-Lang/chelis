@@ -246,6 +246,156 @@ private theorem runtimeLinearDB_subst_shifted2_passthrough_of_separated
   exact runtimeLinearDB_unary_of_separated
     (hshape (substDBAux (j + 2) (lift (lift v)) e)) h.1 h.2.1 h.2.2
 
+private theorem runtimeLinearDB_subst_abs_dead_of_separated
+    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.abs t body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.abs t body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.abs t body))) := by
+  exact runtimeLinearDB_subst_shifted_passthrough_of_separated
+    (mk := TermDB.abs t)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_copy_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.copy e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.copy e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.copy e))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := TermDB.copy)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_fst_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.fst e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.fst e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.fst e))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := TermDB.fst)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_snd_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.snd e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.snd e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.snd e))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := TermDB.snd)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_sum_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j i : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.sum e i)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.sum e i))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.sum e i))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := fun e' => TermDB.sum e' i)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_expand_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j i k : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.expand e i k)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.expand e i k))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.expand e i k))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := fun e' => TermDB.expand e' i k)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_uniformLike_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat} {lo hi : Float}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.uniformLike e lo hi)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.uniformLike e lo hi))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.uniformLike e lo hi))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := fun e' => TermDB.uniformLike e' lo hi)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_grad_dead_of_separated
+    {t tOut : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.grad t tOut body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.grad t tOut body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.grad t tOut body))) := by
+  exact runtimeLinearDB_subst_shifted_passthrough_of_separated
+    (mk := TermDB.grad t tOut)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_vmap_dead_of_separated
+    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.vmap t body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t body))) := by
+  exact runtimeLinearDB_subst_shifted_passthrough_of_separated
+    (mk := TermDB.vmap t)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
+private theorem runtimeLinearDB_subst_perform_dead_of_separated
+    {op : EffectLabel} {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (TermDB.perform op e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.perform op e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.perform op e))) := by
+  exact runtimeLinearDB_subst_passthrough_of_separated
+    (mk := TermDB.perform op)
+    (hshape := by intro e'; simp [locRefsDB])
+    (hsubst := by simp [substDBAux])
+    h
+
 private theorem runtimeLinearDB_grad_body
     {t tOut : Typ} {body : TermDB}
     (h : RuntimeLinearDB (TermDB.grad t tOut body)) :
