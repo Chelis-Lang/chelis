@@ -169,7 +169,10 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             let result = chelis_backend_c::codegen_with_options(
                 &fused,
                 &func_name,
-                chelis_backend_c::CodegenOptions { use_blas: true },
+                chelis_backend_c::CodegenOptions {
+                    use_blas: true,
+                    ..chelis_backend_c::CodegenOptions::default()
+                },
             );
             Ok(compiled_execution_artifact(
                 request.target,

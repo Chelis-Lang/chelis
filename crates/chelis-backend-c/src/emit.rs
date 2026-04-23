@@ -11,6 +11,8 @@ pub struct CEmitter {
     lines: Vec<String>,
     indent: usize,
     use_blas: bool,
+    /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
+    math_lib: crate::MathLib,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: std::collections::HashSet<usize>,
 }
@@ -46,10 +48,14 @@ impl CEmitter {
         let dag = &dag_owned;
 
         let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
+        let math_lib = options
+            .math_lib_override
+            .unwrap_or_else(crate::MathLib::detect);
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
             use_blas: options.use_blas,
+            math_lib,
             reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
         };
 
@@ -57,6 +63,9 @@ impl CEmitter {
         e.line("#include <assert.h>");
         if e.use_blas {
             e.line("#include \"chelis_blas.h\"");
+        }
+        if e.math_lib != crate::MathLib::None {
+            e.line("#include \"chelis_math.h\"");
         }
         e.line(
             "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {",
@@ -854,6 +863,130 @@ impl CEmitter {
         self.line("}");
     }
 
+    // ---- Fused elementwise helpers ----
+
+    /// Returns true if any step in a fused kernel performs a transcendental math op.
+    fn has_math_ops(ops: &[FusedStep]) -> bool {
+        ops.iter().any(|s| {
+            matches!(
+                s.op,
+                FusedStepOp::Exp | FusedStepOp::Log | FusedStepOp::Sin | FusedStepOp::Sqrt
+            )
+        })
+    }
+
+    /// Returns true if the kernel is trivially expressible as a single vForce call
+    /// (exactly one math op applied directly to one external input — no chained ops).
+    fn is_simple_vforce_kernel(ops: &[FusedStep]) -> bool {
+        ops.len() == 1
+            && matches!(
+                ops[0].op,
+                FusedStepOp::Exp | FusedStepOp::Log | FusedStepOp::Sin | FusedStepOp::Sqrt
+            )
+    }
+
+    /// Emit one fused-step expression for the scalar fast/tail path.
+    fn scalar_step_expr(
+        op: &FusedStepOp,
+        resolve: &dyn Fn(&FusedInput) -> String,
+        inputs: &[FusedInput],
+    ) -> String {
+        match op {
+            FusedStepOp::Add => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("{a} + {b}")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("{a} * {b}")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("fmaxf({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("({a} < {b}) ? 1.0f : 0.0f")
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&inputs[0]);
+                format!("-{a}")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&inputs[0]);
+                format!("expf({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&inputs[0]);
+                format!("logf({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&inputs[0]);
+                format!("sinf({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&inputs[0]);
+                format!("sqrtf({a})")
+            }
+        }
+    }
+
+    /// Emit one fused-step expression for the AVX2 + Sleef path.
+    fn simd_step_expr(
+        op: &FusedStepOp,
+        resolve: &dyn Fn(&FusedInput) -> String,
+        inputs: &[FusedInput],
+    ) -> String {
+        match op {
+            FusedStepOp::Add => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_add_ps({a}, {b})")
+            }
+            FusedStepOp::Mul => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_mul_ps({a}, {b})")
+            }
+            FusedStepOp::MaxElem => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_max_ps({a}, {b})")
+            }
+            FusedStepOp::CmpLt => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!(
+                    "_mm256_blendv_ps(_mm256_setzero_ps(), _mm256_set1_ps(1.0f), _mm256_cmp_ps({a}, {b}, _CMP_LT_OS))"
+                )
+            }
+            FusedStepOp::Neg => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_sub_ps(_mm256_setzero_ps(), {a})")
+            }
+            FusedStepOp::Exp => {
+                let a = resolve(&inputs[0]);
+                format!("CHELIS_EXPF8({a})")
+            }
+            FusedStepOp::Log => {
+                let a = resolve(&inputs[0]);
+                format!("CHELIS_LOGF8({a})")
+            }
+            FusedStepOp::Sin => {
+                let a = resolve(&inputs[0]);
+                format!("CHELIS_SINF8({a})")
+            }
+            FusedStepOp::Sqrt => {
+                let a = resolve(&inputs[0]);
+                format!("CHELIS_SQRTF8({a})")
+            }
+        }
+    }
+
     // ---- Fused elementwise ----
     fn emit_fused_elem(
         &mut self,
@@ -882,7 +1015,7 @@ impl CEmitter {
         self.line(&format!("if ({contiguity_cond}) {{"));
         self.indent += 1;
 
-        // Fast path: declare restrict pointers for each external input.
+        // Declare restrict pointers for each external input (used by all fast paths).
         self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
         for (ext_idx, ext_node) in inputs.iter().enumerate() {
             let ext_id = ext_node.0;
@@ -890,18 +1023,13 @@ impl CEmitter {
                 "const float* restrict __ext{ext_idx}_{id} = t{ext_id}->data;"
             ));
         }
-        self.line("#pragma omp parallel for simd");
-        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
-        self.indent += 1;
 
-        // Load each external input into a local float.
-        for (ext_idx, _ext_node) in inputs.iter().enumerate() {
-            self.line(&format!(
-                "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
-            ));
-        }
+        let use_sleef = self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
+        let use_vforce = self.math_lib == crate::MathLib::VForce
+            && Self::has_math_ops(ops)
+            && Self::is_simple_vforce_kernel(ops);
 
-        // Emit each fused step using fast-path locals.
+        // Closures for resolving fused inputs in scalar (fast-path) context.
         let resolve_fast = |fi: &FusedInput| -> String {
             match fi {
                 FusedInput::External(i) => format!("__in_ext{i}"),
@@ -909,62 +1037,115 @@ impl CEmitter {
             }
         };
 
-        for (s, step) in ops.iter().enumerate() {
-            let expr = match &step.op {
-                FusedStepOp::Add => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    let b = resolve_fast(&step.input_indices[1]);
-                    format!("{a} + {b}")
-                }
-                FusedStepOp::Mul => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    let b = resolve_fast(&step.input_indices[1]);
-                    format!("{a} * {b}")
-                }
-                FusedStepOp::MaxElem => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    let b = resolve_fast(&step.input_indices[1]);
-                    format!("fmaxf({a}, {b})")
-                }
-                FusedStepOp::CmpLt => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    let b = resolve_fast(&step.input_indices[1]);
-                    format!("({a} < {b}) ? 1.0f : 0.0f")
-                }
-                FusedStepOp::Neg => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    format!("-{a}")
-                }
-                FusedStepOp::Exp => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    format!("expf({a})")
-                }
-                FusedStepOp::Log => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    format!("logf({a})")
-                }
-                FusedStepOp::Sin => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    format!("sinf({a})")
-                }
-                FusedStepOp::Sqrt => {
-                    let a = resolve_fast(&step.input_indices[0]);
-                    format!("sqrtf({a})")
-                }
+        // Closure for resolving fused inputs in AVX2 SIMD context.
+        let resolve_simd = |fi: &FusedInput| -> String {
+            match fi {
+                FusedInput::External(i) => format!("__v_ext{i}"),
+                FusedInput::PreviousStep(j) => format!("__v{j}"),
+            }
+        };
+
+        let last = ops.len() - 1;
+
+        if use_sleef {
+            // --- Sleef AVX2 path ---
+            // The 8-wide body is guarded by #ifdef CHELIS_HAS_SLEEF so the
+            // generated C compiles without Sleef installed; the #else branch
+            // falls back to the Level-1 scalar loop.
+            self.line("#ifdef CHELIS_HAS_SLEEF");
+            self.line("{");
+            self.indent += 1;
+            self.line("int __i = 0;");
+            // 8-wide main loop
+            self.line(&format!("for (; __i + 8 <= t{id}->size; __i += 8) {{"));
+            self.indent += 1;
+            // Load 8 floats from each external input.
+            for (ext_idx, _) in inputs.iter().enumerate() {
+                self.line(&format!(
+                    "__m256 __v_ext{ext_idx} = _mm256_loadu_ps(__ext{ext_idx}_{id} + __i);"
+                ));
+            }
+            // Emit each step with SIMD intrinsics.
+            for (s, step) in ops.iter().enumerate() {
+                let expr = Self::simd_step_expr(&step.op, &resolve_simd, &step.input_indices);
+                self.line(&format!("__m256 __v{s} = {expr};"));
+            }
+            self.line(&format!("_mm256_storeu_ps(__out_{id} + __i, __v{last});"));
+            self.indent -= 1;
+            self.line("}");
+            // Scalar tail loop for remaining elements (n % 8).
+            self.line(&format!("for (; __i < t{id}->size; __i++) {{"));
+            self.indent += 1;
+            for (ext_idx, _) in inputs.iter().enumerate() {
+                self.line(&format!(
+                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[__i];"
+                ));
+            }
+            for (s, step) in ops.iter().enumerate() {
+                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
+                self.line(&format!("float v{s} = {expr};"));
+            }
+            self.line(&format!("__out_{id}[__i] = v{last};"));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+            self.line("#else");
+            // Fallback: Level-1 scalar OMP SIMD loop.
+            self.line("#pragma omp parallel for simd");
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            for (ext_idx, _) in inputs.iter().enumerate() {
+                self.line(&format!(
+                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
+                ));
+            }
+            for (s, step) in ops.iter().enumerate() {
+                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
+                self.line(&format!("float v{s} = {expr};"));
+            }
+            self.line(&format!("__out_{id}[i] = v{last};"));
+            self.indent -= 1;
+            self.line("}");
+            self.line("#endif");
+        } else if use_vforce {
+            // --- vForce path (macOS only, simple single-op kernels) ---
+            // For a single math op applied to one external input we can call vForce directly.
+            let vforce_fn = match &ops[0].op {
+                FusedStepOp::Exp => "vvexpf",
+                FusedStepOp::Log => "vvlogf",
+                FusedStepOp::Sin => "vvsinf",
+                FusedStepOp::Sqrt => "vvsqrtf",
+                _ => unreachable!("is_simple_vforce_kernel guarantees a math op"),
             };
-            self.line(&format!("float v{s} = {expr};"));
+            self.line(&format!("int __vforce_n_{id} = t{id}->size;"));
+            self.line(&format!(
+                "{vforce_fn}(__out_{id}, __ext0_{id}, &__vforce_n_{id});"
+            ));
+        } else {
+            // --- Level-1 scalar OMP SIMD loop (default fast path) ---
+            self.line("#pragma omp parallel for simd");
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            for (ext_idx, _) in inputs.iter().enumerate() {
+                self.line(&format!(
+                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
+                ));
+            }
+            for (s, step) in ops.iter().enumerate() {
+                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
+                self.line(&format!("float v{s} = {expr};"));
+            }
+            self.line(&format!("__out_{id}[i] = v{last};"));
+            self.indent -= 1;
+            self.line("}");
         }
 
-        // Store last step's result.
-        let last = ops.len() - 1;
-        self.line(&format!("__out_{id}[i] = v{last};"));
-        self.indent -= 1;
-        self.line("}");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
 
-        // Slow path: existing index-conversion loop.
+        // Slow path: existing index-conversion loop (handles non-contiguous strides).
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -993,48 +1174,7 @@ impl CEmitter {
         };
 
         for (s, step) in ops.iter().enumerate() {
-            let expr = match &step.op {
-                FusedStepOp::Add => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    let b = resolve_slow(&step.input_indices[1]);
-                    format!("{a} + {b}")
-                }
-                FusedStepOp::Mul => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    let b = resolve_slow(&step.input_indices[1]);
-                    format!("{a} * {b}")
-                }
-                FusedStepOp::MaxElem => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    let b = resolve_slow(&step.input_indices[1]);
-                    format!("fmaxf({a}, {b})")
-                }
-                FusedStepOp::CmpLt => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    let b = resolve_slow(&step.input_indices[1]);
-                    format!("({a} < {b}) ? 1.0f : 0.0f")
-                }
-                FusedStepOp::Neg => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    format!("-{a}")
-                }
-                FusedStepOp::Exp => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    format!("expf({a})")
-                }
-                FusedStepOp::Log => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    format!("logf({a})")
-                }
-                FusedStepOp::Sin => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    format!("sinf({a})")
-                }
-                FusedStepOp::Sqrt => {
-                    let a = resolve_slow(&step.input_indices[0]);
-                    format!("sqrtf({a})")
-                }
-            };
+            let expr = Self::scalar_step_expr(&step.op, &resolve_slow, &step.input_indices);
             self.line(&format!("float v{s} = {expr};"));
         }
 
@@ -2269,7 +2409,10 @@ mod tests {
         let c = CEmitter::emit_dag_with_options(
             &dag,
             "test_fn",
-            crate::CodegenOptions { use_blas: true },
+            crate::CodegenOptions {
+                use_blas: true,
+                ..crate::CodegenOptions::default()
+            },
         );
         assert!(c.contains("cblas_sgemm("));
     }

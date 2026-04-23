@@ -905,7 +905,10 @@ fn cmd_build_c(
     let result = chelis_backend_c::codegen_with_options(
         dag,
         func_name,
-        chelis_backend_c::CodegenOptions { use_blas: true },
+        chelis_backend_c::CodegenOptions {
+            use_blas: true,
+            ..chelis_backend_c::CodegenOptions::default()
+        },
     );
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
     cmd_build_c_result(result, func_name, output, &symbolic_dims)

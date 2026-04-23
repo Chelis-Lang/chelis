@@ -58,6 +58,12 @@ pub struct CodegenOptions {
     ///
     /// When false, matmul-shaped DAGs still compile via the generic reduction path.
     pub use_blas: bool,
+    /// Override the math library selection for SIMD emission (Level 3b).
+    ///
+    /// `None` means auto-detect via [`MathLib::detect`].  Set to `Some(MathLib::Sleef)`
+    /// in tests to force the Sleef code-generation path without requiring the library to
+    /// actually be installed on the build machine.
+    pub math_lib_override: Option<MathLib>,
 }
 
 /// Generate C source code from a RISC DAG.
@@ -165,6 +171,10 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_simd.h")
     }
 
+    fn runtime_math_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_math.h")
+    }
+
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = [
@@ -206,6 +216,8 @@ mod tests {
         write_temp_file(dst, "chelis_blas.h", &blas_h_src);
         let simd_h_src = std::fs::read_to_string(runtime_simd_header_path()).unwrap();
         write_temp_file(dst, "chelis_simd.h", &simd_h_src);
+        let math_h_src = std::fs::read_to_string(runtime_math_header_path()).unwrap();
+        write_temp_file(dst, "chelis_math.h", &math_h_src);
         std::fs::copy(runtime_library_path(), dst.join("libchelis_runtime.a")).unwrap();
     }
 
@@ -370,7 +382,14 @@ mod tests {
             },
         );
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
-        let result = codegen_with_options(&dag, "test_fn", CodegenOptions { use_blas: true });
+        let result = codegen_with_options(
+            &dag,
+            "test_fn",
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
+        );
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
@@ -1672,7 +1691,14 @@ int main(void) {
             },
         );
         dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
-        let result = codegen_with_options(&dag, "test_blas", CodegenOptions { use_blas: true });
+        let result = codegen_with_options(
+            &dag,
+            "test_blas",
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
+        );
         assert!(result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1799,9 +1825,343 @@ int main(void) {
         let out = compile_and_run_with_codegen_options(
             &dag,
             "test_matmul_blas_num",
-            CodegenOptions { use_blas: true },
+            CodegenOptions {
+                use_blas: true,
+                ..CodegenOptions::default()
+            },
             &[],
         );
         assert_floats_eq(&out, &[3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]);
+    }
+
+    // ---- Level 3b SIMD math tests ----
+
+    /// Build a fused exp(add(a, b)) DAG and return the fused version.
+    fn build_fused_exp_add_dag(n: usize) -> Dag {
+        use chelis_ir::fuse::fuse;
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n));
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(n));
+        let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(n));
+        dag.add_node(RiscOp::Exp, vec![add], vec_f32(n));
+        fuse(&dag)
+    }
+
+    #[test]
+    fn simd_math_fused_kernel_generates_sleef_path() {
+        // Force MathLib::Sleef in codegen and verify the generated C contains the
+        // expected Sleef macros and the scalar tail loop.
+        let dag = build_fused_exp_add_dag(16);
+        let result = codegen_with_options(
+            &dag,
+            "test_sleef_codegen",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::Sleef),
+                ..CodegenOptions::default()
+            },
+        );
+        // The Sleef guard must be present.
+        assert!(
+            result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
+            "expected #ifdef CHELIS_HAS_SLEEF in generated C:\n{}",
+            result.c_source
+        );
+        // The Sleef macro for exp must appear.
+        assert!(
+            result.c_source.contains("CHELIS_EXPF8("),
+            "expected CHELIS_EXPF8( in generated C:\n{}",
+            result.c_source
+        );
+        // The 8-wide loadu load must appear.
+        assert!(
+            result.c_source.contains("_mm256_loadu_ps("),
+            "expected _mm256_loadu_ps( in generated C:\n{}",
+            result.c_source
+        );
+        // The storeu store must appear.
+        assert!(
+            result.c_source.contains("_mm256_storeu_ps("),
+            "expected _mm256_storeu_ps( in generated C:\n{}",
+            result.c_source
+        );
+        // The scalar tail loop guard must appear (for n % 8 != 0 case).
+        assert!(
+            result.c_source.contains("for (; __i < t"),
+            "expected scalar tail loop in generated C:\n{}",
+            result.c_source
+        );
+        // The scalar fallback (Level-1 path) must also be present inside #else.
+        assert!(
+            result.c_source.contains("#else"),
+            "expected #else guard in generated C:\n{}",
+            result.c_source
+        );
+        // The math header include must appear.
+        assert!(
+            result.c_source.contains("#include \"chelis_math.h\""),
+            "expected chelis_math.h include in generated C:\n{}",
+            result.c_source
+        );
+    }
+
+    #[test]
+    fn simd_math_none_path_does_not_include_math_header() {
+        // MathLib::None must NOT include chelis_math.h.
+        let dag = build_fused_exp_add_dag(8);
+        let result = codegen_with_options(
+            &dag,
+            "test_no_math_header",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::None),
+                ..CodegenOptions::default()
+            },
+        );
+        assert!(
+            !result.c_source.contains("#include \"chelis_math.h\""),
+            "MathLib::None must not emit chelis_math.h include:\n{}",
+            result.c_source
+        );
+        assert!(
+            !result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
+            "MathLib::None must not emit Sleef guards:\n{}",
+            result.c_source
+        );
+    }
+
+    #[test]
+    fn simd_pure_arithmetic_fused_kernel_skips_sleef_path() {
+        // A kernel with only Add (no math ops) must use the Level-1 path even when
+        // MathLib::Sleef is forced, because has_math_ops() returns false.
+        use chelis_ir::fuse::fuse;
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
+        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
+        let dag = fuse(&dag);
+        let result = codegen_with_options(
+            &dag,
+            "test_no_sleef_add",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::Sleef),
+                ..CodegenOptions::default()
+            },
+        );
+        // Sleef guard must NOT appear — add-only kernel takes the Level-1 path.
+        assert!(
+            !result.c_source.contains("#ifdef CHELIS_HAS_SLEEF"),
+            "pure-arithmetic kernel must not emit Sleef guard:\n{}",
+            result.c_source
+        );
+        // The Level-1 omp simd loop must be present.
+        assert!(
+            result.c_source.contains("#pragma omp parallel for simd"),
+            "pure-arithmetic kernel must use Level-1 omp simd loop:\n{}",
+            result.c_source
+        );
+    }
+
+    #[test]
+    fn simd_math_fused_kernel_compiles_and_runs() {
+        // Compile the Sleef-path C without -DCHELIS_HAS_SLEEF (so the #else Level-1
+        // scalar path is compiled).  Run at n=7 (partial 8-wide block) and n=1024.
+        if !gcc_available() {
+            eprintln!("skipping: gcc not available");
+            return;
+        }
+        for &n in &[7usize, 1024] {
+            let dag = build_fused_exp_add_dag(n);
+            // Generate C with Sleef path enabled so the generated source has the SIMD
+            // block, but compile without -DCHELIS_HAS_SLEEF so the #else branch fires.
+            let result = codegen_with_options(
+                &dag,
+                "test_simd_compile",
+                CodegenOptions {
+                    math_lib_override: Some(MathLib::Sleef),
+                    ..CodegenOptions::default()
+                },
+            );
+
+            let tmp = tempfile::tempdir().unwrap();
+            copy_runtime_artifacts(tmp.path());
+            write_temp_file(tmp.path(), "model.c", &result.c_source);
+
+            // Build the main harness: fill a with 0.5, b with 0.5, expect exp(1.0)=e^1.
+            let main_c = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <math.h>
+void test_simd_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    int shape[1] = {{ {n} }};
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
+    for (int i = 0; i < {n}; i++) {{ ta->data[i] = 0.5f; tb->data[i] = 0.5f; }}
+    chelis_tensor *inputs[2] = {{ta, tb}};
+    chelis_tensor *outputs[1] = {{0}};
+    test_simd_compile(inputs, 2, outputs, 1);
+    float expected = expf(1.0f);
+    for (int i = 0; i < {n}; i++) {{
+        float diff = outputs[0]->data[i] - expected;
+        if (diff < 0) diff = -diff;
+        if (diff > 1e-5f) {{ return 1; }}
+    }}
+    chelis_free(ta);
+    chelis_free(tb);
+    chelis_free(outputs[0]);
+    return 0;
+}}
+"#
+            );
+            write_temp_file(tmp.path(), "main.c", &main_c);
+            let bin_path = tmp.path().join("test_simd_compile");
+
+            let toolchain = test_toolchain(result.requirements);
+            let mut cmd = Command::new(&toolchain.compiler);
+            apply_c_test_flags(&mut cmd);
+            cmd.args(["-O2", "-mavx2"]);
+            cmd.args(&toolchain.compile_flags);
+            cmd.arg(tmp.path().join("main.c").to_str().unwrap());
+            cmd.arg(tmp.path().join("model.c").to_str().unwrap());
+            add_runtime_link(&mut cmd, tmp.path());
+            cmd.args(&toolchain.link_flags);
+            cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
+            let compile_out = cmd.output().unwrap();
+            assert!(
+                compile_out.status.success(),
+                "gcc failed at n={n}:\nstderr: {}\nC source:\n{}",
+                String::from_utf8_lossy(&compile_out.stderr),
+                result.c_source
+            );
+
+            let run_out = Command::new(bin_path.to_str().unwrap()).output().unwrap();
+            assert!(
+                run_out.status.success(),
+                "binary failed at n={n}: {}",
+                String::from_utf8_lossy(&run_out.stderr)
+            );
+        }
+    }
+
+    /// Acceptance oracle for Level 3b SIMD math.
+    ///
+    /// Runs exp(add(a, b)) via the Sleef-path C (compiled without CHELIS_HAS_SLEEF
+    /// so the #else Level-1 scalar path executes) and verifies the result matches
+    /// a pure scalar reference implementation within 1 ULP (< 2e-7 relative error).
+    #[test]
+    fn simd_math_fused_kernel_matches_scalar_output() {
+        if !gcc_available() {
+            eprintln!("skipping: gcc not available");
+            return;
+        }
+
+        // Reference: compute exp(a+b) entirely in Rust.
+        let n = 33usize; // Not a multiple of 8; exercises both the main block and the tail.
+        let a_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1f32 - 1.5f32).collect();
+        let b_data: Vec<f32> = (0..n).map(|i| (i as f32) * -0.05f32 + 0.5f32).collect();
+        let reference: Vec<f32> = a_data
+            .iter()
+            .zip(b_data.iter())
+            .map(|(a, b)| (a + b).exp())
+            .collect();
+
+        let dag = build_fused_exp_add_dag(n);
+        let result = codegen_with_options(
+            &dag,
+            "test_oracle",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::Sleef),
+                ..CodegenOptions::default()
+            },
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "model.c", &result.c_source);
+
+        // Build input initializers from the test vectors.
+        let a_init: String = a_data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("ta->data[{i}] = {v:.8}f;"))
+            .collect::<Vec<_>>()
+            .join("\n    ");
+        let b_init: String = b_data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("tb->data[{i}] = {v:.8}f;"))
+            .collect::<Vec<_>>()
+            .join("\n    ");
+
+        let main_c = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <math.h>
+#include <stdio.h>
+void test_oracle(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    int shape[1] = {{ {n} }};
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
+    {a_init}
+    {b_init}
+    chelis_tensor *inputs[2] = {{ta, tb}};
+    chelis_tensor *outputs[1] = {{0}};
+    test_oracle(inputs, 2, outputs, 1);
+    for (int i = 0; i < {n}; i++) {{
+        printf("%.8f\n", outputs[0]->data[i]);
+    }}
+    chelis_free(ta);
+    chelis_free(tb);
+    chelis_free(outputs[0]);
+    return 0;
+}}
+"#
+        );
+        write_temp_file(tmp.path(), "main.c", &main_c);
+        let bin_path = tmp.path().join("test_oracle");
+
+        let toolchain = test_toolchain(result.requirements);
+        let mut cmd = Command::new(&toolchain.compiler);
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-mavx2"]);
+        cmd.args(&toolchain.compile_flags);
+        cmd.arg(tmp.path().join("main.c").to_str().unwrap());
+        cmd.arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.args(&toolchain.link_flags);
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
+        let compile_out = cmd.output().unwrap();
+        assert!(
+            compile_out.status.success(),
+            "gcc failed:\nstderr: {}\nC source:\n{}",
+            String::from_utf8_lossy(&compile_out.stderr),
+            result.c_source
+        );
+
+        let run_out = Command::new(bin_path.to_str().unwrap()).output().unwrap();
+        assert!(
+            run_out.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&run_out.stderr)
+        );
+        let stdout = String::from_utf8(run_out.stdout).unwrap();
+        let actual: Vec<f32> = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim().parse::<f32>().expect("expected f32 output"))
+            .collect();
+        assert_eq!(
+            actual.len(),
+            n,
+            "expected {n} output values, got {}",
+            actual.len()
+        );
+        for (i, (got, expected)) in actual.iter().zip(reference.iter()).enumerate() {
+            let rel_err = ((got - expected) / expected).abs();
+            assert!(
+                rel_err < 2e-7,
+                "index {i}: expected {expected}, got {got}, relative error {rel_err:.2e} exceeds 2e-7"
+            );
+        }
     }
 }
