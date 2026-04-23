@@ -6,9 +6,15 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+sleef = []
+
 [dependencies]
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
+
+[build-dependencies]
+pkg-config = "0.3"
 
 [dev-dependencies]
 chelis-runtime.workspace = true

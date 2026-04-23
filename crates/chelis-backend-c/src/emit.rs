@@ -280,6 +280,7 @@ impl CEmitter {
                     dag,
                     "INFINITY",
                     "acc = fminf(acc, t{a}->data[src_idx]);",
+                    Some("chelis_min_f32"),
                 );
             }
             RiscOp::ProdReduce { axis } => {
@@ -291,6 +292,7 @@ impl CEmitter {
                     dag,
                     "1.0f",
                     "acc *= t{a}->data[src_idx];",
+                    None,
                 );
             }
             RiscOp::Argmax { axis } => {
@@ -1207,6 +1209,9 @@ impl CEmitter {
     // `update_tmpl` is the body of the inner loop with literal `{a}` tokens
     // for the input node id. Used by MinReduce and ProdReduce; the structure
     // mirrors `emit_reduce_max` exactly.
+    //
+    // `fast_path_fn` names a scalar intrinsic for a future SIMD fast path (Level 3b);
+    // it is accepted here so call sites compile but is not yet used in the body.
     #[allow(clippy::too_many_arguments)]
     fn emit_reduce_simple(
         &mut self,
@@ -1217,6 +1222,7 @@ impl CEmitter {
         dag: &Dag,
         init: &str,
         update_tmpl: &str,
+        _fast_path_fn: Option<&str>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -1293,9 +1299,25 @@ impl CEmitter {
         let dtype = Self::dtype_macro(ty);
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
         let cmp = if is_argmax { ">" } else { "<" };
+        let simd_fn = if is_argmax {
+            "chelis_argmax_f32"
+        } else {
+            "chelis_argmin_f32"
+        };
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        let output_is_scalar = ty.dims.is_empty();
+        if output_is_scalar {
+            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "t{id}->data[0] = (float){simd_fn}(t{a}->data, t{a}->size);"
+            ));
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+        }
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
@@ -1342,6 +1364,10 @@ impl CEmitter {
         self.line(&format!("t{id}->data[outer] = (float)best_idx;"));
         self.indent -= 1;
         self.line("}");
+        if output_is_scalar {
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Fused elementwise→reduction ----

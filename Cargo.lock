@@ -318,6 +318,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "pkg-config",
  "tempfile",
 ]
 

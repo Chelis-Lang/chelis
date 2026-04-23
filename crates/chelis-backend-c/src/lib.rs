@@ -25,6 +25,32 @@ pub struct CodegenResult {
     pub symbolic_dims: Vec<String>,
 }
 
+/// Which vectorized math library is available for SIMD emission (Level 3b).
+///
+/// Detected at build time via `build.rs`; stored on [`CEmitter`] and threaded through
+/// codegen so the emitter can choose the right include and macro set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathLib {
+    /// AVX2 + Sleef (Linux, detected via pkg-config at build time).
+    Sleef,
+    /// vForce via Accelerate.framework (macOS).
+    VForce,
+    /// No vectorized math library available; scalar fallback only.
+    None,
+}
+
+impl MathLib {
+    /// Select the appropriate variant based on compile-time feature flags.
+    pub fn detect() -> Self {
+        #[cfg(feature = "sleef")]
+        return MathLib::Sleef;
+        #[cfg(all(not(feature = "sleef"), target_os = "macos"))]
+        return MathLib::VForce;
+        #[cfg(all(not(feature = "sleef"), not(target_os = "macos")))]
+        MathLib::None
+    }
+}
+
 /// Optional backend features for C code generation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodegenOptions {
@@ -135,6 +161,10 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_blas.h")
     }
 
+    fn runtime_simd_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_simd.h")
+    }
+
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = [
@@ -174,6 +204,8 @@ mod tests {
         write_temp_file(dst, "chelis_runtime.h", &h_src);
         let blas_h_src = std::fs::read_to_string(runtime_blas_header_path()).unwrap();
         write_temp_file(dst, "chelis_blas.h", &blas_h_src);
+        let simd_h_src = std::fs::read_to_string(runtime_simd_header_path()).unwrap();
+        write_temp_file(dst, "chelis_simd.h", &simd_h_src);
         std::fs::copy(runtime_library_path(), dst.join("libchelis_runtime.a")).unwrap();
     }
 

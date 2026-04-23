@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "chelis_simd.h"
 
 #define CHELIS_F32 0
 #define CHELIS_F64 1
