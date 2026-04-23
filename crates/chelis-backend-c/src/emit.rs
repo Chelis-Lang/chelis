@@ -1101,6 +1101,17 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        let output_is_scalar = ty.dims.is_empty();
+        if output_is_scalar {
+            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "t{id}->data[0] = chelis_sum_f32(t{a}->data, t{a}->size);"
+            ));
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+        }
         self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
         self.line("#pragma omp parallel for");
         self.line(&format!(
@@ -1142,6 +1153,10 @@ impl CEmitter {
         self.line(&format!("t{id}->data[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
+        if output_is_scalar {
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Reduce max ----
@@ -1162,6 +1177,17 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        let output_is_scalar = ty.dims.is_empty();
+        if output_is_scalar {
+            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "t{id}->data[0] = chelis_max_f32(t{a}->data, t{a}->size);"
+            ));
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+        }
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
@@ -1201,6 +1227,10 @@ impl CEmitter {
         self.line(&format!("t{id}->data[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
+        if output_is_scalar {
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Generic scalar reduction (min / prod) ----
@@ -1210,8 +1240,8 @@ impl CEmitter {
     // for the input node id. Used by MinReduce and ProdReduce; the structure
     // mirrors `emit_reduce_max` exactly.
     //
-    // `fast_path_fn` names a scalar intrinsic for a future SIMD fast path (Level 3b);
-    // it is accepted here so call sites compile but is not yet used in the body.
+    // `simd_fn` is an optional SIMD helper name (e.g. "chelis_min_f32") used
+    // when the output is a scalar and the input is contiguous.
     #[allow(clippy::too_many_arguments)]
     fn emit_reduce_simple(
         &mut self,
@@ -1222,7 +1252,7 @@ impl CEmitter {
         dag: &Dag,
         init: &str,
         update_tmpl: &str,
-        _fast_path_fn: Option<&str>,
+        simd_fn: Option<&str>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -1233,6 +1263,19 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        let output_is_scalar = ty.dims.is_empty();
+        let use_simd = output_is_scalar && simd_fn.is_some();
+        if use_simd {
+            let fn_name = simd_fn.unwrap();
+            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "t{id}->data[0] = {fn_name}(t{a}->data, t{a}->size);"
+            ));
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+        }
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
@@ -1273,6 +1316,10 @@ impl CEmitter {
         self.line(&format!("t{id}->data[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
+        if use_simd {
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     // ---- Argmax / Argmin ----
