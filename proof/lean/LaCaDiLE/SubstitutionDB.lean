@@ -1929,6 +1929,53 @@ theorem runtimeLinearDB_subst_var_live_dead_separated
       LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var j))) := by
   simp [substDBAux, h_linear, hsep_v_rhs, hsep_rhs_v]
 
+theorem runtimeLinearDB_subst_var_live_dead
+    {Γ_in Γ_out : LinearCtxDB}
+    {v : TermDB} {t_v ti : Typ} {rhsRefs : List Loc}
+    (i j : Nat)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hlook : (Γ_in.insertAt j (some t_v))[i]? = some (some ti))
+    (hout : (Γ_in.insertAt j (some t_v)).set i none = Γ_out.insertAt j none)
+    (h_linear : RuntimeLinearDB v)
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    RuntimeLinearDB (substDBAux j v (TermDB.var i)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.var i))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var i))) := by
+  rcases Nat.lt_trichotomy i j with hij | rfl | hij
+  · by_cases hiΓ : i < Γ_in.length
+    · have hset :
+          (LinearCtxDB.insertAt j (some t_v) Γ_in).set i none =
+          LinearCtxDB.insertAt j (some t_v) (Γ_in.set i none) :=
+        LinearCtxDB.set_insertAt_lt Γ_in j (some t_v) i none hij hiΓ
+      rw [hset] at hout
+      have hlook_j := congrArg (fun G => G[j]?) hout
+      simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out, hij, hiΓ] at hlook_j
+    · exfalso
+      have hi_lt_len : i < Γ_in.length + 1 := by
+        have := (List.getElem?_eq_some_iff.mp hlook).1
+        rw [LinearCtxDB.length_insertAt] at this
+        exact this
+      have hi_eq : i = Γ_in.length := Nat.le_antisymm
+        (Nat.lt_succ_iff.mp hi_lt_len) (Nat.le_of_not_lt hiΓ)
+      omega
+  · rw [LinearCtxDB.getElem?_insertAt_eq Γ_in i (some t_v) hj_in] at hlook
+    have hti : ti = t_v := by simpa using hlook.symm
+    subst hti
+    exact runtimeLinearDB_subst_var_live_dead_separated i h_linear hsep_v_rhs hsep_rhs_v
+  · have him1 : j ≤ i - 1 := by omega
+    have hi_eq : i - 1 + 1 = i := by omega
+    have hset :
+        (LinearCtxDB.insertAt j (some t_v) Γ_in).set i none =
+        LinearCtxDB.insertAt j (some t_v) (Γ_in.set (i - 1) none) := by
+      have := LinearCtxDB.set_insertAt_gt Γ_in j (some t_v) (i - 1) none him1
+      rw [hi_eq] at this
+      exact this
+    rw [hset] at hout
+    have hlook_j := congrArg (fun G => G[j]?) hout
+    simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out, hij, him1] at hlook_j
+
 private theorem insertAt_some_ne_insertAt_none
     {Γ_in Γ_out : LinearCtxDB} {j : Nat} {t_v : Typ}
     (hj_in : j ≤ Γ_in.length)
