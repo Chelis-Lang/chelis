@@ -4352,6 +4352,31 @@ theorem runtimeLinearDB_subst_none_separated
   · rw [hlocs]
     exact hsep_rhs_e
 
+theorem runtimeLinearDB_subst_none_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j none) e t eps (Γ2.insertAt j none))
+    (h_linear : RuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  have hlocs : locRefsDB (substDBAux j v e) = locRefsDB e :=
+    locRefsDB_subst_none_gen h_e v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
 /-- Motive bundle for the "live slot stays live" location theorem.
 If the distinguished slot is live on both input and output, the term
 cannot have consumed that slot, so substitution still introduces no
@@ -4752,5 +4777,363 @@ theorem runtimeLinearDB_subst_live_separated
     exact hsep_erhs
   · rw [hlocs]
     exact hsep_rhs_e
+
+theorem runtimeLinearDB_subst_live_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j (some t_v)) e t eps (Γ2.insertAt j (some t_v)))
+    (h_linear : RuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  unfold RuntimeLinearDB at h_linear ⊢
+  have hlocs : locRefsDB (substDBAux j v e) = locRefsDB e :=
+    locRefsDB_subst_live_gen h_e v t_v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
+theorem runtimeLinearDB_subst_dead_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (v : TermDB) (t_v : Typ) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB) (rhsRefs : List Loc)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j (some t_v))
+    (hout : Γ2 = Γ_out.insertAt j none)
+    (h_v : HasTypeDB Δ S Γ_in v t_v [] Γ_in)
+    (hlin_v : RuntimeLinearDB v)
+    (hsep_v_e : LocRefsSeparated (locRefsDB v) (locRefsDB e))
+    (hsep_e_v : LocRefsSeparated (locRefsDB e) (locRefsDB v))
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v))
+    (hlin_e : RuntimeLinearDB e)
+    (hsep_e_rhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  revert v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+    hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+  change RuntimeLinearSubstDeadMotive1 Δ S Γ1 e t eps Γ2 h
+  induction h using HasTypeDB.rec (motive_2 := RuntimeLinearSubstDeadMotive2) with
+  | var Δ_ S_ Γ i ti hlook =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v _hsep_v_e _hsep_e_v hsep_v_rhs hsep_rhs_v _hlin_e _hsep_e_rhs _hsep_rhs_e
+      exact runtimeLinearDB_subst_var_live_dead i j hj_in hj_out (hin ▸ hlook) (hin ▸ hout)
+        hlin_v hsep_v_rhs hsep_rhs_v
+  | unit Δ_ S_ Γ =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout _h_v
+        _hlin_v _hsep_v_e _hsep_e_v _hsep_v_rhs _hsep_rhs_v _hlin_e _hsep_e_rhs _hsep_rhs_e
+      exact runtimeLinearDB_subst_dead_same_ctx_absurd hj_in hj_out hin hout
+  | abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hin_body : some t1 :: Γ1 =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have h_v_lifted :
+          HasTypeDB Δ_ S_ (some t1 :: Γ_in) (lift v) t_v [] (some t1 :: Γ_in) :=
+        weakening_head_db h_v
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have hlin_body : RuntimeLinearDB body := runtimeLinearDB_abs_body hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB body) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB body) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body (lift v) t_v (j + 1) (some t1 :: Γ_in) (slot :: Γ_out) rhsRefs
+        hj_in_body hj_out_body hin_body hout_body h_v_lifted
+        (by simpa [locRefsDB_lift] using hlin_v)
+        (by simpa [locRefsDB_lift] using hsep_v_body)
+        (by simpa [locRefsDB_lift] using hsep_body_v)
+        (by simpa [locRefsDB_lift] using hsep_v_rhs)
+        (by simpa [locRefsDB_lift] using hsep_rhs_v)
+        hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_abs_dead_of_separated hbody'
+  | app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_copy_dead_of_separated hbody'
+  | letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_fst_dead_of_separated hbody'
+  | snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_snd_dead_of_separated hbody'
+  | const Δ_ S_ Γ v_ ds =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout _h_v
+        _hlin_v _hsep_v_e _hsep_e_v _hsep_v_rhs _hsep_rhs_v _hlin_e _hsep_e_rhs _hsep_rhs_e
+      exact runtimeLinearDB_subst_dead_same_ctx_absurd hj_in hj_out hin hout
+  | tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_sum_dead_of_separated hbody'
+  | texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' hds' ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_expand_dead_of_separated hbody'
+  | uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_uniformLike_dead_of_separated hbody'
+  | perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := by simpa [RuntimeLinearDB, locRefsDB] using hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB e_) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB e_) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB e_) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_body hsep_body_v hsep_v_rhs hsep_rhs_v hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_perform_dead_of_separated hbody'
+  | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ih_hb ih_hcls =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      sorry
+  | tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hin_body : some (Typ.tensor ds) :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some (Typ.tensor ds) :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have h_v_cap : HasTypeDB (Capability.diff :: Δ_) S_ Γ_in v t_v [] Γ_in :=
+        hasTypeDB_cap_weaken h_v Capability.diff
+      have h_v_cap_lifted :
+          HasTypeDB (Capability.diff :: Δ_) S_ (some (Typ.tensor ds) :: Γ_in) (lift v) t_v []
+            (some (Typ.tensor ds) :: Γ_in) :=
+        weakening_head_db h_v_cap
+      have hj_in_body : j + 1 ≤ (some (Typ.tensor ds) :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have hlin_body : RuntimeLinearDB body := runtimeLinearDB_grad_body hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB body) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB body) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body (lift v) t_v (j + 1) (some (Typ.tensor ds) :: Γ_in) (slot :: Γ_out) rhsRefs
+        hj_in_body hj_out_body hin_body hout_body h_v_cap_lifted
+        (by simpa [locRefsDB_lift] using hlin_v)
+        (by simpa [locRefsDB_lift] using hsep_v_body)
+        (by simpa [locRefsDB_lift] using hsep_body_v)
+        (by simpa [locRefsDB_lift] using hsep_v_rhs)
+        (by simpa [locRefsDB_lift] using hsep_rhs_v)
+        hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_grad_dead_of_separated hbody'
+  | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hin_body : some t1 :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have h_v_lifted :
+          HasTypeDB Δ_ S_ (some t1 :: Γ_in) (lift v) t_v [] (some t1 :: Γ_in) :=
+        weakening_head_db h_v
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have hlin_body : RuntimeLinearDB body := runtimeLinearDB_vmap_body hlin_e
+      have hsep_v_body : LocRefsSeparated (locRefsDB v) (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_v_e
+      have hsep_body_v : LocRefsSeparated (locRefsDB body) (locRefsDB v) := by
+        simpa [locRefsDB] using hsep_e_v
+      have hsep_body_rhs : LocRefsSeparated (locRefsDB body) rhsRefs := by
+        simpa [locRefsDB] using hsep_e_rhs
+      have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB body) := by
+        simpa [locRefsDB] using hsep_rhs_e
+      have hbody' := ih_body (lift v) t_v (j + 1) (some t1 :: Γ_in) (slot :: Γ_out) rhsRefs
+        hj_in_body hj_out_body hin_body hout_body h_v_lifted
+        (by simpa [locRefsDB_lift] using hlin_v)
+        (by simpa [locRefsDB_lift] using hsep_v_body)
+        (by simpa [locRefsDB_lift] using hsep_body_v)
+        (by simpa [locRefsDB_lift] using hsep_v_rhs)
+        (by simpa [locRefsDB_lift] using hsep_rhs_v)
+        hlin_body hsep_body_rhs hsep_rhs_body
+      exact runtimeLinearDB_subst_vmap_dead_of_separated hbody'
+  | loc Δ_ S_ Γ ell ti hlook =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout _h_v
+        _hlin_v _hsep_v_e _hsep_e_v _hsep_v_rhs _hsep_rhs_v _hlin_e _hsep_e_rhs _hsep_rhs_e
+      exact runtimeLinearDB_subst_dead_same_ctx_absurd hj_in hj_out hin hout
+  | subEff Δ_ S_ Γ Γ' e_ ti eps_ eps'_ hbody hSub ih_body =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
+      have hlin_body : RuntimeLinearDB e_ := hlin_e
+      have hbody' := ih_body v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_body hsep_e_rhs hsep_rhs_e
+      simpa [substDBAux, locRefsDB] using hbody'
+  | nil Δ_ S_ Γ ty epsR_ =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout _h_v
+        _hlin_v _hsep_v_e _hsep_e_v _hsep_v_rhs _hsep_rhs_v _hlin_e _hsep_e_rhs _hsep_rhs_e
+      exact clausesRuntimeLinearDB_subst_dead_same_ctx_absurd hj_in hj_out hin hout
+  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest
+      ih_hb_typ ih_hrest =>
+      intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
+        hlin_v hsep_v_cls hsep_cls_v hsep_v_rhs hsep_rhs_v hlin_cls hsep_cls_rhs hsep_rhs_cls
+      sorry
+
+theorem runtimeLinearDB_subst_dead
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j none))
+    (h_v : HasTypeDB Δ S Γ v t_v [] Γ)
+    (hlin_v : RuntimeLinearDB v)
+    (hsep_v_e : LocRefsSeparated (locRefsDB v) (locRefsDB e))
+    (hsep_e_v : LocRefsSeparated (locRefsDB e) (locRefsDB v))
+    (hlin_e : RuntimeLinearDB e) :
+    RuntimeLinearDB (substDBAux j v e) :=
+  (runtimeLinearDB_subst_dead_gen h_e v t_v j Γ Γ []
+    hj hj rfl rfl h_v hlin_v hsep_v_e hsep_e_v
+    (by simp [LocRefsSeparated])
+    (by simp [LocRefsSeparated])
+    hlin_e
+    (by simp [LocRefsSeparated])
+    (by simp [LocRefsSeparated])).1
+
+theorem runtimeLinearDB_subst_dead_separated
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j none))
+    (h_v : HasTypeDB Δ S Γ v t_v [] Γ)
+    (hlin_v : RuntimeLinearDB v)
+    (hsep_v_e : LocRefsSeparated (locRefsDB v) (locRefsDB e))
+    (hsep_e_v : LocRefsSeparated (locRefsDB e) (locRefsDB v))
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v))
+    (hlin_e : RuntimeLinearDB e)
+    (hsep_e_rhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) :=
+  runtimeLinearDB_subst_dead_gen h_e v t_v j Γ Γ rhsRefs
+    hj hj rfl rfl h_v hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v
+    hlin_e hsep_e_rhs hsep_rhs_e
 
 end LaCaDiLE
