@@ -250,6 +250,74 @@ private theorem runtimeLinearDB_append_term_both
     simpa [RuntimeLinearDB, hshape] using h
   exact runtimeLinearDB_append_inv_both happ
 
+private theorem runtimeLinearDB_append_left_consuming_premises
+    {e1 e2 : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : locRefsDB (mk e1 e2) = locRefsDB e1 ++ locRefsDB e2)
+    (hlin : RuntimeLinearDB (mk e1 e2))
+    (hsep_mk_rhs : LocRefsSeparated (locRefsDB (mk e1 e2)) rhsRefs)
+    (hsep_rhs_mk : LocRefsSeparated rhsRefs (locRefsDB (mk e1 e2))) :
+    RuntimeLinearDB e1 ∧
+      RuntimeLinearDB e2 ∧
+      LocRefsSeparated (locRefsDB e1) (locRefsDB e2 ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsDB e2 ++ rhsRefs) (locRefsDB e1) ∧
+      LocRefsSeparated (locRefsDB e2) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB e2) := by
+  rcases runtimeLinearDB_append_term_both hshape hlin with ⟨h1, h2, hsep12, hsep21⟩
+  have hsep1rhs : LocRefsSeparated (locRefsDB e1) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (locRefsDB e1 ++ locRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_left_of_append hsep_app_rhs
+  have hsep2rhs : LocRefsSeparated (locRefsDB e2) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (locRefsDB e1 ++ locRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_right_of_append hsep_app_rhs
+  have hsep_rhs1 : LocRefsSeparated rhsRefs (locRefsDB e1) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (locRefsDB e1 ++ locRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_app
+  have hsep_rhs2 : LocRefsSeparated rhsRefs (locRefsDB e2) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (locRefsDB e1 ++ locRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_app
+  refine ⟨h1, h2, ?_, ?_, hsep2rhs, hsep_rhs2⟩
+  · exact locRefsSeparated_lhs_append hsep12 hsep1rhs
+  · exact locRefsSeparated_append hsep21 hsep_rhs1
+
+private theorem runtimeLinearDB_append_right_consuming_premises
+    {e1 e2 : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : locRefsDB (mk e1 e2) = locRefsDB e1 ++ locRefsDB e2)
+    (hlin : RuntimeLinearDB (mk e1 e2))
+    (hsep_mk_rhs : LocRefsSeparated (locRefsDB (mk e1 e2)) rhsRefs)
+    (hsep_rhs_mk : LocRefsSeparated rhsRefs (locRefsDB (mk e1 e2))) :
+    RuntimeLinearDB e1 ∧
+      RuntimeLinearDB e2 ∧
+      LocRefsSeparated (locRefsDB e1) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB e1) ∧
+      LocRefsSeparated (locRefsDB e2) (locRefsDB e1 ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsDB e1 ++ rhsRefs) (locRefsDB e2) := by
+  rcases runtimeLinearDB_append_term_both hshape hlin with ⟨h1, h2, hsep12, hsep21⟩
+  have hsep1rhs : LocRefsSeparated (locRefsDB e1) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (locRefsDB e1 ++ locRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_left_of_append hsep_app_rhs
+  have hsep2rhs : LocRefsSeparated (locRefsDB e2) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (locRefsDB e1 ++ locRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_right_of_append hsep_app_rhs
+  have hsep_rhs1 : LocRefsSeparated rhsRefs (locRefsDB e1) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (locRefsDB e1 ++ locRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_app
+  have hsep_rhs2 : LocRefsSeparated rhsRefs (locRefsDB e2) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (locRefsDB e1 ++ locRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_app
+  refine ⟨h1, h2, hsep1rhs, hsep_rhs1, ?_, ?_⟩
+  · exact locRefsSeparated_lhs_append hsep21 hsep2rhs
+  · exact locRefsSeparated_append hsep12 hsep_rhs2
+
 private theorem runtimeLinearDB_handle_inv
     {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
     (h : RuntimeLinearDB (TermDB.handle epsH body clauses)) :
@@ -268,6 +336,72 @@ private theorem runtimeLinearDB_handle_inv_both
   have happ : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
     simpa [RuntimeLinearDB, locRefsDB] using h
   exact runtimeLinearDB_append_inv_both happ
+
+private theorem runtimeLinearDB_handle_body_consuming_premises
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    {rhsRefs : List Loc}
+    (hlin : RuntimeLinearDB (TermDB.handle epsH body clauses))
+    (hsep_handle_rhs : LocRefsSeparated (locRefsDB (TermDB.handle epsH body clauses)) rhsRefs)
+    (hsep_rhs_handle : LocRefsSeparated rhsRefs (locRefsDB (TermDB.handle epsH body clauses))) :
+    RuntimeLinearDB body ∧
+      (locRefsClausesDB clauses).Nodup ∧
+      LocRefsSeparated (locRefsDB body) (locRefsClausesDB clauses ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsClausesDB clauses ++ rhsRefs) (locRefsDB body) ∧
+      LocRefsSeparated (locRefsClausesDB clauses) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsClausesDB clauses) := by
+  rcases runtimeLinearDB_handle_inv_both hlin with ⟨hbody, hcls, hsep_body_cls, hsep_cls_body⟩
+  have hsep_body_rhs : LocRefsSeparated (locRefsDB body) rhsRefs := by
+    have hsep_handle_rhs' : LocRefsSeparated (locRefsDB body ++ locRefsClausesDB clauses) rhsRefs := by
+      simpa [locRefsDB] using hsep_handle_rhs
+    exact locRefsSeparated_left_of_append hsep_handle_rhs'
+  have hsep_cls_rhs : LocRefsSeparated (locRefsClausesDB clauses) rhsRefs := by
+    have hsep_handle_rhs' : LocRefsSeparated (locRefsDB body ++ locRefsClausesDB clauses) rhsRefs := by
+      simpa [locRefsDB] using hsep_handle_rhs
+    exact locRefsSeparated_right_of_append hsep_handle_rhs'
+  have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB body) := by
+    have hsep_rhs_handle' : LocRefsSeparated rhsRefs (locRefsDB body ++ locRefsClausesDB clauses) := by
+      simpa [locRefsDB] using hsep_rhs_handle
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_handle'
+  have hsep_rhs_cls : LocRefsSeparated rhsRefs (locRefsClausesDB clauses) := by
+    have hsep_rhs_handle' : LocRefsSeparated rhsRefs (locRefsDB body ++ locRefsClausesDB clauses) := by
+      simpa [locRefsDB] using hsep_rhs_handle
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_handle'
+  refine ⟨hbody, hcls, ?_, ?_, hsep_cls_rhs, hsep_rhs_cls⟩
+  · exact locRefsSeparated_lhs_append hsep_body_cls hsep_body_rhs
+  · exact locRefsSeparated_append hsep_cls_body hsep_rhs_body
+
+private theorem runtimeLinearDB_handle_clauses_consuming_premises
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    {rhsRefs : List Loc}
+    (hlin : RuntimeLinearDB (TermDB.handle epsH body clauses))
+    (hsep_handle_rhs : LocRefsSeparated (locRefsDB (TermDB.handle epsH body clauses)) rhsRefs)
+    (hsep_rhs_handle : LocRefsSeparated rhsRefs (locRefsDB (TermDB.handle epsH body clauses))) :
+    RuntimeLinearDB body ∧
+      (locRefsClausesDB clauses).Nodup ∧
+      LocRefsSeparated (locRefsDB body) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB body) ∧
+      LocRefsSeparated (locRefsClausesDB clauses) (locRefsDB body ++ rhsRefs) ∧
+      LocRefsSeparated (locRefsDB body ++ rhsRefs) (locRefsClausesDB clauses) := by
+  rcases runtimeLinearDB_handle_inv_both hlin with ⟨hbody, hcls, hsep_body_cls, hsep_cls_body⟩
+  have hsep_body_rhs : LocRefsSeparated (locRefsDB body) rhsRefs := by
+    have hsep_handle_rhs' : LocRefsSeparated (locRefsDB body ++ locRefsClausesDB clauses) rhsRefs := by
+      simpa [locRefsDB] using hsep_handle_rhs
+    exact locRefsSeparated_left_of_append hsep_handle_rhs'
+  have hsep_cls_rhs : LocRefsSeparated (locRefsClausesDB clauses) rhsRefs := by
+    have hsep_handle_rhs' : LocRefsSeparated (locRefsDB body ++ locRefsClausesDB clauses) rhsRefs := by
+      simpa [locRefsDB] using hsep_handle_rhs
+    exact locRefsSeparated_right_of_append hsep_handle_rhs'
+  have hsep_rhs_body : LocRefsSeparated rhsRefs (locRefsDB body) := by
+    have hsep_rhs_handle' : LocRefsSeparated rhsRefs (locRefsDB body ++ locRefsClausesDB clauses) := by
+      simpa [locRefsDB] using hsep_rhs_handle
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_handle'
+  have hsep_rhs_cls : LocRefsSeparated rhsRefs (locRefsClausesDB clauses) := by
+    have hsep_rhs_handle' : LocRefsSeparated rhsRefs (locRefsDB body ++ locRefsClausesDB clauses) := by
+      simpa [locRefsDB] using hsep_rhs_handle
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_handle'
+  refine ⟨hbody, hcls, hsep_body_rhs, hsep_rhs_body, ?_, ?_⟩
+  · exact locRefsSeparated_lhs_append hsep_cls_body hsep_cls_rhs
+  · exact locRefsSeparated_append hsep_body_cls hsep_rhs_cls
 
 private theorem runtimeLinearDB_append_term_of
     {e1 e2 : TermDB}
