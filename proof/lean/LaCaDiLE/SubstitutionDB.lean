@@ -2038,6 +2038,32 @@ private theorem insertAt_some_ne_insertAt_none
   have hlook := congrArg (fun G => G[j]?) hEq
   simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out] at hlook
 
+private theorem runtimeLinearDB_subst_dead_same_ctx_absurd
+    {e v : TermDB} {rhsRefs : List Loc}
+    {Γ Γ_in Γ_out : LinearCtxDB} {t_v : Typ} {j : Nat}
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ = Γ_in.insertAt j (some t_v))
+    (hout : Γ = Γ_out.insertAt j none) :
+    RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  exfalso
+  exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
+
+private theorem clausesRuntimeLinearDB_subst_dead_same_ctx_absurd
+    {cls : List (EffectLabel × TermDB)} {v : TermDB} {rhsRefs : List Loc}
+    {Γ Γ_in Γ_out : LinearCtxDB} {t_v : Typ} {j : Nat}
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ = Γ_in.insertAt j (some t_v))
+    (hout : Γ = Γ_out.insertAt j none) :
+    (locRefsClausesDB (substClausesDBAux j v cls)).Nodup ∧
+      LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v cls)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsClausesDB (substClausesDBAux j v cls)) := by
+  exfalso
+  exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
+
 /-- Motive bundle for the consuming runtime-linearity theorem.
 The distinguished slot is live on input and dead on output, so only
 one recursive branch may actually inject `v`'s runtime locations;
