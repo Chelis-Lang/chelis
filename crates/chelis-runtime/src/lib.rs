@@ -415,10 +415,15 @@ pub unsafe extern "C" fn chelis_alloc(
         tensor.size = 1;
     }
     let bytes = tensor.size as usize * std::mem::size_of::<f32>();
-    tensor.data = libc::calloc(tensor.size as usize, std::mem::size_of::<f32>()) as *mut f32;
-    if tensor.data.is_null() && bytes != 0 {
+    let mut ptr: *mut libc::c_void = std::ptr::null_mut();
+    let ret = libc::posix_memalign(&mut ptr, 32, bytes.max(1));
+    if ret != 0 || (ptr.is_null() && bytes != 0) {
         runtime_fail!("tensor allocation failed");
     }
+    if bytes > 0 {
+        libc::memset(ptr, 0, bytes);
+    }
+    tensor.data = ptr as *mut f32;
     Box::into_raw(tensor)
 }
 
@@ -2549,5 +2554,23 @@ mod tests {
     fn tensor_layout_stays_stable() {
         assert_eq!(std::mem::size_of::<chelis_tensor>(), 88);
         assert_eq!(std::mem::align_of::<chelis_tensor>(), 8);
+    }
+
+    #[test]
+    fn chelis_alloc_returns_32_byte_aligned_data() {
+        unsafe {
+            let shape = [1000i32];
+            let result = chelis_alloc(1, shape.as_ptr(), CHELIS_F32);
+            assert!(
+                !(*result).data.is_null(),
+                "chelis_alloc must return non-null data"
+            );
+            assert_eq!(
+                (*result).data as usize % 32,
+                0,
+                "chelis_alloc must return 32-byte aligned data"
+            );
+            chelis_free(result);
+        }
     }
 }
