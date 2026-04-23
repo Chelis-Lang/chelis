@@ -95,7 +95,7 @@ fn reef_std_io_module_checks_and_builds() {
         r#"[package]
 name = "io-app"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -169,7 +169,7 @@ fn reef_std_io_module_rejects_missing_export() {
         r#"[package]
 name = "io-app-bad"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -290,7 +290,7 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
         r#"[package]
 name = "json-bad"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -348,7 +348,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
         r#"[package]
 name = "json-try-bad"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -414,7 +414,7 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
         r#"[package]
 name = "csv-bad"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -472,7 +472,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
         r#"[package]
 name = "csv-try-bad"
 version = "0.1.0"
-compiler = "=0.1.21"
+compiler = "=0.2.0"
 module_prefix = "Demo"
 
 [dependencies]
@@ -513,4 +513,146 @@ view = print(ok)
         String::from_utf8_lossy(&eval_stdout).contains("ok = false")
             || String::from_utf8_lossy(&eval_stdout).contains("false")
     );
+}
+
+#[test]
+fn reef_std_parquet_module_resolves_and_type_checks() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("parquet-app");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "parquet-app"
+version = "0.1.0"
+compiler = "=0.2.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.IO.Parquet (read_parquet)
+
+def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+}
+
+#[test]
+fn reef_std_parquet_module_rejects_missing_export() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("parquet-bad");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "parquet-bad"
+version = "0.1.0"
+compiler = "=0.2.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.IO.Parquet (nonexistent_parquet_fn)
+
+x = nonexistent_parquet_fn("foo")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nonexistent_parquet_fn"))
+        .stderr(predicate::str::contains("does not export"));
+}
+
+#[test]
+fn reef_std_parquet_write_resolves_and_type_checks() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("parquet-write-app");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "parquet-write-app"
+version = "0.1.0"
+compiler = "=0.2.0"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.IO.Parquet (write_parquet)
+
+def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
 }
