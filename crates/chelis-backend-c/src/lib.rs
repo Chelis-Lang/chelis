@@ -1926,6 +1926,17 @@ int main(void) {
             "MathLib::None must not emit Sleef guards:\n{}",
             result.c_source
         );
+        // Positive: must still use Level-1 omp simd and scalar math functions.
+        assert!(
+            result.c_source.contains("#pragma omp parallel for simd"),
+            "MathLib::None must emit Level-1 omp simd loop:\n{}",
+            result.c_source
+        );
+        assert!(
+            result.c_source.contains("expf("),
+            "MathLib::None must emit scalar expf():\n{}",
+            result.c_source
+        );
     }
 
     #[test]

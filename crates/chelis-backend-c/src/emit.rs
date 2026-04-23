@@ -819,12 +819,31 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
         self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
-        self.line("#pragma omp parallel for simd");
-        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
-        self.indent += 1;
-        self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
-        self.indent -= 1;
-        self.line("}");
+        if self.math_lib == crate::MathLib::VForce {
+            if let Some(vf_fn) = Self::vforce_func(func) {
+                // vForce whole-array batch API on macOS (Accelerate.framework).
+                self.line("{");
+                self.indent += 1;
+                self.line(&format!("int __n_{id} = t{id}->size;"));
+                self.line(&format!("{vf_fn}(__out_{id}, __in_a_{id}, &__n_{id});"));
+                self.indent -= 1;
+                self.line("}");
+            } else {
+                self.line("#pragma omp parallel for simd");
+                self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.indent -= 1;
+                self.line("}");
+            }
+        } else {
+            self.line("#pragma omp parallel for simd");
+            self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+            self.indent -= 1;
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -843,6 +862,17 @@ impl CEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// Map a scalar C math function name to its vForce batch equivalent.
+    fn vforce_func(scalar_func: &str) -> Option<&'static str> {
+        match scalar_func {
+            "expf" => Some("vvexpf"),
+            "logf" => Some("vvlogf"),
+            "sinf" => Some("vvsinf"),
+            "sqrtf" => Some("vvsqrtf"),
+            _ => None,
+        }
     }
 
     fn emit_uniform_like(&mut self, id: usize, low: f64, high: f64, seed: u64, ty: &TensorType) {
@@ -873,16 +903,6 @@ impl CEmitter {
                 FusedStepOp::Exp | FusedStepOp::Log | FusedStepOp::Sin | FusedStepOp::Sqrt
             )
         })
-    }
-
-    /// Returns true if the kernel is trivially expressible as a single vForce call
-    /// (exactly one math op applied directly to one external input — no chained ops).
-    fn is_simple_vforce_kernel(ops: &[FusedStep]) -> bool {
-        ops.len() == 1
-            && matches!(
-                ops[0].op,
-                FusedStepOp::Exp | FusedStepOp::Log | FusedStepOp::Sin | FusedStepOp::Sqrt
-            )
     }
 
     /// Emit one fused-step expression for the scalar fast/tail path.
@@ -1025,9 +1045,6 @@ impl CEmitter {
         }
 
         let use_sleef = self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
-        let use_vforce = self.math_lib == crate::MathLib::VForce
-            && Self::has_math_ops(ops)
-            && Self::is_simple_vforce_kernel(ops);
 
         // Closures for resolving fused inputs in scalar (fast-path) context.
         let resolve_fast = |fi: &FusedInput| -> String {
@@ -1108,20 +1125,6 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
             self.line("#endif");
-        } else if use_vforce {
-            // --- vForce path (macOS only, simple single-op kernels) ---
-            // For a single math op applied to one external input we can call vForce directly.
-            let vforce_fn = match &ops[0].op {
-                FusedStepOp::Exp => "vvexpf",
-                FusedStepOp::Log => "vvlogf",
-                FusedStepOp::Sin => "vvsinf",
-                FusedStepOp::Sqrt => "vvsqrtf",
-                _ => unreachable!("is_simple_vforce_kernel guarantees a math op"),
-            };
-            self.line(&format!("int __vforce_n_{id} = t{id}->size;"));
-            self.line(&format!(
-                "{vforce_fn}(__out_{id}, __ext0_{id}, &__vforce_n_{id});"
-            ));
         } else {
             // --- Level-1 scalar OMP SIMD loop (default fast path) ---
             self.line("#pragma omp parallel for simd");
