@@ -67,6 +67,9 @@ static inline float chelis_sum_f32(const float * CHELIS_RESTRICT data, int n) {
 
 /* ------------------------------------------------------------------ */
 /* chelis_max_f32                                                       */
+/* NaN in input produces implementation-defined results: AVX2           */
+/* _mm256_max_ps returns the second operand when the first is NaN,      */
+/* which makes NaN propagation position-dependent.                      */
 /* ------------------------------------------------------------------ */
 static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return -__builtin_inff();
@@ -110,6 +113,7 @@ static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n) {
 
 /* ------------------------------------------------------------------ */
 /* chelis_min_f32                                                       */
+/* NaN behavior is implementation-defined (same as chelis_max_f32).    */
 /* ------------------------------------------------------------------ */
 static inline float chelis_min_f32(const float * CHELIS_RESTRICT data, int n) {
     if (n <= 0) return __builtin_inff();

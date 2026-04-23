@@ -407,7 +407,12 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
         f.write_all(content.as_bytes()).unwrap();
         path
     };
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         let src = std::fs::read_to_string(rt_dir.join(header)).unwrap();
         write(header, &src);
     }

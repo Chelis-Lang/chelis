@@ -2175,4 +2175,139 @@ int main(void) {{
             );
         }
     }
+
+    #[test]
+    fn simd_single_math_op_generates_sleef_path() {
+        // A single Exp op (not fused) should emit the Sleef AVX2 path when MathLib::Sleef.
+        // Previously this fell through to the omp-simd scalar path.
+        let mut dag = Dag::new();
+        let n: usize = 9; // 8 + 1 to exercise both SIMD and scalar tail
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(n));
+        dag.add_node(RiscOp::Exp, vec![x], vec_f32(n));
+
+        let result = codegen_with_options(
+            &dag,
+            "test_single_exp",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::Sleef),
+                ..CodegenOptions::default()
+            },
+        );
+        let src = &result.c_source;
+        assert!(
+            src.contains("#ifdef CHELIS_HAS_SLEEF"),
+            "single Exp with Sleef should emit #ifdef CHELIS_HAS_SLEEF:\n{src}"
+        );
+        assert!(
+            src.contains("CHELIS_EXPF8("),
+            "single Exp with Sleef should emit CHELIS_EXPF8:\n{src}"
+        );
+        assert!(
+            src.contains("_mm256_loadu_ps("),
+            "single Exp with Sleef should emit _mm256_loadu_ps:\n{src}"
+        );
+        assert!(
+            src.contains("_mm256_storeu_ps("),
+            "single Exp with Sleef should emit _mm256_storeu_ps:\n{src}"
+        );
+    }
+
+    #[test]
+    fn simd_single_math_op_sleef_compiles_and_runs() {
+        if !gcc_available() {
+            eprintln!("skipping: gcc not available");
+            return;
+        }
+        let n: usize = 9; // exercises both 8-wide SIMD block and 1-element scalar tail
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(n));
+        dag.add_node(RiscOp::Exp, vec![x], vec_f32(n));
+
+        let result = codegen_with_options(
+            &dag,
+            "test_single_exp_run",
+            CodegenOptions {
+                math_lib_override: Some(MathLib::Sleef),
+                ..CodegenOptions::default()
+            },
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "model.c", &result.c_source);
+
+        // Input: x[i] = 0.3 * i + 0.1 (non-trivial, spans SIMD + tail)
+        let inputs: Vec<f32> = (0..n).map(|i| 0.3 * i as f32 + 0.1).collect();
+        let reference: Vec<f32> = inputs.iter().map(|v| v.exp()).collect();
+        let x_init = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("tx->data[{i}] = {v:.8}f;"))
+            .collect::<Vec<_>>()
+            .join("\n    ");
+
+        let main_c = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <math.h>
+#include <stdio.h>
+void test_single_exp_run(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    int shape[1] = {{ {n} }};
+    chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_F32);
+    {x_init}
+    chelis_tensor *inputs[1] = {{tx}};
+    chelis_tensor *outputs[1] = {{0}};
+    test_single_exp_run(inputs, 1, outputs, 1);
+    for (int i = 0; i < {n}; i++) {{
+        printf("%.8f\n", outputs[0]->data[i]);
+    }}
+    chelis_free(tx);
+    chelis_free(outputs[0]);
+    return 0;
+}}
+"#
+        );
+        write_temp_file(tmp.path(), "main.c", &main_c);
+        let bin_path = tmp.path().join("test_single_exp_run");
+
+        let toolchain = test_toolchain(result.requirements);
+        let mut cmd = Command::new(&toolchain.compiler);
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-O2", "-mavx2"]);
+        cmd.args(&toolchain.compile_flags);
+        cmd.arg(tmp.path().join("main.c").to_str().unwrap());
+        cmd.arg(tmp.path().join("model.c").to_str().unwrap());
+        add_runtime_link(&mut cmd, tmp.path());
+        cmd.args(&toolchain.link_flags);
+        cmd.arg("-lm").arg("-o").arg(bin_path.to_str().unwrap());
+        let compile_out = cmd.output().unwrap();
+        assert!(
+            compile_out.status.success(),
+            "gcc failed:\nstderr: {}\nC source:\n{}",
+            String::from_utf8_lossy(&compile_out.stderr),
+            result.c_source
+        );
+
+        let run_out = Command::new(bin_path.to_str().unwrap()).output().unwrap();
+        assert!(
+            run_out.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&run_out.stderr)
+        );
+        let stdout = String::from_utf8(run_out.stdout).unwrap();
+        let actual: Vec<f32> = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim().parse::<f32>().expect("f32"))
+            .collect();
+        assert_eq!(actual.len(), n);
+        for (i, (got, expected)) in actual.iter().zip(reference.iter()).enumerate() {
+            let rel_err = ((got - expected) / expected).abs();
+            assert!(
+                rel_err < 2e-7,
+                "index {i}: expected {expected}, got {got}, rel_err {rel_err:.2e}"
+            );
+        }
+    }
 }

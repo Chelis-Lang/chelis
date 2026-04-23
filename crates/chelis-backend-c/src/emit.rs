@@ -836,6 +836,50 @@ impl CEmitter {
                 self.indent -= 1;
                 self.line("}");
             }
+        } else if self.math_lib == crate::MathLib::Sleef {
+            if let Some(simd_macro) = Self::sleef_macro(func) {
+                self.line("#ifdef CHELIS_HAS_SLEEF");
+                self.line("{");
+                self.indent += 1;
+                self.line(&format!("int __i_{id} = 0;"));
+                self.line(&format!(
+                    "for (; __i_{id} + 8 <= t{id}->size; __i_{id} += 8) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "__m256 __v_{id} = _mm256_loadu_ps(__in_a_{id} + __i_{id});"
+                ));
+                self.line(&format!("__m256 __r_{id} = {simd_macro}(__v_{id});"));
+                self.line(&format!(
+                    "_mm256_storeu_ps(__out_{id} + __i_{id}, __r_{id});"
+                ));
+                self.indent -= 1;
+                self.line("}");
+                self.line(&format!("for (; __i_{id} < t{id}->size; __i_{id}++) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "__out_{id}[__i_{id}] = {func}(__in_a_{id}[__i_{id}]);"
+                ));
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+                self.line("#else");
+                self.line("#pragma omp parallel for simd");
+                self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.indent -= 1;
+                self.line("}");
+                self.line("#endif");
+            } else {
+                self.line("#pragma omp parallel for simd");
+                self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.indent -= 1;
+                self.line("}");
+            }
         } else {
             self.line("#pragma omp parallel for simd");
             self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
@@ -871,6 +915,17 @@ impl CEmitter {
             "logf" => Some("vvlogf"),
             "sinf" => Some("vvsinf"),
             "sqrtf" => Some("vvsqrtf"),
+            _ => None,
+        }
+    }
+
+    /// Map a scalar C math function name to its Sleef AVX2 8-wide macro.
+    fn sleef_macro(scalar_func: &str) -> Option<&'static str> {
+        match scalar_func {
+            "expf" => Some("CHELIS_EXPF8"),
+            "logf" => Some("CHELIS_LOGF8"),
+            "sinf" => Some("CHELIS_SINF8"),
+            "sqrtf" => Some("CHELIS_SQRTF8"),
             _ => None,
         }
     }

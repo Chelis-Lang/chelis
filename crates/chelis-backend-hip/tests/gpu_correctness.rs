@@ -130,12 +130,16 @@ fn cpu_runtime_library_path() -> PathBuf {
 
 fn copy_runtime_artifacts(dst: &Path) {
     let include = cpu_runtime_include_dir();
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))

@@ -1226,7 +1226,12 @@ int main(void) {
 
 fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
     let cpu_runtime = cpu_runtime_dir();
-    for header in &["chelis_runtime.h", "chelis_blas.h", "chelis_simd.h", "chelis_math.h"] {
+    for header in &[
+        "chelis_runtime.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
         fs::write(
             dir.join(header),
             fs::read_to_string(cpu_runtime.join(header))
