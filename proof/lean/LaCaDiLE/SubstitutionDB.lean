@@ -200,6 +200,21 @@ private theorem runtimeLinearDB_lift2_of_separated
   have h1 := runtimeLinearDB_lift_of_separated (e := e) (rhsRefs := rhsRefs) hlin hsep_erhs hsep_rhs_e
   exact runtimeLinearDB_lift_of_separated (e := lift e) (rhsRefs := rhsRefs) h1.1 h1.2.1 h1.2.2
 
+private theorem runtimeLinearDB_subst_passthrough_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {mk : TermDB → TermDB}
+    (hshape : ∀ e', locRefsDB (mk e') = locRefsDB e')
+    (hsubst : substDBAux j v (mk e) = mk (substDBAux j v e))
+    (h :
+      RuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    RuntimeLinearDB (substDBAux j v (mk e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (mk e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (mk e))) := by
+  rw [hsubst]
+  exact runtimeLinearDB_unary_of_separated (hshape (substDBAux j v e)) h.1 h.2.1 h.2.2
+
 private theorem runtimeLinearDB_grad_body
     {t tOut : Typ} {body : TermDB}
     (h : RuntimeLinearDB (TermDB.grad t tOut body)) :
