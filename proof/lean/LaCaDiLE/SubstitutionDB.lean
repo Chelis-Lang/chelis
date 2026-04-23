@@ -499,6 +499,27 @@ private theorem runtimeLinearDB_append_right_consuming_premises
   · exact locRefsSeparated_lhs_append hsep21 hsep2rhs
   · exact locRefsSeparated_append hsep12 hsep_rhs2
 
+private theorem runtimeLinearDB_value_binary_premises
+    {e1 e2 v : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : locRefsDB (mk e1 e2) = locRefsDB e1 ++ locRefsDB e2)
+    (hsep_v_mk : LocRefsSeparated (locRefsDB v) (locRefsDB (mk e1 e2)))
+    (hsep_mk_v : LocRefsSeparated (locRefsDB (mk e1 e2)) (locRefsDB v)) :
+    LocRefsSeparated (locRefsDB v) (locRefsDB e1) ∧
+      LocRefsSeparated (locRefsDB e1) (locRefsDB v) ∧
+      LocRefsSeparated (locRefsDB v) (locRefsDB e2) ∧
+      LocRefsSeparated (locRefsDB e2) (locRefsDB v) := by
+  have hsep_v_app : LocRefsSeparated (locRefsDB v) (locRefsDB e1 ++ locRefsDB e2) := by
+    simpa [hshape] using hsep_v_mk
+  have hsep_app_v : LocRefsSeparated (locRefsDB e1 ++ locRefsDB e2) (locRefsDB v) := by
+    simpa [hshape] using hsep_mk_v
+  exact ⟨
+    locRefsSeparated_left_of_rhs_append hsep_v_app,
+    locRefsSeparated_left_of_append hsep_app_v,
+    locRefsSeparated_right_of_rhs_append hsep_v_app,
+    locRefsSeparated_right_of_append hsep_app_v
+  ⟩
+
 private theorem runtimeLinearDB_handle_inv
     {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
     (h : RuntimeLinearDB (TermDB.handle epsH body clauses)) :
@@ -583,6 +604,25 @@ private theorem runtimeLinearDB_handle_clauses_consuming_premises
   refine ⟨hbody, hcls, hsep_body_rhs, hsep_rhs_body, ?_, ?_⟩
   · exact locRefsSeparated_lhs_append hsep_cls_body hsep_cls_rhs
   · exact locRefsSeparated_append hsep_body_cls hsep_rhs_cls
+
+private theorem runtimeLinearDB_value_handle_premises
+    {epsH : EffectRow} {body v : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (hsep_v_handle : LocRefsSeparated (locRefsDB v) (locRefsDB (TermDB.handle epsH body clauses)))
+    (hsep_handle_v : LocRefsSeparated (locRefsDB (TermDB.handle epsH body clauses)) (locRefsDB v)) :
+    LocRefsSeparated (locRefsDB v) (locRefsDB body) ∧
+      LocRefsSeparated (locRefsDB body) (locRefsDB v) ∧
+      LocRefsSeparated (locRefsDB v) (locRefsClausesDB clauses) ∧
+      LocRefsSeparated (locRefsClausesDB clauses) (locRefsDB v) := by
+  have hsep_v_app : LocRefsSeparated (locRefsDB v) (locRefsDB body ++ locRefsClausesDB clauses) := by
+    simpa [locRefsDB] using hsep_v_handle
+  have hsep_app_v : LocRefsSeparated (locRefsDB body ++ locRefsClausesDB clauses) (locRefsDB v) := by
+    simpa [locRefsDB] using hsep_handle_v
+  exact ⟨
+    locRefsSeparated_left_of_rhs_append hsep_v_app,
+    locRefsSeparated_left_of_append hsep_app_v,
+    locRefsSeparated_right_of_rhs_append hsep_v_app,
+    locRefsSeparated_right_of_append hsep_app_v
+  ⟩
 
 private theorem runtimeLinearDB_append_term_of
     {e1 e2 : TermDB}
@@ -863,6 +903,25 @@ private theorem locRefsClausesDB_tail_consuming_premises
   refine ⟨hhb, hrest, hsep_hb_rhs, hsep_rhs_hb, ?_, ?_⟩
   · exact locRefsSeparated_lhs_append hsep_rest_hb hsep_rest_rhs
   · exact locRefsSeparated_append hsep_hb_rest hsep_rhs_rest
+
+private theorem runtimeLinearDB_value_clauses_cons_premises
+    {op : EffectLabel} {hb v : TermDB} {rest : List (EffectLabel × TermDB)}
+    (hsep_v_cls : LocRefsSeparated (locRefsDB v) (locRefsClausesDB ((op, hb) :: rest)))
+    (hsep_cls_v : LocRefsSeparated (locRefsClausesDB ((op, hb) :: rest)) (locRefsDB v)) :
+    LocRefsSeparated (locRefsDB v) (locRefsDB hb) ∧
+      LocRefsSeparated (locRefsDB hb) (locRefsDB v) ∧
+      LocRefsSeparated (locRefsDB v) (locRefsClausesDB rest) ∧
+      LocRefsSeparated (locRefsClausesDB rest) (locRefsDB v) := by
+  have hsep_v_app : LocRefsSeparated (locRefsDB v) (locRefsDB hb ++ locRefsClausesDB rest) := by
+    simpa [locRefsClausesDB] using hsep_v_cls
+  have hsep_app_v : LocRefsSeparated (locRefsDB hb ++ locRefsClausesDB rest) (locRefsDB v) := by
+    simpa [locRefsClausesDB] using hsep_cls_v
+  exact ⟨
+    locRefsSeparated_left_of_rhs_append hsep_v_app,
+    locRefsSeparated_left_of_append hsep_app_v,
+    locRefsSeparated_right_of_rhs_append hsep_v_app,
+    locRefsSeparated_right_of_append hsep_app_v
+  ⟩
 
 private theorem locRefsClausesDB_cons_of_head_consuming
     {op : EffectLabel} {hb' : TermDB} {rest : List (EffectLabel × TermDB)}
@@ -2550,6 +2609,8 @@ all siblings must be reassembled with the unchanged-branch helpers. -/
       Γ2 = Γ_out.insertAt j none →
       HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
       RuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) (locRefsDB e) →
+      LocRefsSeparated (locRefsDB e) (locRefsDB v) →
       LocRefsSeparated (locRefsDB v) rhsRefs →
       LocRefsSeparated rhsRefs (locRefsDB v) →
       RuntimeLinearDB e →
@@ -2572,6 +2633,8 @@ all siblings must be reassembled with the unchanged-branch helpers. -/
       Γ2 = Γ_out.insertAt j none →
       HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
       RuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) (locRefsClausesDB cls) →
+      LocRefsSeparated (locRefsClausesDB cls) (locRefsDB v) →
       LocRefsSeparated (locRefsDB v) rhsRefs →
       LocRefsSeparated rhsRefs (locRefsDB v) →
       (locRefsClausesDB cls).Nodup →
