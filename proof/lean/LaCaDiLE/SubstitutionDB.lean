@@ -177,6 +177,29 @@ private theorem runtimeLinearDB_unary_of_separated
   · simpa [hshape] using hsep_erhs
   · simpa [hshape] using hsep_rhs_e
 
+private theorem runtimeLinearDB_lift_of_separated
+    {e : TermDB} {rhsRefs : List Loc} :
+    RuntimeLinearDB e →
+    LocRefsSeparated (locRefsDB e) rhsRefs →
+    LocRefsSeparated rhsRefs (locRefsDB e) →
+    RuntimeLinearDB (lift e) ∧
+      LocRefsSeparated (locRefsDB (lift e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (lift e)) := by
+  intro hlin hsep_erhs hsep_rhs_e
+  exact runtimeLinearDB_unary_of_separated (locRefsDB_lift e) hlin hsep_erhs hsep_rhs_e
+
+private theorem runtimeLinearDB_lift2_of_separated
+    {e : TermDB} {rhsRefs : List Loc} :
+    RuntimeLinearDB e →
+    LocRefsSeparated (locRefsDB e) rhsRefs →
+    LocRefsSeparated rhsRefs (locRefsDB e) →
+    RuntimeLinearDB (lift (lift e)) ∧
+      LocRefsSeparated (locRefsDB (lift (lift e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (lift (lift e))) := by
+  intro hlin hsep_erhs hsep_rhs_e
+  have h1 := runtimeLinearDB_lift_of_separated (e := e) (rhsRefs := rhsRefs) hlin hsep_erhs hsep_rhs_e
+  exact runtimeLinearDB_lift_of_separated (e := lift e) (rhsRefs := rhsRefs) h1.1 h1.2.1 h1.2.2
+
 private theorem runtimeLinearDB_grad_body
     {t tOut : Typ} {body : TermDB}
     (h : RuntimeLinearDB (TermDB.grad t tOut body)) :
