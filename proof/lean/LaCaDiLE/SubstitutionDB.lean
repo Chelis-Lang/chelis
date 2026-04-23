@@ -2039,6 +2039,9 @@ all siblings must be reassembled with the unchanged-branch helpers. -/
       Γ1 = Γ_in.insertAt j (some t_v) →
       Γ2 = Γ_out.insertAt j none →
       HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      RuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB v) →
       RuntimeLinearDB e →
       LocRefsSeparated (locRefsDB e) rhsRefs →
       LocRefsSeparated rhsRefs (locRefsDB e) →
@@ -2058,6 +2061,9 @@ all siblings must be reassembled with the unchanged-branch helpers. -/
       Γ1 = Γ_in.insertAt j (some t_v) →
       Γ2 = Γ_out.insertAt j none →
       HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      RuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB v) →
       (locRefsClausesDB cls).Nodup →
       LocRefsSeparated (locRefsClausesDB cls) rhsRefs →
       LocRefsSeparated rhsRefs (locRefsClausesDB cls) →
