@@ -1929,6 +1929,57 @@ theorem runtimeLinearDB_subst_var_live_dead_separated
       LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var j))) := by
   simp [substDBAux, h_linear, hsep_v_rhs, hsep_rhs_v]
 
+private theorem insertAt_some_ne_insertAt_none
+    {Γ_in Γ_out : LinearCtxDB} {j : Nat} {t_v : Typ}
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length) :
+    Γ_in.insertAt j (some t_v) ≠ Γ_out.insertAt j none := by
+  intro hEq
+  have hlook := congrArg (fun G => G[j]?) hEq
+  simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out] at hlook
+
+/-- Motive bundle for the consuming runtime-linearity theorem.
+The distinguished slot is live on input and dead on output, so only
+one recursive branch may actually inject `v`'s runtime locations;
+all siblings must be reassembled with the unchanged-branch helpers. -/
+@[reducible] def RuntimeLinearSubstDeadMotive1 :
+    (Δ' : CapCtx) → (S' : StoreTyp) → (Γ1 : LinearCtxDB) →
+    (e : TermDB) → (t : Typ) → (eps : EffectRow) → (Γ2 : LinearCtxDB) →
+    HasTypeDB Δ' S' Γ1 e t eps Γ2 → Prop :=
+  fun Δ' S' Γ1 e _t _eps Γ2 _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB) (rhsRefs : List Loc),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j none →
+      HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      RuntimeLinearDB e →
+      LocRefsSeparated (locRefsDB e) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB e) →
+      RuntimeLinearDB (substDBAux j v e) ∧
+        LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+        LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))
+
+@[reducible] def RuntimeLinearSubstDeadMotive2 :
+    (Δ' : CapCtx) → (S' : StoreTyp) → (Γ1 Γ2 : LinearCtxDB) →
+    (t : Typ) → (epsR : EffectRow) → (cls : List (EffectLabel × TermDB)) →
+    ClausesTypedDB Δ' S' Γ1 Γ2 t epsR cls → Prop :=
+  fun Δ' S' Γ1 Γ2 _t _epsR cls _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB) (rhsRefs : List Loc),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j none →
+      HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      (locRefsClausesDB cls).Nodup →
+      LocRefsSeparated (locRefsClausesDB cls) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsClausesDB cls) →
+      (locRefsClausesDB (substClausesDBAux j v cls)).Nodup ∧
+        LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v cls)) rhsRefs ∧
+        LocRefsSeparated rhsRefs (locRefsClausesDB (substClausesDBAux j v cls))
+
 /-- Wave 5g var case, `i < j` (index to the left of the cutoff):
     substitution preserves the var index and the sub-derivation
     re-applies the var constructor at the same index over the base
