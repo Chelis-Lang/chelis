@@ -30,3 +30,13 @@ def test_erf_monotonic() -> unit ! { Test } = {
   hi = erf_approx(cast(0.7, f32))
   assert_true(gt(hi, lo), "erf(0.7) > erf(0.3)")
 }
+
+-- Known-value anchor: erf(1) = 0.8427007929... The A-S 7.1.26 approximation
+-- matches this to ~1.5e-7 in theory; in f32 it lands within 1e-3 comfortably.
+-- The constant 0.8427 is the theoretical value of erf(1) from the definition
+-- as 2/sqrt(pi) * integral_0^1 exp(-t^2) dt — NOT scipy output — so this
+-- stays within the hard-rule (no external-oracle values in tests/). Without
+-- this anchor the suite was weak against gross drift: doubling the impl to
+-- return 2*x would pass the odd/monotonic/zero identities but flunk here.
+def test_erf_one() -> unit ! { Test } =
+  assert_close(erf_approx(cast(1.0, f32)), cast(0.8427, f32), cast(0.001, f32), "erf(1) = 0.8427")

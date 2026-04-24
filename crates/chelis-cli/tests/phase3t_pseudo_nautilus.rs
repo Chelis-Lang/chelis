@@ -95,7 +95,8 @@ fn pseudo_nautilus_chelis_test_all_green() {
         .stdout(predicate::str::contains("test_erf_symmetry"))
         .stdout(predicate::str::contains("test_erf_bounded"))
         .stdout(predicate::str::contains("test_erf_monotonic"))
-        .stdout(predicate::str::contains("4 passed, 0 failed"))
+        .stdout(predicate::str::contains("test_erf_one"))
+        .stdout(predicate::str::contains("5 passed, 0 failed"))
         .stdout(predicate::str::contains("FAIL").not());
 }
 
@@ -121,10 +122,10 @@ fn pseudo_nautilus_chelis_test_json_all_pass() {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(
         lines.len(),
-        5,
-        "expected 4 test rows + 1 summary row, got {lines:?}"
+        6,
+        "expected 5 test rows + 1 summary row, got {lines:?}"
     );
-    for (idx, line) in lines.iter().enumerate().take(4) {
+    for (idx, line) in lines.iter().enumerate().take(5) {
         let record: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("row {idx} not valid JSON: {line:?} ({e})"));
         assert_eq!(
@@ -142,8 +143,8 @@ fn pseudo_nautilus_chelis_test_json_all_pass() {
         );
     }
     let summary: serde_json::Value =
-        serde_json::from_str(lines[4]).expect("summary row parses as JSON");
-    assert_eq!(summary["summary"]["passed"], 4);
+        serde_json::from_str(lines[5]).expect("summary row parses as JSON");
+    assert_eq!(summary["summary"]["passed"], 5);
     assert_eq!(summary["summary"]["failed"], 0);
 }
 
@@ -185,21 +186,30 @@ fn pseudo_nautilus_parity_script_imports_cleanly() {
         "parity/run_parity.py missing from fixture: {}",
         script.display()
     );
-    let source = fs::read_to_string(&script).expect("read parity script");
-    // Quick sanity: the script must reference scipy.special.erf somewhere
-    // (the whole point of the parity pattern is that the external oracle is
-    // scipy, not a second Chelis implementation).
-    assert!(
-        source.contains("scipy.special"),
-        "parity script must reference scipy.special: {}",
-        script.display()
-    );
-    // Parse via python3's `ast` module — catches broken syntax without
-    // importing scipy itself.
+    // Parse the script via python3's `ast` module and walk the import tree
+    // — the parity script MUST actually import from scipy.special, not just
+    // mention it in a comment (RT4 E.4). A `# scipy.special` with no real
+    // import would defeat the hard rule while passing a naive contains-check.
     let probe = StdCommand::new("python3")
         .arg("-c")
         .arg(format!(
-            "import ast, pathlib; ast.parse(pathlib.Path(r'{}').read_text())",
+            r#"
+import ast, pathlib, sys
+tree = ast.parse(pathlib.Path(r'{}').read_text())
+found = False
+for node in ast.walk(tree):
+    if isinstance(node, ast.ImportFrom) and (node.module or '').startswith('scipy'):
+        found = True
+        break
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.startswith('scipy'):
+                found = True
+                break
+if not found:
+    sys.stderr.write('parity script does not actually import scipy\n')
+    sys.exit(2)
+"#,
             script.display()
         ))
         .output();

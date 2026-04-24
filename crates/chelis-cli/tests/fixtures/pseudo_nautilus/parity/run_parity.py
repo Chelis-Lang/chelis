@@ -26,13 +26,21 @@ SAMPLES: list[float] = [-2.0, -1.0, -0.3, 0.0, 0.3, 0.7, 1.0, 2.0, 3.0]
 TOLERANCE: float = 5e-6
 
 
-def load_scipy_erf():
+def load_scipy_erf(strict: bool):
     try:
         from scipy.special import erf  # type: ignore[import-not-found]
     except ImportError as exc:
+        if strict:
+            # --strict means "fail if we can't actually exercise the oracle" —
+            # a silent skip in CI would turn parity into a no-op (RT4 B.5).
+            print(
+                f"scipy not available ({exc}); --strict requires the external oracle",
+                file=sys.stderr,
+            )
+            return None, True
         print(f"scipy not available ({exc}); skipping parity check", file=sys.stderr)
-        return None
-    return erf
+        return None, False
+    return erf, False
 
 
 def chelis_eval_erf(pkg_root: Path, x: float) -> float:
@@ -98,9 +106,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    erf = load_scipy_erf()
+    erf, strict_missing = load_scipy_erf(args.strict)
     if erf is None:
-        return 0
+        return 1 if strict_missing else 0
 
     pkg_root = Path(__file__).resolve().parent.parent
     print(f"pseudo_nautilus parity: {pkg_root}")
