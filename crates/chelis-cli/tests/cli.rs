@@ -1427,6 +1427,116 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
     assert!(status.success(), "gcc failed with status {status}");
 }
 
+/// Regression test for the Coral UPSTREAM_BUGS.md pattern:
+/// `grad(loss, wrt=theta)(theta, x)` applied to a multi-param named top-level def
+/// (two tensor arguments, differentiating w.r.t. the first).
+/// Verifies: build exits 0, generated C compiles with gcc, and the gradient values
+/// are numerically correct — grad of sum(theta*x) w.r.t. theta equals x.
+#[test]
+fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_coral.ch");
+    let out_dir = dir.path().join("grad-coral-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_coral.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(") && !source.contains("unsupported builtin"),
+        "generated C must not contain unresolved call stubs:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_coral.c", "grad_coral");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_coral"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*x), wrt=theta) = x = [3.0, 4.0]
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[3.0, 4.0])"),
+        "gradient of sum(theta*x) w.r.t. theta must equal x=[3.0, 4.0], got:\n{stdout}"
+    );
+}
+
+/// Regression test for the Coral UPSTREAM_BUGS.md pattern:
+/// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
+/// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
+#[test]
+fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_wrt_x.ch");
+    let out_dir = dir.path().join("grad-wrt-x-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         out = grad(loss, wrt=(x))(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_wrt_x.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(") && !source.contains("unsupported builtin"),
+        "generated C must not contain unresolved call stubs:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_wrt_x.c", "grad_wrt_x");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_wrt_x"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*x), wrt=x) = theta = [1.0, 2.0]
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[1.0, 2.0])"),
+        "gradient of sum(theta*x) w.r.t. x must equal theta=[1.0, 2.0], got:\n{stdout}"
+    );
+}
+
 #[test]
 fn build_c_recursive_tensor_function_stays_on_host_path() {
     let dir = tempdir().expect("tempdir");
