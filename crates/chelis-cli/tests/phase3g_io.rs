@@ -95,7 +95,7 @@ fn reef_std_io_module_checks_and_builds() {
         r#"[package]
 name = "io-app"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -169,7 +169,7 @@ fn reef_std_io_module_rejects_missing_export() {
         r#"[package]
 name = "io-app-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -290,7 +290,7 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
         r#"[package]
 name = "json-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -348,7 +348,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
         r#"[package]
 name = "json-try-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -414,7 +414,7 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
         r#"[package]
 name = "csv-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -472,7 +472,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
         r#"[package]
 name = "csv-try-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -536,7 +536,7 @@ fn reef_std_parquet_module_resolves_and_type_checks() {
         r#"[package]
 name = "parquet-app"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -583,7 +583,7 @@ fn reef_std_parquet_module_rejects_missing_export() {
         r#"[package]
 name = "parquet-bad"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -631,7 +631,7 @@ fn reef_std_parquet_write_resolves_and_type_checks() {
         r#"[package]
 name = "parquet-write-app"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -679,7 +679,7 @@ fn reef_std_parquet_module_builds_cleanly() {
         r#"[package]
 name = "parquet-build-app"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]

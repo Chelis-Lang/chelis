@@ -79,7 +79,7 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
@@ -721,7 +721,7 @@ fn reef_std_generate_is_lowered_through_host_lane() {
             r#"[package]
 name = "phase3i-generate-lowering"
 version = "0.1.0"
-compiler = "=0.2.2"
+compiler = "=0.2.3"
 module_prefix = "Demo"
 
 [dependencies]
