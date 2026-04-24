@@ -240,16 +240,48 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    eval_compiled(compiled, request.bindings, None)
+    eval_compiled(&compiled, request.bindings, None)
 }
 
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    eval_compiled(compiled, request.bindings, Some(selected_root_names))
+    eval_compiled(&compiled, request.bindings, Some(selected_root_names))
+}
+
+/// Compile the source once, then evaluate it once per entry in `test_roots`,
+/// returning a parallel Vec of per-root `(name, Result<EvalResult>)` pairs.
+///
+/// Each root is evaluated with the full `bindings` from the request re-used
+/// unchanged. A failing root does not short-circuit the remaining roots — the
+/// caller sees every root's outcome independently.
+///
+/// If the source fails to compile, the compile error is propagated to every
+/// requested root. That keeps the return shape a 1:1 mapping with `test_roots`
+/// (matching `chelis test`'s per-root reporting) and is easier for callers
+/// than a mixed Result<Vec<_>> + compile-error channel.
+pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Result<EvalResult>)> {
+    let compiled = match compile_source(request.source_kind, &request.source) {
+        Ok(compiled) => compiled,
+        Err(err) => {
+            return test_roots
+                .iter()
+                .map(|name| (name.clone(), Err(err.clone())))
+                .collect();
+        }
+    };
+
+    test_roots
+        .iter()
+        .map(|name| {
+            let roots_slice = std::slice::from_ref(name);
+            let outcome = eval_compiled(&compiled, request.bindings.clone(), Some(roots_slice));
+            (name.clone(), outcome)
+        })
+        .collect()
 }
 
 fn eval_compiled(
-    compiled: CompiledSource,
+    compiled: &CompiledSource,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
@@ -2104,6 +2136,132 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
             ))),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
+    }
+
+    #[test]
+    fn eval_many_returns_per_root_results_preserving_order() {
+        // Two tensor roots: `a` depends on named input `x` (provided), `b`
+        // depends on named input `y` (not provided). The live-mask restricts
+        // DAG evaluation to the selected root's subgraph, so the missing-input
+        // error for `b` surfaces independently of `a`'s success.
+        // eval_many must preserve input order and carry both outcomes.
+        let source = r#"
+a: tensor[2, f32] = a
+b: tensor[2, f32] = b
+"#;
+
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "a".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: vec![1.0, 2.0],
+            },
+        );
+        // `b` is intentionally omitted so that evaluating root `b` fails.
+
+        let results = eval_many(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.to_string(),
+                bindings,
+            },
+            &["a".to_string(), "b".to_string()],
+        );
+
+        assert_eq!(results.len(), 2, "expected one entry per requested root");
+        assert_eq!(results[0].0, "a");
+        assert_eq!(results[1].0, "b");
+
+        let a_result = results[0].1.as_ref().expect("a should succeed");
+        assert!(
+            a_result
+                .roots
+                .iter()
+                .any(|root| root.name.as_deref() == Some("a")),
+            "expected evaluated root `a`, got {:?}",
+            a_result.roots
+        );
+
+        let b_err = results[1]
+            .1
+            .as_ref()
+            .expect_err("b should fail because input `b` was not provided");
+        assert_eq!(b_err.stage, "eval");
+        assert!(
+            b_err
+                .errors
+                .iter()
+                .any(|diag| diag.message.contains('b') || diag.kind == "eval_error"),
+            "expected eval error mentioning `b`, got {:?}",
+            b_err.errors
+        );
+    }
+
+    #[test]
+    fn eval_many_reverse_order_also_isolates_failure() {
+        // Negative-parity: run the same program with the roots in reverse
+        // order. The successful root must still succeed after the failing
+        // root — there must be no hidden shared state that outlives a
+        // per-root eval_compiled call.
+        let source = r#"
+a: tensor[2, f32] = a
+b: tensor[2, f32] = b
+"#;
+
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "a".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: vec![1.0, 2.0],
+            },
+        );
+
+        let results = eval_many(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.to_string(),
+                bindings,
+            },
+            &["b".to_string(), "a".to_string()],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "b");
+        assert_eq!(results[1].0, "a");
+        assert!(results[0].1.is_err(), "b must still fail");
+        assert!(
+            results[1].1.is_ok(),
+            "a must still succeed even after b failed first"
+        );
+    }
+
+    #[test]
+    fn eval_many_propagates_compile_error_per_root() {
+        // When the source itself fails to compile, every requested root must
+        // see the same compile error rather than one root silently swallowing
+        // the failure.
+        let source = "a = this_name_does_not_exist_anywhere";
+
+        let results = eval_many(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.to_string(),
+                bindings: BTreeMap::new(),
+            },
+            &["a".to_string(), "b".to_string()],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "a");
+        assert_eq!(results[1].0, "b");
+        for (name, result) in &results {
+            assert!(
+                result.is_err(),
+                "root `{name}` should inherit the compile error"
+            );
+        }
     }
 
     #[test]

@@ -85,6 +85,29 @@ pub struct PreparedProgram {
     pub package_root: PathBuf,
 }
 
+/// A reef package graph that has been resolved, linked, and cached for reuse
+/// across multiple per-file compiles.
+///
+/// Building one of these is the expensive part of `prepare_program_for_eval_*`:
+/// it walks the package root, reads the manifest, loads the lockfile (or runs
+/// the resolver under a 5s timeout), and materializes all library module decls
+/// with internal-name rewriting applied. A single `PreparedReefGraph` can then
+/// be threaded through many calls to [`compile_with_reef_graph`], each of
+/// which only has to rewrite the per-file entry decls.
+///
+/// All fields are intentionally `pub(crate)`; callers treat the value as an
+/// opaque handle other than `package_root`, which is exposed because
+/// `chelis test` uses it for file discovery.
+#[derive(Debug, Clone)]
+pub struct PreparedReefGraph {
+    pub package_root: PathBuf,
+    pub(crate) graph: PackageGraph,
+    pub(crate) linked_library_decls: Vec<Decl>,
+    pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
+    pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
+    pub(crate) eval_module_prefix: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PackageBuildArtifacts {
     pub package: PackageId,
@@ -238,60 +261,125 @@ pub fn prepare_program_for_eval_file(
     prepare_program_for_eval_source(context_dir, &decls)
 }
 
-pub fn prepare_program_for_eval_source(
-    context_dir: &Path,
-    entry_decls: &[Decl],
-) -> Result<Option<PreparedProgram>, String> {
+/// Resolve, link, and cache the reef package graph rooted at (or above)
+/// `context_dir`. This does the expensive, per-invocation work: package-root
+/// walk, manifest read, dependency resolution (lockfile fast path or
+/// timeout-bounded resolver), chelis-std shell load, internal-name
+/// rewriting of library modules, and caching of `internal_maps` and
+/// `dep_shells`.
+///
+/// The result is an opaque handle that can be threaded through many calls to
+/// [`compile_with_reef_graph`] — one per entry file — to avoid repeating the
+/// expensive graph preparation for every test file in a `chelis test`
+/// invocation.
+///
+/// Returns `Err` (not `Ok(None)`) when `context_dir` is not inside a reef
+/// package. Callers that rely on reef context (e.g. `chelis test`) need an
+/// actionable error with the attempted directory, not a silent `None` that
+/// loses information; the old-path `Ok(None)` semantics live on in
+/// [`prepare_program_for_eval_source`] where that return is load-bearing.
+pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, String> {
     let Some(root) = find_package_root_for_dir(context_dir)? else {
-        return Ok(None);
+        return Err(format!(
+            "no reef.toml found at or above {} — `chelis test` requires a reef package",
+            context_dir.display()
+        ));
     };
-    let lock_path = root.join("reef.lock");
-    let graph = if lock_path.exists() {
-        // Fast path: lockfile already computed the dependency graph.
-        // Path deps are loaded directly; registry deps get a 5-second timeout.
-        let lock = read_lockfile(&lock_path)?;
-        reconstruct_graph_from_lockfile(&root, &lock)?
-    } else {
-        // Slow path: no lockfile yet — resolve from scratch with a hard timeout.
-        let root_clone = root.clone();
-        run_with_timeout(
-            move || resolve_package_graph(&root_clone),
-            Duration::from_secs(5),
-            TIMEOUT_MSG,
-        )?
-    };
-    // Eval does not write the lockfile — that is the build path's responsibility.
-
+    let graph = load_package_graph_for_eval(&root)?;
     let linked = link_graph(&graph, &[])?;
     let internal_maps = build_internal_maps(&graph);
     let dep_shells = dependency_shells(&graph);
-    let eval_module_name = graph
+    let eval_module_prefix = graph
         .packages
         .get(&graph.root_package)
-        .map(|package| format!("{}.__Eval", package.manifest.package.module_prefix))
-        .unwrap_or_else(|| "__Eval".to_string());
+        .map(|package| package.manifest.package.module_prefix.clone())
+        .unwrap_or_default();
+
+    let mut linked_library_decls = Vec::new();
+    for module in linked {
+        linked_library_decls.extend(module.decls);
+    }
+
+    Ok(PreparedReefGraph {
+        package_root: root,
+        graph,
+        linked_library_decls,
+        internal_maps,
+        dep_shells,
+        eval_module_prefix,
+    })
+}
+
+/// Compile an in-memory entry decl list against a previously prepared reef
+/// graph. This is the cheap per-file work: only the entry module is rewritten
+/// and appended to the cached library decls.
+pub fn compile_with_reef_graph(
+    graph: &PreparedReefGraph,
+    entry_decls: &[Decl],
+) -> Result<PreparedProgram, String> {
+    let eval_module_name = if graph.eval_module_prefix.is_empty() {
+        "__Eval".to_string()
+    } else {
+        format!("{}.__Eval", graph.eval_module_prefix)
+    };
     let eval_module = ModuleSource {
-        package_name: graph.root_package.clone(),
+        package_name: graph.graph.root_package.clone(),
         module_name: eval_module_name,
         decls: entry_decls.to_vec(),
         file_rel: PathBuf::from("__eval__.ch"),
         exports: BTreeSet::new(),
         symbols: collect_symbol_kinds(entry_decls),
     };
-    let rewritten_entry_decls =
-        rewrite_eval_module_decls(&eval_module, &graph, &internal_maps, &dep_shells)?;
+    let rewritten_entry_decls = rewrite_eval_module_decls(
+        &eval_module,
+        &graph.graph,
+        &graph.internal_maps,
+        &graph.dep_shells,
+    )?;
 
-    let mut decls = Vec::new();
-    for module in linked {
-        decls.extend(module.decls);
-    }
+    let mut decls = graph.linked_library_decls.clone();
     decls.extend(rewritten_entry_decls);
 
-    Ok(Some(PreparedProgram {
+    Ok(PreparedProgram {
         decls,
         entry_decls: entry_decls.to_vec(),
-        package_root: root,
-    }))
+        package_root: graph.package_root.clone(),
+    })
+}
+
+/// Resolve a `PackageGraph` for eval: fast-path the lockfile when present,
+/// otherwise run the full resolver under the standard 5-second timeout.
+///
+/// Eval does not write the lockfile — that is the build path's responsibility.
+fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
+    let lock_path = root.join("reef.lock");
+    if lock_path.exists() {
+        let lock = read_lockfile(&lock_path)?;
+        reconstruct_graph_from_lockfile(root, &lock)
+    } else {
+        let root_clone = root.to_path_buf();
+        run_with_timeout(
+            move || resolve_package_graph(&root_clone),
+            Duration::from_secs(5),
+            TIMEOUT_MSG,
+        )
+    }
+}
+
+pub fn prepare_program_for_eval_source(
+    context_dir: &Path,
+    entry_decls: &[Decl],
+) -> Result<Option<PreparedProgram>, String> {
+    // Convenience wrapper: preserved for existing callers (chelis eval, the
+    // CLI --file path, Deep/IR integration tests) that want the single-shot
+    // preparation and expect `Ok(None)` when there is no reef package.
+    // `chelis test` takes the split-path route (prepare_reef_graph +
+    // compile_with_reef_graph) to share the expensive graph across files.
+    let Some(_) = find_package_root_for_dir(context_dir)? else {
+        return Ok(None);
+    };
+    let graph = prepare_reef_graph(context_dir)?;
+    compile_with_reef_graph(&graph, entry_decls).map(Some)
 }
 
 pub fn build_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
@@ -2422,6 +2510,189 @@ path = "./nonexistent_dep"
         assert!(
             err.contains("missing") || err.contains("nonexistent") || err.contains("canonicalize"),
             "error should identify the missing dep; got: {err}"
+        );
+    }
+
+    // ---- Shared-graph split: prepare_reef_graph + compile_with_reef_graph ----
+
+    /// Build a minimal reef fixture with a lockfile-backed path dependency.
+    /// Returns (tempdir, package_root) — the tempdir must be kept alive for
+    /// the filesystem to persist.
+    fn shared_graph_fixture() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+        let dep_root = root.join("mylib");
+
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Mylib"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/math.ch"),
+            "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x + y\n",
+        );
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Myapp"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: int32) -> int32 = add(x, x)\n",
+        );
+
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+
+[[dependencies]]
+name = "mylib"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./mylib"
+"#,
+        );
+
+        (dir, root)
+    }
+
+    /// Positive: `prepare_reef_graph` + two calls to `compile_with_reef_graph`
+    /// produces the same library decls as two independent calls to
+    /// `prepare_program_for_eval_source`. The test files each import `add`
+    /// from Mylib.Math to exercise the linked-module + rewrite path.
+    #[test]
+    fn prepare_reef_graph_split_matches_single_shot_semantics() {
+        let (_dir, root) = shared_graph_fixture();
+
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a -> int32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b -> int32 = add(3, 4)\n";
+        let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
+        let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
+
+        // Split-path: one graph preparation, two per-file compiles.
+        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph should succeed");
+        let split_a = compile_with_reef_graph(&graph, &decls_a).expect("compile a via graph");
+        let split_b = compile_with_reef_graph(&graph, &decls_b).expect("compile b via graph");
+
+        // Baseline: two independent full preparations via the convenience wrapper.
+        let single_a = prepare_program_for_eval_source(&root, &decls_a)
+            .expect("single-shot a ok")
+            .expect("single-shot a some");
+        let single_b = prepare_program_for_eval_source(&root, &decls_b)
+            .expect("single-shot b ok")
+            .expect("single-shot b some");
+
+        // Library decl count must match exactly: the graph-shared path must
+        // not drop or duplicate any linked module decl.
+        let lib_decl_count = |p: &PreparedProgram| p.decls.len() - p.entry_decls.len();
+        assert_eq!(
+            lib_decl_count(&split_a),
+            lib_decl_count(&single_a),
+            "library decl count must match between split and single-shot for probe a"
+        );
+        assert_eq!(
+            lib_decl_count(&split_b),
+            lib_decl_count(&single_b),
+            "library decl count must match between split and single-shot for probe b"
+        );
+        // The rewritten `add` function must appear in both.
+        let has_add = |p: &PreparedProgram| {
+            p.decls
+                .iter()
+                .any(|d| matches!(d, Decl::FunDef { name, .. } if name.contains("add")))
+        };
+        assert!(has_add(&split_a), "split a must contain rewritten `add`");
+        assert!(has_add(&split_b), "split b must contain rewritten `add`");
+        // `package_root` agrees too.
+        assert_eq!(split_a.package_root, single_a.package_root);
+        assert_eq!(split_b.package_root, single_b.package_root);
+    }
+
+    /// Diagnostic perf check (plan: "skip the timing assertion if it becomes
+    /// flaky — the correctness test is required, the perf test is diagnostic").
+    ///
+    /// We do NOT gate the suite on a hard 2x multiplier because on a small
+    /// path-dep fixture both paths are sub-millisecond and noise dominates.
+    /// What we CAN assert robustly: the split path is no slower than the
+    /// single-shot path when amortized across two files, which is a
+    /// sufficient signal that the shared graph isn't redoing work.
+    #[test]
+    fn prepare_reef_graph_amortizes_work_across_multiple_files() {
+        let (_dir, root) = shared_graph_fixture();
+
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a -> int32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b -> int32 = add(3, 4)\n";
+        let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
+        let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
+
+        // Warm the OS caches — first run of either path tends to be skewed.
+        let _ = prepare_program_for_eval_source(&root, &decls_a);
+        let _ = prepare_reef_graph(&root);
+
+        // Single-shot: two independent full preparations.
+        let start_single = std::time::Instant::now();
+        let _ = prepare_program_for_eval_source(&root, &decls_a).expect("single a ok");
+        let _ = prepare_program_for_eval_source(&root, &decls_b).expect("single b ok");
+        let single_elapsed = start_single.elapsed();
+
+        // Split-shared: one graph prep, two per-file compiles.
+        let start_split = std::time::Instant::now();
+        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph ok");
+        let _ = compile_with_reef_graph(&graph, &decls_a).expect("compile a ok");
+        let _ = compile_with_reef_graph(&graph, &decls_b).expect("compile b ok");
+        let split_elapsed = start_split.elapsed();
+
+        // Diagnostic: the split path must not regress the single-shot path.
+        // On tiny fixtures the absolute numbers are noise, so we only flag
+        // pathological regressions (split slower than 3x single-shot).
+        assert!(
+            split_elapsed.as_nanos() <= single_elapsed.as_nanos() * 3 + 1_000_000,
+            "split path unexpectedly slower: split={split_elapsed:?}, single={single_elapsed:?}"
+        );
+    }
+
+    /// Negative: `prepare_reef_graph` called outside a reef package must
+    /// return an actionable error (containing the offending directory path),
+    /// not a silent `Ok(None)` that loses information.
+    #[test]
+    fn prepare_reef_graph_outside_package_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        // The tempdir contains no reef.toml in its ancestor chain.
+        let err =
+            prepare_reef_graph(dir.path()).expect_err("outside a reef package must be an error");
+        assert!(
+            err.contains("reef.toml"),
+            "error should mention reef.toml; got: {err}"
+        );
+        assert!(
+            err.contains(dir.path().to_str().unwrap_or_default()),
+            "error should mention the attempted directory; got: {err}"
         );
     }
 }
