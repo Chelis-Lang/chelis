@@ -81,8 +81,9 @@ impl CEmitter {
         e.line("}");
         e.line("");
 
+        let linkage = if options.static_entry { "static " } else { "" };
         e.line(&format!(
-            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
+            "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
         ));
         e.indent = 1;
 

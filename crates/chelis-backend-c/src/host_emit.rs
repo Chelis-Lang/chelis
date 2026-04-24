@@ -232,7 +232,7 @@ fn emit_host_header_with_linkage(
 fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: &str) {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
-            "void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
+            "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
             helper_name,
         ));
         out.push("    (void)n_in;".to_string());
@@ -243,7 +243,18 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         return;
     }
 
-    let helper_src = CEmitter::emit_dag(&helper.dag, helper_name);
+    // Tensor helpers are TU-internal: they are only called from within this
+    // generated `.c` file and must never be exported symbols.  `static_entry`
+    // ensures the kernel function itself gets `static` linkage so that when
+    // compiled with `-shared -fPIC` the symbol is not exported via PLT.
+    let helper_src = CEmitter::emit_dag_with_options(
+        &helper.dag,
+        helper_name,
+        crate::CodegenOptions {
+            static_entry: true,
+            ..crate::CodegenOptions::default()
+        },
+    );
     // The CEmitter prepends a `static inline float chelis_uniform_sample_f32`
     // prelude to every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
