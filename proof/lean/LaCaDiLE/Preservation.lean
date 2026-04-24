@@ -560,6 +560,14 @@ theorem StoreLiveOn.append_right
   intro ell hell
   exact h ell (List.mem_append_right _ hell)
 
+theorem StoreLiveOn.of_subset
+    {sigma : Store} {locs1 locs2 : List Loc}
+    (h : StoreLiveOn sigma locs2)
+    (hsub : ∀ ell, ell ∈ locs1 → ell ∈ locs2) :
+    StoreLiveOn sigma locs1 := by
+  intro ell hell
+  exact h ell (hsub ell hell)
+
 @[simp] theorem storeLiveOn_nil
     {sigma : Store} :
     StoreLiveOn sigma [] := by
@@ -629,6 +637,28 @@ private theorem hasType_store_live_on_locRefs
   | cons Δ_ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest slotX slotK
       hmatch _h_body _h_rest ihBody ihRest hs =>
       exact StoreLiveOn.append (ihBody hs) (ihRest hs)
+
+private theorem hasType_store_live_on_ctxLocRefs
+    {sigma : Store}
+    {Sigma : StoreTyp} {e : Term} {t : Typ} {eps : EffectRow}
+    (E : EvalCtx)
+    (h : HasType [] Sigma [] (plug E e) t eps [])
+    (h_wf : StoreWf sigma Sigma) :
+    StoreLiveOn sigma (ctxLocRefs E) := by
+  apply StoreLiveOn.of_subset (hasType_store_live_on_locRefs h h_wf)
+  intro ell hell
+  exact (mem_locRefs_plug E e ell).2 (Or.inl hell)
+
+private theorem hasType_store_live_on_chainLocRefs
+    {sigma : Store}
+    {Sigma : StoreTyp} {e : Term} {t : Typ} {eps : EffectRow}
+    (Es : EvalCtxChain)
+    (h : HasType [] Sigma [] (multiPlug Es e) t eps [])
+    (h_wf : StoreWf sigma Sigma) :
+    StoreLiveOn sigma (chainLocRefs Es) := by
+  apply StoreLiveOn.of_subset (hasType_store_live_on_locRefs h h_wf)
+  intro ell hell
+  exact (mem_locRefs_multiPlug Es e ell).2 (Or.inl hell)
 
 /-- Step-local store agreement on locations not mentioned by the redex.
     This is the missing store-side fact for the `ctx` case: numeric
