@@ -44,9 +44,27 @@ pub(crate) struct RuntimeOutcome {
     pub(crate) transcript: Vec<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_filtered(program, tensor_bindings, None)
+}
+
+/// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
+/// bindings whose names appear in the filter are *eagerly* evaluated. Other
+/// top-level bindings stay registered in `top_level_defs` so the body of a
+/// selected binding can lazily resolve references to them via
+/// `resolve_top_level`. This is what lets `chelis test` share a single
+/// compile across every test in a file: compile once with N synthesized
+/// `__chelis_test_k = test_k()` bindings, then run N eval passes each
+/// selecting one root — without each pass paying for the other N-1 tests
+/// running as module init.
+pub(crate) fn evaluate_host_program_filtered(
+    program: &CheckedProgram,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     let mut top_level_defs = HashMap::new();
@@ -69,7 +87,13 @@ pub(crate) fn evaluate_host_program(
         top_level_defs.insert(name.to_string(), body.clone());
         let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
-            top_level_order.push(name.to_string());
+            let selected = match selected_roots {
+                None => true,
+                Some(filter) => filter.iter().any(|s| s == name),
+            };
+            if selected {
+                top_level_order.push(name.to_string());
+            }
         }
     }
 

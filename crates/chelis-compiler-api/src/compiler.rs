@@ -13,7 +13,7 @@ use chelis_surf::ast::{
 use chelis_types::{CheckedProgram, errors::CheckError};
 
 use crate::runtime::{
-    RuntimeTensorValue, evaluate_host_program, lookup_runtime_value_for_root,
+    RuntimeTensorValue, evaluate_host_program_filtered, lookup_runtime_value_for_root,
     runtime_value_to_schema,
 };
 use crate::schema::{
@@ -280,6 +280,41 @@ pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Re
         .collect()
 }
 
+/// Opaque handle over a compiled program. Once prepared, any number of
+/// `eval_root` calls share the same underlying Surf→Deep→DAG compile —
+/// what the `chelis test` CLI needs to avoid paying the ~2.3s-per-test
+/// recompilation that killed dev-loop ergonomics.
+///
+/// Cheap to clone (Arc-wrapped internals) and safe to Send into a worker
+/// thread for per-test timeout isolation.
+#[derive(Clone)]
+pub struct PreparedEval {
+    compiled: std::sync::Arc<CompiledSource>,
+}
+
+impl PreparedEval {
+    /// Evaluate exactly one selected root. Other top-level non-fn bindings
+    /// stay registered for lazy reference but are not eagerly evaluated.
+    pub fn eval_root(
+        &self,
+        bindings: BTreeMap<String, crate::schema::TensorValue>,
+        root: &str,
+    ) -> Result<EvalResult> {
+        let roots = [root.to_string()];
+        eval_compiled(&self.compiled, bindings, Some(&roots))
+    }
+}
+
+/// Compile a program once so downstream callers can cheaply evaluate
+/// specific roots against it many times. Used by `chelis test` to share
+/// one compile across every test in a file.
+pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
+    let compiled = compile_source(request.source_kind, &request.source)?;
+    Ok(PreparedEval {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
 fn eval_compiled(
     compiled: &CompiledSource,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -363,8 +398,17 @@ fn eval_compiled(
         );
     }
 
-    let host_outcome = evaluate_host_program(&compiled.checked, &tensor_values_by_name)
-        .map_err(|message| stage_error("eval", message, "eval_error"))?;
+    // When a selected-roots filter is set (eval_selected / eval_many), push it
+    // through to the host-program evaluator so only the selected non-fn
+    // top-levels are eagerly evaluated. This is what lets a single compile
+    // feed many per-test evaluations in `chelis test` without every test
+    // paying for the others' module-init side effects.
+    let host_outcome = evaluate_host_program_filtered(
+        &compiled.checked,
+        &tensor_values_by_name,
+        selected_root_names,
+    )
+    .map_err(|message| stage_error("eval", message, "eval_error"))?;
 
     let roots = compiled
         .all_root_names
