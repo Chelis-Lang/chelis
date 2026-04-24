@@ -1,16 +1,18 @@
 //! Phase 3t.3 — Std.Test module integration tests.
 //!
-//! Verifies that:
-//! 1. A program that imports every `Std.Test` assertion with passing values
-//!    checks and evaluates cleanly (Test effect flows through the wrappers).
-//! 2. Calling an `Std.Test` assertion from a `! {}`-declared function is
-//!    rejected with `UnhandledEffect` (the Test effect carried by the wrapper
-//!    propagates up to the call site).
-//! 3. The `Std.Test.fail` wrapper specifically carries Test (the runtime
-//!    builtin `fail` is tagless; `Std.Test.fail` must not be).
-//! 4. `assert_close` rejects negative/NaN tolerance with a clear error at
-//!    runtime.
-//! 5. `assert_shape` on a mismatched tensor fails with the caller's label.
+//! Per-assertion positive + negative coverage. For each assertion exported by
+//! `Std.Test` we verify:
+//!   * positive: a passing invocation through a `! { Test }` wrapper checks
+//!     and evaluates cleanly (Test effect flows through the wrapper).
+//!   * negative: a mismatched invocation surfaces the assertion's branded
+//!     error message on stderr at eval time, with the caller's label.
+//!
+//! Plus structural tests:
+//!   * Calling an `Std.Test` assertion from a `! {}` function is rejected
+//!     with `UnhandledEffect` (the Test effect propagates).
+//!   * `Std.Test.fail` carries Test (unlike the runtime builtin `fail`).
+//!   * `assert_close` rejects negative tolerance.
+//!   * `assert_shape` mismatches report the caller's label.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -77,57 +79,26 @@ chelis-std = {{ version = "0.1.0" }}
     (dir, reef_home, app_pkg)
 }
 
-#[test]
-fn std_test_all_assertions_pass_under_test_effect() {
-    // Every Std.Test assertion called with a passing value from a
-    // `def test_*() -> unit ! { Test }` wrapper should check + eval clean.
-    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-test-pass");
-    write_file(
-        &app_pkg.join("src/main.ch"),
-        r#"module Demo.Main
-
-import Std.Test (
-  assert_close,
-  assert_close_tensor,
-  assert_eq,
-  assert_eq_bool,
-  assert_eq_int,
-  assert_eq_string,
-  assert_false,
-  assert_shape,
-  assert_true
-)
-
-def test_all() -> unit ! { Test } = {
-  _ = assert_true(true, "t");
-  _ = assert_false(false, "f");
-  _ = assert_eq(1.5, 1.5, "eq-f32");
-  _ = assert_eq_int(cast(3, int64), cast(3, int64), "eq-int");
-  _ = assert_eq_bool(true, true, "eq-bool");
-  _ = assert_eq_string("hi", "hi", "eq-str");
-  _ = assert_close(1.0, 1.0, 0.0, "close-exact");
-  _ = assert_close(1.0, 1.01, 0.05, "close-tol");
-  _ = assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]), 0.001, "close-tensor");
-  assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3")
-}
-
-ran = test_all()
-"#,
-    );
-
+/// Run `chelis check` on the given app's `src/main.ch` and assert it returns
+/// a perfect score. Returns the assertion handle so callers can chain extra
+/// stdout predicates if needed.
+fn assert_check_clean(reef_home: &Path, app_pkg: &Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"score\": 1"));
+}
 
+/// Run `chelis eval --file src/main.ch` and assert it succeeds (status 0).
+fn assert_eval_succeeds(reef_home: &Path, app_pkg: &Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
         .args([
             "eval",
             "--file",
@@ -135,6 +106,398 @@ ran = test_all()
         ])
         .assert()
         .success();
+}
+
+/// Run `chelis eval --file src/main.ch` and assert it fails. Then assert each
+/// substring in `stderr_contains` appears on stderr.
+fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&str]) {
+    let mut cmd = Command::cargo_bin("chelis").expect("binary");
+    cmd.env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ]);
+    let mut assertion = cmd.assert().failure();
+    for fragment in stderr_contains {
+        assertion = assertion.stderr(predicate::str::contains(*fragment));
+    }
+    let _ = assertion;
+}
+
+#[test]
+fn std_test_assert_true_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-true-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_true)
+
+def test_case() -> unit ! { Test } = assert_true(true, "t-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_true_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-true-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_true)
+
+def test_case() -> unit ! { Test } = assert_true(false, "t-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_true` routes through `test_assert(cond, label)`; the runtime
+    // brands the failure as `assert failed: <label>`.
+    assert_eval_fails_with(&reef_home, &app_pkg, &["assert failed: t-fail"]);
+}
+
+#[test]
+fn std_test_assert_false_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-false-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_false)
+
+def test_case() -> unit ! { Test } = assert_false(false, "f-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_false_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-false-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_false)
+
+def test_case() -> unit ! { Test } = assert_false(true, "f-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_false(cond, label)` => `test_assert(not(cond), label)`; the
+    // runtime brands the failure as `assert failed: <label>`.
+    assert_eval_fails_with(&reef_home, &app_pkg, &["assert failed: f-fail"]);
+}
+
+#[test]
+fn std_test_assert_eq_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq)
+
+def test_case() -> unit ! { Test } = assert_eq(1.5, 1.5, "eq-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_eq_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq)
+
+def test_case() -> unit ! { Test } = assert_eq(1.5, 2.5, "eq-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_eq` routes through `test_assert_eq_f32`; runtime brands the
+    // failure as `assert_eq_f32 (<label>): expected <expected>, got <actual>`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_eq_f32 (eq-fail): expected 2.5, got 1.5"],
+    );
+}
+
+#[test]
+fn std_test_assert_eq_int_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-int-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_int)
+
+def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(3, int64), "eq-int-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_eq_int_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-int-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_int)
+
+def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(5, int64), "eq-int-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_eq_int` routes through `test_assert_eq_int`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_eq_int (eq-int-fail): expected 5, got 3"],
+    );
+}
+
+#[test]
+fn std_test_assert_eq_bool_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-bool-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_bool)
+
+def test_case() -> unit ! { Test } = assert_eq_bool(true, true, "eq-bool-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_eq_bool_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-bool-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_bool)
+
+def test_case() -> unit ! { Test } = assert_eq_bool(true, false, "eq-bool-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_eq_bool (eq-bool-fail): expected false, got true"],
+    );
+}
+
+#[test]
+fn std_test_assert_eq_string_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-str-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_string)
+
+def test_case() -> unit ! { Test } = assert_eq_string("hi", "hi", "eq-str-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_eq_string_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-str-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_string)
+
+def test_case() -> unit ! { Test } = assert_eq_string("foo", "bar", "eq-str-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `test_assert_eq_string` uses Debug-quoted strings: `expected "bar", got "foo"`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_eq_string (eq-str-fail): expected \"bar\", got \"foo\""],
+    );
+}
+
+#[test]
+fn std_test_assert_close_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_close)
+
+def test_case() -> unit ! { Test } = {
+  _ = assert_close(1.0, 1.0, 0.0, "close-exact");
+  assert_close(1.0, 1.01, 0.05, "close-tol")
+}
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_close_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_close)
+
+def test_case() -> unit ! { Test } = assert_close(1.0, 2.0, 0.001, "close-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_close` builds its own diagnostic via string_concat:
+    // `assert_close (<label>): expected <expected>, got <actual>, tol <tol>`.
+    // Float Display renders `1.0`/`2.0` as `1`/`2` and `0.001` as `0.001`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert failed: assert_close (close-fail): expected 2, got 1, tol 0.001"],
+    );
+}
+
+#[test]
+fn std_test_assert_close_tensor_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_close_tensor)
+
+def test_case() -> unit ! { Test } =
+  assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]), 0.001, "close-tensor-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_close_tensor_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_close_tensor)
+
+def test_case() -> unit ! { Test } =
+  assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 9.0]), 0.001, "close-tensor-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_close_tensor` is a runtime builtin that emits the index of the
+    // first mismatch: `at index <i> expected <e>, got <a>, tol <tol>`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_close_tensor (close-tensor-fail): at index 1 expected 9, got 2, tol 0.001"],
+    );
+}
+
+#[test]
+fn std_test_assert_shape_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-shape-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_shape)
+
+def test_case() -> unit ! { Test } =
+  assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_shape_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-shape-fail-perassert");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_shape)
+
+def test_case() -> unit ! { Test } =
+  assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // `assert_shape` builds its diagnostic via string_concat as well:
+    // `assert_shape (<label>): expected <expected_n>, got <actual_n>`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert failed: assert_shape (shape-fail): expected 7, got 2"],
+    );
 }
 
 #[test]
