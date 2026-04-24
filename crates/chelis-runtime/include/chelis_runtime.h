@@ -92,6 +92,7 @@ chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *d
 void chelis_free(chelis_tensor *t);
 void chelis_fill_f32(chelis_tensor *t, float val);
 void chelis_fill_i64(chelis_tensor *t, int64_t val);
+void chelis_fill_f64(chelis_tensor *t, double val);
 chelis_tensor *chelis_scalar_tensor_from_i64(int64_t value);
 chelis_tensor *chelis_scalar_tensor_from_f64(double value);
 double chelis_tensor_to_f64(const chelis_tensor *t);

@@ -78,17 +78,17 @@ impl Prim {
     }
 
     /// Whether this precision is valid as the element type of a tensor in
-    /// the current Phase 0f backend. The C/HIP backends support f32, bool,
-    /// and integer precisions; reduced floats (f16, bf16, f8e4m3) and f64
-    /// are not supported as tensor element types and must be rejected at
-    /// check time per the "no implicit precision promotion" rule.
+    /// the current Phase 0f backend. The C/HIP backends support f32, f64,
+    /// bool, and integer precisions; reduced floats (f16, bf16, f8e4m3) are
+    /// not supported as tensor element types and must be rejected at check
+    /// time per the "no implicit precision promotion" rule.
     ///
-    /// This intentionally does not affect host scalar precisions — an f64
-    /// host literal is fine; only tensor precisions are constrained here.
+    /// This intentionally does not affect host scalar precisions — only
+    /// tensor precisions are constrained here.
     pub fn is_valid_tensor_precision(&self) -> bool {
         matches!(
             self,
-            Prim::F32 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
+            Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int8 | Prim::Int32 | Prim::Int64
         )
     }
 

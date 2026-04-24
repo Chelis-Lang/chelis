@@ -415,7 +415,7 @@ pub unsafe extern "C" fn chelis_alloc(
     if tensor.size == 0 {
         tensor.size = 1;
     }
-    let elem_size = if dtype == CHELIS_I64 {
+    let elem_size = if dtype == CHELIS_I64 || dtype == CHELIS_F64 {
         std::mem::size_of::<i64>()
     } else {
         std::mem::size_of::<f32>()
@@ -488,6 +488,14 @@ pub unsafe extern "C" fn chelis_fill_f32(t: *mut chelis_tensor, val: f32) {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_i64(t: *mut chelis_tensor, val: i64) {
     let ptr = (*t).data as *mut i64;
+    for i in 0..(*t).size as isize {
+        *ptr.offset(i) = val;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_fill_f64(t: *mut chelis_tensor, val: f64) {
+    let ptr = (*t).data as *mut f64;
     for i in 0..(*t).size as isize {
         *ptr.offset(i) = val;
     }
@@ -2366,9 +2374,15 @@ pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chelis_tensor {
+    let elem_size = if (*t).dtype == CHELIS_I64 || (*t).dtype == CHELIS_F64 {
+        std::mem::size_of::<i64>()
+    } else {
+        std::mem::size_of::<f32>()
+    };
     if chelis_is_contiguous(t) != 0 {
         let out = chelis_alloc((*t).ndim, (*t).shape.as_ptr(), (*t).dtype);
-        ptr::copy_nonoverlapping((*t).data, (*out).data, (*t).size as usize);
+        let bytes = (*t).size as usize * elem_size;
+        ptr::copy_nonoverlapping((*t).data as *const u8, (*out).data as *mut u8, bytes);
         return out;
     }
     let out = chelis_alloc((*t).ndim, (*t).shape.as_ptr(), (*t).dtype);
@@ -2376,7 +2390,9 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     for i in 0..(*out).size {
         chelis_flat_to_indices(i, (*out).shape.as_ptr(), (*out).ndim, indices.as_mut_ptr());
         let src = chelis_indices_to_flat(indices.as_ptr(), (*t).strides.as_ptr(), (*t).ndim);
-        *(*out).data.add(i as usize) = *(*t).data.add(src as usize);
+        let dst_byte = ((*out).data as *mut u8).add(i as usize * elem_size);
+        let src_byte = ((*t).data as *const u8).add(src as usize * elem_size);
+        ptr::copy_nonoverlapping(src_byte, dst_byte, elem_size);
     }
     out
 }

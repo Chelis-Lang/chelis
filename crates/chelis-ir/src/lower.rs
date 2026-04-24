@@ -4489,17 +4489,16 @@ mod regression_tests {
 
     #[test]
     fn fix1_tensor_type_lit_dim() {
-        // The checker rejects tensor[512, f64] because the Phase 0f backend
-        // cannot represent f64 tensors, so this test must bypass the
-        // checker and exercise the IR lowerer directly. The property under
-        // test is that the lowerer preserves literal-dimension metadata
+        // Uses an unsupported-precision tensor type (bf16) as the lowerer-only
+        // fixture so the checker would reject it if we ran it. The property
+        // under test is that the lowerer preserves literal-dimension metadata
         // and non-f32 precisions on its DAG nodes — a property the lowerer
         // should keep intact even though no front-end source reaches it.
-        let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} f64))} 0))";
+        let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} bf16))} 0))";
         let dag = parse_and_lower_unchecked(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.dims, vec![DimInfo::Lit(512)]);
-        assert_eq!(node.output_type.precision, Prim::F64);
+        assert_eq!(node.output_type.precision, Prim::Bf16);
     }
 
     // Fix 3: Lexical scoping -- let restores bindings.

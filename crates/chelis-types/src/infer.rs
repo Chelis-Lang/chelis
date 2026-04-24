@@ -105,9 +105,9 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     }
 
     // Third pass: reject tensor types whose element precision isn't supported
-    // by the Phase 0f backend (f16/bf16/f64/f8e4m3). These would silently get
+    // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
-    // precision promotion" rule.
+    // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, &mut errors);
 
     InferResult {
@@ -1081,7 +1081,7 @@ fn walk_for_tensor_precision(
                         CheckErrorKind::UnsupportedTensorPrecision,
                         format!(
                             "tensor element precision `{}` is not supported by the current \
-                             Phase 0f backend (supported: f32, bool, int8, int32, int64)",
+                             Phase 0f backend (supported: f32, f64, bool, int8, int32, int64)",
                             name
                         ),
                         vec![format!(
@@ -7256,7 +7256,7 @@ fn infer_cast(
                     CheckErrorKind::UnsupportedTensorPrecision,
                     format!(
                         "cannot cast tensor to unsupported element precision `{}` \
-                         (supported: f32, bool, int8, int32, int64)",
+                         (supported: f32, f64, bool, int8, int32, int64)",
                         new_prec.name()
                     ),
                     vec!["Cast to f32 or an integer precision instead".to_string()],
@@ -8263,14 +8263,10 @@ mod tests {
     // ── Unsupported tensor precision tests ──────────────────────
 
     #[test]
-    fn tensor_ascription_rejects_f64() {
-        // (y : tensor[4, f64]) must be rejected at check time — the
-        // Phase 0f backend downcasts silently otherwise, violating
-        // "no implicit precision promotion".
-        check_err(
-            "(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f64))} 0))",
-            CheckErrorKind::UnsupportedTensorPrecision,
-        );
+    fn tensor_ascription_accepts_f64() {
+        // v0.2.3: f64 tensors are now a first-class precision. The checker
+        // accepts tensor[..., f64]; the C backend emits `double` arrays.
+        check_ok("(def {} y (lit {type: (t-tensor {} (d-lit {} 4) (t-prim {} f64))} 0))");
     }
 
     #[test]
@@ -8309,12 +8305,12 @@ mod tests {
     }
 
     #[test]
-    fn cast_tensor_rejects_f64() {
-        // cast(tensor_f32, f64) — eval fails, so reject at check time.
-        check_err(
+    fn cast_tensor_accepts_f64() {
+        // v0.2.3: tensor-f64 is a valid cast target. The checker accepts
+        // cast(tensor_f32, f64); the backend emits float→double conversion.
+        check_ok(
             "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))
              (def {} y (cast {} (var {} x) (t-prim {} f64)))",
-            CheckErrorKind::UnsupportedTensorPrecision,
         );
     }
 
@@ -8337,9 +8333,9 @@ mod tests {
     }
 
     #[test]
-    fn surf_source_rejects_f64_tensor_ascription() {
-        // Exercise the full surf → desugar → check pipeline to confirm
-        // the user-facing syntax `(expr : tensor[4, f64])` is rejected.
+    fn surf_source_accepts_f64_tensor_ascription() {
+        // v0.2.3: exercise the full surf → desugar → check pipeline to confirm
+        // the user-facing syntax `(expr : tensor[4, f64])` is accepted.
         let decls = chelis_surf::parser::parse_str(
             "y = (to_tensor([1.0, 2.0, 3.0, 4.0]) : tensor[4, f64])",
         )
@@ -8347,28 +8343,28 @@ mod tests {
         let exprs = chelis_surf::desugar::desugar_program(&decls);
         let result = infer_program(&exprs);
         assert!(
-            result
+            !result
                 .errors
                 .iter()
                 .any(|e| matches!(e.kind, CheckErrorKind::UnsupportedTensorPrecision)),
-            "expected UnsupportedTensorPrecision in surf-level f64 tensor ascription, got: {:?}",
+            "expected no UnsupportedTensorPrecision for f64 tensor ascription, got: {:?}",
             result.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn surf_source_rejects_cast_to_f64_tensor() {
-        // Exercise the full pipeline for `cast(tensor, f64)`.
+    fn surf_source_accepts_cast_to_f64_tensor() {
+        // v0.2.3: exercise the full pipeline for `cast(tensor, f64)`.
         let decls =
             chelis_surf::parser::parse_str("y = cast(to_tensor([1.5]), f64)").expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
         let result = infer_program(&exprs);
         assert!(
-            result
+            !result
                 .errors
                 .iter()
                 .any(|e| matches!(e.kind, CheckErrorKind::UnsupportedTensorPrecision)),
-            "expected UnsupportedTensorPrecision for cast(tensor, f64), got: {:?}",
+            "expected no UnsupportedTensorPrecision for cast(tensor, f64), got: {:?}",
             result.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
     }

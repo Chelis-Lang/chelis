@@ -418,7 +418,7 @@ impl CEmitter {
     fn validate_supported_precisions(dag: &Dag) {
         for node in dag.nodes() {
             match node.output_type.precision {
-                Prim::F32 | Prim::Bool | Prim::Int32 | Prim::Int64 => {}
+                Prim::F32 | Prim::F64 | Prim::Bool | Prim::Int32 | Prim::Int64 => {}
                 other => panic!(
                     "C backend does not yet support {} tensors, found at node {}",
                     other.name(),
@@ -427,7 +427,10 @@ impl CEmitter {
             }
 
             if let RiscOp::Cast { new_precision } = node.op
-                && !matches!(new_precision, Prim::F32 | Prim::Int32 | Prim::Int64)
+                && !matches!(
+                    new_precision,
+                    Prim::F32 | Prim::F64 | Prim::Int32 | Prim::Int64
+                )
             {
                 panic!(
                     "C backend does not yet support casts to {}, found at node {}",
@@ -597,6 +600,7 @@ impl CEmitter {
     fn dtype_macro(ty: &TensorType) -> &'static str {
         match ty.precision {
             Prim::F32 => "CHELIS_F32",
+            Prim::F64 => "CHELIS_F64",
             Prim::Bool => "CHELIS_BOOL",
             Prim::Int32 => "CHELIS_I32",
             Prim::Int64 => "CHELIS_I64",
@@ -608,12 +612,42 @@ impl CEmitter {
     /// F32 and Bool use `float` (the native data pointer type).
     /// Int32 uses `int32_t` (reinterpret cast; sizeof matches float).
     /// Int64 uses `int64_t` (reinterpret cast; sizeof is 2x float, alloc adjusts).
+    /// F64 uses `double` (reinterpret cast; sizeof is 2x float, alloc adjusts).
     fn elem_type(ty: &TensorType) -> &'static str {
         match ty.precision {
             Prim::F32 | Prim::Bool => "float",
+            Prim::F64 => "double",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
             _ => "float",
+        }
+    }
+
+    /// Returns true when the tensor's element type is `double`, requiring
+    /// double-precision math helpers (`exp` vs `expf`) and `chelis_fill_f64`.
+    fn is_f64(ty: &TensorType) -> bool {
+        matches!(ty.precision, Prim::F64)
+    }
+
+    /// Double-precision equivalent of a single-precision C math symbol used
+    /// by the emitter. Only the set we actually route through emit_unary_func
+    /// and emit_binary_func is mapped here; unmapped symbols pass through
+    /// unchanged so the emitter never silently renames an unexpected function.
+    fn double_math_fn(scalar_f: &str) -> &str {
+        match scalar_f {
+            "expf" => "exp",
+            "logf" => "log",
+            "sinf" => "sin",
+            "sqrtf" => "sqrt",
+            "cosf" => "cos",
+            "tanf" => "tan",
+            "atanf" => "atan",
+            "fabsf" => "fabs",
+            "floorf" => "floor",
+            "ceilf" => "ceil",
+            "fmaxf" => "fmax",
+            "fminf" => "fmin",
+            other => other,
         }
     }
 
@@ -637,6 +671,9 @@ impl CEmitter {
                     "{{ int32_t *__p = (int32_t*)t{id}->data; for (int __i = 0; __i < t{id}->size; __i++) __p[__i] = (int32_t){}; }}",
                     value as i32
                 ));
+            }
+            Prim::F64 => {
+                self.line(&format!("chelis_fill_f64(t{id}, {value:.17});"));
             }
             _ => {
                 self.line(&format!("chelis_fill_f32(t{id}, {:.8}f);", value as f32));
@@ -712,6 +749,12 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        let et = Self::elem_type(ty);
+        let f = if Self::is_f64(ty) {
+            Self::double_math_fn(func)
+        } else {
+            func
+        };
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
@@ -720,14 +763,18 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!("assert(t{a}->size == t{id}->size);"));
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
-        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
-        self.line(&format!("const float* restrict __in_b_{id} = t{b}->data;"));
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const {et}* restrict __in_b_{id} = (const {et}*)t{b}->data;"
+        ));
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = {func}(__in_a_{id}[i], __in_b_{id}[i]);"
+            "__out_{id}[i] = {f}(__in_a_{id}[i], __in_b_{id}[i]);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -748,7 +795,7 @@ impl CEmitter {
             "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
         ));
         self.line(&format!(
-            "t{id}->data[i] = {func}(t{a}->data[idx_a], t{b}->data[idx_b]);"
+            "(({et}*)t{id}->data)[i] = {f}((({et}*)t{a}->data)[idx_a], (({et}*)t{b}->data)[idx_b]);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -857,14 +904,26 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        let et = Self::elem_type(ty);
+        let is_f64 = Self::is_f64(ty);
+        let f = if is_f64 {
+            Self::double_math_fn(func)
+        } else {
+            func
+        };
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
         self.indent += 1;
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
-        self.line(&format!("const float* restrict __in_a_{id} = t{a}->data;"));
-        if self.math_lib == crate::MathLib::VForce {
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        // SIMD/batched math paths currently only support f32. For f64 tensors
+        // or when no SIMD library is selected, fall back to the scalar OMP SIMD
+        // loop with the appropriate (double- or single-precision) math function.
+        if !is_f64 && self.math_lib == crate::MathLib::VForce {
             if let Some(vf_fn) = Self::vforce_func(func) {
                 // vForce whole-array batch API on macOS (Accelerate.framework).
                 self.line("{");
@@ -877,11 +936,11 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
                 self.indent -= 1;
                 self.line("}");
             }
-        } else if self.math_lib == crate::MathLib::Sleef {
+        } else if !is_f64 && self.math_lib == crate::MathLib::Sleef {
             if let Some(simd_macro) = Self::sleef_macro(func) {
                 self.line("#ifdef CHELIS_HAS_SLEEF");
                 self.line("{");
@@ -903,7 +962,7 @@ impl CEmitter {
                 self.line(&format!("for (; __i_{id} < t{id}->size; __i_{id}++) {{"));
                 self.indent += 1;
                 self.line(&format!(
-                    "__out_{id}[__i_{id}] = {func}(__in_a_{id}[__i_{id}]);"
+                    "__out_{id}[__i_{id}] = {f}(__in_a_{id}[__i_{id}]);"
                 ));
                 self.indent -= 1;
                 self.line("}");
@@ -913,7 +972,7 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
                 self.indent -= 1;
                 self.line("}");
                 self.line("#endif");
@@ -921,7 +980,7 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
                 self.indent -= 1;
                 self.line("}");
             }
@@ -929,7 +988,7 @@ impl CEmitter {
             self.line("#pragma omp parallel for simd");
             self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
             self.indent += 1;
-            self.line(&format!("__out_{id}[i] = {func}(__in_a_{id}[i]);"));
+            self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
             self.indent -= 1;
             self.line("}");
         }
@@ -946,7 +1005,9 @@ impl CEmitter {
         self.line(&format!(
             "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
         ));
-        self.line(&format!("t{id}->data[i] = {func}(t{a}->data[idx]);"));
+        self.line(&format!(
+            "(({et}*)t{id}->data)[i] = {f}((({et}*)t{a}->data)[idx]);"
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2606,6 +2667,84 @@ mod tests {
     }
 
     #[test]
+    fn f64_const_uses_chelis_fill_f64_and_dtype_macro() {
+        // v0.2.3: f64 tensors are a first-class precision. The const path must
+        // emit CHELIS_F64 and chelis_fill_f64 (not chelis_fill_f32, which would
+        // silently downcast).
+        let mut dag = Dag::new();
+        dag.add_node(
+            RiscOp::Const { value: 1.5 },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F64,
+            },
+        );
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(
+            c.contains("CHELIS_F64"),
+            "generated C must use CHELIS_F64 dtype macro:\n{c}"
+        );
+        assert!(
+            c.contains("chelis_fill_f64"),
+            "generated C must call chelis_fill_f64 for f64 const:\n{c}"
+        );
+        assert!(
+            !c.contains("chelis_fill_f32(t0"),
+            "generated C must not fall back to chelis_fill_f32 on an f64 tensor:\n{c}"
+        );
+    }
+
+    #[test]
+    fn f64_tensor_add_uses_double_pointer_cast() {
+        // Regression: binary elementwise over f64 tensors must emit double*
+        // typed pointer casts so gcc reads 8 bytes per element.
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F64,
+        };
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone());
+        dag.add_node(RiscOp::Add, vec![a, b], ty);
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("CHELIS_F64"), "generated C must use CHELIS_F64");
+        assert!(
+            c.contains("double"),
+            "generated C must use double typed pointer casts:\n{c}"
+        );
+    }
+
+    #[test]
+    fn f64_tensor_exp_emits_exp_not_expf() {
+        // exp(tensor[n, f64]) must route to the double-precision math symbol.
+        // Emitting expf() would silently truncate to float and lose precision.
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F64,
+        };
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone());
+        dag.add_node(RiscOp::Exp, vec![a], ty);
+        let c = CEmitter::emit_dag_with_options(
+            &dag,
+            "test_fn",
+            crate::CodegenOptions {
+                math_lib_override: Some(crate::MathLib::None),
+                ..crate::CodegenOptions::default()
+            },
+        );
+        assert!(
+            c.contains("exp("),
+            "f64 exp must emit exp(, not expf(:\n{c}"
+        );
+        assert!(
+            !c.contains("expf("),
+            "f64 exp must not emit the f32 expf( symbol:\n{c}"
+        );
+    }
+
+    #[test]
     fn int64_add_does_not_panic() {
         // Regression: binary elementwise over int64 tensors used to panic.
         let mut dag = Dag::new();
@@ -2713,15 +2852,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "C backend does not yet support f64 tensors")]
+    #[should_panic(expected = "C backend does not yet support bf16 tensors")]
     fn unsupported_precision_panics() {
+        // v0.2.3: f64 is now supported, so this regression uses bf16 as
+        // the unsupported-precision fixture. The backend must still panic
+        // on any other reduced-precision float.
         let mut dag = Dag::new();
         dag.add_node(
             RiscOp::Const { value: 1.0 },
             vec![],
             TensorType {
                 dims: vec![],
-                precision: Prim::F64,
+                precision: Prim::Bf16,
             },
         );
         let _ = CEmitter::emit_dag(&dag, "test_fn");
