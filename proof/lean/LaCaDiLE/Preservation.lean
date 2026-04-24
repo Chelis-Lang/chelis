@@ -2832,6 +2832,111 @@ theorem wellScoped_plug_inner
   · exact wellScoped_handle_body h
   · simpa [plug] using h
 
+private theorem locRefsSeparated_left_of_nodup_append
+    {xs ys : List Loc}
+    (h : (xs ++ ys).Nodup) :
+    LocRefsSeparated xs ys := by
+  rcases List.nodup_append.mp h with ⟨_hxs, _hys, hxy⟩
+  intro ell hx hy
+  exact hxy ell hx ell hy rfl
+
+private theorem locRefsSeparated_right_of_nodup_append
+    {xs ys : List Loc}
+    (h : (xs ++ ys).Nodup) :
+    LocRefsSeparated ys xs := by
+  rcases List.nodup_append.mp h with ⟨_hxs, _hys, hxy⟩
+  intro ell hy hx
+  exact hxy ell hx ell hy rfl
+
+private theorem runtimeLinear_subst_singleton_separated
+    {Sigma : StoreTyp}
+    {x : String} {tArg tRet : Typ} {slot : Option Typ}
+    {body v : Term} {eps : EffectRow} {rhsRefs : List Loc}
+    (hBody : HasType [] Sigma [(x, some tArg)] body tRet eps [(x, slot)])
+    (hBodyLex : LexicallyScoped [(x, some tArg)] body)
+    (hV : HasType [] Sigma [] v tArg [] [])
+    (hVScope : WellScoped v)
+    (hVClosed : Closed v)
+    (hlinBody : RuntimeLinear body)
+    (hsepBodyRhs : LocRefsSeparated (locRefs body) rhsRefs)
+    (hsepRhsBody : LocRefsSeparated rhsRefs (locRefs body))
+    (hlinV : RuntimeLinear v)
+    (hsepVBody : LocRefsSeparated (locRefs v) (locRefs body))
+    (hsepBodyV : LocRefsSeparated (locRefs body) (locRefs v))
+    (hsepVRhs : LocRefsSeparated (locRefs v) rhsRefs)
+    (hsepRhsV : LocRefsSeparated rhsRefs (locRefs v))
+    (hxBody : x ∉ boundVars body) :
+    RuntimeLinear (subst body v x) ∧
+      LocRefsSeparated (locRefs (subst body v x)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefs (subst body v x)) := by
+  rcases transport_typing_lexical hBody hBodyLex with
+    ⟨bodyDB, hEraseBody, hBodyDB⟩
+  rcases transport_typing_lexical hV (lexical_nil hVScope) with
+    ⟨vDB, hEraseV, hVDB⟩
+  have hEraseSubst :
+      eraseTerm [] (subst body v x) = some (substDBAux 0 vDB bodyDB) := by
+    simpa using
+      eraseTerm_subst_tail (ρ := []) (v := v) (x := x) (by simp) hEraseV hEraseBody hxBody
+  have hlinBodyDB : RuntimeLinearDB bodyDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseBody).1 hlinBody
+  have hlinVDB : RuntimeLinearDB vDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseV).1 hlinV
+  have hsepBodyRhsDB :
+      LocRefsSeparated (locRefsDB bodyDB) rhsRefs := by
+    simpa [eraseTerm_locRefs hEraseBody] using hsepBodyRhs
+  have hsepRhsBodyDB :
+      LocRefsSeparated rhsRefs (locRefsDB bodyDB) := by
+    simpa [eraseTerm_locRefs hEraseBody] using hsepRhsBody
+  have hsepVBodyDB :
+      LocRefsSeparated (locRefsDB vDB) (locRefsDB bodyDB) := by
+    simpa [eraseTerm_locRefs hEraseV, eraseTerm_locRefs hEraseBody] using hsepVBody
+  have hsepBodyVDB :
+      LocRefsSeparated (locRefsDB bodyDB) (locRefsDB vDB) := by
+    simpa [eraseTerm_locRefs hEraseV, eraseTerm_locRefs hEraseBody] using hsepBodyV
+  have hsepVRhsDB :
+      LocRefsSeparated (locRefsDB vDB) rhsRefs := by
+    simpa [eraseTerm_locRefs hEraseV] using hsepVRhs
+  have hsepRhsVDB :
+      LocRefsSeparated rhsRefs (locRefsDB vDB) := by
+    simpa [eraseTerm_locRefs hEraseV] using hsepRhsV
+  have hlocsSubst :
+      locRefs (subst body v x) = locRefsDB (substDBAux 0 vDB bodyDB) := by
+    simpa using eraseTerm_locRefs hEraseSubst
+  cases hslot : slot with
+  | none =>
+      have hRes :=
+        runtimeLinearDB_subst_dead_separated
+          (Γ := []) (rhsRefs := rhsRefs)
+          0 (by simp) (by simpa [hslot] using hBodyDB) hVDB
+          hlinVDB hsepVBodyDB hsepBodyVDB hsepVRhsDB hsepRhsVDB
+          hlinBodyDB hsepBodyRhsDB hsepRhsBodyDB
+      refine ⟨?_, ?_, ?_⟩
+      · exact (eraseTerm_runtimeLinear_iff hEraseSubst).2 hRes.1
+      · simpa [hlocsSubst] using hRes.2.1
+      · simpa [hlocsSubst] using hRes.2.2
+  | some tKeep =>
+      have hLiveIn :
+          (eraseCtx [(x, some tArg)])[0]? = some (some tArg) := by
+        simp [eraseCtx]
+      have hMono := hasTypeDB_live_slot_monotone hBodyDB 0 tArg hLiveIn
+      have hOutLive :
+          (eraseCtx [(x, some tKeep)])[0]? = some (some tArg) := by
+        rcases hMono with hLive | hDead
+        · simpa [eraseCtx, hslot] using hLive
+        · simp [eraseCtx, hslot] at hDead
+      have htKeep : tKeep = tArg := by
+        simpa [eraseCtx] using hOutLive
+      subst htKeep
+      have hRes :=
+        runtimeLinearDB_subst_live_gen_separated
+          (Γ1 := []) (Γ2 := []) (v := vDB) (rhsRefs := rhsRefs)
+          0 (by simp) (by simp) (by simpa [hslot] using hBodyDB)
+          hlinBodyDB hsepBodyRhsDB hsepRhsBodyDB
+      refine ⟨?_, ?_, ?_⟩
+      · exact (eraseTerm_runtimeLinear_iff hEraseSubst).2 hRes.1
+      · simpa [hlocsSubst] using hRes.2.1
+      · simpa [hlocsSubst] using hRes.2.2
+
 /-- Step-indexed preservation with the runtime-linearity and frame-local
     store-agreement invariants made explicit. `locs` tracks the
     locations mentioned by any outer frame surrounding the current redex;
