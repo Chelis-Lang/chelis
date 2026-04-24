@@ -2933,6 +2933,117 @@ theorem preservation_ctx_counterexample_not_runtimeLinear :
     ¬ RuntimeLinear ctxCounterTerm := by
   simp [RuntimeLinear, locRefs, ctxCounterTerm]
 
+private def handleCtxCounterBody : Term :=
+  Term.pair (Term.loc 1) (Term.var "k")
+
+private def handleCtxCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", handleCtxCounterBody)]
+
+private def handleCtxCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (plug EvalCtx.copy (Term.perform EffectLabel.accum Term.unit))
+    handleCtxCounterClauses
+
+private def handleCtxCounterTerm' : Term :=
+  subst (subst handleCtxCounterBody Term.unit "x")
+    (Term.abs (capturedContName handleCtxCounterTerm) Typ.unit
+      (Term.handle [EffectLabel.accum]
+        (plug EvalCtx.copy
+          (Term.var (capturedContName handleCtxCounterTerm)))
+        handleCtxCounterClauses))
+    "k"
+
+/-- Concrete witness that one-step `RuntimeLinear` preservation is false
+    for captured-handler reduction under the current `locRefs`
+    definition: the selected clause body's location mention is copied
+    into the reified continuation because the continuation retains the
+    whole clause list. -/
+theorem runtimeLinear_handleOpCtx_counterexample :
+    RuntimeLinear handleCtxCounterTerm ∧
+    Step ⟨[], handleCtxCounterTerm⟩ ⟨[], handleCtxCounterTerm'⟩ ∧
+    ¬ RuntimeLinear handleCtxCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [RuntimeLinear, handleCtxCounterTerm, handleCtxCounterClauses,
+      handleCtxCounterBody, locRefs, locRefsClauses, plug]
+  · exact Step.handleOpCtx []
+      EffectLabel.accum Term.unit
+      [EffectLabel.accum] EvalCtx.copy
+      handleCtxCounterClauses
+      "x" "k" handleCtxCounterBody Typ.unit
+      IsValue.unit
+      ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+      (by simp [handleCtxCounterClauses])
+      (by simp)
+      (by simp [EvalCtx.noHandleFor])
+  · simp [RuntimeLinear, handleCtxCounterTerm', handleCtxCounterTerm,
+      handleCtxCounterClauses, handleCtxCounterBody, locRefs,
+      locRefsClauses, plug, subst]
+
+theorem runtimeLinear_handleOpCtxs_counterexample :
+    RuntimeLinear handleCtxCounterTerm ∧
+    Step ⟨[], handleCtxCounterTerm⟩ ⟨[], handleCtxCounterTerm'⟩ ∧
+    ¬ RuntimeLinear handleCtxCounterTerm' := by
+  simpa [handleCtxCounterTerm, handleCtxCounterTerm', multiPlug] using
+    (show RuntimeLinear
+        (Term.handle [EffectLabel.accum]
+          (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+          handleCtxCounterClauses) ∧
+      Step
+        ⟨[],
+          Term.handle [EffectLabel.accum]
+            (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+            handleCtxCounterClauses⟩
+        ⟨[],
+          subst (subst handleCtxCounterBody Term.unit "x")
+            (Term.abs
+              (capturedContName
+                (Term.handle [EffectLabel.accum]
+                  (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                  handleCtxCounterClauses))
+              Typ.unit
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy]
+                  (Term.var
+                    (capturedContName
+                      (Term.handle [EffectLabel.accum]
+                        (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                        handleCtxCounterClauses))))
+                handleCtxCounterClauses))
+            "k"⟩ ∧
+      ¬ RuntimeLinear
+        (subst (subst handleCtxCounterBody Term.unit "x")
+          (Term.abs
+            (capturedContName
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                handleCtxCounterClauses))
+            Typ.unit
+            (Term.handle [EffectLabel.accum]
+              (multiPlug [EvalCtx.copy]
+                (Term.var
+                  (capturedContName
+                    (Term.handle [EffectLabel.accum]
+                      (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                      handleCtxCounterClauses))))
+              handleCtxCounterClauses))
+          "k") by
+      refine ⟨?_, ?_, ?_⟩
+      · simp [RuntimeLinear, handleCtxCounterClauses, handleCtxCounterBody,
+          locRefs, locRefsClauses, multiPlug, plug]
+      · exact Step.handleOpCtxs []
+          EffectLabel.accum Term.unit
+          [EffectLabel.accum] [EvalCtx.copy]
+          handleCtxCounterClauses
+          "x" "k" handleCtxCounterBody Typ.unit
+          IsValue.unit
+          ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+          (by simp [handleCtxCounterClauses])
+          (by simp)
+          (by simp [EvalCtxChain.noHandleFor, EvalCtx.noHandleFor])
+      · simp [RuntimeLinear, handleCtxCounterClauses, handleCtxCounterBody,
+          locRefs, locRefsClauses, multiPlug, plug, subst])
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
