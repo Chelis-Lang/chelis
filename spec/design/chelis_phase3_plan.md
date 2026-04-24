@@ -1475,6 +1475,49 @@ comparison.
 
 ---
 
+## 3t: Chelis-Native Testing
+
+**Goal:** Add first-class testing to Chelis: a `Std.Test` module, a `chelis test` CLI command, and a convention for reef packages to include Chelis-language tests.
+
+**Prerequisites:** Bug 9 fix (eval hang on reef imports), fast `chelis eval` with package-aware imports.
+
+### Why This Matters
+
+Python test harnesses remain ONLY for cross-language parity verification (Nautilus vs scipy, Coral vs pandas). Everything else — unit tests, property tests, integration tests, smoke tests — is written in Chelis and run via `chelis test`. This is a hard rule for all reef packages, current and future.
+
+`chelis test` runs tests via the evaluator, not the build→gcc→link→run path. This means tests execute without a C compiler, without linking, without the runtime library. The evaluator already handles the full language surface. This is what makes it fast and what makes it usable as the default testing path for every reef package.
+
+### Deliverables
+
+1. **`Std.Test` module in chelis-std** — assertion functions (`assert_eq`, `assert_close`, `assert_close_tensor`, `assert_true`, `assert_false`, `fail`), either via a `Test` algebraic effect or runtime builtin.
+2. **`chelis test` CLI command** — discovers `tests/*.ch` files, evaluates each via the evaluator (not build+gcc+link+run), calls every `def test_*()` function, reports pass/fail with structured output, exits 0/1.
+3. **Test file convention** — `tests/*.ch` in every reef package, `def test_*()` naming, documented layout; `parity/` for Python-only parity scripts.
+4. **Nautilus test migration** — mathematical identity tests, property tests, edge case tests, smoke tests move from Python to Chelis. Scipy parity tests remain in Python under `parity/`. Migration scope: ~60-70% of assertions move to Chelis.
+5. **Coral test migration** — same split: structural correctness tests (frame construction, HAMT, filter/sort/groupby on known data, NaN handling, reshape round-trips) move to Chelis. Pandas parity stays in Python.
+6. **SKILL.md for `Std.Test`** — documents assertion API for coding agents.
+
+### Hard Rule
+
+Only code that compares Chelis output against an external oracle (scipy, pandas, QuantLib) uses Python. All other tests are written in Chelis and run via `chelis test`.
+
+### Reef Package Layout Convention
+
+```
+shell-name/
+├── src/           # Chelis source
+├── tests/         # Chelis-native test files (def test_*())
+├── parity/        # Python-only parity scripts (scipy/pandas/QuantLib comparison)
+└── reef.toml
+```
+
+### Acceptance Oracle
+
+`chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites. `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset.
+
+Full design: `chelis_native_testing_plan.md`
+
+---
+
 ## 3f: SKILL.md v2
 
 **Goal:** Update the teaching surface for the full Phase 2 + Phase 3 language, including
@@ -1711,6 +1754,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3j`: Nautilus | large | `3h`, `3i`, `3j-pre` | Pure Chelis library + nalgebra-backed LinAlg with hand-written adjoints (stats, distributions, special, linalg, optim, ODE/SDE) |
 | `3k`: Coral | medium | `3h`, `3d`, `3g`, `3j-pre` | Pure Chelis library (dataframes, NaN handling, rolling windows, Parquet via `parquet2` FFI) |
 | `3l`: Shoals | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
+| `3t`: Native Testing | medium | Bug 9 fix, fast eval | Chelis library (`Std.Test`) + CLI (`chelis test` command) + test migrations for Nautilus and Coral |
 | `3f`: SKILL.md v2 | small | all above | Documentation |
 
 This phase is intentionally sequential and pragmatic. The remaining work is about making
@@ -1749,6 +1793,9 @@ Before calling Phase 3 complete:
   rolling windows, and Parquet I/O as the `coral` Reef package
 - `3l` provides finance-specific pricing, risk, and stochastic process tools as the
   `shoals` Reef package
+- `3t` provides `Std.Test` and the `chelis test` CLI command; Nautilus and Coral test
+  suites are migrated so that mathematical identity / property / smoke tests run via
+  `chelis test` and only scipy/pandas parity checks remain in Python under `parity/`
 - `3f` reflects the full post-shell language in `SKILL.md` and examples, including
   `Nautilus.*`, `Coral.*`, and `Shoals.*` package imports and mentions of the `school`
   (classical ML) and `darwin` (evolutionary algorithms) stubs

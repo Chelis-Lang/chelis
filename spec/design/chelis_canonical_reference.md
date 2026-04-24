@@ -153,7 +153,7 @@ is `octant-docs` (full LaTeX document ingestion, Octant Phase 4).
 
 | Shell | Depends On | Status | Contents |
 |---|---|---|---|
-| `chelis-std` | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal` |
+| `chelis-std` | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests) |
 | `nautilus` | `chelis-std` | Active (`v0.1.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
 | `coral` | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
 | `shoals` | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
@@ -191,6 +191,8 @@ needs dates and exact arithmetic.
 
 **Lazy list fusion (future compiler optimization).** The tensor DAG fuses elementwise tensor operations. The host lane (lists, strings) is eager and creates intermediate allocations for chained `map`/`filter`/`fold`. A future compiler pass could fuse host-lane list operation chains into single-pass traversals, eliminating intermediates. Same principle as tensor fusion, applied to the host lane. Low priority — becomes relevant when profiling shows list allocation as a bottleneck in Coral string columns or Hull AST processing.
 
+**Chelis-native testing as the default.** All reef package tests are written in Chelis and run via `chelis test`, except for cross-language parity tests (comparing against scipy, pandas, or other external oracles) which use Python. This is a hard rule, not a guideline. Python test infrastructure exists only for parity verification against external libraries. `Std.Test` provides assertion functions (`assert_eq`, `assert_close`, `assert_close_tensor`, `assert_true`, `assert_false`, `fail`); `chelis test` discovers `tests/*.ch` files and runs them via the evaluator — no C compiler, no linking, no runtime library required. The `Test` effect (or runtime builtin) tracks assertion pass/fail. The `parity/` directory convention (renamed from `tests/`) holds Python-only parity scripts. Reef package layout: `tests/` for Chelis, `parity/` for Python. Full design: `chelis_native_testing_plan.md`.
+
 **SIMD support (four-level plan, future).** Level 1: `restrict` + `const` + alignment + pragmas in generated C (leverages linearity — the type system proves no aliasing, justifying `restrict`). Level 2: hand-written SIMD reductions in the runtime (sum/max/min/argmax/argmin, AVX2 + NEON). Level 3: vectorized math library integration (Sleef on Linux, Accelerate vForce on macOS) for SIMD-width math in fused kernels — highest impact item, targeted before OOPSLA benchmarks. Level 4: full SIMD-width-aware codegen (only if Levels 1-3 leave gaps). Full design: `chelis_simd_plan.md`.
 
 ---
@@ -223,6 +225,9 @@ chelis reef publish
 chelis validate --surf app.ch
 chelis validate --deep app.dp
 chelis validate --desugar app.ch
+chelis test tests/              # discover and run Chelis-native test files
+chelis test tests/foo.ch        # run a specific test file
+chelis test tests/ --filter erf # run only tests matching "erf"
 ```
 
 This is the intended stable surface for project-level documentation.

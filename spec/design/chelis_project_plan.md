@@ -635,6 +635,8 @@ A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus`
 need. Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed
 market data via named tensor dimensions.
 
+Shoals ships with Chelis-native tests from day one (`tests/*.ch`, run via `chelis test`). Python parity only if comparing against QuantLib or other external pricing references.
+
 **Key design decision: instruments as dicts, not closed ADTs.** Financial instruments
 are open-ended — structuring desks invent new payoff formulas continuously. Representing
 instruments as `Dict[String, f32]` (or `Dict[String, Column]` for term structures) lets
@@ -671,6 +673,8 @@ integration, no simplification, no equation solving. The intelligence is in the
 coding model (for the LLM-assisted lowering path that lands in `3o`) and the
 compiler (for type verification and provenance tracking). Full design in
 `chelis_octant_design.md`; executable sub-phase contract in `phase3n_octant.md`.
+
+Octant tests are Chelis-native. No external oracle for LaTeX parsing correctness.
 
 | Module | Contents |
 |---|---|
@@ -714,6 +718,8 @@ but no Phase 3 sub-phase implements them.
   Chelis, checked by Chelis, used to test Chelis. The marine name: the hull defines the
   shape of the vessel; the spec defines the shape of the language.
 
+  Hull tests are entirely Chelis-native. Hull tests ARE Chelis programs testing Chelis — no Python involvement.
+
   Hull implements the LaCaDiLE typing rules and operational semantics directly as
   Chelis functions over an ADT representation of the Deep AST. The grammar becomes ADTs
   (`type Expr = Var(String) | App(Expr, Expr) | Add(Expr, Expr) | ...`). The typing
@@ -748,6 +754,22 @@ but no Phase 3 sub-phase implements them.
   surrounding prose so model-validation teams can ingest an entire model document as
   a unit. Parser scope is significantly larger than the quant-finance expression
   subset shipped in `3n`. Depends on the full `3n`/`3o` Octant surface.
+
+### 3t: Chelis-Native Testing
+
+**Dependencies:** Bug 9 fix (eval hang on reef imports), fast `chelis eval` with package-aware imports.
+
+**Deliverables:**
+1. `Std.Test` module in chelis-std — assertion functions (`assert_eq`, `assert_close`, `assert_close_tensor`, `assert_true`, `assert_false`, `fail`), either via a `Test` algebraic effect or runtime builtin.
+2. `chelis test` CLI command — discovers `tests/*.ch` files, evaluates each via the evaluator (not build+gcc+link+run), calls every `def test_*()` function, reports pass/fail with structured output, exits 0/1.
+3. Test file convention — `tests/*.ch` in every reef package, `def test_*()` naming, documented layout.
+4. Nautilus test migration — mathematical identity tests, property tests, edge case tests, smoke tests move from Python to Chelis. Scipy parity tests remain in Python under `parity/`.
+5. Coral test migration — same split: structural correctness tests move to Chelis, pandas parity stays in Python.
+6. SKILL.md for `Std.Test` — documents assertion API for coding agents.
+
+**Hard rule:** Only code that compares Chelis output against an external oracle (scipy, pandas, QuantLib) uses Python. All other tests are written in Chelis and run via `chelis test`. This applies to all reef packages, current and future.
+
+Full design: `chelis_native_testing_plan.md`
 
 ### 3f: SKILL.md v2
 
@@ -822,7 +844,7 @@ training. Investment: make the evaluator resolve imports from installed reef pac
 optimize startup time, and handle the standard library without filesystem round-trips.
 This also serves agent-driven development (sub-second feedback on whether a generated
 function produces the right value). Target: `chelis eval myfile.ch --expr "erf(0.5)"`
-completes in under 200ms with Nautilus imported.
+completes in under 200ms with Nautilus imported. `chelis test` is a thin layer on top of fast eval: discover test files, evaluate each, collect assertion results. The fast eval investment directly enables native testing infrastructure.
 
 **Stability labels on shell APIs.** Mark each exported function in every SKILL.md as
 `stable` or `alpha`. The training pipeline's corpus-curation step (4a) uses these
