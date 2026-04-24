@@ -225,9 +225,11 @@ chelis reef publish
 chelis validate --surf app.ch
 chelis validate --deep app.dp
 chelis validate --desugar app.ch
-chelis test tests/              # discover and run Chelis-native test files
-chelis test tests/foo.ch        # run a specific test file
-chelis test tests/ --filter erf # run only tests matching "erf"
+chelis test tests/                    # discover and run Chelis-native test files
+chelis test tests/foo.ch              # run a specific test file
+chelis test tests/ --filter erf       # run only tests matching "erf"
+chelis test tests/ --timeout 10       # per-test wall-clock timeout (seconds, default 30)
+chelis test tests/ --json             # emit newline-delimited JSON records instead of plain text
 ```
 
 This is the intended stable surface for project-level documentation.

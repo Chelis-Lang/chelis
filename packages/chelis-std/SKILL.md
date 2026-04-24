@@ -842,6 +842,11 @@ def test_adds() -> unit ! { Test } = assert_eq(add(1.0, 1.0), 2.0, "add-1+1")
 `assert_close_tensor` is the tensor-shaped counterpart with identical
 semantics, reporting the first mismatching index in its failure message.
 
+`assert_shape` brands its own failures as
+`"assert_shape (<label>): expected <n>, got <m>"`. It does not leak the
+internal `test_assert_eq_int` prefix — grep for `assert_shape` in a run log
+and every shape mismatch from this assertion is accounted for.
+
 `Std.Test.fail` is a Chelis wrapper around `test_assert(false, msg)` so it
 carries `Test`. The tagless runtime builtin `fail` (used by non-test code) is
 intentionally not re-exported here — use `Std.Test.fail` from tests so the

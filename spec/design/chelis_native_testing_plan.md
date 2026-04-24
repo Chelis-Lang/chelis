@@ -320,3 +320,127 @@ Similar split. Frame construction tests, HAMT tests, filter/sort/groupby on know
 - `chelis fuzz erf --property "output_in(-1,1)" --trials 10000` — "erf never produces output outside [-1,1] on 10k random inputs"
 
 `Std.Test` is the foundation. `chelis fuzz` builds on it later. Both use the evaluator, both report pass/fail, both run from the CLI.
+
+---
+
+## Worked Example: `chelis test` End-to-End
+
+This walk-through mirrors the shipped CLI as of Phase 3t.5. Use it as the canonical
+reference for what `chelis test` actually does today — flag set, output shape, and exit
+codes all match the binary produced by `cargo run -p chelis-cli`.
+
+### Package layout
+
+A minimal reef package that exercises `chelis test`:
+
+```
+demo-foo/
+├── reef.toml
+├── src/
+│   └── foo.ch
+└── tests/
+    └── foo.ch
+```
+
+`reef.toml`:
+
+```toml
+[package]
+name = "demo-foo"
+version = "0.1.0"
+compiler = "=0.2.3"
+module_prefix = "Foo"
+```
+
+`src/foo.ch`:
+
+```chelis-surf-fragment
+module Foo.Core
+export (double)
+
+def double(x: f32) -> f32 = mul(x, cast(2.0, f32))
+```
+
+`tests/foo.ch`:
+
+```chelis-surf-fragment
+module Foo.Tests.Core
+
+import Foo.Core (double)
+import Std.Test (assert_eq, assert_close)
+
+def test_double_zero() -> unit ! { Test } =
+  assert_eq(double(cast(0.0, f32)), cast(0.0, f32), "double(0) = 0")
+
+def test_double_small() -> unit ! { Test } =
+  assert_close(double(cast(1.5, f32)), cast(3.0, f32), 1e-6, "double(1.5) ~ 3.0")
+```
+
+### Running the suite
+
+The default invocation discovers every `.ch` file under `tests/` and runs every
+nullary `def test_*()` function:
+
+```text
+$ chelis test tests/
+tests/foo.ch
+  test_double_zero ............. PASS
+  test_double_small ............ PASS
+
+2 passed, 0 failed
+```
+
+Exit code is `0` on all-pass, `1` on any failure, `2` on a runner-level error (missing
+`tests/` directory, invocation outside a reef package, etc.).
+
+### Narrowing with `--filter`
+
+`--filter` is a substring match over `<file>::<test_fn>`; non-matching tests are
+dropped before execution:
+
+```text
+$ chelis test tests/ --filter zero
+tests/foo.ch
+  test_double_zero ............. PASS
+
+1 passed, 0 failed
+```
+
+A filter that matches nothing still exits `0` with `0 passed, 0 failed` — consistent
+with `cargo test` and `pytest` ergonomics.
+
+### Machine-readable output with `--json`
+
+`--json` switches the plain-text renderer off and emits one JSON object per test row
+plus a final `{"summary": ...}` record (newline-delimited):
+
+```text
+$ chelis test tests/ --json
+{"file":"tests/foo.ch","test":"test_double_zero","status":"pass"}
+{"file":"tests/foo.ch","test":"test_double_small","status":"pass"}
+{"summary":{"passed":2,"failed":0}}
+```
+
+Failing rows carry an additional `"message"` field with the assertion's label and
+expected/got values (e.g. `"assert_close (double(1.5) ~ 3.0): expected 3, got 3.01, tol 1e-06"`).
+
+### Bounding wall time with `--timeout`
+
+`--timeout <seconds>` caps per-test wall-clock time. The default is 30 seconds;
+override for fast CI loops or slow integration suites:
+
+```text
+$ chelis test tests/ --timeout 5
+```
+
+A test that exceeds the budget fails with a timeout message and the run exits `1`.
+
+### Reef layout rule (hard)
+
+- `tests/` — Chelis-native test files. Run with `chelis test`. No C compiler, no
+  linker, no runtime library.
+- `parity/` — Python-only scripts comparing Chelis output against an external oracle
+  (scipy, pandas, sympy, QuantLib). Invoked separately from `chelis test`; not part of
+  the native test surface.
+
+Use `tests/` for Chelis; use `parity/` for Python oracle comparison only.
