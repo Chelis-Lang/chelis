@@ -1117,7 +1117,7 @@ fn check_rejects_unresolved_function_names() {
     let path = dir.path().join("unresolved_name.ch");
     write_file(
         &path,
-        "def probe(x: f32) -> f32 = sub(x, cos(x))\n\
+        "def probe(x: f32) -> f32 = sub(x, frobnicate(x))\n\
          def main() -> f32 = probe(cast(1.0, f32))\n",
     );
 
@@ -1135,8 +1135,8 @@ fn check_rejects_unresolved_function_names() {
             .as_array()
             .expect("unresolved_names array")
             .iter()
-            .any(|name| name == "cos"),
-        "expected unresolved_names to include cos, got {json}"
+            .any(|name| name == "frobnicate"),
+        "expected unresolved_names to include frobnicate, got {json}"
     );
 }
 

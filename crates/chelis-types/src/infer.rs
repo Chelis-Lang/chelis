@@ -9099,7 +9099,7 @@ mod tests {
     #[test]
     fn phase0e_preserves_unresolved_name_errors() {
         let decls = chelis_surf::parser::parse_str(
-            "def probe(x: f32) -> f32 = sub(x, cos(x))\n\
+            "def probe(x: f32) -> f32 = sub(x, frobnicate(x))\n\
              def main() -> f32 = probe(cast(1.0, f32))\n",
         )
         .expect("surf parse");
@@ -9117,8 +9117,8 @@ mod tests {
 
         let report = crate::fitness::check_phase0e_program(&exprs);
         assert!(
-            report.unresolved_names.contains(&"cos".to_string()),
-            "expected phase0e fitness report to include unresolved cos, got {:?}",
+            report.unresolved_names.contains(&"frobnicate".to_string()),
+            "expected phase0e fitness report to include unresolved frobnicate, got {:?}",
             report.unresolved_names
         );
     }
