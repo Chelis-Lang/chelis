@@ -2882,6 +2882,20 @@ private theorem locRefsSeparated_lhs_append
   · exact h1 ell hx hy
   · exact h2 ell hx hz
 
+private theorem locRefsSeparated_rhs_left_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated xs (ys ++ zs)) :
+    LocRefsSeparated xs ys := by
+  intro ell hx hy
+  exact h ell hx (List.mem_append_left _ hy)
+
+private theorem locRefsSeparated_rhs_right_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated xs (ys ++ zs)) :
+    LocRefsSeparated xs zs := by
+  intro ell hx hz
+  exact h ell hx (List.mem_append_right _ hz)
+
 private theorem runtimeLinear_clause_mem_separated
     {clauses : List (EffectLabel × String × String × Term)}
     {op : EffectLabel} {x k : String} {hb : Term} {rhsRefs : List Loc}
