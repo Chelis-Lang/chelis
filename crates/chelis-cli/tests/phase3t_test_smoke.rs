@@ -205,3 +205,220 @@ fn chelis_test_non_reef_context_exits_two() {
         .code(2)
         .stderr(predicate::str::contains("reef"));
 }
+
+// === RT3 regression tests ===
+
+#[test]
+fn chelis_test_empty_tests_dir_exits_zero_with_zero_zero_summary() {
+    // RT3 H5: empty `tests/` must exit 0 with "0 passed, 0 failed", not
+    // exit 2. Matches `cargo test` and `pytest` ergonomics — a fresh
+    // package with no tests yet is a legitimate state, not a runner error.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty");
+    // tests/ exists but has no .ch files. Ensure it is truly empty.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("0 passed, 0 failed"));
+}
+
+#[test]
+fn chelis_test_hidden_dotfile_is_skipped() {
+    // RT3 M2: editor temp files and other dot-prefixed files must not be
+    // enumerated as tests — avoids accidentally running an editor's backup
+    // or a hidden fixture.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-dotfile");
+    write_file(
+        &pkg.join("tests/.secret.ch"),
+        r#"module Smoke.Tests.Hidden
+
+def test_should_not_run() -> unit = test_assert(false, "hidden should be skipped")
+"#,
+    );
+    // A real test file alongside the dotfile so we still have something to run.
+    write_file(
+        &pkg.join("tests/visible.ch"),
+        r#"module Smoke.Tests.Visible
+
+def test_visible() -> unit = test_assert(true, "ok")
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test_visible"))
+        .stdout(predicate::str::contains("test_should_not_run").not())
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
+fn chelis_test_non_unit_returning_def_is_not_enumerated() {
+    // RT3 H4: `def test_x : bool = true` parses as a zero-param FunDef but
+    // is not a test — it's a typed value binding with non-unit type. The
+    // enumerator must skip it so the real `def test_real() -> unit`
+    // alongside it runs and passes.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-non-unit");
+    write_file(
+        &pkg.join("tests/mixed.ch"),
+        r#"module Smoke.Tests.Mixed
+
+def test_x : bool = true
+
+def test_real() -> unit = test_assert(true, "real test runs")
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The real test must PASS. The value-binding `test_x` must not appear
+    // as its own row — enumerator must have skipped it.
+    assert!(
+        stdout.contains("test_real"),
+        "test_real missing from:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "PASS missing from:\nstdout={stdout}\nstderr={stderr}"
+    );
+    // `test_x` must not appear as an enumerated test row — a cascade row
+    // (e.g., `test_x ... FAIL (module-init failed)`) would imply it was
+    // enumerated. Check that the only lines mentioning `test_x` (if any)
+    // are not test-result rows.
+    for line in stdout.lines() {
+        if line.contains("test_x") {
+            assert!(
+                !line.contains("PASS") && !line.contains("FAIL"),
+                "test_x appeared as a test row; got:\nstdout={stdout}\nstderr={stderr}"
+            );
+        }
+    }
+    assert!(
+        stdout.contains("1 passed, 0 failed"),
+        "summary missing from:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(output.status.success(), "expected exit 0");
+}
+
+#[test]
+fn chelis_test_duplicate_test_name_is_reported_as_file_level_error() {
+    // RT3 H3: two `def test_foo()` in the same file is Chelis-level
+    // shadowing and will execute the second body silently. Test runner
+    // must surface this as a fatal enumeration error attributed to the
+    // file, not pretend both ran.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-dup");
+    write_file(
+        &pkg.join("tests/dup.ch"),
+        r#"module Smoke.Tests.Dup
+
+def test_foo() -> unit = test_assert(true, "first")
+
+def test_foo() -> unit = test_assert(false, "second")
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("duplicate test definition"));
+}
+
+#[test]
+fn chelis_test_file_level_error_does_not_cascade_full_error_per_test() {
+    // RT3 H2: a type error in ONE test must not cascade the FULL error
+    // message into every other test row. The file-level error is reported
+    // ONCE with its full detail; the per-test rows carry only a brief
+    // cascade marker ("module-init failed"). Verify the full error text
+    // is attributed to a single row, not duplicated across per-test rows.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-compile");
+    write_file(
+        &pkg.join("tests/bad.ch"),
+        r#"module Smoke.Tests.Bad
+
+def test_broken() -> unit = test_assert_eq_int(1, true, "mismatched types")
+
+def test_healthy() -> unit = test_assert(true, "would have passed")
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The full type-error detail must appear exactly once across all rows —
+    // not repeated per test (that was the cascade bug).
+    let full_err_count = stdout.matches("precision mismatch").count()
+        + stdout.matches("type mismatch").count()
+        + stdout.matches("expected int64").count();
+    assert!(
+        full_err_count <= 2,
+        "full error message should not be duplicated across per-test rows; got:\n{stdout}"
+    );
+    // Cascade rows carry the brief marker, not the full error.
+    assert!(
+        stdout.contains("module-init failed"),
+        "cascade marker missing; got:\n{stdout}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn chelis_test_module_init_failure_surfaces_as_module_init_row_and_cascades() {
+    // RT3 H1: a top-level `let _ = assert_*(...)` that fails must surface
+    // as its own `module-init` row and cascade every discovered test to
+    // FAIL with a "module-init failed" message. Matches the spec's
+    // worked output example.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-moduleinit");
+    write_file(
+        &pkg.join("tests/init.ch"),
+        r#"module Smoke.Tests.Init
+
+_sanity = test_assert(false, "module init fails here")
+
+def test_one() -> unit = test_assert(true, "would have passed one")
+
+def test_two() -> unit = test_assert(true, "would have passed two")
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("module-init"),
+        "module-init row missing from:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("test_one") && stdout.contains("test_two"),
+        "cascade-failed tests missing from:\n{stdout}"
+    );
+    // All three rows are FAIL (module-init plus two cascades).
+    let fail_count = stdout.matches("FAIL").count();
+    assert!(
+        fail_count >= 3,
+        "expected module-init + 2 cascades = 3+ FAIL rows; got {fail_count} in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("module-init failed"),
+        "cascade message missing from:\n{stdout}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}

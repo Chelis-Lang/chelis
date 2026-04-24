@@ -822,10 +822,18 @@ fn cmd_test(
 
     let test_files = discover_test_files(&target)?;
     if test_files.is_empty() {
-        return Err(format!(
-            "no .ch files found under `{}` — `chelis test` requires at least one test file to run",
-            target.display()
-        ));
+        // Empty test dir is a legitimate CI state (no tests yet, or all filtered
+        // out before discovery). Report 0/0 and exit 0 — matches `cargo test` and
+        // `pytest` ergonomics. A truly missing `tests/` dir already errored above.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        if json {
+            writeln!(out, "{{\"summary\":{{\"passed\":0,\"failed\":0}}}}")
+                .map_err(|e| e.to_string())?;
+        } else {
+            writeln!(out, "0 passed, 0 failed").map_err(|e| e.to_string())?;
+        }
+        return Ok(0);
     }
 
     let timeout = Duration::from_secs(timeout_secs.max(1));
@@ -907,7 +915,24 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
         return Ok(vec![target.to_path_buf()]);
     }
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(target).sort_by_file_name() {
+    let walker = walkdir::WalkDir::new(target)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            // Skip dot-prefixed files AND directories (editor temp files, build
+            // dirs like `.git` or `target/.rustc_info.json`, hidden fixtures).
+            // Also skip `target/` directories which accumulate build artifacts
+            // and have bitten us in red-team testing.
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with('.') {
+                return false;
+            }
+            if entry.file_type().is_dir() && name == "target" {
+                return false;
+            }
+            true
+        });
+    for entry in walker {
         let entry = entry.map_err(|e| format!("failed to walk {}: {e}", target.display()))?;
         if !entry.file_type().is_file() {
             continue;
@@ -1008,9 +1033,54 @@ fn run_test_file(
     // to `Std.*` or sibling modules.
     let flat_decls = flatten_module_decls(&parsed);
 
-    let matched_tests = enumerate_test_fns(&flat_decls, filter, rel_display);
+    let matched_tests = match enumerate_test_fns(&flat_decls, filter, rel_display) {
+        EnumerationOutcome::Tests(tests) => tests,
+        EnumerationOutcome::Error(msg) => {
+            return Ok(vec![TestRow {
+                file: rel_display.to_string(),
+                test: "<file>".to_string(),
+                status: TestStatus::Fail,
+                message: Some(msg),
+            }]);
+        }
+    };
     if matched_tests.is_empty() {
         return Ok(Vec::new());
+    }
+
+    // File-level compile pre-check (RT3 H2). If the whole module doesn't
+    // type-check, emit ONE file-level failure row instead of cascading the
+    // same compile error across every discovered test.
+    if let Err(compile_err) = chelis_reef::compile_with_reef_graph(graph, &flat_decls) {
+        return Ok(vec![TestRow {
+            file: rel_display.to_string(),
+            test: "<file>".to_string(),
+            status: TestStatus::Fail,
+            message: Some(format!("compile: {compile_err}")),
+        }]);
+    }
+
+    // Module-init pre-check (RT3 H1). Evaluate the flat module alone — any
+    // top-level `let _ = assert_*(...)` failure surfaces here as its own
+    // `module-init` row and cascades every discovered test to FAIL. This
+    // matches the plan's worked example output.
+    if let Some(init_err) = eval_module_init(graph, &flat_decls, timeout) {
+        let mut rows = Vec::with_capacity(matched_tests.len() + 1);
+        rows.push(TestRow {
+            file: rel_display.to_string(),
+            test: "module-init".to_string(),
+            status: TestStatus::Fail,
+            message: Some(init_err),
+        });
+        for test in &matched_tests {
+            rows.push(TestRow {
+                file: rel_display.to_string(),
+                test: test.name.clone(),
+                status: TestStatus::Fail,
+                message: Some("module-init failed".to_string()),
+            });
+        }
+        return Ok(rows);
     }
 
     // Per-test isolation. We cannot bundle every test as a separate top-level
@@ -1051,7 +1121,7 @@ fn run_test_file(
 
         let source_text = chelis_surf::format::format_program(&prepared.decls);
         let root = synth_name.clone();
-        let outcome = chelis_reef::run_with_timeout(
+        let outcome = run_test_with_timeout(
             move || {
                 let request = EvalRequest {
                     source_kind: SourceKind::Surf,
@@ -1102,32 +1172,158 @@ struct DiscoveredTest {
     span: chelis_deep::Span,
 }
 
+/// Return value from `enumerate_test_fns` — either the list of runnable tests,
+/// or a fatal enumeration error (duplicate names) attributed to the file.
+enum EnumerationOutcome {
+    Tests(Vec<DiscoveredTest>),
+    Error(String),
+}
+
 fn enumerate_test_fns(
     decls: &[Decl],
     filter: Option<&str>,
     rel_display: &str,
-) -> Vec<DiscoveredTest> {
+) -> EnumerationOutcome {
     let mut out = Vec::new();
+    let mut seen: HashMap<String, bool> = HashMap::new();
     for decl in decls {
-        if let Decl::FunDef {
-            name, params, span, ..
+        let Decl::FunDef {
+            name,
+            params,
+            ret_ty,
+            span,
+            ..
         } = decl
-            && name.starts_with("test_")
-            && params.is_empty()
-        {
-            let key = format!("{rel_display}::{name}");
-            if let Some(needle) = filter
-                && !key.contains(needle)
-            {
-                continue;
-            }
-            out.push(DiscoveredTest {
-                name: name.clone(),
-                span: *span,
-            });
+        else {
+            continue;
+        };
+        // Tests must be genuinely nullary functions with a `test_<name>` prefix
+        // (not `test_` alone) and must return unit — either implicitly (no
+        // annotation), via `-> unit`, or via `-> _`. Rejecting non-unit return
+        // types is what keeps typed-value bindings like `def test_x : int64 = 42`
+        // from being mis-enumerated as zero-arg tests and cascading compile
+        // errors across every other test in the same file (RT3 H4).
+        if !name.starts_with("test_") || name == "test_" {
+            continue;
         }
+        if !params.is_empty() {
+            continue;
+        }
+        if let Some(ty) = ret_ty
+            && !is_unit_type(ty)
+        {
+            continue;
+        }
+        // Duplicate `def test_foo()` in the same file silently shadows in
+        // Chelis; surface it as a fatal enumeration error so the operator
+        // can fix the file instead of guessing which body ran (RT3 H3).
+        if seen.insert(name.clone(), true).is_some() {
+            return EnumerationOutcome::Error(format!(
+                "duplicate test definition `{name}` — each `def test_*()` in a test file must have a unique name"
+            ));
+        }
+        let key = format!("{rel_display}::{name}");
+        if let Some(needle) = filter
+            && !key.contains(needle)
+        {
+            continue;
+        }
+        out.push(DiscoveredTest {
+            name: name.clone(),
+            span: *span,
+        });
     }
-    out
+    EnumerationOutcome::Tests(out)
+}
+
+fn is_unit_type(ty: &chelis_surf::ast::TypeExpr) -> bool {
+    use chelis_surf::ast::TypeExpr;
+    match ty {
+        TypeExpr::Named(name, _) => name == "unit",
+        TypeExpr::Infer(_) => true,
+        _ => false,
+    }
+}
+
+/// Per-test evaluation wrapper that runs the closure on a worker thread with
+/// a generous (32 MB) stack and catches non-stack panics via `catch_unwind`.
+/// The default 2 MB thread stack is too tight for common test patterns that
+/// recurse through the evaluator's AST walker; 32 MB is a pragmatic v1 upper
+/// bound. Pathological recursion beyond that still aborts the whole process
+/// because Rust's stack-overflow handler is `abort()`, not `panic()`. Full
+/// subprocess isolation is tracked as a follow-up.
+fn run_test_with_timeout<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + std::panic::UnwindSafe + 'static,
+    timeout: Duration,
+    timeout_msg: &str,
+) -> Result<T, String> {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel::<Result<T, String>>();
+    let builder = std::thread::Builder::new()
+        .name("chelis-test-worker".to_string())
+        .stack_size(32 * 1024 * 1024);
+    if builder
+        .spawn(move || {
+            let result = std::panic::catch_unwind(f);
+            let payload = match result {
+                Ok(inner) => inner,
+                Err(panic_payload) => {
+                    let msg = panic_payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "test panicked (no message)".to_string());
+                    Err(format!("panic: {msg}"))
+                }
+            };
+            let _ = tx.send(payload);
+        })
+        .is_err()
+    {
+        return Err("failed to spawn test worker thread".to_string());
+    }
+    rx.recv_timeout(timeout)
+        .unwrap_or_else(|_| Err(timeout_msg.to_string()))
+}
+
+/// Evaluate the module without any synthesized test-caller binding. Returns
+/// `Some(err)` if any top-level `let _ = assert_*(...)` or other module-init
+/// computation fails; `None` if module init is clean. Wrapped in the same
+/// per-test timeout because a pathological module-init loop should not hang
+/// the runner.
+fn eval_module_init(
+    graph: &chelis_reef::PreparedReefGraph,
+    flat_decls: &[Decl],
+    timeout: Duration,
+) -> Option<String> {
+    let prepared = match chelis_reef::compile_with_reef_graph(graph, flat_decls) {
+        Ok(p) => p,
+        Err(err) => return Some(format!("compile: {err}")),
+    };
+    let source_text = chelis_surf::format::format_program(&prepared.decls);
+    let outcome = run_test_with_timeout(
+        move || {
+            let request = EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source_text,
+                bindings: BTreeMap::new(),
+            };
+            Ok(chelis_compiler_api::compiler::eval(request))
+        },
+        timeout,
+        &format!("module-init timeout after {}s", timeout.as_secs()),
+    );
+    match outcome {
+        Err(msg) => Some(msg),
+        Ok(Ok(_)) => None,
+        Ok(Err(err)) => Some(
+            err.errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+    }
 }
 
 fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
