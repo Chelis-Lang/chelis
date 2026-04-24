@@ -2937,6 +2937,98 @@ private theorem runtimeLinear_subst_singleton_separated
       · simpa [hlocsSubst] using hRes.2.1
       · simpa [hlocsSubst] using hRes.2.2
 
+private theorem runtimeLinear_beta_via_db
+    {Sigma : StoreTyp}
+    {x : String} {tArg tRet : Typ}
+    {body v : Term} {eps : EffectRow} {locs : List Loc}
+    (hTyp : HasType [] Sigma [] (Term.app (Term.abs x tArg body) v) tRet eps [])
+    (hv : IsValue v)
+    (hScope : WellScoped (Term.app (Term.abs x tArg body) v))
+    (hLinear : RuntimeLinear (Term.app (Term.abs x tArg body) v))
+    (hsep : LocRefsSeparated locs (locRefs (Term.app (Term.abs x tArg body) v))) :
+    RuntimeLinear (subst body v x) ∧
+      LocRefsSeparated (locRefs (subst body v x)) locs ∧
+      LocRefsSeparated locs (locRefs (subst body v x)) := by
+  rcases HasType.app_inv_sub_bridge hTyp with
+    ⟨GammaMid, t1, epsBody, epsFun, epsArg, hFun, hArg, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hFun
+  subst hMid
+  rcases HasType.abs_inv hFun with
+    ⟨tRet', epsBody', GammaBody, slot, hArrow, hBody, hOut⟩
+  injection hArrow with hT1 _hRet _hEff
+  subst t1
+  subst tRet'
+  subst epsBody'
+  subst GammaBody
+  have hClosedV : Closed v := has_type_closed_term_of_closed_input hArg
+  have hArgNil : HasType [] Sigma [] v tArg [] [] :=
+    HasType.value_eff_polymorphic_bridge hArg hv []
+  have hScopeAbs : WellScoped (Term.abs x tArg body) := by
+    simpa [plug] using
+      (wellScoped_plug_inner
+        (E := EvalCtx.appL v)
+        (e := Term.abs x tArg body) hScope)
+  have hScopeV : WellScoped v := by
+    simpa [plug] using
+      (wellScoped_plug_inner
+        (E := EvalCtx.appR (Term.abs x tArg body))
+        (e := v) hScope)
+  have hBodyScope := wellScoped_abs_body hScopeAbs
+  have hLocs : (locRefs body ++ locRefs v).Nodup := by
+    simpa [RuntimeLinear, locRefs] using hLinear
+  rcases List.nodup_append.mp hLocs with ⟨hlinBody, hlinV, _hsepBodyV⟩
+  refine runtimeLinear_subst_singleton_separated
+    hBody (lexical_singleton hBodyScope.1 hBodyScope.2)
+    hArgNil hScopeV hClosedV hlinBody ?_ ?_ hlinV ?_ ?_ ?_ ?_ hBodyScope.1
+  · intro ell hBodyLoc hLocs
+    exact hsep ell hLocs (by simp [locRefs, hBodyLoc])
+  · intro ell hLocs hBodyLoc
+    exact hsep ell hLocs (by simp [locRefs, hBodyLoc])
+  · exact locRefsSeparated_right_of_nodup_append hLocs
+  · exact locRefsSeparated_left_of_nodup_append hLocs
+  · intro ell hVLoc hLocs
+    exact hsep ell hLocs (by simp [locRefs, hVLoc])
+  · intro ell hLocs hVLoc
+    exact hsep ell hLocs (by simp [locRefs, hVLoc])
+
+private theorem runtimeLinear_letBind_via_db
+    {Sigma : StoreTyp}
+    {x : String} {v body : Term} {t : Typ} {eps : EffectRow} {locs : List Loc}
+    (hTyp : HasType [] Sigma [] (Term.letBind x v body) t eps [])
+    (hv : IsValue v)
+    (hScope : WellScoped (Term.letBind x v body))
+    (hLinear : RuntimeLinear (Term.letBind x v body))
+    (hsep : LocRefsSeparated locs (locRefs (Term.letBind x v body))) :
+    RuntimeLinear (subst body v x) ∧
+      LocRefsSeparated (locRefs (subst body v x)) locs ∧
+      LocRefsSeparated locs (locRefs (subst body v x)) := by
+  rcases HasType.plug_letBind_inv hTyp with
+    ⟨GammaMid, Gamma3, t1, eps1, eps2, slot, hV, hBody, hGammaOut, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hV
+  subst hMid
+  have hGamma3 : Gamma3 = [] := by simpa using hGammaOut
+  subst hGamma3
+  have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+  have hVNil : HasType [] Sigma [] v t1 [] [] :=
+    HasType.value_eff_polymorphic_bridge hV hv []
+  have hScopeParts := wellScoped_letBind_body hScope
+  have hLocs : (locRefs v ++ locRefs body).Nodup := by
+    simpa [RuntimeLinear, locRefs] using hLinear
+  rcases List.nodup_append.mp hLocs with ⟨hlinV, hlinBody, _hsep⟩
+  refine runtimeLinear_subst_singleton_separated
+    hBody (lexical_singleton hScopeParts.2.1 hScopeParts.2.2)
+    hVNil hScopeParts.1 hClosedV hlinBody ?_ ?_ hlinV ?_ ?_ ?_ ?_ hScopeParts.2.1
+  · intro ell hBodyLoc hLocs
+    exact hsep ell hLocs (by simp [locRefs, hBodyLoc])
+  · intro ell hLocs hBodyLoc
+    exact hsep ell hLocs (by simp [locRefs, hBodyLoc])
+  · exact locRefsSeparated_left_of_nodup_append hLocs
+  · exact locRefsSeparated_right_of_nodup_append hLocs
+  · intro ell hVLoc hLocs
+    exact hsep ell hLocs (by simp [locRefs, hVLoc])
+  · intro ell hLocs hVLoc
+    exact hsep ell hLocs (by simp [locRefs, hVLoc])
+
 /-- Step-indexed preservation with the runtime-linearity and frame-local
     store-agreement invariants made explicit. `locs` tracks the
     locations mentioned by any outer frame surrounding the current redex;
