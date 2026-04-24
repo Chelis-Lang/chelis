@@ -20,5 +20,9 @@ def assert_close(actual: f32, expected: f32, tol: f32, label: string) -> unit ! 
   }
 }
 def assert_close_tensor[n](actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
-def assert_shape[n](t: tensor[n, f32], expected_n: int64, label: string) -> unit ! { Test } = test_assert_eq_int(cast(shape(t, cast(0, int32)), int64), expected_n, label)
+def assert_shape[n](t: tensor[n, f32], expected_n: int64, label: string) -> unit ! { Test } = {
+  actual_n = cast(shape(t, cast(0, int32)), int64)
+  ok = eq(actual_n, expected_n)
+  test_assert(ok, string_concat("assert_shape (", string_concat(label, string_concat("): expected ", string_concat(to_string(expected_n), string_concat(", got ", to_string(actual_n)))))))
+}
 def fail(msg: string) -> unit ! { Test } = test_assert(false, msg)

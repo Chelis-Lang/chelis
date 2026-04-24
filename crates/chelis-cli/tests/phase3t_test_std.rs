@@ -269,6 +269,9 @@ ran = test_shape_bad()
         ])
         .assert()
         .failure()
+        // assert_shape must brand its own failures with `assert_shape (...)`
+        // rather than leaking the internal test_assert_eq_int prefix (RT2 C.2).
+        .stderr(predicate::str::contains("assert_shape"))
         .stderr(predicate::str::contains("shape-bad"))
         .stderr(predicate::str::contains("expected 7"));
 }
