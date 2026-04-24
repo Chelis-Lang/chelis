@@ -656,3 +656,69 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
         .success()
         .stdout(predicate::str::contains("\"score\": 1"));
 }
+
+#[test]
+fn reef_std_parquet_module_builds_cleanly() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("parquet-build-app");
+    let out_dir = dir.path().join("out");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        r#"[package]
+name = "parquet-build-app"
+version = "0.1.0"
+compiler = "=0.2.1"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
+"#,
+    );
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.IO.Parquet (read_parquet, write_parquet)
+
+def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
+def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(out_dir.join("main.c").exists(), "expected generated main.c");
+    assert!(out_dir.join("main.h").exists(), "expected generated main.h");
+}
