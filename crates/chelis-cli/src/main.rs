@@ -211,6 +211,23 @@ enum Command {
         #[clap(long, default_value = "30")]
         timeout: u64,
     },
+    /// Internal: run the tests in a single file and emit NDJSON on stdout.
+    /// Invoked by `chelis test` as a subprocess per file so a crash in one
+    /// test file (e.g., stack overflow) does not kill every other test file.
+    #[command(hide = true, name = "__test_file")]
+    InternalTestFile {
+        /// Absolute path to the .ch test file.
+        file: PathBuf,
+        /// Relative path used in the `<file>::<test>` filter key.
+        #[clap(long)]
+        rel_display: String,
+        /// Optional substring filter on `<file>::<test_fn>`.
+        #[clap(long)]
+        filter: Option<String>,
+        /// Per-test timeout in seconds.
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -278,6 +295,23 @@ fn main() {
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
+        Some(Command::InternalTestFile {
+            file,
+            rel_display,
+            filter,
+            timeout,
+        }) => match cmd_internal_test_file(
+            &file,
+            &rel_display,
+            filter.as_deref(),
+            Duration::from_secs(timeout.max(1)),
+        ) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        },
         Some(Command::Test {
             path,
             filter,
@@ -836,11 +870,17 @@ fn cmd_test(
         return Ok(0);
     }
 
-    let timeout = Duration::from_secs(timeout_secs.max(1));
     let mut passed: usize = 0;
     let mut failed: usize = 0;
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    // Parent prepares the reef graph once to validate we're in a reef package
+    // and to prime the lockfile. Per-file execution happens in a subprocess so
+    // a crash (stack overflow → abort()) in one file does not kill the others.
+    let _ = graph; // graph validated above; keep handle alive for the whole run
+    let self_path =
+        std::env::current_exe().map_err(|e| format!("could not locate chelis binary: {e}"))?;
 
     for file in &test_files {
         let rel_display = file
@@ -849,21 +889,8 @@ fn cmd_test(
             .display()
             .to_string();
 
-        let file_result = run_test_file(&graph, file, filter, &rel_display, timeout);
-        let rows = match file_result {
-            Ok(rows) => rows,
-            Err(err) => {
-                // File-level failure (parse error or compile error with no
-                // matching tests). Record as a synthetic row so the operator
-                // sees it, and count as failed.
-                vec![TestRow {
-                    file: rel_display.clone(),
-                    test: "<file>".to_string(),
-                    status: TestStatus::Fail,
-                    message: Some(err),
-                }]
-            }
-        };
+        let rows =
+            run_test_file_subprocess(&self_path, &cwd, file, &rel_display, filter, timeout_secs);
 
         if rows.is_empty() {
             // Nothing matched the filter in this file — skip silently so the
@@ -944,6 +971,137 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
         files.push(path.to_path_buf());
     }
     Ok(files)
+}
+
+/// Spawn `chelis __test_file <file> --rel-display ... --filter ... --timeout N`
+/// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
+/// child crash (stack overflow, panic in the evaluator) only kills the child;
+/// the parent attributes the loss as a file-level worker crash and moves on.
+fn run_test_file_subprocess(
+    self_path: &Path,
+    cwd: &Path,
+    file: &Path,
+    rel_display: &str,
+    filter: Option<&str>,
+    timeout_secs: u64,
+) -> Vec<TestRow> {
+    let mut cmd = std::process::Command::new(self_path);
+    cmd.arg("__test_file")
+        .arg(file)
+        .arg("--rel-display")
+        .arg(rel_display)
+        .arg("--timeout")
+        .arg(timeout_secs.to_string())
+        .current_dir(cwd);
+    if let Some(needle) = filter {
+        cmd.arg("--filter").arg(needle);
+    }
+    // Inherit CHELIS_REEF_HOME and PATH; the child needs the same reef
+    // registry the parent was configured with.
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(err) => {
+            return vec![TestRow {
+                file: rel_display.to_string(),
+                test: "<file>".to_string(),
+                status: TestStatus::Fail,
+                message: Some(format!("could not spawn test worker: {err}")),
+            }];
+        }
+    };
+
+    // Parse NDJSON rows from stdout. The child emits one `{file,test,status,message?}`
+    // record per line. A malformed or empty line is ignored; a completely empty
+    // stdout combined with a non-zero exit means the child crashed before
+    // running anything.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut rows = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(test) = value.get("test").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(status_s) = value.get("status").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let status = match status_s {
+            "pass" => TestStatus::Pass,
+            _ => TestStatus::Fail,
+        };
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let file_str = value
+            .get("file")
+            .and_then(|v| v.as_str())
+            .unwrap_or(rel_display)
+            .to_string();
+        rows.push(TestRow {
+            file: file_str,
+            test: test.to_string(),
+            status,
+            message,
+        });
+    }
+
+    // Child exited abnormally (signal, abort, crash before any output).
+    if rows.is_empty() && !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let signal_code = output.status.code();
+        let msg = if let Some(code) = signal_code {
+            format!("worker exited {code}: {}", stderr.trim())
+        } else {
+            format!("worker killed by signal: {}", stderr.trim())
+        };
+        rows.push(TestRow {
+            file: rel_display.to_string(),
+            test: "<file>".to_string(),
+            status: TestStatus::Fail,
+            message: Some(msg),
+        });
+    }
+
+    rows
+}
+
+/// Hidden subcommand body: run every test in a single file and emit
+/// per-test NDJSON on stdout. Called by the parent `chelis test` via
+/// `run_test_file_subprocess` for per-file crash isolation.
+fn cmd_internal_test_file(
+    file: &Path,
+    rel_display: &str,
+    filter: Option<&str>,
+    timeout: Duration,
+) -> Result<i32, String> {
+    let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
+    let graph = chelis_reef::prepare_reef_graph(&cwd)?;
+    let file_result = run_test_file(&graph, file, filter, rel_display, timeout);
+    let rows = match file_result {
+        Ok(rows) => rows,
+        Err(err) => vec![TestRow {
+            file: rel_display.to_string(),
+            test: "<file>".to_string(),
+            status: TestStatus::Fail,
+            message: Some(err),
+        }],
+    };
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut failed = 0usize;
+    for row in &rows {
+        writeln!(out, "{}", row.to_json()).map_err(|e| e.to_string())?;
+        if row.status == TestStatus::Fail {
+            failed += 1;
+        }
+    }
+    Ok(if failed == 0 { 0 } else { 1 })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
