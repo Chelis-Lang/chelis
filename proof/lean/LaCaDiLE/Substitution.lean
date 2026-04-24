@@ -338,6 +338,219 @@ theorem mem_locRefs_substClauses
 
 end
 
+mutual
+
+/-- Every binder appearing after substitution already came from the
+    original term or from the substituted value. -/
+theorem mem_boundVars_subst
+    (e v : Term) (x z : String)
+    (hmem : z ∈ boundVars (subst e v x)) :
+    z ∈ boundVars e ∨ z ∈ boundVars v := by
+  match e with
+  | Term.var y =>
+      by_cases hy : y = x
+      · simp [subst, hy] at hmem
+        exact Or.inr hmem
+      · simp [subst, hy, boundVars] at hmem
+  | Term.abs y t body =>
+      by_cases hy : y = x
+      · simp [subst, hy, boundVars] at hmem ⊢
+        exact Or.inl hmem
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · exact Or.elim (mem_boundVars_subst body v x z hmem)
+            (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.app e1 e2 =>
+      simp [subst, boundVars] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.letBind y e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · rcases hmem with hmem | hmem
+          · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+              (fun h => Or.inl (Or.inr (Or.inl h))) (fun h => Or.inr h)
+          · exact Or.inl (Or.inr (Or.inr hmem))
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · rcases hmem with hmem | hmem
+          · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+              (fun h => Or.inl (Or.inr (Or.inl h))) (fun h => Or.inr h)
+          · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+              (fun h => Or.inl (Or.inr (Or.inr h))) (fun h => Or.inr h)
+  | Term.copy e =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.letpair y k e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inr (Or.inl hmem))
+          · rcases hmem with hmem | hmem
+            · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+                (fun h => Or.inl (Or.inr (Or.inr (Or.inl h)))) (fun h => Or.inr h)
+            · exact Or.inl (Or.inr (Or.inr (Or.inr hmem)))
+      · by_cases hk : k = x
+        · simp [subst, hy, hk, boundVars] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inl hmem)
+          · rcases hmem with hmem | hmem
+            · exact Or.inl (Or.inr (Or.inl hmem))
+            · rcases hmem with hmem | hmem
+              · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inl h)))) (fun h => Or.inr h)
+              · exact Or.inl (Or.inr (Or.inr (Or.inr hmem)))
+        · simp [subst, hy, hk, boundVars] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inl hmem)
+          · rcases hmem with hmem | hmem
+            · exact Or.inl (Or.inr (Or.inl hmem))
+            · rcases hmem with hmem | hmem
+              · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inl h)))) (fun h => Or.inr h)
+              · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inr h)))) (fun h => Or.inr h)
+  | Term.pair e1 e2 =>
+      simp [subst, boundVars] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.fst e =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.snd e =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.unit =>
+      simp [subst, boundVars] at hmem
+  | Term.const _ _ =>
+      simp [subst, boundVars] at hmem
+  | Term.add e1 e2 =>
+      simp [subst, boundVars] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.mul e1 e2 =>
+      simp [subst, boundVars] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_boundVars_subst e1 v x z hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.sum e d =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.expand e d =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.uniformLike e lo hi =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.grad y t tOut body =>
+      by_cases hy : y = x
+      · simp [subst, hy, boundVars] at hmem ⊢
+        exact Or.inl hmem
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · exact Or.elim (mem_boundVars_subst body v x z hmem)
+            (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.vmap y t body =>
+      by_cases hy : y = x
+      · simp [subst, hy, boundVars] at hmem ⊢
+        exact Or.inl hmem
+      · simp [subst, hy, boundVars] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · exact Or.elim (mem_boundVars_subst body v x z hmem)
+            (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.handle epsH body clauses =>
+      simp [subst, boundVars] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_boundVars_subst body v x z hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_boundVars_substClauses clauses v x z hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | Term.perform op e =>
+      simp [subst, boundVars] at hmem ⊢
+      exact mem_boundVars_subst e v x z hmem
+  | Term.loc ell =>
+      simp [subst, boundVars] at hmem
+
+/-- Clause-list version of `mem_boundVars_subst`. -/
+theorem mem_boundVars_substClauses
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x z : String)
+    (hmem : z ∈ boundVarsClauses (substClauses clauses v x)) :
+    z ∈ boundVarsClauses clauses ∨ z ∈ boundVars v := by
+  match clauses with
+  | [] =>
+      simp [substClauses, boundVarsClauses] at hmem
+  | (op, y, k, hb) :: rest =>
+      by_cases hy : y = x
+      · simp [substClauses, subst, hy, boundVarsClauses] at hmem ⊢
+        rcases hmem with hmem | hmem
+        · exact Or.inl (Or.inl hmem)
+        · rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inr (Or.inl hmem))
+          · rcases hmem with hmem | hmem
+            · exact Or.inl (Or.inr (Or.inr (Or.inl hmem)))
+            · exact Or.elim (mem_boundVars_substClauses rest v x z hmem)
+                (fun h => Or.inl (Or.inr (Or.inr (Or.inr h)))) (fun h => Or.inr h)
+      · by_cases hk : k = x
+        · simp [substClauses, subst, hy, hk, boundVarsClauses] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inl hmem)
+          · rcases hmem with hmem | hmem
+            · exact Or.inl (Or.inr (Or.inl hmem))
+            · rcases hmem with hmem | hmem
+              · exact Or.inl (Or.inr (Or.inr (Or.inl hmem)))
+              · exact Or.elim (mem_boundVars_substClauses rest v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inr h)))) (fun h => Or.inr h)
+        · simp [substClauses, subst, hy, hk, boundVarsClauses] at hmem ⊢
+          rcases hmem with hmem | hmem
+          · exact Or.inl (Or.inl hmem)
+          · rcases hmem with hmem | hmem
+            · exact Or.inl (Or.inr (Or.inl hmem))
+            · rcases hmem with hmem | hmem
+              · exact Or.elim (mem_boundVars_subst hb v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inl h)))) (fun h => Or.inr h)
+              · exact Or.elim (mem_boundVars_substClauses rest v x z hmem)
+                  (fun h => Or.inl (Or.inr (Or.inr (Or.inr h)))) (fun h => Or.inr h)
+
+end
+
+/-- If `z` is absent from both `e` and `v`, substitution cannot
+    introduce `z` as a binder in the result. -/
+theorem subst_notBound
+    (e v : Term) (x z : String)
+    (he : z ∉ boundVars e) (hv : z ∉ boundVars v) :
+    z ∉ boundVars (subst e v x) := by
+  intro h
+  exact (mem_boundVars_subst e v x z h).elim he hv
+
+/-- Clause-list version of `subst_notBound`. -/
+theorem substClauses_notBound
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x z : String)
+    (hcls : z ∉ boundVarsClauses clauses) (hv : z ∉ boundVars v) :
+    z ∉ boundVarsClauses (substClauses clauses v x) := by
+  intro h
+  exact (mem_boundVars_substClauses clauses v x z h).elim hcls hv
+
 /-- Substitution on a closed term is a no-op: a closed term has no
     free variables, so `subst e v x` equals `e` regardless of `v`/`x`. -/
 theorem subst_closed
