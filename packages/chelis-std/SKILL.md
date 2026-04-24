@@ -787,3 +787,127 @@ Success criterion for the current skill:
 - more than half of these prompts should reach `fitness >= 0.9`
 - and end with zero checker errors
 - within five repair iterations
+
+## 8. `Std.Test` — Chelis-Native Test Assertions
+
+`Std.Test` provides the assertion surface for Chelis-native tests. Every
+exported function has the effect row `! { Test }`, so calling any of them
+from a `! {}`-declared function is a type error — that is the mechanism that
+keeps test assertions from silently leaking into production code.
+
+Import what you need:
+
+```chelis-surf-fragment
+import Std.Test (
+  assert_true,
+  assert_false,
+  assert_eq,
+  assert_eq_int,
+  assert_eq_bool,
+  assert_eq_string,
+  assert_close,
+  assert_close_tensor,
+  assert_shape,
+  fail
+)
+```
+
+A test function must declare `! { Test }`. Test discovery (3t.4) looks for
+nullary `def test_*()` functions, so use that naming convention:
+
+```chelis-surf-fragment
+def test_adds() -> unit ! { Test } = assert_eq(add(1.0, 1.0), 2.0, "add-1+1")
+```
+
+### API Summary
+
+| Function | Signature |
+|---|---|
+| `assert_true` | `(bool, string) -> unit ! { Test }` |
+| `assert_false` | `(bool, string) -> unit ! { Test }` |
+| `assert_eq` | `(f32, f32, string) -> unit ! { Test }` |
+| `assert_eq_int` | `(int64, int64, string) -> unit ! { Test }` |
+| `assert_eq_bool` | `(bool, bool, string) -> unit ! { Test }` |
+| `assert_eq_string` | `(string, string, string) -> unit ! { Test }` |
+| `assert_close` | `(f32, f32, f32, string) -> unit ! { Test }` |
+| `assert_close_tensor` | `(tensor[n, f32], tensor[n, f32], f32, string) -> unit ! { Test }` |
+| `assert_shape` | `(tensor[n, f32], int64, string) -> unit ! { Test }` |
+| `fail` | `(string) -> unit ! { Test }` |
+
+`assert_close` is strict: it fails when `|actual - expected| > tol`. Passing
+`tol == 0` requires exact equality. Negative or NaN `tol` produces an
+`"assert_close (<label>): invalid tolerance <t>"` failure. NaN in `actual` or
+`expected` is never close.
+
+`assert_close_tensor` is the tensor-shaped counterpart with identical
+semantics, reporting the first mismatching index in its failure message.
+
+`Std.Test.fail` is a Chelis wrapper around `test_assert(false, msg)` so it
+carries `Test`. The tagless runtime builtin `fail` (used by non-test code) is
+intentionally not re-exported here — use `Std.Test.fail` from tests so the
+checker can enforce that the Test effect is declared on the calling function.
+
+### Worked Examples
+
+```chelis-surf-fragment
+def test_true_flag() -> unit ! { Test } = assert_true(true, "flag-true")
+```
+
+```chelis-surf-fragment
+def test_false_flag() -> unit ! { Test } = assert_false(false, "flag-false")
+```
+
+```chelis-surf-fragment
+def test_f32_eq() -> unit ! { Test } = assert_eq(1.5, 1.5, "scalar-eq")
+```
+
+```chelis-surf-fragment
+def test_int_eq() -> unit ! { Test } =
+  assert_eq_int(cast(3, int64), cast(3, int64), "int-eq")
+```
+
+```chelis-surf-fragment
+def test_bool_eq() -> unit ! { Test } = assert_eq_bool(true, true, "bool-eq")
+```
+
+```chelis-surf-fragment
+def test_string_eq() -> unit ! { Test } =
+  assert_eq_string("hi", "hi", "str-eq")
+```
+
+```chelis-surf-fragment
+def test_close_scalar() -> unit ! { Test } =
+  assert_close(1.0, 1.01, 0.05, "close-scalar")
+```
+
+```chelis-surf-fragment
+def test_close_tensor() -> unit ! { Test } =
+  assert_close_tensor(
+    to_tensor([1.0, 2.0]),
+    to_tensor([1.0, 2.0]),
+    0.001,
+    "close-tensor"
+  )
+```
+
+```chelis-surf-fragment
+def test_tensor_shape() -> unit ! { Test } =
+  assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3")
+```
+
+```chelis-surf-fragment
+def test_unreachable() -> unit ! { Test } = fail("reached unreachable branch")
+```
+
+### Common Mistakes
+
+- Forgetting `! { Test }` on the test function signature. The checker will
+  reject the body with `UnhandledEffect` mentioning `Test`.
+- Calling the tagless runtime `fail` from a test — allowed, but you lose the
+  Test-effect signal. Prefer `Std.Test.fail` in test code.
+- Passing a negative tolerance to `assert_close` — that surfaces as an
+  explicit runtime failure with `"invalid tolerance"` in the message, not a
+  silent skip.
+- Chaining several assertions without block-binding them. In a block body the
+  intermediate assertions must be `_ = assert_*(...)` with `;` separators
+  (Surf block syntax), and only the final expression is the tail.
