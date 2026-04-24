@@ -337,10 +337,14 @@ A minimal reef package that exercises `chelis test`:
 demo-foo/
 ├── reef.toml
 ├── src/
-│   └── foo.ch
+│   └── core.ch
 └── tests/
-    └── foo.ch
+    └── core.ch
 ```
+
+Reef enforces that a file's last module path component matches the file name, so
+`module Foo.Core` must live in `core.ch` (not `foo.ch`). Pick module names that
+reflect the capability, and let the file name follow.
 
 `reef.toml`:
 
@@ -350,9 +354,12 @@ name = "demo-foo"
 version = "0.1.0"
 compiler = "=0.2.3"
 module_prefix = "Foo"
+
+[dependencies]
+chelis-std = { version = "0.1.0" }
 ```
 
-`src/foo.ch`:
+`src/core.ch`:
 
 ```chelis-surf-fragment
 module Foo.Core
@@ -361,7 +368,7 @@ export (double)
 def double(x: f32) -> f32 = mul(x, cast(2.0, f32))
 ```
 
-`tests/foo.ch`:
+`tests/core.ch`:
 
 ```chelis-surf-fragment
 module Foo.Tests.Core
@@ -383,9 +390,9 @@ nullary `def test_*()` function:
 
 ```text
 $ chelis test tests/
-tests/foo.ch
-  test_double_zero ............. PASS
-  test_double_small ............ PASS
+tests/core.ch
+  test_double_zero .............. PASS
+  test_double_small ............. PASS
 
 2 passed, 0 failed
 ```
@@ -400,8 +407,8 @@ dropped before execution:
 
 ```text
 $ chelis test tests/ --filter zero
-tests/foo.ch
-  test_double_zero ............. PASS
+tests/core.ch
+  test_double_zero .............. PASS
 
 1 passed, 0 failed
 ```
@@ -416,13 +423,13 @@ plus a final `{"summary": ...}` record (newline-delimited):
 
 ```text
 $ chelis test tests/ --json
-{"file":"tests/foo.ch","test":"test_double_zero","status":"pass"}
-{"file":"tests/foo.ch","test":"test_double_small","status":"pass"}
+{"file":"tests/core.ch","test":"test_double_zero","status":"pass"}
+{"file":"tests/core.ch","test":"test_double_small","status":"pass"}
 {"summary":{"passed":2,"failed":0}}
 ```
 
 Failing rows carry an additional `"message"` field with the assertion's label and
-expected/got values (e.g. `"assert_close (double(1.5) ~ 3.0): expected 3, got 3.01, tol 1e-06"`).
+expected/got values (e.g. `"assert failed: assert_close (double(1.5) ~ 3.0): expected 3.01, got 3, tol 0.000001"`).
 
 ### Bounding wall time with `--timeout`
 

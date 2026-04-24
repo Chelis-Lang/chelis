@@ -791,9 +791,19 @@ Success criterion for the current skill:
 ## 8. `Std.Test` — Chelis-Native Test Assertions
 
 `Std.Test` provides the assertion surface for Chelis-native tests. Every
-exported function has the effect row `! { Test }`, so calling any of them
-from a `! {}`-declared function is a type error — that is the mechanism that
-keeps test assertions from silently leaking into production code.
+exported function has the effect row `! { Test }`, so any function that
+transitively calls one picks up Test in its inferred effects.
+
+**What enforcement actually buys you:** any function that declares an
+explicit effect row (e.g. `! {}` or `! { IO }`) is type-checked against its
+inferred effects. Calling a Test-carrying function from a `! {}`-declared
+function is a type error. An unannotated `def f() = assert_true(...)` is
+NOT rejected on its own — the effect still propagates through `f`, and
+the mismatch surfaces at the first downstream caller that declares an
+effect row. In practice, pin production entry points with explicit effect
+rows (`! {}`, `! { IO }`, `! { IO, Random }`) so the Test effect has a
+boundary to fail against; don't rely on unannotated defs to enforce the
+separation by themselves.
 
 Import what you need:
 
@@ -906,8 +916,10 @@ def test_unreachable() -> unit ! { Test } = fail("reached unreachable branch")
 
 ### Common Mistakes
 
-- Forgetting `! { Test }` on the test function signature. The checker will
-  reject the body with `UnhandledEffect` mentioning `Test`.
+- Forgetting `! { Test }` on the test function signature. `chelis check` will
+  not reject an unannotated test body on its own, but the Test effect
+  propagates to callers; declare the effect row to make the contract visible
+  and to get `UnhandledEffect` diagnostics at any `! {}`-declared boundary.
 - Calling the tagless runtime `fail` from a test — allowed, but you lose the
   Test-effect signal. Prefer `Std.Test.fail` in test code.
 - Passing a negative tolerance to `assert_close` — that surfaces as an
