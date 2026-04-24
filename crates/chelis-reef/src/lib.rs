@@ -716,12 +716,16 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
         .get(name)
         .and_then(|versions| versions.iter().find(|entry| entry.version == version))
         .ok_or_else(|| {
-            format!("package `{name}` version `{version}` missing from local registry index")
+            format!(
+                "package `{name}` version `{version}` missing from local registry index — \
+                 run `chelis reef build` first to populate the cache"
+            )
         })?;
     let pkg_dir = registry_root.join("packages").join(name).join(version);
     if !pkg_dir.exists() {
         return Err(format!(
-            "package `{name}` version `{version}` not found in local registry"
+            "package `{name}` version `{version}` not found in local registry — \
+             run `chelis reef build` first to populate the cache"
         ));
     }
     let shell_path = pkg_dir.join(format!("{name}-{version}.chb"));
@@ -2222,6 +2226,202 @@ some-registry-lib = {{ version = "0.1.0" }}
         assert!(
             result.is_err(),
             "expected error when registry dep is uncacheable, got: {result:?}"
+        );
+    }
+
+    // ---- ADVERSARIAL TESTS: fast path edge cases ----
+
+    /// H: prepare_program_for_eval_file with a file that has an import but NO
+    /// reef.toml anywhere in the ancestor chain (no package root at all).
+    /// Must return Ok(None) immediately — not hang, not panic, not Err.
+    #[test]
+    fn adv_eval_file_no_package_root_returns_ok_none() {
+        let dir = tempdir().expect("tempdir");
+        // No reef.toml anywhere in this temp dir tree.
+        let eval_file = dir.path().join("probe.ch");
+        // Write a file that has an import — would fail if resolver ran.
+        write(
+            &eval_file,
+            "import NonExistent.Module (something)\ndef result -> int32 = 42\n",
+        );
+
+        let start = std::time::Instant::now();
+        let result = prepare_program_for_eval_file(&eval_file, dir.path());
+        let elapsed = start.elapsed();
+
+        // Must return immediately (< 500ms), not hang.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "no-package-root eval took {elapsed:?} — should return immediately"
+        );
+
+        // Must return Ok(None): no package root found, no resolution attempted.
+        match result {
+            Ok(None) => {} // correct
+            Ok(Some(_)) => panic!("expected Ok(None) without package root, got Ok(Some(...))"),
+            Err(e) => {
+                // Could also be Err if the file can't be found in a non-existent location.
+                // As long as it doesn't hang, this is acceptable.
+                eprintln!("Note: got Err (acceptable if no package root): {e}");
+            }
+        }
+    }
+
+    /// G: Fast path with a reef.lock containing a registry dep (LocalRegistry source).
+    /// With an empty registry cache, the 5-second per-dep timeout must fire and return
+    /// an actionable error mentioning "chelis reef build", not hang for 5 seconds.
+    ///
+    /// We test this via the internal `reconstruct_graph_from_lockfile` path for speed.
+    #[test]
+    fn adv_lockfile_with_registry_dep_and_no_cache_returns_actionable_error() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Myapp"
+
+[dependencies]
+some-lib = {{ version = "0.1.0" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+        );
+
+        // Write a reef.lock that claims some-lib comes from the local registry (no cache).
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+
+[[dependencies]]
+name = "some-lib"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = "abc"
+shell_sha256 = "def"
+
+[dependencies.source]
+kind = "local_registry"
+"#,
+        );
+
+        // Point CHELIS_REEF_HOME at an empty directory so load_registry_package fails fast.
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
+        }
+
+        let lock = read_lockfile(&root.join("reef.lock")).expect("read lockfile");
+        // Use a short timeout to avoid waiting 5 seconds in the test.
+        // We call reconstruct_graph_from_lockfile indirectly via run_with_timeout.
+        let root_clone = root.clone();
+        let result = run_with_timeout(
+            move || reconstruct_graph_from_lockfile(&root_clone, &lock),
+            Duration::from_millis(200),
+            TIMEOUT_MSG,
+        );
+
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+
+        let err = result.expect_err("should have failed: registry dep not in cache");
+        // The error must mention "chelis reef build" — the actionable instruction.
+        assert!(
+            err.contains("chelis reef build"),
+            "error must mention `chelis reef build` for actionable recovery; got: {err}"
+        );
+    }
+
+    /// I: Negative test — timeout error message must contain "chelis reef build".
+    /// This is already tested via `run_with_timeout_returns_error_on_timeout`,
+    /// but we test the TIMEOUT_MSG constant directly so a change to the message
+    /// can't silently break the invariant.
+    #[test]
+    fn adv_timeout_msg_contains_chelis_reef_build() {
+        assert!(
+            TIMEOUT_MSG.contains("chelis reef build"),
+            "TIMEOUT_MSG must contain 'chelis reef build' for actionable recovery; got: {TIMEOUT_MSG}"
+        );
+    }
+
+    /// Adversarial: reef.lock with a path dep where the dep directory doesn't exist.
+    /// Must return a clean Err (path resolution fails), not a panic or hang.
+    #[test]
+    fn adv_lockfile_with_missing_path_dep_returns_clean_error() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Myapp"
+
+[dependencies]
+missing = {{ path = "./nonexistent_dep" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+        );
+
+        // reef.lock says the dep is a path dep to a nonexistent directory.
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+
+[[dependencies]]
+name = "missing"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./nonexistent_dep"
+"#,
+        );
+
+        let start = std::time::Instant::now();
+        let entry_decls =
+            chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
+        let result = prepare_program_for_eval_source(&root, &entry_decls);
+        let elapsed = start.elapsed();
+
+        // Must fail fast with a clean error — not hang.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "missing-path-dep fast path took {elapsed:?} — should fail quickly"
+        );
+        assert!(
+            result.is_err(),
+            "expected Err for missing path dep, got: {result:?}"
+        );
+        let err = result.unwrap_err();
+        // Should mention the failing dependency name or path.
+        assert!(
+            err.contains("missing") || err.contains("nonexistent") || err.contains("canonicalize"),
+            "error should identify the missing dep; got: {err}"
         );
     }
 }

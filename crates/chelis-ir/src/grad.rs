@@ -2409,4 +2409,145 @@ mod tests {
             "error message must identify Ceil as non-differentiable; got: {err}"
         );
     }
+
+    // ---- ADVERSARIAL TESTS: missing coverage from red-team spec ----
+
+    /// abs(x) at x=0 must give exactly 0.0 (sign convention: sign(0) = 0).
+    /// This is NOT covered by grad_abs_positive (x=2.0) or grad_abs_negative (x=-2.0).
+    #[test]
+    fn adv_grad_abs_at_zero_is_zero() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone()));
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("x".to_string(), 0.0_f64);
+        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let a = vals[&grad_result.grad_nodes[&x]];
+        assert!(
+            a.abs() < 1e-9,
+            "abs gradient at x=0 must be 0.0 (sign(0)=0), got {a}"
+        );
+    }
+
+    /// abs(x) at x=-2.7 must give exactly -1.0.
+    /// Spec says: abs(x) at x=-2.7 → -1.0.
+    #[test]
+    fn adv_grad_abs_at_neg2_7_is_neg1() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone()));
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("x".to_string(), -2.7_f64);
+        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let a = vals[&grad_result.grad_nodes[&x]];
+        assert!(
+            (a - (-1.0)).abs() < 1e-6,
+            "abs gradient at x=-2.7 must be -1.0, got {a}"
+        );
+    }
+
+    /// atan(x) at x=1.5: grad = 1/(1+1.5²) = 1/3.25 ≈ 0.3077.
+    /// Spec asks for this point; existing test only covers x=1.0.
+    #[test]
+    fn adv_grad_atan_at_1_5() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Atan, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.5, 1e-5);
+        assert_grad_close(a, n);
+        let expected = 1.0 / (1.0 + 1.5_f64 * 1.5);
+        assert!(
+            (a - expected).abs() < 1e-4,
+            "grad of atan at 1.5 should be ≈ {expected} (1/3.25), got {a}"
+        );
+    }
+
+    /// tan(x) at x=0.3: grad = 1/cos²(0.3) ≈ 1.047.
+    /// Spec asks for this exact point with exact value; existing test uses x=0.5 with no exact check.
+    #[test]
+    fn adv_grad_tan_at_0_3_exact() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Tan, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.3, 1e-5);
+        assert_grad_close(a, n);
+        let expected = 1.0 / (0.3_f64.cos() * 0.3_f64.cos());
+        assert!(
+            (a - expected).abs() < 1e-4,
+            "grad of tan at 0.3 should be ≈ {expected} (1/cos²(0.3)), got {a}"
+        );
+    }
+
+    /// cos(add(x, const(0.5))) composition — grad should be -sin(x+0.5).
+    #[test]
+    fn adv_grad_cos_of_add_composition() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
+        let half = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], scalar_f32());
+        let xp = dag.add_node(RiscOp::Add, vec![x, half], scalar_f32());
+        let out = dag.add_node(RiscOp::Cos, vec![xp], scalar_f32());
+
+        let x0 = 0.7_f64;
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
+        assert_grad_close(a, n);
+        let expected = -(x0 + 0.5).sin();
+        assert!(
+            (a - expected).abs() < 1e-4,
+            "grad of cos(x+0.5) at x=0.7 should be -sin(1.2) ≈ {expected}, got {a}"
+        );
+    }
+
+    /// floor must give a CLEAN error (containing "Floor" and "non-differentiable"),
+    /// not a silent zero gradient. Double-checks grad_dag_checked, not just grad_dag.
+    #[test]
+    fn adv_floor_grad_dag_checked_error_is_not_silent_zero() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Floor, vec![a], ty.clone()));
+        // grad_dag (unchecked) returns a zero gradient silently — that is the safety net.
+        // grad_dag_checked must be the gate that rejects it.
+        let result = grad_dag_checked(&dag, out, &[x]);
+        match result {
+            Err(msg) => {
+                assert!(msg.contains("Floor"), "error must name 'Floor'; got: {msg}");
+                assert!(
+                    msg.contains("non-differentiable"),
+                    "error must say 'non-differentiable'; got: {msg}"
+                );
+            }
+            Ok(_) => panic!("floor must be rejected by grad_dag_checked — got Ok"),
+        }
+    }
+
+    /// ceil must give a CLEAN error, not succeed.
+    #[test]
+    fn adv_ceil_grad_dag_checked_error_is_not_silent_zero() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Ceil, vec![a], ty.clone()));
+        let result = grad_dag_checked(&dag, out, &[x]);
+        match result {
+            Err(msg) => {
+                assert!(msg.contains("Ceil"), "error must name 'Ceil'; got: {msg}");
+                assert!(
+                    msg.contains("non-differentiable"),
+                    "error must say 'non-differentiable'; got: {msg}"
+                );
+            }
+            Ok(_) => panic!("ceil must be rejected by grad_dag_checked — got Ok"),
+        }
+    }
+
+    /// cos(x) at x=0.5: exact value check. Spec requires -sin(0.5) ≈ -0.4794.
+    #[test]
+    fn adv_grad_cos_at_0_5_exact_value() {
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Cos, vec![a], ty.clone()));
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("x".to_string(), 0.5_f64);
+        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let a = vals[&grad_result.grad_nodes[&x]];
+        let expected = -(0.5_f64).sin(); // ≈ -0.4794
+        assert!(
+            (a - expected).abs() < 1e-5,
+            "cos gradient at x=0.5 must be -sin(0.5) ≈ {expected:.6}, got {a:.6}"
+        );
+    }
 }

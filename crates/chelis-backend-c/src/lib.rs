@@ -2430,4 +2430,275 @@ int main(void) {{
             );
         }
     }
+
+    // ---- ADVERSARIAL TESTS: static linkage, C compilation, and scalar builtin coverage ----
+
+    /// E: When globals are present (internal_linkage=true), user functions become
+    /// `static inline`. The tensor helper must remain `static void` (not `static inline`).
+    /// This case is NOT tested by `host_program_tensor_helpers_are_static_entry_not_exported`
+    /// which only tests the no-globals case.
+    #[test]
+    fn adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void() {
+        use chelis_ir::host::{
+            HostBinding, HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+        };
+
+        let mut helper_dag = Dag::new();
+        helper_dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+
+        let helper = HostTensorHelper {
+            name: "prog__fn__tensor_0".to_string(),
+            dag: helper_dag,
+            inputs: vec![],
+            output: scalar_f32(),
+        };
+
+        let func = HostFunction {
+            name: "my_func".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: HostType::Float64,
+            }],
+            ret_ty: HostType::Float64,
+            body: HostExpr::Float(0.0),
+            tensor_helpers: vec![helper],
+        };
+
+        // Adding a global binding triggers internal_linkage=true.
+        let program = HostProgram {
+            globals: vec![HostBinding {
+                name: "__g".to_string(),
+                display_name: None,
+                ty: HostType::Int64,
+                value: HostExpr::Int(1),
+            }],
+            global_tensor_helpers: vec![],
+            functions: vec![func],
+        };
+
+        let result = codegen_host_program(&program, "prog");
+        let src = &result.c_source;
+
+        // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
+        assert!(
+            src.contains("static void my_func__tensor_0("),
+            "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
+        );
+        // User function in globals mode must be `static inline` (not plain void, not static void)
+        assert!(
+            src.contains("static inline"),
+            "user function in globals mode must carry `static inline` linkage;\ngenerated source:\n{src}"
+        );
+        // The exported entry must NOT be plain `static void` (it's `static inline`, not `static void`)
+        assert!(
+            !src.contains("static void my_func("),
+            "user function must not be `static void`; must be `static inline`;\ngenerated source:\n{src}"
+        );
+    }
+
+    /// F: Generate a host program with a tensor helper and compile it with -shared -fPIC.
+    /// This confirms that `static` linkage on helpers doesn't break shared-library builds.
+    #[test]
+    fn adv_host_program_compiles_as_shared_library_with_fpic() {
+        if !gcc_available() {
+            eprintln!("skipping: gcc not available");
+            return;
+        }
+        use chelis_ir::host::{
+            HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+        };
+
+        let mut helper_dag = Dag::new();
+        helper_dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+
+        let helper = HostTensorHelper {
+            name: "lib__exported_fn__tensor_0".to_string(),
+            dag: helper_dag,
+            inputs: vec![],
+            output: scalar_f32(),
+        };
+
+        let func = HostFunction {
+            name: "exported_fn".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: HostType::Float64,
+            }],
+            ret_ty: HostType::Float64,
+            body: HostExpr::Float(0.0),
+            tensor_helpers: vec![helper],
+        };
+
+        // No globals → external linkage for functions (library mode)
+        let program = HostProgram {
+            globals: vec![],
+            global_tensor_helpers: vec![],
+            functions: vec![func],
+        };
+
+        let result = codegen_host_program(&program, "lib");
+        let src = &result.c_source;
+
+        let tmp = tempfile::tempdir().unwrap();
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "lib.c", src);
+
+        let so_path = tmp.path().join("lib.so");
+        let mut cmd = Command::new(crate::toolchain::c_compiler());
+        apply_c_test_flags(&mut cmd);
+        cmd.args(["-shared", "-fPIC", "-O2", "-std=c11"])
+            .arg("-I")
+            .arg(tmp.path())
+            .arg(tmp.path().join("lib.c").to_str().unwrap())
+            .arg("-o")
+            .arg(so_path.to_str().unwrap())
+            .arg("-lm");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "shared-library compilation with -shared -fPIC failed:\nstderr: {}\nC source:\n{src}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(so_path.exists(), "shared library file not produced");
+    }
+
+    /// A (adversarial): Verify each new scalar builtin emits the correct C function name.
+    /// Tests that `tan` emits `tanf` (not `tanhf` or anything else).
+    #[test]
+    fn adv_tan_emits_tanf_not_tanhf() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Tan, vec![x], scalar_f32());
+        let result = codegen(&dag, "test_tan");
+        let src = &result.c_source;
+        assert!(src.contains("tanf("), "tan must emit `tanf(`; got:\n{src}");
+        assert!(
+            !src.contains("tanhf("),
+            "tan must NOT emit `tanhf(` (hyperbolic); got:\n{src}"
+        );
+    }
+
+    /// A (adversarial): Verify abs emits `fabsf` not `absf`.
+    #[test]
+    fn adv_abs_emits_fabsf_not_absf() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Abs, vec![x], scalar_f32());
+        let result = codegen(&dag, "test_abs");
+        let src = &result.c_source;
+        // `fabsf` must appear; plain `absf` (which doesn't exist in C) must not.
+        assert!(
+            src.contains("fabsf("),
+            "abs must emit `fabsf(`; got:\n{src}"
+        );
+        // Check that the string `absf(` only appears as `fabsf(` (the 'f' prefix is required)
+        let absf_count = src.matches("fabsf(").count();
+        let abs_occurrences: Vec<_> = src.match_indices("absf(").collect();
+        for (pos, _) in &abs_occurrences {
+            if *pos == 0 || src.as_bytes()[pos - 1] != b'f' {
+                panic!("found bare `absf(` at position {pos} — should be `fabsf(`;\n{src}");
+            }
+        }
+        assert!(absf_count >= 1, "no `fabsf(` in output:\n{src}");
+    }
+
+    /// B (adversarial): Numerically check cos at a non-trivial point: cos(π/4) ≈ 0.7071.
+    #[test]
+    fn adv_numerical_cos_at_pi_over_4() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Const {
+                value: std::f64::consts::FRAC_PI_4,
+            },
+            vec![],
+            scalar_f32(),
+        );
+        dag.add_node(RiscOp::Cos, vec![x], scalar_f32());
+        let out = compile_and_run(&dag, "test_cos_pi4");
+        let val: f32 = out.trim().parse().expect("float output");
+        assert!(
+            (val - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5,
+            "cos(π/4) expected ≈ {}, got {val}",
+            std::f32::consts::FRAC_1_SQRT_2
+        );
+    }
+
+    /// B (adversarial): atan(1.0) should be π/4 ≈ 0.7854.
+    #[test]
+    fn adv_numerical_atan_at_1() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Atan, vec![x], scalar_f32());
+        let out = compile_and_run(&dag, "test_atan_1");
+        let val: f32 = out.trim().parse().expect("float output");
+        let expected = std::f32::consts::FRAC_PI_4;
+        assert!(
+            (val - expected).abs() < 1e-5,
+            "atan(1.0) expected ≈ {expected} (π/4), got {val}"
+        );
+    }
+
+    /// B (adversarial): floor(-1.3) should be -2.0.
+    #[test]
+    fn adv_numerical_floor_negative() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Const { value: -1.3 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Floor, vec![x], scalar_f32());
+        let out = compile_and_run(&dag, "test_floor_neg");
+        let val: f32 = out.trim().parse().expect("float output");
+        assert!(
+            (val - (-2.0f32)).abs() < 1e-6,
+            "floor(-1.3) expected -2.0, got {val}"
+        );
+    }
+
+    /// B (adversarial): ceil(-1.7) should be -1.0.
+    #[test]
+    fn adv_numerical_ceil_negative() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Const { value: -1.7 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Ceil, vec![x], scalar_f32());
+        let out = compile_and_run(&dag, "test_ceil_neg");
+        let val: f32 = out.trim().parse().expect("float output");
+        assert!(
+            (val - (-1.0f32)).abs() < 1e-6,
+            "ceil(-1.7) expected -1.0, got {val}"
+        );
+    }
+
+    /// B (adversarial): abs(-3.14) should be 3.14.
+    #[test]
+    fn adv_numerical_abs_negative_pi() {
+        if !gcc_available() {
+            return;
+        }
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Const {
+                value: -std::f64::consts::PI,
+            },
+            vec![],
+            scalar_f32(),
+        );
+        dag.add_node(RiscOp::Abs, vec![x], scalar_f32());
+        let out = compile_and_run(&dag, "test_abs_neg_pi");
+        let val: f32 = out.trim().parse().expect("float output");
+        assert!(
+            (val - std::f32::consts::PI).abs() < 1e-5,
+            "abs(-π) expected ≈ {}, got {val}",
+            std::f32::consts::PI
+        );
+    }
 }
