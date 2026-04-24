@@ -240,6 +240,12 @@ impl CEmitter {
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
             RiscOp::Sin => self.emit_unary_func(id, "sinf", &node.inputs, &node.output_type),
             RiscOp::Sqrt => self.emit_unary_func(id, "sqrtf", &node.inputs, &node.output_type),
+            RiscOp::Cos => self.emit_unary_func(id, "cosf", &node.inputs, &node.output_type),
+            RiscOp::Tan => self.emit_unary_func(id, "tanf", &node.inputs, &node.output_type),
+            RiscOp::Atan => self.emit_unary_func(id, "atanf", &node.inputs, &node.output_type),
+            RiscOp::Abs => self.emit_unary_func(id, "fabsf", &node.inputs, &node.output_type),
+            RiscOp::Floor => self.emit_unary_func(id, "floorf", &node.inputs, &node.output_type),
+            RiscOp::Ceil => self.emit_unary_func(id, "ceilf", &node.inputs, &node.output_type),
             RiscOp::UniformLike { low, high, seed } => {
                 self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
             }
@@ -993,7 +999,16 @@ impl CEmitter {
         ops.iter().any(|s| {
             matches!(
                 s.op,
-                FusedStepOp::Exp | FusedStepOp::Log | FusedStepOp::Sin | FusedStepOp::Sqrt
+                FusedStepOp::Exp
+                    | FusedStepOp::Log
+                    | FusedStepOp::Sin
+                    | FusedStepOp::Sqrt
+                    | FusedStepOp::Cos
+                    | FusedStepOp::Tan
+                    | FusedStepOp::Atan
+                    | FusedStepOp::Abs
+                    | FusedStepOp::Floor
+                    | FusedStepOp::Ceil
             )
         })
     }
@@ -1044,6 +1059,30 @@ impl CEmitter {
             FusedStepOp::Sqrt => {
                 let a = resolve(&inputs[0]);
                 format!("sqrtf({a})")
+            }
+            FusedStepOp::Cos => {
+                let a = resolve(&inputs[0]);
+                format!("cosf({a})")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&inputs[0]);
+                format!("tanf({a})")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&inputs[0]);
+                format!("atanf({a})")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&inputs[0]);
+                format!("fabsf({a})")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&inputs[0]);
+                format!("floorf({a})")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&inputs[0]);
+                format!("ceilf({a})")
             }
         }
     }
@@ -1096,6 +1135,31 @@ impl CEmitter {
             FusedStepOp::Sqrt => {
                 let a = resolve(&inputs[0]);
                 format!("CHELIS_SQRTF8({a})")
+            }
+            // New ops: no SIMD intrinsic yet, emit scalar broadcast via set1
+            FusedStepOp::Cos => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(cosf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(tanf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(atanf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(fabsf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(floorf(_mm256_cvtss_f32({a})))")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&inputs[0]);
+                format!("_mm256_set1_ps(ceilf(_mm256_cvtss_f32({a})))")
             }
         }
     }
@@ -1778,6 +1842,30 @@ impl CEmitter {
                 FusedStepOp::Sqrt => {
                     let a = resolve(&step.input_indices[0]);
                     format!("sqrtf({a})")
+                }
+                FusedStepOp::Cos => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("cosf({a})")
+                }
+                FusedStepOp::Tan => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("tanf({a})")
+                }
+                FusedStepOp::Atan => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("atanf({a})")
+                }
+                FusedStepOp::Abs => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("fabsf({a})")
+                }
+                FusedStepOp::Floor => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("floorf({a})")
+                }
+                FusedStepOp::Ceil => {
+                    let a = resolve(&step.input_indices[0]);
+                    format!("ceilf({a})")
                 }
             };
             self.line(&format!("float v{s} = {expr};"));
@@ -2745,6 +2833,102 @@ mod tests {
         assert!(
             c.contains("chelis_flat_to_indices"),
             "fused slow path must still be present"
+        );
+    }
+
+    // ---- New scalar builtin C emission tests ----
+
+    #[test]
+    fn cos_emits_cosf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Cos, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("cosf("), "expected cosf( in:\n{c}");
+    }
+
+    #[test]
+    fn tan_emits_tanf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Tan, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("tanf("), "expected tanf( in:\n{c}");
+    }
+
+    #[test]
+    fn atan_emits_atanf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Atan, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("atanf("), "expected atanf( in:\n{c}");
+    }
+
+    #[test]
+    fn abs_emits_fabsf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Abs, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("fabsf("), "expected fabsf( in:\n{c}");
+    }
+
+    #[test]
+    fn floor_emits_floorf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.7 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Floor, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("floorf("), "expected floorf( in:\n{c}");
+    }
+
+    #[test]
+    fn ceil_emits_ceilf() {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.3 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Ceil, vec![a], scalar_f32());
+        let c = CEmitter::emit_dag(&dag, "test_fn");
+        assert!(c.contains("ceilf("), "expected ceilf( in:\n{c}");
+    }
+
+    // ---- Numerical correctness: verify via constant folding in the evaluator ----
+    // These tests confirm that the Rust-side evaluator and the IR pipeline agree
+    // on the mathematical values. The C emission tests above cover the symbol name.
+
+    #[test]
+    fn cos_numerical_correctness() {
+        // cos(π/3) ≈ 0.5 (within 1e-4)
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Const {
+                value: std::f64::consts::PI / 3.0,
+            },
+            vec![],
+            scalar_f32(),
+        );
+        let out = dag.add_node(RiscOp::Cos, vec![x], scalar_f32());
+        dag.add_root(out);
+        let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
+        let val = results[&out] as f32;
+        assert!(
+            (val - 0.5_f32).abs() < 1e-4,
+            "cos(π/3) should be ≈ 0.5, got {val}"
+        );
+    }
+
+    #[test]
+    fn abs_numerical_correctness() {
+        // abs(-2.0) == 2.0
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32());
+        let out = dag.add_node(RiscOp::Abs, vec![x], scalar_f32());
+        dag.add_root(out);
+        let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
+        let val = results[&out] as f32;
+        assert!(
+            (val - 2.0_f32).abs() < 1e-4,
+            "abs(-2.0) should be 2.0, got {val}"
         );
     }
 }

@@ -75,6 +75,20 @@ pub fn grad_dag_checked(
                     node.id.0
                 ));
             }
+            RiscOp::Floor => {
+                return Err(format!(
+                    "grad: Floor at node {} is non-differentiable (piecewise constant); \
+                     remove it from the gradient path or wrap it in a stop-gradient",
+                    node.id.0
+                ));
+            }
+            RiscOp::Ceil => {
+                return Err(format!(
+                    "grad: Ceil at node {} is non-differentiable (piecewise constant); \
+                     remove it from the gradient path or wrap it in a stop-gradient",
+                    node.id.0
+                ));
+            }
             _ => {}
         }
     }
@@ -322,6 +336,84 @@ fn compute_adjoints(
             let two_sqrt = dag.add_node(RiscOp::Mul, vec![two, node.id], ty.clone());
             let dx = tier2::lower_div(dag, g, two_sqrt, &ty);
             Some(vec![(x, dx)])
+        }
+        RiscOp::Cos => {
+            // d/dx cos(x) = -sin(x)
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let sin_x = dag.add_node(RiscOp::Sin, vec![x], ty.clone());
+            let neg_sin_x = dag.add_node(RiscOp::Neg, vec![sin_x], ty.clone());
+            let dx = dag.add_node(RiscOp::Mul, vec![g, neg_sin_x], ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Tan => {
+            // d/dx tan(x) = 1 / cos²(x) = g / (cos(x) * cos(x))
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let cos_x = dag.add_node(RiscOp::Cos, vec![x], ty.clone());
+            let cos_sq = dag.add_node(RiscOp::Mul, vec![cos_x, cos_x], ty.clone());
+            let dx = tier2::lower_div(dag, g, cos_sq, &ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Atan => {
+            // d/dx atan(x) = 1 / (1 + x²) = g / (1 + x*x)
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
+            let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], ty.clone());
+            let denom = dag.add_node(RiscOp::Add, vec![one, x_sq], ty.clone());
+            let dx = tier2::lower_div(dag, g, denom, &ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Abs => {
+            // d/dx abs(x) = sign(x): 1 if x > 0, -1 if x < 0, 0 if x = 0
+            // Expressed as: (x > 0) - (x < 0) cast to float, then * g
+            // Equivalently: cast(cmplt(zero, x)) - cast(cmplt(x, zero)) multiplied by g
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let bool_ty = TensorType {
+                dims: ty.dims.clone(),
+                precision: chelis_types::types::Prim::Bool,
+            };
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone());
+            // positive mask: x > 0  i.e. cmplt(0, x)
+            let pos_bool = dag.add_node(RiscOp::CmpLt, vec![zero, x], bool_ty.clone());
+            let pos = dag.add_node(
+                RiscOp::Cast {
+                    new_precision: ty.precision,
+                },
+                vec![pos_bool],
+                ty.clone(),
+            );
+            // negative mask: x < 0  i.e. cmplt(x, 0)
+            let neg_bool = dag.add_node(RiscOp::CmpLt, vec![x, zero], bool_ty);
+            let neg_cast = dag.add_node(
+                RiscOp::Cast {
+                    new_precision: ty.precision,
+                },
+                vec![neg_bool],
+                ty.clone(),
+            );
+            // sign = pos - neg_cast  (tier2 sub)
+            let sign = tier2::lower_sub(dag, pos, neg_cast, &ty);
+            let dx = dag.add_node(RiscOp::Mul, vec![sign, g], ty);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::Floor => {
+            // floor is non-differentiable — grad_dag_checked will have already
+            // rejected this; this arm is a safety net returning zero gradient.
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty);
+            Some(vec![(x, zero)])
+        }
+        RiscOp::Ceil => {
+            // ceil is non-differentiable — grad_dag_checked will have already
+            // rejected this; this arm is a safety net returning zero gradient.
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty);
+            Some(vec![(x, zero)])
         }
         RiscOp::UniformLike { .. } => {
             let x = node.inputs[0];
@@ -2218,6 +2310,103 @@ mod tests {
         assert!(
             err.contains("Argmin") && err.contains("non-differentiable"),
             "error message must identify the non-differentiable op; got: {err}"
+        );
+    }
+
+    // ---- New scalar builtin AD tests ----
+
+    #[test]
+    fn grad_cos() {
+        // d/dx cos(x) = -sin(x)
+        // At x=0.5: -sin(0.5) ≈ -0.4794
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Cos, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
+        assert_grad_close(a, n);
+        let expected = -(0.5_f64).sin();
+        assert!(
+            (a - expected).abs() < 1e-4,
+            "grad of cos at 0.5 should be ≈ {expected}, got {a}"
+        );
+    }
+
+    #[test]
+    fn grad_tan() {
+        // d/dx tan(x) = 1 / cos²(x)
+        // At x=0.5: 1/cos²(0.5) ≈ 1.298
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Tan, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
+        assert_grad_close(a, n);
+    }
+
+    #[test]
+    fn grad_atan() {
+        // d/dx atan(x) = 1 / (1 + x²)
+        // At x=1.0: 1 / (1+1) = 0.5
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Atan, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - 0.5).abs() < 1e-4,
+            "grad of atan at 1.0 should be ≈ 0.5, got {a}"
+        );
+    }
+
+    #[test]
+    fn grad_abs_positive() {
+        // d/dx abs(x) = 1 for x > 0
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - 1.0).abs() < 1e-4,
+            "grad of abs at 2.0 should be 1.0, got {a}"
+        );
+    }
+
+    #[test]
+    fn grad_abs_negative() {
+        // d/dx abs(x) = -1 for x < 0
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone()));
+        let (a, n) = finite_diff(&dag, out, x, "x", &[], -2.0, 1e-5);
+        assert_grad_close(a, n);
+        assert!(
+            (a - (-1.0)).abs() < 1e-4,
+            "grad of abs at -2.0 should be -1.0, got {a}"
+        );
+    }
+
+    #[test]
+    fn floor_on_grad_path_errors_cleanly() {
+        // floor is non-differentiable: grad_dag_checked must return a clean error.
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Floor, vec![a], ty.clone()));
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Err(e) => e,
+            Ok(_) => panic!("floor on the gradient path must error, not succeed"),
+        };
+        assert!(
+            err.contains("Floor") && err.contains("non-differentiable"),
+            "error message must identify Floor as non-differentiable; got: {err}"
+        );
+    }
+
+    #[test]
+    fn ceil_on_grad_path_errors_cleanly() {
+        // ceil is non-differentiable: grad_dag_checked must return a clean error.
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Ceil, vec![a], ty.clone()));
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Err(e) => e,
+            Ok(_) => panic!("ceil on the gradient path must error, not succeed"),
+        };
+        assert!(
+            err.contains("Ceil") && err.contains("non-differentiable"),
+            "error message must identify Ceil as non-differentiable; got: {err}"
         );
     }
 }

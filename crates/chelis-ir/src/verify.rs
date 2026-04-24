@@ -102,6 +102,12 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Realize
@@ -173,7 +179,16 @@ pub fn verify(dag: &Dag) -> Vec<String> {
 
         // C4: transcendental ops require float precision.
         match &node.op {
-            RiscOp::Exp | RiscOp::Log | RiscOp::Sin | RiscOp::Sqrt => {
+            RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil => {
                 if arity == 1
                     && let Some(input) = dag.get(node.inputs[0])
                     && !input.output_type.precision.is_float()
