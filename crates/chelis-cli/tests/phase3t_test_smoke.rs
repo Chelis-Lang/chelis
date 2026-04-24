@@ -337,20 +337,22 @@ def test_foo() -> unit = test_assert(false, "second")
 }
 
 #[test]
-fn chelis_test_file_level_error_does_not_cascade_full_error_per_test() {
-    // RT3 H2: a type error in ONE test must not cascade the FULL error
-    // message into every other test row. The file-level error is reported
-    // ONCE with its full detail; the per-test rows carry only a brief
-    // cascade marker ("module-init failed"). Verify the full error text
-    // is attributed to a single row, not duplicated across per-test rows.
-    let (_dir, pkg) = make_reef_package("phase3t-smoke-compile");
+fn chelis_test_module_level_bad_binding_cascades_briefly() {
+    // RT3 H2 variant: a failing module-level binding (a `let _bad = ...`
+    // that throws during eval) surfaces as a single module-init row with
+    // the full error detail, and per-test rows only carry the brief
+    // "module-init failed" cascade marker — the full error text is NOT
+    // repeated per test. This exercises the module-init pre-check path.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-mod-init-cascade");
     write_file(
         &pkg.join("tests/bad.ch"),
         r#"module Smoke.Tests.Bad
 
-def test_broken() -> unit = test_assert_eq_int(1, true, "mismatched types")
+_init_failure = test_assert(false, "module init broken")
 
-def test_healthy() -> unit = test_assert(true, "would have passed")
+def test_one() -> unit = test_assert(true, "would have passed 1")
+
+def test_two() -> unit = test_assert(true, "would have passed 2")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -360,19 +362,18 @@ def test_healthy() -> unit = test_assert(true, "would have passed")
         .output()
         .expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The full type-error detail must appear exactly once across all rows —
-    // not repeated per test (that was the cascade bug).
-    let full_err_count = stdout.matches("precision mismatch").count()
-        + stdout.matches("type mismatch").count()
-        + stdout.matches("expected int64").count();
-    assert!(
-        full_err_count <= 2,
-        "full error message should not be duplicated across per-test rows; got:\n{stdout}"
+    // The full module-init error detail must appear exactly once across
+    // all rows — not repeated per test (that was the cascade bug).
+    let full_err_count = stdout.matches("module init broken").count();
+    assert_eq!(
+        full_err_count, 1,
+        "full module-init error should appear once, not per-test; got:\n{stdout}"
     );
-    // Cascade rows carry the brief marker, not the full error.
-    assert!(
-        stdout.contains("module-init failed"),
-        "cascade marker missing; got:\n{stdout}"
+    // Per-test rows carry the brief marker.
+    let cascade_count = stdout.matches("module-init failed").count();
+    assert_eq!(
+        cascade_count, 2,
+        "two tests should each carry the brief cascade marker; got:\n{stdout}"
     );
     assert_eq!(output.status.code(), Some(1));
 }

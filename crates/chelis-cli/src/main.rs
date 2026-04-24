@@ -1296,6 +1296,24 @@ fn eval_module_init(
     flat_decls: &[Decl],
     timeout: Duration,
 ) -> Option<String> {
+    // Only the test file's own top-level `let` bindings are module-init for
+    // the suite. If the file has none, skip the eval entirely.
+    // Using `compiler::eval` (no selected roots) evaluates EVERY top-level
+    // non-fn binding in the concatenated program — including library modules
+    // when the package depends on chelis-std — which fails under strict-load
+    // semantics because library bodies reference yet-to-be-provided inputs.
+    // `eval_selected` scopes the eval to the test file's own roots so
+    // module-init means what it should: the test file's top level, not the
+    // standard library's.
+    let mut module_roots: Vec<String> = Vec::new();
+    for decl in flat_decls {
+        if let Decl::LetDef { name, .. } = decl {
+            module_roots.push(name.clone());
+        }
+    }
+    if module_roots.is_empty() {
+        return None;
+    }
     let prepared = match chelis_reef::compile_with_reef_graph(graph, flat_decls) {
         Ok(p) => p,
         Err(err) => return Some(format!("compile: {err}")),
@@ -1308,7 +1326,10 @@ fn eval_module_init(
                 source: source_text,
                 bindings: BTreeMap::new(),
             };
-            Ok(chelis_compiler_api::compiler::eval(request))
+            Ok(chelis_compiler_api::compiler::eval_selected(
+                request,
+                &module_roots,
+            ))
         },
         timeout,
         &format!("module-init timeout after {}s", timeout.as_secs()),

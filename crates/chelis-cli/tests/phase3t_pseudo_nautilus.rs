@@ -48,22 +48,44 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-/// Stage the fixture into a tempdir. Returns `(tempdir guard, package root)`.
-/// Callers keep the guard alive for the duration of the test.
-fn stage_fixture(scratch_name: &str) -> (tempfile::TempDir, PathBuf) {
+fn package_std() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/chelis-std")
+        .canonicalize()
+        .expect("chelis-std package must exist")
+}
+
+/// Stage the fixture into a tempdir and publish `chelis-std` into a local
+/// reef home so the fixture's `chelis-std` dep resolves. Returns
+/// `(tempdir guard, package root, reef home)`. Callers keep the guard alive
+/// for the duration of the test.
+fn stage_fixture(scratch_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempdir().expect("tempdir");
     let pkg = dir.path().join(scratch_name);
     copy_dir_recursive(&fixture_path(), &pkg);
-    (dir, pkg)
+    // Publish chelis-std into a scoped reef home so `import Std.Test` in
+    // `tests/*.ch` resolves. Without this, module-init pre-checks would fail
+    // with `unresolved import Std.Test`.
+    let reef_home = dir.path().join("reef-home");
+    let std_staging = dir.path().join("chelis-std-src");
+    copy_dir_recursive(&package_std(), &std_staging);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_staging.to_str().unwrap()])
+        .assert()
+        .success();
+    (dir, pkg, reef_home)
 }
 
 #[test]
 fn pseudo_nautilus_chelis_test_all_green() {
     // The fixture's Chelis-native tests must pass as a unit — this is the
     // "internal correctness, no external oracle needed" half of the hard rule.
-    let (_dir, pkg) = stage_fixture("pseudo-nautilus-green");
+    let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-green");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "tests/"])
         .assert()
@@ -83,9 +105,10 @@ fn pseudo_nautilus_chelis_test_json_all_pass() {
     // carry `"failed":0`. This locks the machine-facing output shape so a
     // future regression that silently downgrades assertions to skips (or
     // drops tests entirely) fails this test.
-    let (_dir, pkg) = stage_fixture("pseudo-nautilus-json");
+    let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-json");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "--json", "tests/"])
         .assert()
@@ -130,9 +153,10 @@ fn pseudo_nautilus_chelis_test_filter_picks_single_test() {
     // `erf_symmetry` narrows to exactly the symmetry test. This guards
     // against a filter that silently runs all tests when it can't parse the
     // needle — a bug that would make the flag useless in CI.
-    let (_dir, pkg) = stage_fixture("pseudo-nautilus-filter");
+    let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-filter");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "--filter", "erf_symmetry", "tests/"])
         .assert()
@@ -154,7 +178,7 @@ fn pseudo_nautilus_parity_script_imports_cleanly() {
     // `run_parity.py` would silently undermine the "external oracle lives in
     // Python" half of the hard rule. `python3 -c "import ast; ast.parse(...)"`
     // catches syntactic regressions without needing scipy installed.
-    let (_dir, pkg) = stage_fixture("pseudo-nautilus-parity-syntax");
+    let (_dir, pkg, _reef_home) = stage_fixture("pseudo-nautilus-parity-syntax");
     let script = pkg.join("parity/run_parity.py");
     assert!(
         script.exists(),
@@ -206,7 +230,7 @@ fn pseudo_nautilus_parity_script_imports_cleanly() {
 #[test]
 #[ignore]
 fn pseudo_nautilus_parity_script_runs_with_scipy() {
-    let (_dir, pkg) = stage_fixture("pseudo-nautilus-parity-run");
+    let (_dir, pkg, _reef_home) = stage_fixture("pseudo-nautilus-parity-run");
     // Put the freshly-built chelis binary on PATH so the parity script's
     // `chelis eval` subprocesses see it. `assert_cmd::cargo_bin` yields the
     // path; PATH prepend gives the script plain `chelis` resolution.
