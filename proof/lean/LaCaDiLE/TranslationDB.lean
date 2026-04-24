@@ -3326,6 +3326,348 @@ end
 
 mutual
 
+theorem eraseTerm_subst_split
+    {ρin ρout : BinderEnv} {v : Term} {x : String} {vDB : TermDB}
+    (hρin : x ∉ ρin)
+    (hv : eraseTerm [] v = some vDB) :
+    ∀ {body : Term} {bodyDB : TermDB},
+      eraseTerm (ρin ++ x :: ρout) body = some bodyDB ->
+      x ∉ boundVars body ->
+      eraseTerm (ρin ++ ρout) (subst body v x) =
+        some (substDBAux ρin.length vDB bodyDB)
+  | Term.var y, bodyDB, hbody, hx => by
+      by_cases hxy : y = x
+      · subst hxy
+        simp [eraseTerm, lookupBinder_append_target hρin] at hbody
+        cases hbody
+        have hvρ : eraseTerm (ρin ++ ρout) v = some vDB := by
+          simpa using eraseTerm_suffix hv (ρin ++ ρout)
+        simpa [subst, substDBAux] using hvρ
+      · cases hρin_y : lookupBinder ρin y with
+        | some i =>
+            have hi : i < ρin.length := lookupBinder_some_lt_length hρin_y
+            simp [eraseTerm, hxy, lookupBinder_append_left hρin_y] at hbody
+            cases hbody
+            simp [eraseTerm, subst, hxy, lookupBinder_append_left hρin_y,
+              substDBAux, Nat.ne_of_lt hi, hi]
+        | none =>
+            cases hρout_y : lookupBinder ρout y with
+            | none =>
+                simp [eraseTerm, hxy, lookupBinder_append_after_target hρin_y hxy, hρout_y] at hbody
+            | some j =>
+                simp [eraseTerm, hxy, lookupBinder_append_after_target hρin_y hxy, hρout_y] at hbody
+                cases hbody
+                have hneq : j + (ρin.length + 1) ≠ ρin.length := by omega
+                have hlt : ¬ j + (ρin.length + 1) < ρin.length := by omega
+                simp [eraseTerm, subst, hxy, lookupBinder_append_of_none hρin_y, hρout_y,
+                  substDBAux, hneq, hlt, Nat.add_assoc, Nat.add_left_comm, Nat.add_comm]
+  | Term.abs y t body, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases hbody' : eraseTerm (y :: (ρin ++ x :: ρout)) body with _ | bodyDB' <;>
+        simp [eraseTerm, hbody'] at hbody
+      cases hbody
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have hρin' : x ∉ y :: ρin := by
+        simp [hxy', hρin]
+      have ih := eraseTerm_subst_split (ρin := y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv hbody' hx.2
+      have ih' :
+          eraseTerm (y :: (ρin ++ ρout)) (subst body v x) =
+            some (substDBAux (ρin.length + 1) vDB bodyDB') := by
+        simpa [List.cons_append] using ih
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih', List.cons_append]
+  | Term.app e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (ρin ++ x :: ρout) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.1
+      have ih2 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h2 hx.2
+      simp [eraseTerm, subst, substDBAux, ih1, ih2]
+  | Term.letBind y e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars, List.mem_append, not_or] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (y :: (ρin ++ x :: ρout)) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.2.1
+      have hρin' : x ∉ y :: ρin := by
+        simp [hxy', hρin]
+      have ih2 := eraseTerm_subst_split (ρin := y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv h2 hx.2.2
+      have ih2' :
+          eraseTerm (y :: (ρin ++ ρout)) (subst e2 v x) =
+            some (substDBAux (ρin.length + 1) vDB e2DB) := by
+        simpa [List.cons_append] using ih2
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih1, ih2', List.cons_append]
+  | Term.copy e, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
+      cases hbody
+      have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+      simp [eraseTerm, subst, substDBAux, ih]
+  | Term.letpair y z e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars, List.mem_append, not_or] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (z :: y :: (ρin ++ x :: ρout)) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hzx : z ≠ x := by
+        intro h
+        exact hx.2.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have hxz' : x ≠ z := by
+        intro h
+        exact hzx h.symm
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.2.2.1
+      have hρin' : x ∉ z :: y :: ρin := by
+        simp [hxz', hxy', hρin]
+      have ih2 := eraseTerm_subst_split (ρin := z :: y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv h2 hx.2.2.2
+      have ih2' :
+          eraseTerm (z :: y :: (ρin ++ ρout)) (subst e2 v x) =
+            some (substDBAux (ρin.length + 2) vDB e2DB) := by
+        simpa [List.cons_append] using ih2
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseTerm, subst, hyx, hzx, substDBAux, hvlift, ih1, ih2', List.cons_append]
+  | Term.pair e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (ρin ++ x :: ρout) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.1
+      have ih2 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h2 hx.2
+      simp [eraseTerm, subst, substDBAux, ih1, ih2]
+  | Term.fst e, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
+      cases hbody
+      have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+      simp [eraseTerm, subst, substDBAux, ih]
+  | Term.snd e, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
+      cases hbody
+      have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+      simp [eraseTerm, subst, substDBAux, ih]
+  | Term.unit, bodyDB, hbody, hx => by
+      simp [eraseTerm] at hbody
+      cases hbody
+      simp [eraseTerm, subst, substDBAux]
+  | Term.const c ds, bodyDB, hbody, hx => by
+      simp [eraseTerm] at hbody
+      cases hbody
+      simp [eraseTerm, subst, substDBAux]
+  | Term.add e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (ρin ++ x :: ρout) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.1
+      have ih2 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h2 hx.2
+      simp [eraseTerm, subst, substDBAux, ih1, ih2]
+  | Term.mul e1 e2, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases h1 : eraseTerm (ρin ++ x :: ρout) e1 with _ | e1DB <;> simp [eraseTerm, h1] at hbody
+      rcases h2 : eraseTerm (ρin ++ x :: ρout) e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hbody
+      cases hbody
+      have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.1
+      have ih2 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h2 hx.2
+      simp [eraseTerm, subst, substDBAux, ih1, ih2]
+  | Term.sum e d, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+        have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+        simp [eraseTerm, subst, ih]
+        rfl
+  | Term.expand e d, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+        have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+        simp [eraseTerm, subst, ih]
+        rfl
+  | Term.uniformLike e lo hi, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+      · simp [eraseTerm, he] at hbody
+        cases hbody
+        have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+        simp [eraseTerm, subst, ih]
+        rfl
+  | Term.grad y t tOut body, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases hbody' : eraseTerm (y :: (ρin ++ x :: ρout)) body with _ | bodyDB' <;>
+        simp [eraseTerm, hbody'] at hbody
+      cases hbody
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have hρin' : x ∉ y :: ρin := by
+        simp [hxy', hρin]
+      have ih := eraseTerm_subst_split (ρin := y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv hbody' hx.2
+      have ih' :
+          eraseTerm (y :: (ρin ++ ρout)) (subst body v x) =
+            some (substDBAux (ρin.length + 1) vDB bodyDB') := by
+        simpa [List.cons_append] using ih
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih', List.cons_append]
+  | Term.vmap y t body, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases hbody' : eraseTerm (y :: (ρin ++ x :: ρout)) body with _ | bodyDB' <;>
+        simp [eraseTerm, hbody'] at hbody
+      cases hbody
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have hρin' : x ∉ y :: ρin := by
+        simp [hxy', hρin]
+      have ih := eraseTerm_subst_split (ρin := y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv hbody' hx.2
+      have ih' :
+          eraseTerm (y :: (ρin ++ ρout)) (subst body v x) =
+            some (substDBAux (ρin.length + 1) vDB bodyDB') := by
+        simpa [List.cons_append] using ih
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih', List.cons_append]
+  | Term.handle epsH body clauses, bodyDB, hbody, hx => by
+      simp [boundVars, List.mem_append, not_or] at hx
+      rcases hbody' : eraseTerm (ρin ++ x :: ρout) body with _ | bodyDB' <;>
+        simp [eraseTerm, hbody'] at hbody
+      rcases hcls : eraseClauses (ρin ++ x :: ρout) clauses with _ | clsDB <;>
+        simp [eraseTerm, hbody', hcls] at hbody
+      cases hbody
+      have ihBody := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv hbody' hx.1
+      have ihClauses := eraseClauses_subst_split (ρin := ρin) (ρout := ρout) hρin hv hcls hx.2
+      simp [eraseTerm, subst, substDBAux, ihBody, ihClauses]
+  | Term.perform op e, bodyDB, hbody, hx => by
+      simp [boundVars] at hx
+      rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
+      cases hbody
+      have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
+      simp [eraseTerm, subst, substDBAux, ih]
+  | Term.loc ell, bodyDB, hbody, hx => by
+      simp [eraseTerm] at hbody
+      cases hbody
+      simp [eraseTerm, subst, substDBAux]
+
+theorem eraseClauses_subst_split
+    {ρin ρout : BinderEnv} {v : Term} {x : String} {vDB : TermDB}
+    (hρin : x ∉ ρin)
+    (hv : eraseTerm [] v = some vDB) :
+    ∀ {clauses : List (EffectLabel × String × String × Term)}
+      {clausesDB : List (EffectLabel × TermDB)},
+      eraseClauses (ρin ++ x :: ρout) clauses = some clausesDB ->
+      x ∉ boundVarsClauses clauses ->
+      eraseClauses (ρin ++ ρout) (substClauses clauses v x) =
+        some (substClausesDBAux ρin.length vDB clausesDB)
+  | [], clausesDB, hclauses, hx => by
+      simp [eraseClauses] at hclauses
+      cases hclauses
+      simp [eraseClauses, substClauses, substClausesDBAux]
+  | (op, y, k, hb) :: rest, clausesDB, hclauses, hx => by
+      simp [boundVarsClauses, List.mem_append, not_or] at hx
+      rcases hhb : eraseTerm (k :: y :: (ρin ++ x :: ρout)) hb with _ | hbDB <;>
+        simp [eraseClauses, hhb] at hclauses
+      rcases hrest : eraseClauses (ρin ++ x :: ρout) rest with _ | restDB <;>
+        simp [eraseClauses, hhb, hrest] at hclauses
+      cases hclauses
+      have hyx : y ≠ x := by
+        intro h
+        exact hx.1 h.symm
+      have hkx : k ≠ x := by
+        intro h
+        exact hx.2.1 h.symm
+      have hxy' : x ≠ y := by
+        intro h
+        exact hyx h.symm
+      have hxk' : x ≠ k := by
+        intro h
+        exact hkx h.symm
+      have hρin' : x ∉ k :: y :: ρin := by
+        simp [hxk', hxy', hρin]
+      have ihBody := eraseTerm_subst_split (ρin := k :: y :: ρin) (ρout := ρout)
+        (v := v) (x := x) hρin' hv hhb hx.2.2.1
+      have ihBody' :
+          eraseTerm (k :: y :: (ρin ++ ρout)) (subst hb v x) =
+            some (substDBAux (ρin.length + 2) vDB hbDB) := by
+        simpa [List.cons_append] using ihBody
+      have ihRest := eraseClauses_subst_split (ρin := ρin) (ρout := ρout) hρin hv hrest hx.2.2.2
+      have hvlift : lift vDB = vDB := by
+        simpa [lift] using
+          (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
+      simp [eraseClauses, substClauses, hyx, hkx, substClausesDBAux, hvlift, ihBody', ihRest]
+
+end
+
+theorem eraseTerm_subst_head
+    {ρ : BinderEnv} {v : Term} {x : String} {vDB : TermDB}
+    (hv : eraseTerm [] v = some vDB) :
+    ∀ {body : Term} {bodyDB : TermDB},
+      eraseTerm (x :: ρ) body = some bodyDB ->
+      x ∉ boundVars body ->
+      eraseTerm ρ (subst body v x) = some (substDBAux 0 vDB bodyDB) := by
+  intro body bodyDB hbody hx
+  simpa using
+    (eraseTerm_subst_split (ρin := []) (ρout := ρ) (v := v) (x := x) (by simp) hv hbody hx)
+
+theorem eraseClauses_subst_head
+    {ρ : BinderEnv} {v : Term} {x : String} {vDB : TermDB}
+    (hv : eraseTerm [] v = some vDB) :
+    ∀ {clauses : List (EffectLabel × String × String × Term)}
+      {clausesDB : List (EffectLabel × TermDB)},
+      eraseClauses (x :: ρ) clauses = some clausesDB ->
+      x ∉ boundVarsClauses clauses ->
+      eraseClauses ρ (substClauses clauses v x) =
+        some (substClausesDBAux 0 vDB clausesDB) := by
+  intro clauses clausesDB hclauses hx
+  simpa using
+    (eraseClauses_subst_split (ρin := []) (ρout := ρ) (v := v) (x := x) (by simp) hv hclauses hx)
+
+mutual
+
 /-- Closed substitutions commute at distinct variable names. This is
     the named-side reordering lemma needed when a two-binder reduction
     substitutes the tail binder first to match `subst_preserves_typing`,
