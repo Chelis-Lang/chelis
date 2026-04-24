@@ -25,3 +25,9 @@ crates/chelis-cli/chelis_runtime.h
 crates/chelis-cli/chelis_hip_runtime.h
 crates/chelis-cli/pad_hip.cpp
 crates/chelis-cli/pad_hip.h
+
+# Agent worktrees (ephemeral, per-session)
+.claude/worktrees/
+
+# Lean proof work-in-progress (tracked separately)
+proof/
