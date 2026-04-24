@@ -3028,6 +3028,108 @@ private theorem locRefsSeparated_rhs_right_of_append
   intro ell hx hz
   exact h ell hx (List.mem_append_right _ hz)
 
+private theorem runtimeLinear_plug_replace
+    {E : EvalCtx} {e e' : Term}
+    (hOld : RuntimeLinear (plug E e))
+    (hNew : RuntimeLinear e')
+    (hSepCtxNew : LocRefsSeparated (ctxLocRefs E) (locRefs e'))
+    (hSepNewCtx : LocRefsSeparated (locRefs e') (ctxLocRefs E)) :
+    RuntimeLinear (plug E e') := by
+  cases E with
+  | hole =>
+      simpa [plug] using hNew
+  | appL e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | appR v1 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨hFrame, _hOldInner, _hSep⟩
+      exact List.nodup_append.mpr ⟨hFrame, hNew, by
+        intro ell hLocFrame ell' hLocNew hEq
+        subst ell'
+        exact hSepCtxNew ell hLocFrame hLocNew⟩
+  | letBind x e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | copy =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | letpair x y e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | pairL e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | pairR v1 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨hFrame, _hOldInner, _hSep⟩
+      exact List.nodup_append.mpr ⟨hFrame, hNew, by
+        intro ell hLocFrame ell' hLocNew hEq
+        subst ell'
+        exact hSepCtxNew ell hLocFrame hLocNew⟩
+  | fst =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | snd =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | addL e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | addR v1 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨hFrame, _hOldInner, _hSep⟩
+      exact List.nodup_append.mpr ⟨hFrame, hNew, by
+        intro ell hLocFrame ell' hLocNew hEq
+        subst ell'
+        exact hSepCtxNew ell hLocFrame hLocNew⟩
+  | mulL e2 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | mulR v1 =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨hFrame, _hOldInner, _hSep⟩
+      exact List.nodup_append.mpr ⟨hFrame, hNew, by
+        intro ell hLocFrame ell' hLocNew hEq
+        subst ell'
+        exact hSepCtxNew ell hLocFrame hLocNew⟩
+  | sum d =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | expand d =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | uniformLike lo hi =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+  | handle epsH clauses =>
+      rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using hOld) with
+        ⟨_hOldInner, hFrame, _hSep⟩
+      exact List.nodup_append.mpr ⟨hNew, hFrame, by
+        intro ell hLocNew ell' hLocFrame hEq
+        subst ell'
+        exact hSepNewCtx ell hLocNew hLocFrame⟩
+  | perform op =>
+      simpa [RuntimeLinear, plug, locRefs] using hNew
+
 private theorem runtimeLinear_clause_mem_separated
     {clauses : List (EffectLabel × String × String × Term)}
     {op : EffectLabel} {x k : String} {hb : Term} {rhsRefs : List Loc}

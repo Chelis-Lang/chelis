@@ -316,6 +316,118 @@ theorem runtimeLinear_multiPlug
         · intro hLocE
           exact hInner.2 ell hmemEs hLocE
 
+/-- Converse direction of `runtimeLinear_plug`: plugging preserves
+    runtime linearity when the frame's own location references are
+    duplicate-free and separated from the hole term in both directions. -/
+theorem runtimeLinear_plug_of
+    {E : EvalCtx} {e : Term}
+    (hCtx : (ctxLocRefs E).Nodup)
+    (h : RuntimeLinear e)
+    (hSep : LocRefsSeparated (ctxLocRefs E) (locRefs e))
+    (hSepSymm : LocRefsSeparated (locRefs e) (ctxLocRefs E)) :
+    RuntimeLinear (plug E e) := by
+  cases E with
+  | hole =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | appL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | appR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | letBind x e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | copy =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | letpair x y e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | pairL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | pairR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | fst =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | snd =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | addL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | addR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | mulL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | mulR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | sum d =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | expand d =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | uniformLike lo hi =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+  | handle epsH clauses =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocCls hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocCls⟩
+  | perform op =>
+      simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
+
+/-- Converse direction of `runtimeLinear_multiPlug`: plugging a whole
+    chain preserves runtime linearity when the chain's explicit
+    location references are duplicate-free and separated from the hole
+    term in both directions. -/
+theorem runtimeLinear_multiPlug_of
+    {Es : EvalCtxChain} {e : Term}
+    (hChain : (chainLocRefs Es).Nodup)
+    (h : RuntimeLinear e)
+    (hSep : LocRefsSeparated (chainLocRefs Es) (locRefs e))
+    (hSepSymm : LocRefsSeparated (locRefs e) (chainLocRefs Es)) :
+    RuntimeLinear (multiPlug Es e) := by
+  induction Es generalizing e with
+  | nil =>
+      simpa [multiPlug, chainLocRefs, RuntimeLinear, LocRefsSeparated] using h
+  | cons E Es ih =>
+      rcases List.nodup_append.mp hChain with ⟨hCtx, hEs, _hCross⟩
+      apply runtimeLinear_plug_of hCtx
+      · exact ih hEs h
+          (fun ell hmemEs hLocE => hSep ell (List.mem_append.mpr <| Or.inr hmemEs) hLocE)
+          (fun ell hLocE hmemEs => hSepSymm ell hLocE (List.mem_append.mpr <| Or.inr hmemEs))
+      · intro ell hmemE hLocMulti
+        rcases (mem_locRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
+        · exact locRefsSeparated_left_of_nodup_append hChain ell hmemE hmemEs
+        · exact hSep ell (List.mem_append.mpr <| Or.inl hmemE) hLocE
+      · intro ell hLocMulti hmemE
+        rcases (mem_locRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
+        · exact locRefsSeparated_right_of_nodup_append hChain ell hmemEs hmemE
+        · exact hSepSymm ell hLocE (List.mem_append.mpr <| Or.inl hmemE)
+
 /-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
     context `E` is not itself a `handle` whose effect row catches `op`.
     Because `EvalCtx` is a one-step (non-recursive) context, this is a
