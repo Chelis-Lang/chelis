@@ -422,3 +422,119 @@ def test_two() -> unit = test_assert(true, "would have passed two")
     );
     assert_eq!(output.status.code(), Some(1));
 }
+
+// === Phase 3t.5 extras: richer failure-mode coverage ===
+
+#[test]
+fn chelis_test_infinite_recursion_times_out_and_suite_continues() {
+    // 3t.5 coverage: an infinite loop in one test should surface as a FAIL
+    // carrying the timeout message, not hang the suite. A sibling passing
+    // test must still run and pass so the runner is proven to proceed past
+    // the timed-out worker. The timeout is the `--timeout` override so we do
+    // not have to wait the default 30s.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-timeout");
+    write_file(
+        &pkg.join("tests/loopy.ch"),
+        r#"module Smoke.Tests.Loopy
+
+-- A fold over a multi-million-element range is a stack-safe way to trip
+-- the per-test timeout without blowing the worker stack (native
+-- recursion with no base case overflows the 32 MB test-worker stack
+-- before the timeout deadline fires). 10_000_000 iterations consistently
+-- exceeds the --timeout 2 budget used below.
+def test_infinite() -> unit = test_assert(eq(fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), range(cast(0, int64), cast(10000000, int64))), cast(0, int64)), "never")
+
+def test_quick() -> unit = test_assert(true, "quick")
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "--timeout", "2", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The looping test must appear as FAIL with a timeout-flavored message.
+    assert!(
+        stdout.contains("test_infinite"),
+        "test_infinite missing from:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("timeout"),
+        "timeout message missing from:\n{stdout}"
+    );
+    // The sibling test must have PASSed — the runner must not bail after one
+    // timed-out test.
+    assert!(
+        stdout.contains("test_quick"),
+        "test_quick missing from:\n{stdout}"
+    );
+    let pass_count = stdout.matches("PASS").count();
+    assert!(
+        pass_count >= 1,
+        "expected at least one PASS (test_quick); got {pass_count} in:\n{stdout}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn chelis_test_missing_import_is_reported_as_file_level_error() {
+    // 3t.5 coverage: a test file that imports a module that does not exist
+    // in the reef graph must report a file-level error row and continue to
+    // the next file. Specifically: the compile error must surface, and the
+    // runner must exit 1 (test failure) — not exit 2 (runner error), because
+    // the file was enumerated successfully; it is one test file's content
+    // that is broken, not the runner state.
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-missing-import");
+    write_file(
+        &pkg.join("tests/ghost.ch"),
+        r#"module Smoke.Tests.Ghost
+
+import Nonexistent.Module (imaginary_helper)
+
+def test_uses_ghost() -> unit = test_assert(true, "would never compile")
+"#,
+    );
+    // Sibling file that is fine — runner must keep going past the broken
+    // file, exercise this one, and still exit 1 because of the first.
+    write_file(
+        &pkg.join("tests/ok.ch"),
+        r#"module Smoke.Tests.Ok
+
+def test_ok() -> unit = test_assert(true, "ok")
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The broken file must produce a FAIL row that references either the
+    // compile error or the unresolved module name.
+    assert!(
+        stdout.contains("ghost.ch"),
+        "ghost.ch missing from output:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("FAIL"),
+        "FAIL row missing from:\nstdout={stdout}"
+    );
+    // The healthy sibling file must still report its PASS row.
+    assert!(
+        stdout.contains("test_ok"),
+        "sibling test_ok missing from:\nstdout={stdout}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "PASS row missing from:\nstdout={stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1 (failing tests), got {:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+}
