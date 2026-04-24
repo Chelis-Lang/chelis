@@ -137,3 +137,71 @@ def ok(x: tensor[2, 3, f32]): int32 =
     )
     .expect("shape queries should be observational, not consuming");
 }
+
+#[test]
+fn to_list_does_not_consume_tensor_input() {
+    check_surf(
+        r#"
+def ok(x: tensor[4, f32]): tensor[4, f32] =
+  {
+    xs: List[f32] = to_list(x)
+    relu(x)
+  }
+"#,
+    )
+    .expect("to_list reads the tensor without freeing it, so x must remain live");
+}
+
+#[test]
+fn to_list_still_flags_use_after_genuine_consume() {
+    let errors = check_surf(
+        r#"
+def bad(x: tensor[4, f32]): tensor[4, f32] =
+  {
+    y: tensor[4, f32] = relu(x)
+    xs: List[f32] = to_list(x)
+    y
+  }
+"#,
+    )
+    .expect_err("to_list after a consuming use of x should still be rejected");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::UseAfterConsume)
+            && error.message.contains("variable `x`")
+    }));
+}
+
+#[test]
+fn tensor_to_scalar_does_not_consume_tensor_input() {
+    check_surf(
+        r#"
+def ok(x: tensor[f32]): tensor[f32] =
+  {
+    v: f64 = tensor_to_scalar(x)
+    relu(x)
+  }
+"#,
+    )
+    .expect("tensor_to_scalar reads the tensor without freeing it, so x must remain live");
+}
+
+#[test]
+fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
+    let errors = check_surf(
+        r#"
+def bad(x: tensor[f32]): tensor[f32] =
+  {
+    y: tensor[f32] = relu(x)
+    v: f64 = tensor_to_scalar(x)
+    y
+  }
+"#,
+    )
+    .expect_err("tensor_to_scalar after a consuming use of x should still be rejected");
+
+    assert!(errors.iter().any(|error| {
+        matches!(error.kind, CheckErrorKind::UseAfterConsume)
+            && error.message.contains("variable `x`")
+    }));
+}

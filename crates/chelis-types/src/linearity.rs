@@ -699,10 +699,26 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
 }
 
 fn builtin_arg_is_observational(name: Option<&str>, arg_index: usize) -> bool {
+    // Tensor→host conversions read the tensor without taking ownership — the
+    // runtime implementations (`chelis_list_from_tensor`, `chelis_tensor_to_f64`,
+    // `chelis_print_f32`, `chelis_tensor_rank`, `chelis_tensor_shape`,
+    // `chelis_tensor_numel`, `tensor_to_string`) all read via the pointer and
+    // never call `chelis_free`, so the caller still owns the input afterwards.
+    // Keeping these observational avoids forcing callers to sprinkle
+    // `copy(x)` before every query or host-lane conversion.
     matches!(
         (name, arg_index),
         (
-            Some("print" | "debug" | "to_string" | "rank" | "shape" | "numel"),
+            Some(
+                "print"
+                    | "debug"
+                    | "to_string"
+                    | "rank"
+                    | "shape"
+                    | "numel"
+                    | "to_list"
+                    | "tensor_to_scalar"
+            ),
             0
         )
     )
