@@ -159,6 +159,31 @@ def ctxLocRefs : EvalCtx → List Loc
   | EvalCtx.handle _ clauses => locRefsClauses clauses
   | EvalCtx.perform _ => []
 
+/-- Active runtime locations mentioned by the outer frame of a one-step
+    evaluation context, excluding the hole term itself. Handler clauses
+    are dormant and therefore contribute nothing to the active
+    footprint. -/
+def activeCtxLocRefs : EvalCtx → List Loc
+  | EvalCtx.hole => []
+  | EvalCtx.appL e2 => activeLocRefs e2
+  | EvalCtx.appR v1 => activeLocRefs v1
+  | EvalCtx.letBind _ e2 => activeLocRefs e2
+  | EvalCtx.copy => []
+  | EvalCtx.letpair _ _ e2 => activeLocRefs e2
+  | EvalCtx.pairL e2 => activeLocRefs e2
+  | EvalCtx.pairR v1 => activeLocRefs v1
+  | EvalCtx.fst => []
+  | EvalCtx.snd => []
+  | EvalCtx.addL e2 => activeLocRefs e2
+  | EvalCtx.addR v1 => activeLocRefs v1
+  | EvalCtx.mulL e2 => activeLocRefs e2
+  | EvalCtx.mulR v1 => activeLocRefs v1
+  | EvalCtx.sum _ => []
+  | EvalCtx.expand _ => []
+  | EvalCtx.uniformLike _ _ => []
+  | EvalCtx.handle _ clauses => activeLocRefsClauses clauses
+  | EvalCtx.perform _ => []
+
 /-- Separation of runtime-location mentions between two lists. -/
 def LocRefsSeparated (xs ys : List Loc) : Prop :=
   ∀ ell, ell ∈ xs → ell ∉ ys
@@ -185,6 +210,11 @@ theorem mem_locRefs_plug
     (E : EvalCtx) (e : Term) (ell : Loc) :
     ell ∈ locRefs (plug E e) ↔ ell ∈ ctxLocRefs E ∨ ell ∈ locRefs e := by
   cases E <;> simp [plug, ctxLocRefs, locRefs, or_comm]
+
+theorem mem_activeLocRefs_plug
+    (E : EvalCtx) (e : Term) (ell : Loc) :
+    ell ∈ activeLocRefs (plug E e) ↔ ell ∈ activeCtxLocRefs E ∨ ell ∈ activeLocRefs e := by
+  cases E <;> simp [plug, activeCtxLocRefs, activeLocRefs, activeLocRefsClauses, or_comm]
 
 /-! ### Multi-frame evaluation context chains (Wave 1 P2)
 
@@ -215,6 +245,12 @@ def chainLocRefs : EvalCtxChain → List Loc
   | [] => []
   | E :: Es => ctxLocRefs E ++ chainLocRefs Es
 
+/-- Active runtime locations mentioned by the outer frames of an
+    evaluation context chain, excluding the hole term itself. -/
+def activeChainLocRefs : EvalCtxChain → List Loc
+  | [] => []
+  | E :: Es => activeCtxLocRefs E ++ activeChainLocRefs Es
+
 theorem mem_locRefs_multiPlug
     (Es : EvalCtxChain) (e : Term) (ell : Loc) :
     ell ∈ locRefs (multiPlug Es e) ↔ ell ∈ chainLocRefs Es ∨ ell ∈ locRefs e := by
@@ -223,6 +259,16 @@ theorem mem_locRefs_multiPlug
       simp [multiPlug, chainLocRefs]
   | cons E Es ih =>
       simp [multiPlug, chainLocRefs, mem_locRefs_plug, ih, or_left_comm, or_assoc]
+
+theorem mem_activeLocRefs_multiPlug
+    (Es : EvalCtxChain) (e : Term) (ell : Loc) :
+    ell ∈ activeLocRefs (multiPlug Es e) ↔
+      ell ∈ activeChainLocRefs Es ∨ ell ∈ activeLocRefs e := by
+  induction Es with
+  | nil =>
+      simp [multiPlug, activeChainLocRefs]
+  | cons E Es ih =>
+      simp [multiPlug, activeChainLocRefs, mem_activeLocRefs_plug, ih, or_left_comm, or_assoc]
 
 /-- Runtime linearity of a plugged term forces the hole term to remain
     runtime-linear and disjoint from the frame's explicit location
@@ -312,6 +358,95 @@ theorem runtimeLinear_multiPlug
           have hLocMulti :
               ell ∈ locRefs (multiPlug Es e) := by
             exact (mem_locRefs_multiPlug Es e ell).2 (Or.inr hLocE)
+          exact hOuter.2 ell hmemE hLocMulti
+        · intro hLocE
+          exact hInner.2 ell hmemEs hLocE
+
+/-- Active-footprint version of `runtimeLinear_plug`. -/
+theorem activeRuntimeLinear_plug
+    {E : EvalCtx} {e : Term}
+    (h : ActiveRuntimeLinear (plug E e)) :
+    ActiveRuntimeLinear e ∧ LocRefsSeparated (activeCtxLocRefs E) (activeLocRefs e) := by
+  cases E with
+  | hole =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | appL e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | appR v1 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨_hv1, he, _hsep⟩
+      exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | letBind x e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | copy =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | letpair x y e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | pairL e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | pairR v1 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨_hv1, he, _hsep⟩
+      exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | fst =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | snd =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | addL e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | addR v1 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨_hv1, he, _hsep⟩
+      exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | mulL e2 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨he, _he2, _hsep⟩
+      exact ⟨he, locRefsSeparated_right_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | mulR v1 =>
+      rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
+        ⟨_hv1, he, _hsep⟩
+      exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
+  | sum d =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | expand d =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | uniformLike lo hi =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | handle epsH clauses =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs,
+        activeLocRefs, activeLocRefsClauses] using h
+  | perform op =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+
+/-- Chain version of `activeRuntimeLinear_plug`. -/
+theorem activeRuntimeLinear_multiPlug
+    {Es : EvalCtxChain} {e : Term}
+    (h : ActiveRuntimeLinear (multiPlug Es e)) :
+    ActiveRuntimeLinear e ∧ LocRefsSeparated (activeChainLocRefs Es) (activeLocRefs e) := by
+  induction Es with
+  | nil =>
+      simpa [multiPlug, activeChainLocRefs, ActiveRuntimeLinear, LocRefsSeparated] using h
+  | cons E Es ih =>
+      have hOuter := activeRuntimeLinear_plug (E := E) (e := multiPlug Es e) h
+      have hInner := ih hOuter.1
+      constructor
+      · exact hInner.1
+      · intro ell hmem
+        rcases List.mem_append.mp hmem with hmemE | hmemEs
+        · intro hLocE
+          have hLocMulti :
+              ell ∈ activeLocRefs (multiPlug Es e) := by
+            exact (mem_activeLocRefs_multiPlug Es e ell).2 (Or.inr hLocE)
           exact hOuter.2 ell hmemE hLocMulti
         · intro hLocE
           exact hInner.2 ell hmemEs hLocE
@@ -425,6 +560,119 @@ theorem runtimeLinear_multiPlug_of
         · exact hSep ell (List.mem_append.mpr <| Or.inl hmemE) hLocE
       · intro ell hLocMulti hmemE
         rcases (mem_locRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
+        · exact locRefsSeparated_right_of_nodup_append hChain ell hmemEs hmemE
+        · exact hSepSymm ell hLocE (List.mem_append.mpr <| Or.inl hmemE)
+
+/-- Converse direction of `activeRuntimeLinear_plug`: plugging preserves
+    the active runtime-linearity footprint when the frame's active
+    location references are duplicate-free and separated from the hole
+    term in both directions. -/
+theorem activeRuntimeLinear_plug_of
+    {E : EvalCtx} {e : Term}
+    (hCtx : (activeCtxLocRefs E).Nodup)
+    (h : ActiveRuntimeLinear e)
+    (hSep : LocRefsSeparated (activeCtxLocRefs E) (activeLocRefs e))
+    (hSepSymm : LocRefsSeparated (activeLocRefs e) (activeCtxLocRefs E)) :
+    ActiveRuntimeLinear (plug E e) := by
+  cases E with
+  | hole =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | appL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | appR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | letBind x e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | copy =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | letpair x y e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | pairL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | pairR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | fst =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | snd =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | addL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | addR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | mulL e2 =>
+      exact List.nodup_append.mpr ⟨h, hCtx, by
+        intro ell hLoc ell' hLocE2 hEq
+        subst ell'
+        exact hSepSymm ell hLoc hLocE2⟩
+  | mulR v1 =>
+      exact List.nodup_append.mpr ⟨hCtx, h, by
+        intro ell hLocV1 ell' hLoc hEq
+        subst ell'
+        exact hSep ell hLocV1 hLoc⟩
+  | sum d =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | expand d =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | uniformLike lo hi =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+  | handle epsH clauses =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs,
+        activeLocRefs, activeLocRefsClauses] using h
+  | perform op =>
+      simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
+
+/-- Converse direction of `activeRuntimeLinear_multiPlug`: plugging a
+    whole chain preserves the active runtime-linearity footprint when
+    the chain's active location references are duplicate-free and
+    separated from the hole term in both directions. -/
+theorem activeRuntimeLinear_multiPlug_of
+    {Es : EvalCtxChain} {e : Term}
+    (hChain : (activeChainLocRefs Es).Nodup)
+    (h : ActiveRuntimeLinear e)
+    (hSep : LocRefsSeparated (activeChainLocRefs Es) (activeLocRefs e))
+    (hSepSymm : LocRefsSeparated (activeLocRefs e) (activeChainLocRefs Es)) :
+    ActiveRuntimeLinear (multiPlug Es e) := by
+  induction Es generalizing e with
+  | nil =>
+      simpa [multiPlug, activeChainLocRefs, ActiveRuntimeLinear, LocRefsSeparated] using h
+  | cons E Es ih =>
+      rcases List.nodup_append.mp hChain with ⟨hCtx, hEs, _hCross⟩
+      apply activeRuntimeLinear_plug_of hCtx
+      · exact ih hEs h
+          (fun ell hmemEs hLocE =>
+            hSep ell (List.mem_append.mpr <| Or.inr hmemEs) hLocE)
+          (fun ell hLocE hmemEs =>
+            hSepSymm ell hLocE (List.mem_append.mpr <| Or.inr hmemEs))
+      · intro ell hmemE hLocMulti
+        rcases (mem_activeLocRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
+        · exact locRefsSeparated_left_of_nodup_append hChain ell hmemE hmemEs
+        · exact hSep ell (List.mem_append.mpr <| Or.inl hmemE) hLocE
+      · intro ell hLocMulti hmemE
+        rcases (mem_activeLocRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
         · exact locRefsSeparated_right_of_nodup_append hChain ell hmemEs hmemE
         · exact hSepSymm ell hLocE (List.mem_append.mpr <| Or.inl hmemE)
 
