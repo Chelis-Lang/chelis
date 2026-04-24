@@ -528,6 +528,44 @@ theorem StoreTypOn.of_sub
   intro ell t _ hell
   exact hsub ell t hell
 
+/-- Every location in `locs` is present in the runtime store. This is
+    the freshness side-condition needed by runtime-linearity
+    preservation: when a step allocates a fresh location, we must know
+    it is fresh not only for the redex, but also for any untouched
+    outer-frame references threaded through the induction. -/
+def StoreLiveOn (sigma : Store) (locs : List Loc) : Prop :=
+  ∀ ell, ell ∈ locs → (storeLookup sigma ell).isSome
+
+theorem StoreLiveOn.append
+    {sigma : Store} {locs1 locs2 : List Loc}
+    (h1 : StoreLiveOn sigma locs1)
+    (h2 : StoreLiveOn sigma locs2) :
+    StoreLiveOn sigma (locs1 ++ locs2) := by
+  intro ell hell
+  rcases List.mem_append.mp hell with hmem1 | hmem2
+  · exact h1 ell hmem1
+  · exact h2 ell hmem2
+
+theorem StoreLiveOn.append_left
+    {sigma : Store} {locs1 locs2 : List Loc}
+    (h : StoreLiveOn sigma (locs1 ++ locs2)) :
+    StoreLiveOn sigma locs1 := by
+  intro ell hell
+  exact h ell (List.mem_append_left _ hell)
+
+theorem StoreLiveOn.append_right
+    {sigma : Store} {locs1 locs2 : List Loc}
+    (h : StoreLiveOn sigma (locs1 ++ locs2)) :
+    StoreLiveOn sigma locs2 := by
+  intro ell hell
+  exact h ell (List.mem_append_right _ hell)
+
+@[simp] theorem storeLiveOn_nil
+    {sigma : Store} :
+    StoreLiveOn sigma [] := by
+  intro ell hell
+  cases hell
+
 /-- Step-local store agreement on locations not mentioned by the redex.
     This is the missing store-side fact for the `ctx` case: numeric
     reductions may consume locations mentioned inside the redex, but
