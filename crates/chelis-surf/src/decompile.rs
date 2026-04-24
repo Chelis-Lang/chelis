@@ -1925,12 +1925,14 @@ fn decompile_effect_suffix_from_type_expr(expr: &Expr) -> String {
         return String::new();
     };
 
-    let rendered = decompile_effect_set_expr(effect_expr);
-    if rendered.is_empty() {
-        String::new()
-    } else {
-        format!(" ! {{ {rendered} }}")
+    let Expr::List(eff_list, _) = effect_expr else {
+        return String::new();
+    };
+    if tag(eff_list) != Some("effects") {
+        return String::new();
     }
+    let rendered = decompile_effect_set_expr(effect_expr);
+    format!(" ! {{ {rendered} }}")
 }
 
 fn decompile_effect_set_expr(expr: &Expr) -> String {

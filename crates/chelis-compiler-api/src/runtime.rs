@@ -1485,6 +1485,11 @@ impl<'a> EvalContext<'a> {
                 let expected = expect_tensor_arg(args, 1)?;
                 let tol = expect_float_arg(args, 2)?;
                 let label = expect_string_arg(args, 3)?;
+                if tol.is_nan() || tol < 0.0 {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): invalid tolerance {tol} (must be finite and non-negative)"
+                    ));
+                }
                 let actual_data = &actual.value.data;
                 let expected_data = &expected.value.data;
                 if actual_data.len() != expected_data.len() {
@@ -1495,7 +1500,14 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
-                    if (a - e).abs() >= tol {
+                    if a.is_nan() || e.is_nan() {
+                        return Err(format!(
+                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol} (NaN is never close)"
+                        ));
+                    }
+                    let diff = (a - e).abs();
+                    let mismatch = if tol == 0.0 { a != e } else { diff > tol };
+                    if mismatch {
                         return Err(format!(
                             "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol}"
                         ));
@@ -3133,5 +3145,113 @@ x = test_assert_close_tensor(actual, expected, 0.01, "close")
             outcome.host_bindings.get("x"),
             Some(RuntimeValue::Unit)
         ));
+    }
+
+    #[test]
+    fn test_assert_close_tensor_zero_tol_passes_bit_exact() {
+        // Regression: tol = 0 with identical data must pass, not report a false mismatch.
+        let checked = checked_surf(
+            r#"
+actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
+expected: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
+x = test_assert_close_tensor(actual, expected, 0.0, "bit-exact")
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("zero-tol bit-exact equality should pass");
+        assert!(matches!(
+            outcome.host_bindings.get("x"),
+            Some(RuntimeValue::Unit)
+        ));
+    }
+
+    #[test]
+    fn test_assert_close_tensor_zero_tol_rejects_any_delta() {
+        let checked = checked_surf(
+            r#"
+actual: tensor[2, f32] = to_tensor([1.0, 2.0])
+expected: tensor[2, f32] = to_tensor([1.0, 2.00001])
+x = test_assert_close_tensor(actual, expected, 0.0, "strict")
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("zero-tol with any delta must fail");
+        assert!(
+            err.contains("at index 1") && err.contains("strict"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_nan_actual_fails() {
+        // Regression: NaN in actual must fail. (NaN - x).abs() is NaN, which silently
+        // passes the old `>= tol` check. sqrt(-1.0) produces NaN.
+        let checked = checked_surf(
+            r#"
+nan_val: f32 = sqrt(-1.0)
+actual: tensor[2, f32] = to_tensor([1.0, nan_val])
+expected: tensor[2, f32] = to_tensor([1.0, 2.0])
+x = test_assert_close_tensor(actual, expected, 0.01, "nan-actual")
+"#,
+        );
+        let err =
+            evaluate_host_program(&checked, &HashMap::new()).expect_err("NaN in actual must fail");
+        assert!(
+            err.contains("at index 1") && err.contains("NaN"),
+            "expected NaN-aware diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_nan_expected_fails() {
+        let checked = checked_surf(
+            r#"
+nan_val: f32 = sqrt(-1.0)
+actual: tensor[2, f32] = to_tensor([1.0, 2.0])
+expected: tensor[2, f32] = to_tensor([1.0, nan_val])
+x = test_assert_close_tensor(actual, expected, 0.01, "nan-expected")
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("NaN in expected must fail");
+        assert!(
+            err.contains("at index 1") && err.contains("NaN"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_negative_tol_rejected() {
+        let checked = checked_surf(
+            r#"
+actual: tensor[2, f32] = to_tensor([1.0, 2.0])
+expected: tensor[2, f32] = to_tensor([1.0, 2.0])
+x = test_assert_close_tensor(actual, expected, -0.001, "neg-tol")
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("negative tol must be rejected");
+        assert!(
+            err.contains("invalid tolerance") && err.contains("neg-tol"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_nan_tol_rejected() {
+        let checked = checked_surf(
+            r#"
+nan_tol: f32 = sqrt(-1.0)
+actual: tensor[2, f32] = to_tensor([1.0, 2.0])
+expected: tensor[2, f32] = to_tensor([1.0, 4.0])
+x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
+"#,
+        );
+        let err =
+            evaluate_host_program(&checked, &HashMap::new()).expect_err("NaN tol must be rejected");
+        assert!(
+            err.contains("invalid tolerance") && err.contains("nan-tol"),
+            "got: {err}"
+        );
     }
 }

@@ -154,7 +154,7 @@ fn format_effects(effects: Option<&[EffectExpr]>) -> String {
         return String::new();
     };
     if effects.is_empty() {
-        return String::new();
+        return " ! {}".to_string();
     }
     format!(
         " ! {{ {} }}",
@@ -569,5 +569,42 @@ mod tests {
         }];
 
         assert_eq!(format_program(&program), "x = 1\n");
+    }
+
+    #[test]
+    fn explicit_empty_effect_row_is_preserved() {
+        // Regression: `! {}` is a meaningful annotation (declared-pure) and must survive
+        // a format round-trip. Erasing it silently downgrades the effect contract and
+        // lets assertions leak into declared-pure functions.
+        let source = "def f() -> unit ! {} = ()\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains("! {}"),
+            "empty effect row must be preserved; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn explicit_effect_row_survives_round_trip() {
+        let source = "def f() -> unit ! { Test } = ()\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            rendered.contains("! { Test }"),
+            "Test effect row must be preserved; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn unannotated_def_stays_unannotated() {
+        // The absence of an effect row is distinct from an empty row and must survive.
+        let source = "def f() -> unit = ()\n";
+        let program = crate::parser::parse_str(source).expect("parse");
+        let rendered = format_program(&program);
+        assert!(
+            !rendered.contains("! {"),
+            "unannotated def must not grow an effect row; got: {rendered}"
+        );
     }
 }
