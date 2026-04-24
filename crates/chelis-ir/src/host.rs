@@ -2612,28 +2612,31 @@ fn lower_app_host_expr(
             ty,
         };
     }
-    let helper_tensor_ty = expr_tensor_type(&app_expr, program, scope).or_else(|| {
-        if let HostType::Tensor(tensor_ty) = &inferred_ret_ty {
-            Some(tensor_ty.clone())
-        } else if let HostType::Tensor(tensor_ty) = &explicit_ty {
-            Some(tensor_ty.clone())
-        } else {
-            None
-        }
-    }).or_else(|| {
-        // When the callee is a `(grad {} fn_arg)` node (not a plain `var`),
-        // `infer_app_expr_host_type` returns None because it only handles `var`
-        // callees — so `helper_tensor_ty` is None and the tensor-helper path is
-        // skipped entirely.  For `grad(named_fn)(x)` the output shape equals the
-        // shape of the first differentiable argument `x`, so infer it from there.
-        // This lets `try_lower_tensor_helper_call` succeed even when the outer
-        // `app` node carries no explicit type annotation.
-        let callee = kids.first().and_then(as_list)?;
-        if tag(callee) != Some("grad") {
-            return None;
-        }
-        kids.get(1).and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
-    });
+    let helper_tensor_ty = expr_tensor_type(&app_expr, program, scope)
+        .or_else(|| {
+            if let HostType::Tensor(tensor_ty) = &inferred_ret_ty {
+                Some(tensor_ty.clone())
+            } else if let HostType::Tensor(tensor_ty) = &explicit_ty {
+                Some(tensor_ty.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // When the callee is a `(grad {} fn_arg)` node (not a plain `var`),
+            // `infer_app_expr_host_type` returns None because it only handles `var`
+            // callees — so `helper_tensor_ty` is None and the tensor-helper path is
+            // skipped entirely.  For `grad(named_fn)(x)` the output shape equals the
+            // shape of the first differentiable argument `x`, so infer it from there.
+            // This lets `try_lower_tensor_helper_call` succeed even when the outer
+            // `app` node carries no explicit type annotation.
+            let callee = kids.first().and_then(as_list)?;
+            if tag(callee) != Some("grad") {
+                return None;
+            }
+            kids.get(1)
+                .and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
+        });
     let (helper_expr, helper_scope, helper_bindings) =
         hoist_host_lane_tensor_bindings(&app_expr, program, scope, fn_sig.as_ref(), tensor_helpers);
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are

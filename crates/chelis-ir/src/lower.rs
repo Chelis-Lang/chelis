@@ -4748,52 +4748,6 @@ mod regression_tests {
     // context (no local_callables). This is the exact path the host-lane tensor
     // helper uses when compiling `grad(loss)(x)` where `loss` is a top-level def.
     //
-    // Helper: build the fn body and app expression used in grad tests below.
-    fn make_grad_named_fn_fixtures() -> (
-        chelis_deep::ast::Expr,
-        chelis_deep::ast::Expr,
-        std::collections::HashMap<String, chelis_deep::ast::Expr>,
-        std::collections::HashMap<String, crate::dag::TensorType>,
-    ) {
-        use std::collections::HashMap;
-        // loss(x) = sum(mul(x,x), 0)  →  grad at x = 2*x
-        let fn_src = r#"
-            (fn {}
-              (params {}
-                (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
-              (app {type: (t-tensor {} (t-prim {} f32))}
-                (var {} sum)
-                (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
-                  (var {} mul)
-                  (copy {} (var {} x))
-                  (copy {} (var {} x)))
-                (lit {type: (t-prim {} int32)} 0)))
-        "#;
-        let app_src = r#"
-            (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
-              (grad {} (var {} loss))
-              (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
-        "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
-            .expect("parse fn failed")
-            .into_iter()
-            .next()
-            .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
-            .expect("parse app failed")
-            .into_iter()
-            .next()
-            .expect("app expr");
-        let mut program_defs = HashMap::new();
-        program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
-        };
-        let scoped_types = HashMap::from([("input".to_string(), input_ty)]);
-        (app_expr, chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol("_".into()), chelis_deep::Span::new(0,0)), program_defs, scoped_types)
-    }
-
     // Positive: lower_subexpr_program with program_defs resolves grad(named_fn)(x).
     // This must NOT panic and must produce a valid DAG.
     #[test]
@@ -4837,7 +4791,7 @@ mod regression_tests {
         // This must NOT panic with "`grad` is not representable in the Phase 0e RISC DAG".
         let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
         assert!(
-            dag.len() > 0,
+            !dag.is_empty(),
             "lowering grad(named_fn)(x) must produce a non-empty DAG"
         );
         assert!(
@@ -4954,7 +4908,7 @@ mod regression_tests {
         let scoped_types = HashMap::from([("input".to_string(), input_ty.clone())]);
         let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
         assert!(
-            dag.len() > 0,
+            !dag.is_empty(),
             "lower_subexpr_program of grad(named_fn)(input) must produce a non-empty DAG"
         );
         let inputs = HashMap::from([(
