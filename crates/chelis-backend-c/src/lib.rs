@@ -64,6 +64,13 @@ pub struct CodegenOptions {
     /// in tests to force the Sleef code-generation path without requiring the library to
     /// actually be installed on the build machine.
     pub math_lib_override: Option<MathLib>,
+    /// Emit the generated entry function with `static` linkage.
+    ///
+    /// Set to `true` when the emitted DAG kernel is a TU-internal helper (e.g. a
+    /// `HostTensorHelper` DAG embedded in a host `.c` file).  External callers must
+    /// never see `static` on the exported entry point — leave this `false` (the
+    /// default) for all standalone `codegen` / `codegen_with_options` calls.
+    pub static_entry: bool,
 }
 
 /// Generate C source code from a RISC DAG.
@@ -257,6 +264,119 @@ mod tests {
         let result = codegen(&dag, "test_fn");
         assert!(result.h_header.ends_with(';'));
         assert!(!result.h_header.contains('{'));
+    }
+
+    // ---- Linkage invariant tests ----
+    //
+    // These tests enforce the PLT-avoidance contract: internal tensor helper
+    // functions emitted into the `.c` file must carry `static` linkage so
+    // that `-shared -fPIC` builds do not export them via PLT.  The exported
+    // entry point must NOT be `static` so external callers can link against it.
+
+    #[test]
+    fn dag_codegen_exported_entry_has_no_static_prefix() {
+        // The standalone DAG codegen path (used by `chelis build` for object-mode
+        // compilation) must emit an extern-linkage entry function.  Making it
+        // `static` would prevent external callers from linking against the symbol.
+        let mut dag = Dag::new();
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let result = codegen(&dag, "my_entry");
+        // The definition line must start with `void`, not `static void`.
+        assert!(
+            result.c_source.contains("\nvoid my_entry("),
+            "exported entry must not be static; got:\n{}",
+            &result.c_source[..result.c_source.find('{').unwrap_or(result.c_source.len())]
+        );
+        assert!(
+            !result.c_source.contains("static void my_entry("),
+            "exported entry must not carry static linkage"
+        );
+    }
+
+    #[test]
+    fn dag_codegen_with_static_entry_option_emits_static_prefix() {
+        // When the caller explicitly requests static_entry (used internally for
+        // HostTensorHelper DAG kernels), the function definition must be `static void`.
+        let mut dag = Dag::new();
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let result = emit::CEmitter::emit_dag_with_options(
+            &dag,
+            "internal_helper",
+            CodegenOptions {
+                static_entry: true,
+                ..CodegenOptions::default()
+            },
+        );
+        assert!(
+            result.contains("static void internal_helper("),
+            "internal helper must be static; got source starting:\n{}",
+            &result[..result.find('{').unwrap_or(result.len()).min(300)]
+        );
+    }
+
+    #[test]
+    fn host_program_tensor_helpers_are_static_entry_not_exported() {
+        // For a HostProgram with a tensor helper, the emitted `.c` source must
+        // mark the helper function as `static` (preventing PLT export) while
+        // the user-facing HostFunction entry keeps external linkage.
+        use chelis_ir::host::{
+            HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+        };
+
+        // Build a simple 1-element scalar DAG for the helper.
+        let mut helper_dag = Dag::new();
+        helper_dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+
+        let helper = HostTensorHelper {
+            name: "my_prog__my_fn__tensor_0".to_string(),
+            dag: helper_dag,
+            inputs: vec![],
+            output: scalar_f32(),
+        };
+
+        let func = HostFunction {
+            name: "my_fn".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: HostType::Float64,
+            }],
+            ret_ty: HostType::Float64,
+            // Body is just a float literal — does not actually call the tensor helper,
+            // but the helper must still be emitted into the file.
+            body: HostExpr::Float(0.0),
+            tensor_helpers: vec![helper],
+        };
+
+        let program = HostProgram {
+            globals: vec![],
+            global_tensor_helpers: vec![],
+            functions: vec![func],
+        };
+
+        let result = codegen_host_program(&program, "my_prog");
+        let src = &result.c_source;
+
+        // The tensor helper must be static (internal to the TU).
+        // `emit_host_program` names the helper as `{emitted_fn_name}__tensor_{index}`.
+        assert!(
+            src.contains("static void my_fn__tensor_0("),
+            "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
+            src
+        );
+
+        // The user-facing entry function must NOT be static (library mode: no globals).
+        // Without globals, internal_linkage=false, so the function has external linkage.
+        assert!(
+            !src.contains("static void my_fn(") && !src.contains("static inline void my_fn("),
+            "exported entry function my_fn must not be static;\ngenerated source:\n{}",
+            src
+        );
+        // Confirm the external-linkage definition is present.
+        assert!(
+            src.contains(" my_fn("),
+            "exported entry function my_fn must have an external-linkage definition;\ngenerated source:\n{}",
+            src
+        );
     }
 
     #[test]
