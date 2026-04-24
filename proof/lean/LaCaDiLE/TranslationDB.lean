@@ -1116,11 +1116,175 @@ theorem eraseClauses_locRefs :
 
 end
 
+mutual
+
+theorem eraseTerm_activeLocRefs :
+    ∀ {ρ : BinderEnv} {e : Term} {eDB : TermDB},
+      eraseTerm ρ e = some eDB ->
+      activeLocRefs e = activeLocRefsDB eDB
+  | ρ, Term.var x, eDB, hErase => by
+      cases hρx : lookupBinder ρ x with
+      | none =>
+          simp [eraseTerm, hρx] at hErase
+      | some i =>
+          simp [eraseTerm, hρx] at hErase
+          cases hErase
+          simp [activeLocRefs, activeLocRefsDB]
+  | ρ, Term.abs x t body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs hbody
+  | ρ, Term.app e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.letBind x e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm (x :: ρ) e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.copy e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
+  | ρ, Term.letpair x y e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm (y :: x :: ρ) e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.pair e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.fst e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
+  | ρ, Term.snd e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
+  | ρ, Term.unit, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB]
+  | ρ, Term.const c ds, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB]
+  | ρ, Term.add e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.mul e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+  | ρ, Term.sum e d, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+  | ρ, Term.expand e d, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+  | ρ, Term.uniformLike e lo hi, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+  | ρ, Term.grad x t tOut body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs hbody
+  | ρ, Term.vmap x t body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs hbody
+  | ρ, Term.handle epsH body clauses, eDB, hErase => by
+      rcases hbody : eraseTerm ρ body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      rcases hclauses : eraseClauses ρ clauses with _ | clausesDB <;>
+        simp [eraseTerm, hbody, hclauses] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody,
+        eraseClauses_activeLocRefs hclauses]
+  | ρ, Term.perform op e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
+  | ρ, Term.loc ell, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [activeLocRefs, activeLocRefsDB]
+
+theorem eraseClauses_activeLocRefs :
+    ∀ {ρ : BinderEnv}
+      {clauses : List (EffectLabel × String × String × Term)}
+      {clausesDB : List (EffectLabel × TermDB)},
+      eraseClauses ρ clauses = some clausesDB ->
+      activeLocRefsClauses clauses = activeLocRefsClausesDB clausesDB
+  | ρ, [], clausesDB, hErase => by
+      simp [eraseClauses] at hErase
+      cases hErase
+      simp [activeLocRefsClauses, activeLocRefsClausesDB]
+  | ρ, (op, x, k, hb) :: rest, clausesDB, hErase => by
+      rcases hhb : eraseTerm (k :: x :: ρ) hb with _ | hbDB <;>
+        simp [eraseClauses, hhb] at hErase
+      rcases hrest : eraseClauses ρ rest with _ | restDB <;>
+        simp [eraseClauses, hhb, hrest] at hErase
+      cases hErase
+      simp [activeLocRefsClauses, activeLocRefsClausesDB, eraseClauses_activeLocRefs hrest]
+
+end
+
 theorem eraseTerm_runtimeLinear_iff
     {ρ : BinderEnv} {e : Term} {eDB : TermDB}
     (hErase : eraseTerm ρ e = some eDB) :
     RuntimeLinear e ↔ RuntimeLinearDB eDB := by
   simpa [RuntimeLinear, RuntimeLinearDB, eraseTerm_locRefs hErase]
+
+theorem eraseTerm_activeRuntimeLinear_iff
+    {ρ : BinderEnv} {e : Term} {eDB : TermDB}
+    (hErase : eraseTerm ρ e = some eDB) :
+    ActiveRuntimeLinear e ↔ ActiveRuntimeLinearDB eDB := by
+  simpa [ActiveRuntimeLinear, ActiveRuntimeLinearDB, eraseTerm_activeLocRefs hErase]
 
 mutual
 

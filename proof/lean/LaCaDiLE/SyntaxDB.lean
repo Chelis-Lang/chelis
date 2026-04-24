@@ -108,11 +108,60 @@ def locRefsClausesDB : List (EffectLabel × TermDB) → List Loc
 
 end
 
-/-- DB-side runtime linearity: no explicit location is mentioned twice. -/
+mutual
+
+/-- DB-side active runtime-location surface. This mirrors
+    `Syntax.activeLocRefs`: handler clause bodies remain dormant and do
+    not contribute to the active footprint until a matching `perform`
+    selects them. -/
+def activeLocRefsDB : TermDB → List Loc
+  | TermDB.var _ => []
+  | TermDB.abs _ body => activeLocRefsDB body
+  | TermDB.app e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.letBind e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.copy e => activeLocRefsDB e
+  | TermDB.letpair e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.pair e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.fst e => activeLocRefsDB e
+  | TermDB.snd e => activeLocRefsDB e
+  | TermDB.unit => []
+  | TermDB.const _ _ => []
+  | TermDB.add e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.mul e1 e2 => activeLocRefsDB e1 ++ activeLocRefsDB e2
+  | TermDB.sum e _ => activeLocRefsDB e
+  | TermDB.expand e _ _ => activeLocRefsDB e
+  | TermDB.uniformLike e _ _ => activeLocRefsDB e
+  | TermDB.grad _ _ body => activeLocRefsDB body
+  | TermDB.vmap _ body => activeLocRefsDB body
+  | TermDB.handle _ body clauses => activeLocRefsDB body ++ activeLocRefsClausesDB clauses
+  | TermDB.perform _ e => activeLocRefsDB e
+  | TermDB.loc ell => [ell]
+
+def activeLocRefsClausesDB : List (EffectLabel × TermDB) → List Loc
+  | [] => []
+  | _ :: rest => activeLocRefsClausesDB rest
+
+end
+
+@[simp] theorem activeLocRefsClausesDB_eq_nil
+    (clauses : List (EffectLabel × TermDB)) :
+    activeLocRefsClausesDB clauses = [] := by
+  induction clauses with
+  | nil =>
+      simp [activeLocRefsClausesDB]
+  | cons _ rest ih =>
+      simp [activeLocRefsClausesDB, ih]
+
+/-- DB-side active runtime linearity: no active explicit location is
+    mentioned twice. -/
+def ActiveRuntimeLinearDB (e : TermDB) : Prop :=
+  (activeLocRefsDB e).Nodup
+
 def RuntimeLinearDB (e : TermDB) : Prop :=
   (locRefsDB e).Nodup
 
--- ## Lifting (shift)
+/-! ## Lifting (shift)
+--
 --
 -- `liftAux c d e` adds `d` to every free variable index in `e` that
 -- is at least `c` (the cutoff). The cutoff tracks how many binders
@@ -121,7 +170,7 @@ def RuntimeLinearDB (e : TermDB) : Prop :=
 -- of de Bruijn calculi, generalized to a `d`-place shift so we can
 -- reuse it for both single-binder lifting (`d = 1`) and multi-binder
 -- lifting (`d = 2` for handler clauses). Handler clauses are handled
--- by the companion `liftClausesAux`.
+-- by the companion `liftClausesAux`. -/
 
 mutual
 

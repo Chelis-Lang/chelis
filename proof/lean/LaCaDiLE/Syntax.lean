@@ -434,10 +434,60 @@ def locRefsClauses :
 
 end
 
+mutual
+
+/-- `activeLocRefs e` collects only the explicit runtime locations that
+    are active in the current evaluation surface of `e`. Unlike
+    `locRefs`, this does not descend into dormant handler clause bodies:
+    a clause body only becomes active after a matching `perform`
+    selects it. Lambda/grad/vmap bodies are still counted because the
+    next head step can activate them immediately via substitution. -/
+def activeLocRefs : Term → List Loc
+  | Term.var _ => []
+  | Term.abs _ _ body => activeLocRefs body
+  | Term.app e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.letBind _ e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.copy e => activeLocRefs e
+  | Term.letpair _ _ e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.pair e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.fst e => activeLocRefs e
+  | Term.snd e => activeLocRefs e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.mul e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
+  | Term.sum e _ => activeLocRefs e
+  | Term.expand e _ => activeLocRefs e
+  | Term.uniformLike e _ _ => activeLocRefs e
+  | Term.grad _ _ _ body => activeLocRefs body
+  | Term.vmap _ _ body => activeLocRefs body
+  | Term.handle _ body clauses => activeLocRefs body ++ activeLocRefsClauses clauses
+  | Term.perform _ e => activeLocRefs e
+  | Term.loc ell => [ell]
+
+def activeLocRefsClauses :
+    List (EffectLabel × String × String × Term) → List Loc
+  | [] => []
+  | _ :: rest => activeLocRefsClauses rest
+
+end
+
+@[simp] theorem activeLocRefsClauses_eq_nil
+    (clauses : List (EffectLabel × String × String × Term)) :
+    activeLocRefsClauses clauses = [] := by
+  induction clauses with
+  | nil =>
+      simp [activeLocRefsClauses]
+  | cons _ rest ih =>
+      simp [activeLocRefsClauses, ih]
+
 /-- Runtime linearity discipline for explicit locations: no location may
     appear more than once in the residual runtime term. This is stronger
     than `WellScoped` and is only meaningful after reduction has
     introduced `Term.loc`. -/
+def ActiveRuntimeLinear (e : Term) : Prop :=
+  (activeLocRefs e).Nodup
+
 def RuntimeLinear (e : Term) : Prop :=
   (locRefs e).Nodup
 
