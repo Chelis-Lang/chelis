@@ -12,6 +12,8 @@ use std::env;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 use tar::{Archive, Builder};
 use walkdir::WalkDir;
 
@@ -243,8 +245,22 @@ pub fn prepare_program_for_eval_source(
     let Some(root) = find_package_root_for_dir(context_dir)? else {
         return Ok(None);
     };
-    let graph = resolve_package_graph(&root)?;
-    write_lockfile(&root.join("reef.lock"), &build_lockfile(&graph))?;
+    let lock_path = root.join("reef.lock");
+    let graph = if lock_path.exists() {
+        // Fast path: lockfile already computed the dependency graph.
+        // Path deps are loaded directly; registry deps get a 5-second timeout.
+        let lock = read_lockfile(&lock_path)?;
+        reconstruct_graph_from_lockfile(&root, &lock)?
+    } else {
+        // Slow path: no lockfile yet — resolve from scratch with a hard timeout.
+        let root_clone = root.clone();
+        run_with_timeout(
+            move || resolve_package_graph(&root_clone),
+            Duration::from_secs(5),
+            TIMEOUT_MSG,
+        )?
+    };
+    // Eval does not write the lockfile — that is the build path's responsibility.
 
     let linked = link_graph(&graph, &[])?;
     let internal_maps = build_internal_maps(&graph);
@@ -433,6 +449,113 @@ fn write_manifest(path: &Path, manifest: &ReefManifest) -> Result<(), Box<dyn st
 fn write_lockfile(path: &Path, lock: &ReefLock) -> Result<(), String> {
     let text = toml::to_string_pretty(lock).map_err(|e| e.to_string())?;
     fs::write(path, format!("{text}\n")).map_err(|e| e.to_string())
+}
+
+fn read_lockfile(path: &Path) -> Result<ReefLock, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    toml::from_str::<ReefLock>(&text)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+/// Run `f` on a background thread.  Return `Err(timeout_msg)` if it does not
+/// complete within `timeout`.
+fn run_with_timeout<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+    timeout: Duration,
+    timeout_msg: &str,
+) -> Result<T, String> {
+    let (tx, rx) = mpsc::channel::<Result<T, String>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout)
+        .unwrap_or_else(|_| Err(timeout_msg.to_string()))
+}
+
+const TIMEOUT_MSG: &str = "reef dependency resolution timed out \u{2014} run `chelis reef build` first to populate the cache";
+
+/// Rebuild a [`PackageGraph`] from an already-written `reef.lock` without
+/// calling the full [`resolve_package_graph`] walk.
+///
+/// Path dependencies are loaded directly from the local filesystem (fast).
+/// Local-registry dependencies are loaded with a 5-second timeout; if the
+/// cache is missing or slow the caller gets an actionable error instead of
+/// a hang.
+fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<PackageGraph, String> {
+    let mut packages: BTreeMap<String, LoadedPackage> = BTreeMap::new();
+
+    // Load the root package.
+    let root_manifest = read_manifest(&root.join("reef.toml"))?;
+    let root_modules = load_package_modules(root, &root_manifest)?;
+    let root_name = lock.package.name.clone();
+    packages.insert(
+        root_name.clone(),
+        LoadedPackage {
+            id: lock.package.clone(),
+            manifest: root_manifest,
+            modules: root_modules,
+            source: LoadedSourceKind::Root,
+            shell: None,
+        },
+    );
+
+    // Load each dependency.
+    for dep in &lock.dependencies {
+        match &dep.source {
+            LockSource::Path { path } => {
+                let dep_root = root.join(path).canonicalize().map_err(|e| {
+                    format!("failed to resolve path dependency `{}`: {e}", dep.name)
+                })?;
+                let dep_manifest = read_manifest(&dep_root.join("reef.toml"))?;
+                let dep_modules = load_package_modules(&dep_root, &dep_manifest)?;
+                packages.insert(
+                    dep.name.clone(),
+                    LoadedPackage {
+                        id: PackageId {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                        },
+                        manifest: dep_manifest,
+                        modules: dep_modules,
+                        source: LoadedSourceKind::Path {
+                            relative: path.clone(),
+                        },
+                        shell: None,
+                    },
+                );
+            }
+            LockSource::LocalRegistry => {
+                let dep_name = dep.name.clone();
+                let dep_version = dep.version.clone();
+                let installed = run_with_timeout(
+                    move || load_registry_package(&dep_name, &dep_version),
+                    Duration::from_secs(5),
+                    TIMEOUT_MSG,
+                )?;
+                let dep_manifest = read_manifest(&installed.root.join("reef.toml"))?;
+                let dep_modules = load_package_modules(&installed.root, &dep_manifest)?;
+                packages.insert(
+                    dep.name.clone(),
+                    LoadedPackage {
+                        id: PackageId {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                        },
+                        manifest: dep_manifest,
+                        modules: dep_modules,
+                        source: LoadedSourceKind::LocalRegistry,
+                        shell: Some(installed.shell),
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(PackageGraph {
+        root_package: root_name,
+        packages,
+    })
 }
 
 fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
@@ -1927,5 +2050,178 @@ module_prefix = "Demo"
             .expect("search")
             .expect("package root");
         assert_eq!(found, project.canonicalize().expect("canonicalize project"));
+    }
+
+    /// Positive: when `reef.lock` exists and all deps are path-based, the fast
+    /// path resolves correctly and returns within 1 second.
+    #[test]
+    fn eval_file_uses_lockfile_fast_path_for_path_dep() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+        let dep_root = root.join("mylib");
+
+        // Build the dependency package: Mylib.Math with a single export `add`.
+        write(
+            &dep_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Mylib"
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &dep_root.join("src/math.ch"),
+            "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x + y\n",
+        );
+
+        // Build the root package depending on mylib via a local path.
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Myapp"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\nimport Mylib.Math (add)\ndef double(x: int32) -> int32 = add(x, x)\n",
+        );
+
+        // Write a reef.lock that records the path dependency (the fast path reads
+        // this instead of calling resolve_package_graph).
+        write(
+            &root.join("reef.lock"),
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+
+[[dependencies]]
+name = "mylib"
+version = "0.1.0"
+compiler = "=0.1.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "path"
+path = "./mylib"
+"#,
+        );
+
+        // The eval file imports `add` from Mylib.Math.
+        let eval_file = dir.path().join("probe.ch");
+        write(
+            &eval_file,
+            "import Mylib.Math (add)\ndef result -> int32 = add(1, 2)\n",
+        );
+
+        let start = std::time::Instant::now();
+        let result = prepare_program_for_eval_file(&eval_file, &root);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fast path took {elapsed:?} — expected < 1s"
+        );
+        let program = result
+            .expect("prepare_program_for_eval_file should succeed")
+            .expect("should find a reef package");
+        // The returned decls must include the rewritten definition from Mylib.Math.
+        assert!(
+            program
+                .decls
+                .iter()
+                .any(|decl| matches!(decl, Decl::FunDef { name, .. } if name.contains("add"))),
+            "expected the `add` function from Mylib.Math to appear in compiled decls"
+        );
+    }
+
+    /// Negative: when there is no lockfile and the registry is absent, the
+    /// slow path times out and returns an actionable error instead of hanging.
+    ///
+    /// This test uses a very short artificial timeout via a direct call to
+    /// `run_with_timeout` so it runs quickly in CI.
+    #[test]
+    fn run_with_timeout_returns_error_on_timeout() {
+        let result = run_with_timeout(
+            || {
+                // Simulate a slow operation — longer than the timeout.
+                std::thread::sleep(Duration::from_secs(60));
+                Ok::<i32, String>(42)
+            },
+            Duration::from_millis(50),
+            TIMEOUT_MSG,
+        );
+        let err = result.expect_err("should have timed out");
+        assert!(
+            err.contains("chelis reef build"),
+            "timeout error should mention `chelis reef build`, got: {err}"
+        );
+    }
+
+    /// Negative: `prepare_program_for_eval_source` with no lockfile and a
+    /// registry dependency that is not cached must return an error, not hang.
+    #[test]
+    fn eval_source_without_lockfile_and_missing_registry_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+
+        // Root package with a registry version dep (no local cache, no lockfile).
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Myapp"
+
+[dependencies]
+some-registry-lib = {{ version = "0.1.0" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module Myapp.Main\n\ndef id(x: int32) -> int32 = x\n",
+        );
+
+        // No reef.lock — triggers the slow path.  The registry cache does not
+        // exist in the temp dir, so the 5-second timeout fires.  We don't want
+        // the test itself to block for 5 full seconds, so we test the helper
+        // directly and trust the integration via the timeout test above.
+        //
+        // What we CAN assert without waiting: if CHELIS_REEF_HOME is pointed at
+        // an empty directory, load_registry_package errors immediately (no hang).
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
+        }
+        let entry_decls =
+            chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
+        let result = prepare_program_for_eval_source(&root, &entry_decls);
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
+
+        // Should either succeed (if somehow resolved) or return an error — the
+        // key invariant is that it DOES NOT hang.  Since the registry is empty
+        // and there's no lockfile it must fail.
+        assert!(
+            result.is_err(),
+            "expected error when registry dep is uncacheable, got: {result:?}"
+        );
     }
 }
