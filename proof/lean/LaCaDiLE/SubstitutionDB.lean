@@ -1517,6 +1517,15 @@ theorem hasTypeDB_length_preservation_clauses
   | ClausesTypedDB.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
     exact hasTypeDB_length_preservation_clauses hrest
 
+theorem clausesTypedDB_same_ctx
+    {Delta : CapCtx} {Sigma : StoreTyp} {Γ2 Γ3 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow} {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Delta Sigma Γ2 Γ3 t epsR cls) : Γ2 = Γ3 := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ => rfl
+  | ClausesTypedDB.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hrest =>
+    exact clausesTypedDB_same_ctx hrest
+
 end
 
 /-! ## None-slot monotonicity
@@ -4311,6 +4320,50 @@ theorem locRefsDB_subst_none_gen
       have hrest' := ih_hrest v j Γ_in Γ_out hj_in hj_out (by simpa using hin) (by simpa using hout)
       simp [substClausesDBAux, locRefsClausesDB, hb', hrest', locRefsDB_lift]
 
+theorem locRefsClausesDB_subst_none_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {cls : List (EffectLabel × TermDB)}
+    {t : Typ} {epsR : EffectRow}
+    (h : ClausesTypedDB Δ S Γ1 Γ2 t epsR cls)
+    (v : TermDB) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j none)
+    (hout : Γ2 = Γ_out.insertAt j none) :
+    locRefsClausesDB (substClausesDBAux j v cls) = locRefsClausesDB cls := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ =>
+      simp [substClausesDBAux, locRefsClausesDB]
+  | ClausesTypedDB.cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest =>
+      have hin_body :
+          some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ2 =
+            LinearCtxDB.insertAt (j + 2) none
+              (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) := by
+        subst hin
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hout_body :
+          slot1 :: slot2 :: Γ3 =
+            LinearCtxDB.insertAt (j + 2) none
+              (slot1 :: slot2 :: Γ_out) := by
+        subst hout
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hj_in_body :
+          j + 2 ≤ (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in).length := by
+        simp; omega
+      have hj_out_body :
+          j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have hb' := locRefsDB_subst_none_gen hb_typ (lift (lift v)) (j + 2)
+        (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+        (slot1 :: slot2 :: Γ_out) hj_in_body hj_out_body hin_body hout_body
+      have hrest' := locRefsClausesDB_subst_none_gen hrest v j Γ_in Γ_out
+        hj_in hj_out (by simpa using hin) (by simpa using hout)
+      simp [substClausesDBAux, locRefsClausesDB, hb', hrest', locRefsDB_lift]
+
 theorem locRefsDB_subst_none
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
     {e v : TermDB} {t : Typ} {eps : EffectRow}
@@ -5592,7 +5645,41 @@ theorem runtimeLinearDB_subst_dead_gen
   | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ih_hb ih_hcls =>
       intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
         hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
-      sorry
+      have hctx_cls : Γ2 = Γ3 := clausesTypedDB_same_ctx hcls
+      have hout_body : Γ2 = Γ_out.insertAt j none := hctx_cls.trans hout
+      have hcls_shape_none :
+          ClausesTypedDB Δ_ S_ (Γ_out.insertAt j none)
+            (Γ_out.insertAt j none) ty
+            (EffectRow.removeOps epsB epsH) clauses := by
+        have hcls' := hcls
+        rw [hctx_cls, hout] at hcls'
+        exact hcls'
+      rcases runtimeLinearDB_value_handle_premises hsep_v_e hsep_e_v with
+        ⟨hsep_v_body, hsep_body_v, hsep_v_cls, hsep_cls_v⟩
+      rcases runtimeLinearDB_handle_body_consuming_premises hlin_e hsep_e_rhs hsep_rhs_e with
+        ⟨hlin_body, hlin_cls, hsep_body_rhs', hsep_rhs_body', hsep_cls_rhs, hsep_rhs_cls⟩
+      have hsep_v_rhs' : LocRefsSeparated (locRefsDB v) (locRefsClausesDB clauses ++ rhsRefs) := by
+        exact locRefsSeparated_lhs_append hsep_v_cls hsep_v_rhs
+      have hsep_rhs'_v : LocRefsSeparated (locRefsClausesDB clauses ++ rhsRefs) (locRefsDB v) := by
+        exact locRefsSeparated_append hsep_cls_v hsep_rhs_v
+      have hbody' := ih_hb v t_v j Γ_in Γ_out (locRefsClausesDB clauses ++ rhsRefs)
+        hj_in hj_out hin hout_body h_v hlin_v hsep_v_body hsep_body_v
+        hsep_v_rhs' hsep_rhs'_v hlin_body hsep_body_rhs' hsep_rhs_body'
+      have hloc_cls :
+          locRefsClausesDB (substClausesDBAux j v clauses) = locRefsClausesDB clauses :=
+        locRefsClausesDB_subst_none_gen hcls_shape_none v j Γ_out Γ_out hj_out hj_out rfl rfl
+      have hhandle :=
+        runtimeLinearDB_handle_of_body_consuming
+          (epsH := epsH)
+          (body' := substDBAux j v body)
+          (clauses := clauses)
+          (rhsRefs := rhsRefs)
+          hbody'.1 hlin_cls hbody'.2.1 hbody'.2.2 hsep_cls_rhs hsep_rhs_cls
+      refine ⟨?_, ?_, ?_⟩
+      · unfold RuntimeLinearDB at hhandle ⊢
+        simpa [substDBAux, locRefsDB, hloc_cls] using hhandle.1
+      · simpa [substDBAux, locRefsDB, hloc_cls] using hhandle.2.1
+      · simpa [substDBAux, locRefsDB, hloc_cls] using hhandle.2.2
   | tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub ih_body =>
       intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
         hlin_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hlin_e hsep_e_rhs hsep_rhs_e
@@ -5679,7 +5766,9 @@ theorem runtimeLinearDB_subst_dead_gen
       ih_hb_typ ih_hrest =>
       intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
         hlin_v hsep_v_cls hsep_cls_v hsep_v_rhs hsep_rhs_v hlin_cls hsep_cls_rhs hsep_rhs_cls
-      sorry
+      have hctx : Γ2 = Γ3 := clausesTypedDB_same_ctx hrest
+      exact clausesRuntimeLinearDB_subst_dead_same_ctx_absurd hj_in hj_out
+        (hctx.symm.trans hin) hout
 
 theorem runtimeLinearDB_subst_dead
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
