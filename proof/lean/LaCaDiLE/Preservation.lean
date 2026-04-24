@@ -566,6 +566,70 @@ theorem StoreLiveOn.append_right
   intro ell hell
   cases hell
 
+private theorem hasType_store_live_on_locRefs
+    {sigma : Store}
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (h_wf : StoreWf sigma Sigma) :
+    StoreLiveOn sigma (locRefs e) := by
+  induction h using HasType.rec
+    (motive_2 := fun _ S_ _ _ _ _ clauses _ =>
+      StoreWf sigma S_ → StoreLiveOn sigma (locRefsClauses clauses)) with
+  | var =>
+      simpa [locRefs, StoreLiveOn]
+  | unit =>
+      simpa [locRefs, StoreLiveOn]
+  | abs _ _ _ _ _ _ _ _ _ _ _ ih =>
+      simpa [locRefs] using ih h_wf
+  | app _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | letBind _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | copy _ _ _ _ _ _ _ _ ih =>
+      simpa [locRefs] using ih h_wf
+  | letpair _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | fst _ _ _ _ _ _ _ _ _ ih =>
+      simpa [locRefs] using ih h_wf
+  | snd _ _ _ _ _ _ _ _ _ ih =>
+      simpa [locRefs] using ih h_wf
+  | const =>
+      simpa [locRefs, StoreLiveOn]
+  | tadd _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | tmul _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact StoreLiveOn.append (ih1 h_wf) (ih2 h_wf)
+  | tsum _ _ _ _ _ _ _ _ _h hmem ih =>
+      simpa [locRefs] using ih h_wf
+  | texpand _ _ _ _ _ _ _ _ _h ih =>
+      simpa [locRefs] using ih h_wf
+  | uniformLike Δ_ _ Γ1 Γ2 e0 ds lo hi ep _h ih =>
+      simpa [locRefs] using ih h_wf
+  | perform Δ_ _ Γ1 Γ2 op e0 tArg tRet ep _h hM ih =>
+      simpa [locRefs] using ih h_wf
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsubEff ih =>
+      simpa [locRefs] using ih h_wf
+  | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
+      simpa [locRefs] using ih h_wf
+  | handle Δ_ _ Γ1 Γ2 Γ3 body clauses t_ epsH epsB _hb hSubsH hClsH
+      hCover _hcls ihBody ihClauses =>
+      exact StoreLiveOn.append (ihBody h_wf) (ihClauses h_wf)
+  | loc _ _ _ ell tv hlook =>
+      intro ell' hell
+      simp [locRefs] at hell
+      subst ell'
+      exact StoreWf.lookup_isSome_of_typing h_wf hlook
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih h_wf
+  | nil =>
+      simpa [locRefsClauses, StoreLiveOn]
+  | cons Δ_ _ Γ2 Γ3 t_ tArg tRet epsR_ op x k hb rest slotX slotK
+      hmatch _h_body _h_rest ihBody ihRest hs =>
+      exact StoreLiveOn.append (ihBody hs) (ihRest hs)
+
 /-- Step-local store agreement on locations not mentioned by the redex.
     This is the missing store-side fact for the `ctx` case: numeric
     reductions may consume locations mentioned inside the redex, but
