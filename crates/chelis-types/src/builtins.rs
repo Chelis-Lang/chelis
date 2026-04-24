@@ -69,6 +69,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "print",
     "fail",
     "debug",
+    "test_assert",
+    "test_assert_eq_f32",
+    "test_assert_eq_int",
+    "test_assert_eq_bool",
+    "test_assert_eq_string",
+    "test_assert_close_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -499,6 +505,101 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("print", &mut env, &mut vg);
     generic_unop("fail", &mut env, &mut vg);
     generic_unop_same("debug", &mut env, &mut vg);
+
+    // Test builtins. Effects (`! { Test }`) are not carried on the scheme itself;
+    // they are assigned by chelis-effects when the name is encountered in an `app`
+    // node, mirroring how `print` / `read_file` acquire IO.
+    env.bind(
+        "test_assert".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::Bool), Type::Prim(Prim::String)],
+                Box::new(Type::Unit),
+            ),
+        },
+    );
+    env.bind(
+        "test_assert_eq_f32".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Prim(Prim::F32),
+                    Type::Prim(Prim::F32),
+                    Type::Prim(Prim::String),
+                ],
+                Box::new(Type::Unit),
+            ),
+        },
+    );
+    env.bind(
+        "test_assert_eq_int".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Prim(Prim::Int64),
+                    Type::Prim(Prim::Int64),
+                    Type::Prim(Prim::String),
+                ],
+                Box::new(Type::Unit),
+            ),
+        },
+    );
+    env.bind(
+        "test_assert_eq_bool".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Prim(Prim::Bool),
+                    Type::Prim(Prim::Bool),
+                    Type::Prim(Prim::String),
+                ],
+                Box::new(Type::Unit),
+            ),
+        },
+    );
+    env.bind(
+        "test_assert_eq_string".to_string(),
+        Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    Type::Prim(Prim::String),
+                    Type::Prim(Prim::String),
+                    Type::Prim(Prim::String),
+                ],
+                Box::new(Type::Unit),
+            ),
+        },
+    );
+    {
+        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
+        let tensor_tv = vg.fresh_tvar();
+        env.bind(
+            "test_assert_close_tensor".to_string(),
+            Scheme {
+                tvars: vec![tensor_tv],
+                dvars: vec![],
+                body: Type::Fn(
+                    vec![
+                        Type::Var(tensor_tv),
+                        Type::Var(tensor_tv),
+                        Type::Prim(Prim::F32),
+                        Type::Prim(Prim::String),
+                    ],
+                    Box::new(Type::Unit),
+                ),
+            },
+        );
+    }
     generic_unop("string_len", &mut env, &mut vg);
     generic_binop("string_concat", &mut env, &mut vg);
     generic_unop("string_trim", &mut env, &mut vg);

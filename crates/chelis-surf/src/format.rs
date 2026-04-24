@@ -172,6 +172,7 @@ fn format_effect(effect: &EffectExpr) -> String {
         EffectExpr::Random(_) => "Random".to_string(),
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
+        EffectExpr::Test(_) => "Test".to_string(),
         EffectExpr::Resource(device, _) => format!("Resource(\"{device}\")"),
     }
 }

@@ -1423,6 +1423,86 @@ impl<'a> EvalContext<'a> {
                 let message = expect_string_arg(args, 0)?;
                 Err(message)
             }
+            "test_assert" => {
+                let cond = expect_bool_arg(args, 0)?;
+                let label = expect_string_arg(args, 1)?;
+                if cond {
+                    Ok(RuntimeValue::Unit)
+                } else {
+                    Err(format!("assert failed: {label}"))
+                }
+            }
+            "test_assert_eq_f32" => {
+                let actual = expect_float_arg(args, 0)?;
+                let expected = expect_float_arg(args, 1)?;
+                let label = expect_string_arg(args, 2)?;
+                if actual == expected {
+                    Ok(RuntimeValue::Unit)
+                } else {
+                    Err(format!(
+                        "assert_eq_f32 ({label}): expected {expected}, got {actual}"
+                    ))
+                }
+            }
+            "test_assert_eq_int" => {
+                let actual = expect_int_arg(args, 0)?;
+                let expected = expect_int_arg(args, 1)?;
+                let label = expect_string_arg(args, 2)?;
+                if actual == expected {
+                    Ok(RuntimeValue::Unit)
+                } else {
+                    Err(format!(
+                        "assert_eq_int ({label}): expected {expected}, got {actual}"
+                    ))
+                }
+            }
+            "test_assert_eq_bool" => {
+                let actual = expect_bool_arg(args, 0)?;
+                let expected = expect_bool_arg(args, 1)?;
+                let label = expect_string_arg(args, 2)?;
+                if actual == expected {
+                    Ok(RuntimeValue::Unit)
+                } else {
+                    Err(format!(
+                        "assert_eq_bool ({label}): expected {expected}, got {actual}"
+                    ))
+                }
+            }
+            "test_assert_eq_string" => {
+                let actual = expect_string_arg(args, 0)?;
+                let expected = expect_string_arg(args, 1)?;
+                let label = expect_string_arg(args, 2)?;
+                if actual == expected {
+                    Ok(RuntimeValue::Unit)
+                } else {
+                    Err(format!(
+                        "assert_eq_string ({label}): expected {expected:?}, got {actual:?}"
+                    ))
+                }
+            }
+            "test_assert_close_tensor" => {
+                let actual = expect_tensor_arg(args, 0)?;
+                let expected = expect_tensor_arg(args, 1)?;
+                let tol = expect_float_arg(args, 2)?;
+                let label = expect_string_arg(args, 3)?;
+                let actual_data = &actual.value.data;
+                let expected_data = &expected.value.data;
+                if actual_data.len() != expected_data.len() {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): length mismatch, expected {} elements, got {}",
+                        expected_data.len(),
+                        actual_data.len()
+                    ));
+                }
+                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
+                    if (a - e).abs() >= tol {
+                        return Err(format!(
+                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol}"
+                        ));
+                    }
+                }
+                Ok(RuntimeValue::Unit)
+            }
             "debug" => {
                 let value = args
                     .first()
@@ -1895,6 +1975,13 @@ fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64, String> {
     match args.get(index) {
         Some(RuntimeValue::Int(value)) => Ok(*value),
         other => Err(format!("expected int arg at index {index}, got {other:?}")),
+    }
+}
+
+fn expect_bool_arg(args: &[RuntimeValue], index: usize) -> Result<bool, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Bool(value)) => Ok(*value),
+        other => Err(format!("expected bool arg at index {index}, got {other:?}")),
     }
 }
 
@@ -2923,5 +3010,128 @@ x = with seed(7) {
             RuntimeValue::Float(v) => assert!((*v >= 0.0) && (*v <= 1.0), "got {v}"),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    // ----- Phase 3t.1: test_assert_* builtins -----
+
+    #[test]
+    fn test_assert_true_returns_unit() {
+        let checked = checked_surf(r#"x = test_assert(true, "ok")"#);
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("test_assert(true, ...) should evaluate to Ok");
+        let value = outcome.host_bindings.get("x").expect("x binding");
+        assert!(matches!(value, RuntimeValue::Unit), "got {value:?}");
+    }
+
+    #[test]
+    fn test_assert_false_returns_err_with_label() {
+        let checked = checked_surf(r#"x = test_assert(false, "my-label")"#);
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("test_assert(false, ...) should surface as host Err");
+        assert!(
+            err.contains("assert failed") && err.contains("my-label"),
+            "expected 'assert failed' and 'my-label' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_eq_f32_mismatch_includes_actual_and_expected() {
+        let checked = checked_surf(r#"x = test_assert_eq_f32(1.0, 2.0, "label")"#);
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("mismatched f32 assert should surface as host Err");
+        assert!(err.contains("1") && err.contains("2"), "got: {err}");
+        assert!(err.contains("label"), "expected label in error, got: {err}");
+    }
+
+    #[test]
+    fn test_assert_eq_f32_match_returns_unit() {
+        let checked = checked_surf(r#"x = test_assert_eq_f32(1.5, 1.5, "same")"#);
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("matched f32 assert should evaluate");
+        let value = outcome.host_bindings.get("x").expect("x binding");
+        assert!(matches!(value, RuntimeValue::Unit), "got {value:?}");
+    }
+
+    #[test]
+    fn test_assert_eq_int_match_and_mismatch() {
+        let ok = checked_surf(r#"x = test_assert_eq_int(cast(3, int64), cast(3, int64), "i")"#);
+        let outcome = evaluate_host_program(&ok, &HashMap::new()).expect("int match should eval");
+        assert!(matches!(
+            outcome.host_bindings.get("x"),
+            Some(RuntimeValue::Unit)
+        ));
+
+        let bad = checked_surf(r#"x = test_assert_eq_int(cast(3, int64), cast(5, int64), "i")"#);
+        let err = evaluate_host_program(&bad, &HashMap::new())
+            .expect_err("int mismatch should surface Err");
+        assert!(
+            err.contains("3") && err.contains("5") && err.contains("i"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_eq_bool_match_and_mismatch() {
+        let ok = checked_surf(r#"x = test_assert_eq_bool(true, true, "b")"#);
+        evaluate_host_program(&ok, &HashMap::new()).expect("bool match should eval");
+
+        let bad = checked_surf(r#"x = test_assert_eq_bool(true, false, "b")"#);
+        let err = evaluate_host_program(&bad, &HashMap::new())
+            .expect_err("bool mismatch should surface Err");
+        assert!(
+            err.contains("true") && err.contains("false") && err.contains("b"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_eq_string_match_and_mismatch() {
+        let ok = checked_surf(r#"x = test_assert_eq_string("hi", "hi", "s")"#);
+        evaluate_host_program(&ok, &HashMap::new()).expect("string match should eval");
+
+        let bad = checked_surf(r#"x = test_assert_eq_string("foo", "bar", "s")"#);
+        let err = evaluate_host_program(&bad, &HashMap::new())
+            .expect_err("string mismatch should surface Err");
+        assert!(
+            err.contains("foo") && err.contains("bar") && err.contains("s"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_reports_first_mismatch_index() {
+        // Use 4-element tensors [1.0, 2.0, 3.0, 4.0] vs [1.0, 2.0, 99.0, 4.0]:
+        // index 2 is the first mismatch.
+        let checked = checked_surf(
+            r#"
+actual: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
+expected: tensor[4, f32] = to_tensor([1.0, 2.0, 99.0, 4.0])
+x = test_assert_close_tensor(actual, expected, 0.001, "close")
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("close-tensor mismatch should surface Err");
+        assert!(
+            err.contains("at index 2") && err.contains("close"),
+            "expected 'at index 2' and label, got: {err}"
+        );
+        assert!(err.contains("99") && err.contains('3'), "got: {err}");
+    }
+
+    #[test]
+    fn test_assert_close_tensor_match_returns_unit() {
+        let checked = checked_surf(
+            r#"
+actual: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
+expected: tensor[3, f32] = to_tensor([1.001, 2.001, 3.001])
+x = test_assert_close_tensor(actual, expected, 0.01, "close")
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("close-tensor within tol should evaluate to Unit");
+        assert!(matches!(
+            outcome.host_bindings.get("x"),
+            Some(RuntimeValue::Unit)
+        ));
     }
 }

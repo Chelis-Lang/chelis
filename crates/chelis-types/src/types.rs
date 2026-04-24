@@ -143,6 +143,11 @@ pub enum Effect {
     Random,
     Accum,
     Io,
+    /// Chelis-native testing effect. Pinned at the root, no handler.
+    /// Any function that (directly or transitively) calls a `test_assert_*`
+    /// builtin acquires this effect, preventing assertions from silently
+    /// leaking into `! {}` production code.
+    Test,
     Resource(String),
 }
 
@@ -152,6 +157,7 @@ impl fmt::Display for Effect {
             Self::Random => f.write_str("Random"),
             Self::Accum => f.write_str("Accum"),
             Self::Io => f.write_str("IO"),
+            Self::Test => f.write_str("Test"),
             Self::Resource(device) => write!(f, "Resource(\"{device}\")"),
         }
     }

@@ -30,6 +30,7 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     let mut errors = Vec::new();
     validate_handlers(&annotated_exprs, &mut errors);
     validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
+    validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
         Ok(CheckedProgram::from_parts(
@@ -229,6 +230,19 @@ fn infer_app_effects(
         )
     ) {
         effects.insert(Effect::Io);
+    }
+    if matches!(
+        builtin_name,
+        Some(
+            "test_assert"
+                | "test_assert_eq_f32"
+                | "test_assert_eq_int"
+                | "test_assert_eq_bool"
+                | "test_assert_eq_string"
+                | "test_assert_close_tensor"
+        )
+    ) {
+        effects.insert(Effect::Test);
     }
 
     effects
@@ -562,6 +576,115 @@ fn validate_unhandled_random_roots(
     }
 }
 
+/// Extract the effect set declared on a `(defsig name t-fn-with-eff-meta)` expression.
+/// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
+fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
+    // defsig has form: (defsig {} name t-fn-expr)
+    let kids = children(list);
+    let t_fn = kids.get(1)?;
+    let Expr::List(t_fn_list, _) = t_fn else {
+        return None;
+    };
+    if get_tag(t_fn_list) != Some("t-fn") {
+        return None;
+    }
+    // t-fn metadata is element [1] (the meta map).
+    let Expr::Map(meta, _) = t_fn_list.elements.get(1)? else {
+        return None;
+    };
+    let (_, eff_expr) = meta.entries.iter().find(|(key, _)| key == "eff")?;
+    // eff_expr is (effects {} sym sym ...)
+    let Expr::List(eff_list, _) = eff_expr else {
+        return None;
+    };
+    if get_tag(eff_list) != Some("effects") {
+        return None;
+    }
+    let mut declared = EffectSet::new();
+    for child in children(eff_list) {
+        if let Some(name) = symbol_name(child) {
+            match name {
+                "random" => declared.insert(Effect::Random),
+                "accum" => declared.insert(Effect::Accum),
+                "io" => declared.insert(Effect::Io),
+                "test" => declared.insert(Effect::Test),
+                // "diff" is currently tracked separately and does not appear in inferred sets.
+                _ => {}
+            }
+        } else if let Expr::List(inner, _) = child
+            && get_tag(inner) == Some("resource")
+            && let Some(device) = children(inner).first().and_then(|expr| match expr {
+                Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
+                _ => None,
+            })
+        {
+            declared.insert(Effect::Resource(device));
+        }
+    }
+    Some(declared)
+}
+
+/// Reject `def f` whose inferred effects exceed the effects declared on its `defsig`.
+///
+/// This enforces the contract that effect annotations are upper bounds: a function
+/// signed `! {}` (or `! { IO }`) cannot silently acquire additional effects such as
+/// `Test` via a call to `test_assert_*`.
+fn validate_declared_vs_inferred(
+    exprs: &[Expr],
+    effects_by_def: &HashMap<String, EffectSet>,
+    errors: &mut Vec<EffectError>,
+) {
+    let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
+    for expr in exprs {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("defsig")
+        {
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            if let Some(declared) = declared_effects_from_defsig(list) {
+                declared_by_name.insert(name.to_string(), declared);
+            }
+        }
+    }
+
+    for (name, declared) in &declared_by_name {
+        let inferred = match effects_by_def.get(name) {
+            Some(inferred) => inferred,
+            None => continue,
+        };
+        // Find effects inferred but not declared.
+        let missing: Vec<Effect> = inferred
+            .iter()
+            .filter(|effect| !declared.contains(effect))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let declared_str = if declared.is_empty() {
+            "{}".to_string()
+        } else {
+            declared.to_string()
+        };
+        let missing_str = missing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        errors.push(EffectError {
+            kind: EffectErrorKind::UnhandledEffect,
+            message: format!(
+                "Function `{name}` is declared with effects `{declared_str}` but its body performs effects `{{{missing_str}}}` that were not declared"
+            ),
+            suggestions: vec![format!(
+                "Either add the missing effect(s) to the signature of `{name}` (e.g. `! {{ {missing_str} }}`) or refactor the body so it does not perform them."
+            )],
+        });
+    }
+}
+
 fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<EffectError>) {
     match expr {
         Expr::List(list, _) => {
@@ -623,6 +746,7 @@ fn effect_set_expr(effects: &EffectSet) -> Expr {
             Effect::Random => symbol("random"),
             Effect::Accum => symbol("accum"),
             Effect::Io => symbol("io"),
+            Effect::Test => symbol("test"),
             Effect::Resource(device) => Expr::List(
                 chelis_deep::ast::List {
                     elements: vec![
@@ -973,6 +1097,170 @@ contents = read_file("dataset.txt")
                 .is_some_and(|effects| effects.contains(&Effect::Io)),
             "expected IO effect on read_file root, got {:?}",
             inferred.get("contents")
+        );
+    }
+
+    // ----- Phase 3t.1: Test effect propagation and enforcement -----
+
+    #[test]
+    fn test_assert_adds_test_effect_to_calling_fn() {
+        // A top-level def whose body calls test_assert should acquire Effect::Test.
+        let program = surf_checked(
+            r#"
+def my_check() -> unit = test_assert(true, "ok")
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("my_check")
+                .is_some_and(|effects| effects.contains(&Effect::Test)),
+            "expected Test effect on my_check, got {:?}",
+            inferred.get("my_check")
+        );
+    }
+
+    #[test]
+    fn test_assert_close_tensor_propagates_test_effect() {
+        let program = surf_checked(
+            r#"
+def close() -> unit =
+  test_assert_close_tensor(
+    to_tensor([1.0, 2.0]),
+    to_tensor([1.0, 2.0]),
+    0.01,
+    "close"
+  )
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("close")
+                .is_some_and(|effects| effects.contains(&Effect::Test)),
+            "expected Test effect on close(), got {:?}",
+            inferred.get("close")
+        );
+    }
+
+    #[test]
+    fn test_effect_propagates_transitively_through_calls() {
+        let program = surf_checked(
+            r#"
+def inner() -> unit = test_assert(true, "inner")
+def outer() -> unit = inner()
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("outer")
+                .is_some_and(|effects| effects.contains(&Effect::Test)),
+            "expected Test effect to transit inner -> outer, got {:?}",
+            inferred.get("outer")
+        );
+    }
+
+    #[test]
+    fn with_seed_does_not_handle_test_effect() {
+        // `with seed(...)` must remove Random, but must NOT remove Test.
+        let program = surf_checked(
+            r#"
+def sealed() -> unit =
+  with seed(7) { test_assert(true, "inside-handler") }
+"#,
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
+        assert!(
+            inferred
+                .get("sealed")
+                .is_some_and(|effects| effects.contains(&Effect::Test)),
+            "with seed(...) must not swallow the Test effect, got {:?}",
+            inferred.get("sealed")
+        );
+    }
+
+    #[test]
+    fn empty_effect_sig_rejects_test_assert_caller() {
+        // `def g() -> unit ! {} = test_assert(...)` should fail: body inferred Test,
+        // sig declares no effects.
+        let decls = parse_surf(
+            r#"
+def g() -> unit ! {} = test_assert(true, "leak")
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let errors = check_program(&checked)
+            .expect_err("def with `! {}` that calls test_assert must be rejected");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect && error.message.contains("Test")
+            }),
+            "expected UnhandledEffect mentioning Test, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn empty_effect_sig_rejects_transitive_test_caller() {
+        // Caller has no assert in its body, but it calls a function that does.
+        // The `! {}` signature on g must still reject this.
+        let decls = parse_surf(
+            r#"
+def f() -> unit = test_assert(true, "x")
+def g() -> unit ! {} = f()
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let errors =
+            check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect
+                    && error.message.contains("g")
+                    && error.message.contains("Test")
+            }),
+            "expected UnhandledEffect on g with Test, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn declared_test_effect_accepts_test_assert_caller() {
+        // When the caller honestly declares `! { Test }`, no error.
+        let decls = parse_surf(
+            r#"
+def test_ok() -> unit ! {Test} = test_assert(true, "ok")
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        check_program(&checked).expect("declared Test should accept test_assert caller");
+    }
+
+    #[test]
+    fn declared_io_effect_still_rejects_test_effect_leakage() {
+        // A sig with `! { IO }` is not a superset of `{ Test }`. Adding a test_assert
+        // call inside an IO-only function should still be rejected — the effect
+        // systems are orthogonal axes of the effect row.
+        let decls = parse_surf(
+            r#"
+def leak() -> unit ! {IO} = test_assert(true, "sneak")
+"#,
+        )
+        .expect("surf parse");
+        let deep = desugar_program(&decls);
+        let checked = chelis_types::check_phase0e_program(&deep).expect("type check");
+        let errors =
+            check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == EffectErrorKind::UnhandledEffect && error.message.contains("Test")
+            }),
+            "expected UnhandledEffect mentioning Test, got {errors:?}"
         );
     }
 }
