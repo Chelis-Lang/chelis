@@ -28,7 +28,15 @@ impl TensorValue {
 }
 
 fn numel(shape: &[usize]) -> usize {
-    shape.iter().product::<usize>().max(1)
+    if shape.is_empty() {
+        // Scalar: no dimensions means a single element.
+        1
+    } else {
+        // Non-scalar: honor every dimension, including zero. A tensor[0, f32]
+        // legitimately holds zero elements; inflating to 1 drops data integrity
+        // and panics the from_vec length assertion.
+        shape.iter().product()
+    }
 }
 
 fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {

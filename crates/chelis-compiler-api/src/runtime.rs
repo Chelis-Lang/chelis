@@ -426,6 +426,11 @@ impl<'a> EvalContext<'a> {
             Expr::Atom(Atom::Float(value), _) => Ok(RuntimeValue::Float(*value)),
             Expr::Atom(Atom::Bool(value), _) => Ok(RuntimeValue::Bool(*value)),
             Expr::Atom(Atom::Str(value), _) => Ok(RuntimeValue::String(value.clone())),
+            // Unit literal `()` desugars to `(lit {type: (t-unit {})} ())` where the
+            // inner `()` is an empty bare list. Treat that as RuntimeValue::Unit so
+            // `def test_noop() -> unit = ()` runs cleanly instead of dying with
+            // "unsupported literal form".
+            Expr::List(inner, _) if inner.elements.is_empty() => Ok(RuntimeValue::Unit),
             _ => Err("unsupported literal form".to_string()),
         }
     }

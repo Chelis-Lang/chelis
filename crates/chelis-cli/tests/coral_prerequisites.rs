@@ -229,7 +229,11 @@ all_true_idx = where_indices(all_true)
 }
 
 #[test]
-fn coral_where_indices_all_false_currently_hits_empty_tensor_residual() {
+fn coral_where_indices_all_false_returns_empty_tensor() {
+    // Previously this panicked the evaluator because `numel` floored zero-
+    // length tensors to 1, tripping the length assertion in `from_vec`.
+    // After the 3t cleanup fix, the evaluator honors the zero dimension and
+    // the empty mask path produces a legitimate `tensor[0, int64]`.
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices-empty");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -252,6 +256,7 @@ value = where_indices(all_false)
             app_pkg.join("src/main.ch").to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("assertion `left == right` failed"));
+        .success()
+        .stdout(predicate::str::contains("shape=[0]"))
+        .stdout(predicate::str::contains("data=[]"));
 }
