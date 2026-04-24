@@ -42,7 +42,7 @@ Create `spec/design/chelis_native_testing_plan.md` from the downloaded draft.
 
 **Update Octant section.** Add:
 
-> Octant tests are Chelis-native. No external oracle for LaTeX parsing correctness.
+> Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsing correctness: parse the same LaTeX in both Octant and sympy, compare expression trees. Same pattern as Nautilus vs scipy — sympy parity lives in `parity/`. Chelis-native tests cover tokenizer correctness, parser crash safety, provenance span accuracy, and parse→pretty-print round-trips.
 
 **Update Hull section.** Add:
 

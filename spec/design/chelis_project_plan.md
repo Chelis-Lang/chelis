@@ -674,7 +674,7 @@ coding model (for the LLM-assisted lowering path that lands in `3o`) and the
 compiler (for type verification and provenance tracking). Full design in
 `chelis_octant_design.md`; executable sub-phase contract in `phase3n_octant.md`.
 
-Octant tests are Chelis-native. No external oracle for LaTeX parsing correctness.
+Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsing correctness: parse the same LaTeX in both Octant and sympy, compare expression trees. That is a parity test against an external oracle — same pattern as Nautilus vs scipy. Chelis-native tests cover tokenizer correctness, parser crash safety, provenance span accuracy, and parse→pretty-print round-trips.
 
 | Module | Contents |
 |---|---|

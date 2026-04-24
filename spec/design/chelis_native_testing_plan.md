@@ -223,6 +223,22 @@ def test_with_column_preserves_existing() = {
 }
 ```
 
+### Octant
+
+**Chelis-native tests for structural and provenance correctness. Python (sympy) for LaTeX parsing parity.**
+
+The oracle for "does the LaTeX parser produce the correct Deep AST" is sympy's `parse_latex` (or latex2sympy2). Parse the same LaTeX string in both Octant and sympy, compare the resulting expression trees, and verify they represent the same mathematics. That is a parity test against an external oracle — same pattern as Nautilus vs scipy.
+
+**Stays in Python (`parity/`):**
+- `run_parity.py` — parses LaTeX expressions via sympy/latex2sympy2, compares resulting expression structure against Octant's lowered Deep for a corpus of known formulas.
+
+**Moves to Chelis (`tests/`):**
+- Tokenizer correctness (known input → expected token sequence)
+- Parser crash safety (out-of-scope LaTeX produces diagnostics, not silent drops)
+- Provenance span accuracy (every lowered Deep node carries a span that points to the right source offset)
+- Parse→pretty-print round-trips (parse then render recovers equivalent LaTeX)
+- Special function routing (erf → Nautilus.Special, \Phi → Nautilus.Distributions, etc.)
+
 ### Shoals (and all future shells)
 
 **Chelis-native tests from day one.** Python only for comparison against QuantLib or other external references, if needed. The default is `chelis test tests/`.
@@ -243,7 +259,7 @@ def test_with_column_preserves_existing() = {
 5. Coral test migration (same split)
 6. SKILL.md for Std.Test (documents assertion API for agents)
 
-**Convention rule:** Only code that compares Chelis output against an external oracle (scipy, pandas, QuantLib) uses Python. All other tests are written in Chelis and run via `chelis test`. This is not a guideline — it is a hard rule for all reef packages.
+**Convention rule:** Only code that compares Chelis output against an external oracle (scipy/numpy for Nautilus, pandas for Coral, sympy/latex2sympy2 for Octant LaTeX parsing, QuantLib for Shoals) uses Python. All other tests are written in Chelis and run via `chelis test`. This is not a guideline — it is a hard rule for all reef packages.
 
 ### Pre-Phase 4 investment update
 
