@@ -3105,6 +3105,276 @@ private theorem runtimeLinear_letBind_via_db
   · intro ell hLocs hVLoc
     exact hsep ell hLocs (by simp [locRefs, hVLoc])
 
+private theorem runtimeLinear_letpair_via_db
+    {Sigma : StoreTyp}
+    {x y : String} {v1 v2 body : Term} {t : Typ} {eps : EffectRow} {locs : List Loc}
+    (hTyp : HasType [] Sigma [] (Term.letpair x y (Term.pair v1 v2) body) t eps [])
+    (hv1 : IsValue v1) (hv2 : IsValue v2)
+    (hScope : WellScoped (Term.letpair x y (Term.pair v1 v2) body))
+    (hLinear : RuntimeLinear (Term.letpair x y (Term.pair v1 v2) body))
+    (hsep : LocRefsSeparated locs (locRefs (Term.letpair x y (Term.pair v1 v2) body))) :
+    RuntimeLinear (subst (subst body v1 x) v2 y) ∧
+      LocRefsSeparated (locRefs (subst (subst body v1 x) v2 y)) locs ∧
+      LocRefsSeparated locs (locRefs (subst (subst body v1 x) v2 y)) := by
+  rcases HasType.letpair_inv_sub_bridge hTyp with
+    ⟨GammaMid, GammaBody, t1, t2, epsPair, epsBody, slotX, slotY, hPair, hBody, hOut, hSub⟩
+  have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hPair
+  subst hMid
+  subst GammaBody
+  rcases HasType.pair_inv_sub_bridge hPair with
+    ⟨GammaPair, epsV1, epsV2, hV1, hV2, hPairSub⟩
+  have hPairMid : GammaPair = [] := has_type_closed_output_of_closed_input hV1
+  subst hPairMid
+  have hV1Closed : Closed v1 := has_type_closed_term_of_closed_input hV1
+  have hV2Closed : Closed v2 := has_type_closed_term_of_closed_input hV2
+  have hV1Nil : HasType [] Sigma [] v1 t1 [] [] :=
+    HasType.value_eff_polymorphic_bridge hV1 hv1 []
+  have hV2Nil : HasType [] Sigma [] v2 t2 [] [] :=
+    HasType.value_eff_polymorphic_bridge hV2 hv2 []
+  have hScopeParts := wellScoped_letpair_body hScope
+  have hScopePair : WellScoped (Term.pair v1 v2) := hScopeParts.1
+  have hxy : x ≠ y := hScopeParts.2.1
+  have hxBody : x ∉ boundVars body := hScopeParts.2.2.1
+  have hyBody : y ∉ boundVars body := hScopeParts.2.2.2.1
+  have hScopeBody : WellScoped body := hScopeParts.2.2.2.2
+  have hScopeV1 : WellScoped v1 := wellScoped_pair_left hScopePair
+  have hScopeV2 : WellScoped v2 := wellScoped_pair_right hScopePair
+  have hscopeNodup :
+      (x :: y :: (boundVars v1 ++ boundVars v2 ++ boundVars body)).Nodup := by
+    simpa [WellScoped, boundVars, List.append_assoc] using hScope
+  have hyNotRest : y ∉ boundVars v1 ++ boundVars v2 ++ boundVars body := by
+    simpa using (List.nodup_cons.mp (List.nodup_cons.mp hscopeNodup).2).1
+  have hyV1 : y ∉ boundVars v1 := by
+    intro hy
+    exact hyNotRest (by simp [hy])
+  have hLocs : ((locRefs v1 ++ locRefs v2) ++ locRefs body).Nodup := by
+    simpa [RuntimeLinear, locRefs, List.append_assoc] using hLinear
+  rcases List.nodup_append.mp hLocs with ⟨hlinV12, hlinBody, hsepV12BodyRaw⟩
+  have hsepV12Body : LocRefsSeparated (locRefs v1 ++ locRefs v2) (locRefs body) :=
+    locRefsSeparated_left_of_nodup_append hLocs
+  have hsepBodyV12 : LocRefsSeparated (locRefs body) (locRefs v1 ++ locRefs v2) :=
+    locRefsSeparated_right_of_nodup_append hLocs
+  rcases List.nodup_append.mp hlinV12 with ⟨hlinV1, hlinV2, _⟩
+  have hsepV1V2 : LocRefsSeparated (locRefs v1) (locRefs v2) :=
+    locRefsSeparated_left_of_nodup_append hlinV12
+  have hsepV2V1 : LocRefsSeparated (locRefs v2) (locRefs v1) :=
+    locRefsSeparated_right_of_nodup_append hlinV12
+  have hsepV1Body : LocRefsSeparated (locRefs v1) (locRefs body) :=
+    locRefsSeparated_left_of_append hsepV12Body
+  have hsepV2Body : LocRefsSeparated (locRefs v2) (locRefs body) :=
+    locRefsSeparated_right_of_append hsepV12Body
+  have hsepBodyV1 : LocRefsSeparated (locRefs body) (locRefs v1) :=
+    locRefsSeparated_rhs_left_of_append hsepBodyV12
+  have hsepBodyV2 : LocRefsSeparated (locRefs body) (locRefs v2) :=
+    locRefsSeparated_rhs_right_of_append hsepBodyV12
+  have hsepV1Locs : LocRefsSeparated (locRefs v1) locs := by
+    intro ell hv1loc hlocs
+    exact hsep ell hlocs (by simp [locRefs, hv1loc])
+  have hsepV2Locs : LocRefsSeparated (locRefs v2) locs := by
+    intro ell hv2loc hlocs
+    exact hsep ell hlocs (by simp [locRefs, hv2loc])
+  have hsepBodyLocs : LocRefsSeparated (locRefs body) locs := by
+    intro ell hbodyloc hlocs
+    exact hsep ell hlocs (by simp [locRefs, hbodyloc])
+  have hsepLocsV1 : LocRefsSeparated locs (locRefs v1) := by
+    intro ell hlocs hv1loc
+    exact hsep ell hlocs (by simp [locRefs, hv1loc])
+  have hsepLocsV2 : LocRefsSeparated locs (locRefs v2) := by
+    intro ell hlocs hv2loc
+    exact hsep ell hlocs (by simp [locRefs, hv2loc])
+  have hsepLocsBody : LocRefsSeparated locs (locRefs body) := by
+    intro ell hlocs hbodyloc
+    exact hsep ell hlocs (by simp [locRefs, hbodyloc])
+  have hBodyLex : LexicallyScoped [(x, some t1), (y, some t2)] body := by
+    simpa using
+      (lexical_letpair_body (Gamma := []) (tx := t1) (ty := t2) (lexical_nil hScope))
+  rcases transport_typing_lexical hBody hBodyLex with
+    ⟨bodyDB, hEraseBody, hBodyDB0⟩
+  rcases transport_typing_lexical hV1Nil (lexical_nil hScopeV1) with
+    ⟨v1DB, hEraseV1, hV1DB⟩
+  rcases transport_typing_lexical hV2Nil (lexical_nil hScopeV2) with
+    ⟨v2DB, hEraseV2, hV2DB⟩
+  have hV1UnderY : HasType [] Sigma [(y, some t2)] v1 t1 [] [(y, some t2)] := by
+    simpa using hasType_prefix_weaken hV1Nil [(y, some t2)]
+  rcases transport_typing_lexical hV1UnderY (lexical_singleton hyV1 hScopeV1) with
+    ⟨v1DBY, hEraseV1Y, hV1DBY0⟩
+  have hEraseV1Y' :
+      eraseTerm (ctxEnv [(y, some t2)]) v1 = some v1DB := by
+    simpa [ctxEnv, linearCtxDom] using eraseTerm_suffix hEraseV1 [y]
+  have hv1Eq : v1DBY = v1DB := by
+    have : some v1DBY = some v1DB := by simpa [hEraseV1Y] using hEraseV1Y'
+    exact Option.some.inj this
+  have hV1DBY : HasTypeDB [] Sigma [some t2] v1DB t1 [] [some t2] := by
+    cases hv1Eq
+    simpa [eraseCtx] using hV1DBY0
+  have hBodyShape :
+      HasTypeDB [] Sigma (LinearCtxDB.insertAt 1 (some t1) [some t2]) bodyDB t epsBody
+        (LinearCtxDB.insertAt 1 slotX [slotY]) := by
+    simpa using hBodyDB0
+  have hlinBodyDB : RuntimeLinearDB bodyDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseBody).1 hlinBody
+  have hlinV1DB : RuntimeLinearDB v1DB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseV1).1 hlinV1
+  have hlinV2DB : RuntimeLinearDB v2DB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseV2).1 hlinV2
+  have hsepV1BodyDB :
+      LocRefsSeparated (locRefsDB v1DB) (locRefsDB bodyDB) := by
+    simpa [eraseTerm_locRefs hEraseV1, eraseTerm_locRefs hEraseBody] using hsepV1Body
+  have hsepBodyV1DB :
+      LocRefsSeparated (locRefsDB bodyDB) (locRefsDB v1DB) := by
+    simpa [eraseTerm_locRefs hEraseV1, eraseTerm_locRefs hEraseBody] using hsepBodyV1
+  have hsepV2BodyDB :
+      LocRefsSeparated (locRefsDB v2DB) (locRefsDB bodyDB) := by
+    simpa [eraseTerm_locRefs hEraseV2, eraseTerm_locRefs hEraseBody] using hsepV2Body
+  have hsepBodyV2DB :
+      LocRefsSeparated (locRefsDB bodyDB) (locRefsDB v2DB) := by
+    simpa [eraseTerm_locRefs hEraseV2, eraseTerm_locRefs hEraseBody] using hsepBodyV2
+  have hsepV1V2DB :
+      LocRefsSeparated (locRefsDB v1DB) (locRefsDB v2DB) := by
+    simpa [eraseTerm_locRefs hEraseV1, eraseTerm_locRefs hEraseV2] using hsepV1V2
+  have hsepV2V1DB :
+      LocRefsSeparated (locRefsDB v2DB) (locRefsDB v1DB) := by
+    simpa [eraseTerm_locRefs hEraseV1, eraseTerm_locRefs hEraseV2] using hsepV2V1
+  have hsepV1LocsDB :
+      LocRefsSeparated (locRefsDB v1DB) locs := by
+    simpa [eraseTerm_locRefs hEraseV1] using hsepV1Locs
+  have hsepV2LocsDB :
+      LocRefsSeparated (locRefsDB v2DB) locs := by
+    simpa [eraseTerm_locRefs hEraseV2] using hsepV2Locs
+  have hsepBodyLocsDB :
+      LocRefsSeparated (locRefsDB bodyDB) locs := by
+    simpa [eraseTerm_locRefs hEraseBody] using hsepBodyLocs
+  have hsepLocsV1DB :
+      LocRefsSeparated locs (locRefsDB v1DB) := by
+    simpa [eraseTerm_locRefs hEraseV1] using hsepLocsV1
+  have hsepLocsV2DB :
+      LocRefsSeparated locs (locRefsDB v2DB) := by
+    simpa [eraseTerm_locRefs hEraseV2] using hsepLocsV2
+  have hsepLocsBodyDB :
+      LocRefsSeparated locs (locRefsDB bodyDB) := by
+    simpa [eraseTerm_locRefs hEraseBody] using hsepLocsBody
+  have hsepV1RhsDB :
+      LocRefsSeparated (locRefsDB v1DB) (locRefsDB v2DB ++ locs) :=
+    locRefsSeparated_lhs_append hsepV1V2DB hsepV1LocsDB
+  have hsepRhsV1DB :
+      LocRefsSeparated (locRefsDB v2DB ++ locs) (locRefsDB v1DB) :=
+    locRefsSeparated_append hsepV2V1DB hsepLocsV1DB
+  have hEraseAfterX :
+      eraseTerm [y] (subst body v1 x) = some (substDBAux 1 v1DB bodyDB) := by
+    simpa using
+      eraseTerm_subst_split (ρin := [y]) (ρout := []) (v := v1) (x := x)
+        (by simp [hxy]) hEraseV1 hEraseBody hxBody
+  have hFirstTyping :
+      HasTypeDB [] Sigma [some t2] (substDBAux 1 v1DB bodyDB) t epsBody [slotY] := by
+    cases hslotX : slotX with
+    | none =>
+        exact subst_preserves_typing_db_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          (v := v1DB) (t_v := t1) 1 [some t2] [slotY]
+          (some t1) none
+          (by simp) (by simp) rfl rfl
+          (Or.inr (Or.inl ⟨rfl, rfl⟩)) hV1DBY
+    | some tKeep =>
+        have htKeep : tKeep = t1 := by
+          have hLiveIn :
+              (LinearCtxDB.insertAt 1 (some t1) [some t2])[1]? = some (some t1) := by
+            simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape) 1 t1 hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotX] using hLive
+          · simp [hslotX] at hDead
+        cases htKeep
+        exact subst_preserves_typing_db_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          (v := v1DB) (t_v := t1) 1 [some t2] [slotY]
+          (some t1) (some t1)
+          (by simp) (by simp) rfl rfl
+          (Or.inl ⟨rfl, rfl⟩) hV1DBY
+  have hFirstRes :
+      RuntimeLinearDB (substDBAux 1 v1DB bodyDB) ∧
+        LocRefsSeparated (locRefsDB (substDBAux 1 v1DB bodyDB)) (locRefsDB v2DB ++ locs) ∧
+        LocRefsSeparated (locRefsDB v2DB ++ locs) (locRefsDB (substDBAux 1 v1DB bodyDB)) := by
+    cases hslotX : slotX with
+    | none =>
+        exact runtimeLinearDB_subst_dead_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          v1DB t1 1 [some t2] [slotY] (locRefsDB v2DB ++ locs)
+          (by simp) (by simp) rfl rfl hV1DBY
+          hlinV1DB hsepV1BodyDB hsepBodyV1DB hsepV1RhsDB hsepRhsV1DB
+          hlinBodyDB
+          (locRefsSeparated_lhs_append hsepBodyV2DB hsepBodyLocsDB)
+          (locRefsSeparated_append hsepV2BodyDB hsepLocsBodyDB)
+    | some tKeep =>
+        have htKeep : tKeep = t1 := by
+          have hLiveIn :
+              (LinearCtxDB.insertAt 1 (some t1) [some t2])[1]? = some (some t1) := by
+            simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape) 1 t1 hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotX] using hLive
+          · simp [hslotX] at hDead
+        cases htKeep
+        exact runtimeLinearDB_subst_live_gen_separated
+          (Γ1 := [some t2]) (Γ2 := [slotY]) (v := v1DB) (rhsRefs := locRefsDB v2DB ++ locs)
+          1 (by simp) (by simp) (by simpa [hslotX] using hBodyShape)
+          hlinBodyDB
+          (locRefsSeparated_lhs_append hsepBodyV2DB hsepBodyLocsDB)
+          (locRefsSeparated_append hsepV2BodyDB hsepLocsBodyDB)
+  have hyAfterX : y ∉ boundVars (subst body v1 x) := by
+    exact subst_notBound body v1 x y hyBody hyV1
+  have hEraseFinal :
+      eraseTerm [] (subst (subst body v1 x) v2 y) =
+        some (substDBAux 0 v2DB (substDBAux 1 v1DB bodyDB)) := by
+    simpa using
+      eraseTerm_subst_head (ρ := []) (v := v2) (x := y)
+        hEraseV2 hEraseAfterX hyAfterX
+  have hV2LocsDB : locRefsDB v2DB = locRefs v2 := by
+    simpa using (eraseTerm_locRefs hEraseV2).symm
+  have hSecondRes :
+      RuntimeLinearDB (substDBAux 0 v2DB (substDBAux 1 v1DB bodyDB)) ∧
+        LocRefsSeparated (locRefsDB (substDBAux 0 v2DB (substDBAux 1 v1DB bodyDB))) locs ∧
+        LocRefsSeparated locs (locRefsDB (substDBAux 0 v2DB (substDBAux 1 v1DB bodyDB))) := by
+    cases hslotY : slotY with
+    | none =>
+        exact runtimeLinearDB_subst_dead_separated
+          (Γ := []) (rhsRefs := locs)
+          0 (by simp) (by simpa [hslotY] using hFirstTyping) hV2DB
+          hlinV2DB
+          (locRefsSeparated_left_of_append hFirstRes.2.2)
+          (locRefsSeparated_rhs_left_of_append (xs := locRefsDB (substDBAux 1 v1DB bodyDB))
+            (ys := locRefsDB v2DB) (zs := locs) hFirstRes.2.1)
+          hsepV2LocsDB hsepLocsV2DB
+          hFirstRes.1
+          (locRefsSeparated_rhs_right_of_append (xs := locRefsDB (substDBAux 1 v1DB bodyDB))
+            (ys := locRefsDB v2DB) (zs := locs) hFirstRes.2.1)
+          (locRefsSeparated_right_of_append hFirstRes.2.2)
+    | some tKeep =>
+        have htKeep : tKeep = t2 := by
+          have hLiveIn : ([some t2])[0]? = some (some t2) := by simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [hslotY] using hFirstTyping) 0 t2 hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotY] using hLive
+          · simp [hslotY] at hDead
+        cases htKeep
+        exact runtimeLinearDB_subst_live_gen_separated
+          (Γ1 := []) (Γ2 := []) (v := v2DB) (rhsRefs := locs)
+          0 (by simp) (by simp) (by simpa [hslotY] using hFirstTyping)
+          hFirstRes.1
+          (locRefsSeparated_rhs_right_of_append (xs := locRefsDB (substDBAux 1 v1DB bodyDB))
+            (ys := locRefsDB v2DB) (zs := locs) hFirstRes.2.1)
+          (locRefsSeparated_right_of_append hFirstRes.2.2)
+  have hlocsFinal :
+      locRefs (subst (subst body v1 x) v2 y) =
+        locRefsDB (substDBAux 0 v2DB (substDBAux 1 v1DB bodyDB)) := by
+    simpa using eraseTerm_locRefs hEraseFinal
+  refine ⟨?_, ?_, ?_⟩
+  · exact (eraseTerm_runtimeLinear_iff hEraseFinal).2 hSecondRes.1
+  · simpa [hlocsFinal] using hSecondRes.2.1
+  · simpa [hlocsFinal] using hSecondRes.2.2
+
 private theorem mem_locRefsClauses_of_mem_clause
     {clauses : List (EffectLabel × String × String × Term)}
     {op : EffectLabel} {x k : String} {hb : Term} {ell : Loc}
