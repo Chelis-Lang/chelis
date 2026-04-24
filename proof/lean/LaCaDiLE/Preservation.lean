@@ -2848,6 +2848,68 @@ private theorem locRefsSeparated_right_of_nodup_append
   intro ell hy hx
   exact hxy ell hx ell hy rfl
 
+private theorem locRefsSeparated_left_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated (xs ++ ys) zs) :
+    LocRefsSeparated xs zs := by
+  intro ell hx hz
+  exact h ell (List.mem_append_left _ hx) hz
+
+private theorem locRefsSeparated_right_of_append
+    {xs ys zs : List Loc}
+    (h : LocRefsSeparated (xs ++ ys) zs) :
+    LocRefsSeparated ys zs := by
+  intro ell hy hz
+  exact h ell (List.mem_append_right _ hy) hz
+
+private theorem locRefsSeparated_append
+    {xs ys zs : List Loc}
+    (h1 : LocRefsSeparated xs zs)
+    (h2 : LocRefsSeparated ys zs) :
+    LocRefsSeparated (xs ++ ys) zs := by
+  intro ell hxy hz
+  rcases List.mem_append.mp hxy with hx | hy
+  · exact h1 ell hx hz
+  · exact h2 ell hy hz
+
+private theorem locRefsSeparated_lhs_append
+    {xs ys zs : List Loc}
+    (h1 : LocRefsSeparated xs ys)
+    (h2 : LocRefsSeparated xs zs) :
+    LocRefsSeparated xs (ys ++ zs) := by
+  intro ell hx hyz
+  rcases List.mem_append.mp hyz with hy | hz
+  · exact h1 ell hx hy
+  · exact h2 ell hx hz
+
+private theorem runtimeLinear_clause_mem_separated
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term} {rhsRefs : List Loc}
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hlin : (locRefsClauses clauses ++ rhsRefs).Nodup) :
+    RuntimeLinear hb ∧
+      LocRefsSeparated (locRefs hb) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefs hb) := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases cl with ⟨op', x', k', hb'⟩
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        have hsplit : (locRefs hb ++ (locRefsClauses rest ++ rhsRefs)).Nodup := by
+          simpa [locRefsClauses, List.append_assoc] using hlin
+        rcases List.nodup_append.mp hsplit with ⟨hlinHb, _hrest, hsepHb⟩
+        refine ⟨hlinHb, ?_, ?_⟩
+        · intro ell hhb hrhs
+          exact hsepHb ell hhb ell (List.mem_append_right _ hrhs) rfl
+        · intro ell hrhs hhb
+          exact hsepHb ell hhb ell (List.mem_append_right _ hrhs) rfl
+      · have hrest : (locRefsClauses rest ++ rhsRefs).Nodup := by
+          simpa [locRefsClauses, List.append_assoc] using
+            (List.nodup_append.mp (by simpa [locRefsClauses, List.append_assoc] using hlin)).2.1
+        exact ih htl hrest
+
 private theorem runtimeLinear_subst_singleton_separated
     {Sigma : StoreTyp}
     {x : String} {tArg tRet : Typ} {slot : Option Typ}
