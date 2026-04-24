@@ -548,7 +548,10 @@ fn read_lockfile(path: &Path) -> Result<ReefLock, String> {
 
 /// Run `f` on a background thread.  Return `Err(timeout_msg)` if it does not
 /// complete within `timeout`.
-fn run_with_timeout<T: Send + 'static>(
+///
+/// Exposed for `chelis test` so the CLI can bound each test's execution
+/// with the same primitive reef uses internally for dependency resolution.
+pub fn run_with_timeout<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
     timeout: Duration,
     timeout_msg: &str,
