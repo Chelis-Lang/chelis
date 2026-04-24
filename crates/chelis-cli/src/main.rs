@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -196,6 +197,20 @@ enum Command {
         #[command(subcommand)]
         command: ReefCommand,
     },
+    /// Run Chelis-native tests discovered under a `tests/` directory
+    Test {
+        /// Path to tests directory or a single `.ch` test file
+        path: Option<PathBuf>,
+        /// Substring filter on `<file>::<test_fn>`
+        #[clap(long)]
+        filter: Option<String>,
+        /// Emit newline-delimited JSON records instead of plain text
+        #[clap(long)]
+        json: bool,
+        /// Per-test wall-clock timeout (seconds)
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +278,18 @@ fn main() {
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
+        Some(Command::Test {
+            path,
+            filter,
+            json,
+            timeout,
+        }) => match cmd_test(path.as_deref(), filter.as_deref(), json, timeout) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        },
         None => {
             println!(
                 "chelis {} -- use --help for commands",
@@ -759,6 +786,361 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Discover and execute Chelis-native tests.
+///
+/// Walks `.ch` files under `path` (default `tests/` in CWD), extracts nullary
+/// `def test_*` functions, and evaluates each against the surrounding module
+/// with a shared reef graph. Returns the process exit code:
+///
+/// * `0` — every selected test passed.
+/// * `1` — at least one test failed.
+/// * `2` — runner error (missing dir, missing reef package, or no test files parsed).
+fn cmd_test(
+    path: Option<&Path>,
+    filter: Option<&str>,
+    json: bool,
+    timeout_secs: u64,
+) -> Result<i32, String> {
+    let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
+    let target = match path {
+        Some(p) => p.to_path_buf(),
+        None => cwd.join("tests"),
+    };
+
+    if !target.exists() {
+        return Err(format!(
+            "path `{}` does not exist — pass a tests directory or a single .ch file",
+            target.display()
+        ));
+    }
+
+    // Prepare the reef graph once — this is the expensive step we share
+    // across every test file in a single invocation.
+    let graph = chelis_reef::prepare_reef_graph(&cwd)?;
+
+    let test_files = discover_test_files(&target)?;
+    if test_files.is_empty() {
+        return Err(format!(
+            "no .ch files found under `{}` — `chelis test` requires at least one test file to run",
+            target.display()
+        ));
+    }
+
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let mut passed: usize = 0;
+    let mut failed: usize = 0;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    for file in &test_files {
+        let rel_display = file
+            .strip_prefix(&cwd)
+            .unwrap_or(file.as_path())
+            .display()
+            .to_string();
+
+        let file_result = run_test_file(&graph, file, filter, &rel_display, timeout);
+        let rows = match file_result {
+            Ok(rows) => rows,
+            Err(err) => {
+                // File-level failure (parse error or compile error with no
+                // matching tests). Record as a synthetic row so the operator
+                // sees it, and count as failed.
+                vec![TestRow {
+                    file: rel_display.clone(),
+                    test: "<file>".to_string(),
+                    status: TestStatus::Fail,
+                    message: Some(err),
+                }]
+            }
+        };
+
+        if rows.is_empty() {
+            // Nothing matched the filter in this file — skip silently so the
+            // operator can narrow a run without seeing noise.
+            continue;
+        }
+
+        if json {
+            for row in &rows {
+                writeln!(out, "{}", row.to_json()).map_err(|e| e.to_string())?;
+                match row.status {
+                    TestStatus::Pass => passed += 1,
+                    TestStatus::Fail => failed += 1,
+                }
+            }
+        } else {
+            writeln!(out, "{rel_display}").map_err(|e| e.to_string())?;
+            for row in &rows {
+                writeln!(out, "  {}", row.render_plain()).map_err(|e| e.to_string())?;
+                match row.status {
+                    TestStatus::Pass => passed += 1,
+                    TestStatus::Fail => failed += 1,
+                }
+            }
+        }
+    }
+
+    if json {
+        writeln!(
+            out,
+            "{{\"summary\":{{\"passed\":{passed},\"failed\":{failed}}}}}"
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        writeln!(out, "\n{passed} passed, {failed} failed").map_err(|e| e.to_string())?;
+    }
+
+    Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
+    if target.is_file() {
+        if target.extension().and_then(|e| e.to_str()) != Some("ch") {
+            return Err(format!(
+                "`{}` is not a .ch file — `chelis test` only accepts Chelis source",
+                target.display()
+            ));
+        }
+        return Ok(vec![target.to_path_buf()]);
+    }
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(target).sort_by_file_name() {
+        let entry = entry.map_err(|e| format!("failed to walk {}: {e}", target.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ch") {
+            continue;
+        }
+        files.push(path.to_path_buf());
+    }
+    Ok(files)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestStatus {
+    Pass,
+    Fail,
+}
+
+impl TestStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            TestStatus::Pass => "PASS",
+            TestStatus::Fail => "FAIL",
+        }
+    }
+    fn json_label(&self) -> &'static str {
+        match self {
+            TestStatus::Pass => "pass",
+            TestStatus::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TestRow {
+    file: String,
+    test: String,
+    status: TestStatus,
+    message: Option<String>,
+}
+
+impl TestRow {
+    fn render_plain(&self) -> String {
+        // Right-pad the test name with dots so the status column lines up,
+        // matching the plan's worked example (`test_name ......... PASS`).
+        const LEADER_WIDTH: usize = 32;
+        let test_len = self.test.chars().count();
+        let dots = if test_len + 2 >= LEADER_WIDTH {
+            " ".to_string()
+        } else {
+            " ".to_string() + &".".repeat(LEADER_WIDTH - test_len - 2) + " "
+        };
+        let msg = match (&self.message, self.status) {
+            (Some(m), TestStatus::Fail) => format!(" ({m})"),
+            _ => String::new(),
+        };
+        format!("{}{dots}{}{msg}", self.test, self.status.label())
+    }
+
+    fn to_json(&self) -> String {
+        let mut out = format!(
+            "{{\"file\":{},\"test\":{},\"status\":\"{}\"",
+            json_string(&self.file),
+            json_string(&self.test),
+            self.status.json_label()
+        );
+        if let Some(msg) = &self.message {
+            out.push_str(",\"message\":");
+            out.push_str(&json_string(msg));
+        }
+        out.push('}');
+        out
+    }
+}
+
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Execute every `test_*` function in `file` and return one `TestRow` per
+/// selected test. Returns `Err` only when the file itself cannot be read
+/// or parsed — compile/runtime failures surface as per-row `FAIL` entries.
+fn run_test_file(
+    graph: &chelis_reef::PreparedReefGraph,
+    file: &Path,
+    filter: Option<&str>,
+    rel_display: &str,
+    timeout: Duration,
+) -> Result<Vec<TestRow>, String> {
+    let source = fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
+    let parsed = chelis_surf::parser::parse_str(&source)
+        .map_err(|e| format!("parse {}: {e}", file.display()))?;
+
+    // A test file may wrap its contents in `module Foo.Bar` — we need the
+    // flat decl list so `compile_with_reef_graph` can treat it as an eval
+    // module. Imports are preserved so the rewriter can resolve references
+    // to `Std.*` or sibling modules.
+    let flat_decls = flatten_module_decls(&parsed);
+
+    let matched_tests = enumerate_test_fns(&flat_decls, filter, rel_display);
+    if matched_tests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Per-test isolation. We cannot bundle every test as a separate top-level
+    // `let __chelis_test_N = test_N()` because `evaluate_host_program` walks
+    // all non-fn top-level defs unconditionally — a single failing module
+    // binding would then cascade into every test in the file. Instead we
+    // rebuild the program once per selected test with a single caller
+    // binding, share the reef graph, and wrap each evaluation in
+    // `run_with_timeout` to honor `--timeout` per test.
+    let mut rows = Vec::with_capacity(matched_tests.len());
+    for test in &matched_tests {
+        let synth_name = "__chelis_test_root".to_string();
+        let call = chelis_surf::ast::Expr::Apply(
+            Box::new(chelis_surf::ast::Expr::Var(test.name.clone(), test.span)),
+            Vec::new(),
+            test.span,
+        );
+        let mut synth_decls = flat_decls.clone();
+        synth_decls.push(Decl::LetDef {
+            name: synth_name.clone(),
+            ty: None,
+            value: call,
+            span: test.span,
+        });
+
+        let prepared = match chelis_reef::compile_with_reef_graph(graph, &synth_decls) {
+            Ok(p) => p,
+            Err(err) => {
+                rows.push(TestRow {
+                    file: rel_display.to_string(),
+                    test: test.name.clone(),
+                    status: TestStatus::Fail,
+                    message: Some(format!("compile: {err}")),
+                });
+                continue;
+            }
+        };
+
+        let source_text = chelis_surf::format::format_program(&prepared.decls);
+        let root = synth_name.clone();
+        let outcome = chelis_reef::run_with_timeout(
+            move || {
+                let request = EvalRequest {
+                    source_kind: SourceKind::Surf,
+                    source: source_text,
+                    bindings: BTreeMap::new(),
+                };
+                let results = chelis_compiler_api::compiler::eval_many(request, &[root]);
+                Ok(results)
+            },
+            timeout,
+            &format!("timeout after {}s", timeout.as_secs()),
+        );
+
+        let (status, message) = match outcome {
+            Err(msg) => (TestStatus::Fail, Some(msg)),
+            Ok(mut results) => {
+                let (_name, result) = results.pop().ok_or_else(|| {
+                    format!("internal: eval_many returned no rows for `{}`", test.name)
+                })?;
+                match result {
+                    Ok(_) => (TestStatus::Pass, None),
+                    Err(err) => {
+                        let message = err
+                            .errors
+                            .iter()
+                            .map(|d| d.message.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        (TestStatus::Fail, Some(message))
+                    }
+                }
+            }
+        };
+
+        rows.push(TestRow {
+            file: rel_display.to_string(),
+            test: test.name.clone(),
+            status,
+            message,
+        });
+    }
+    Ok(rows)
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredTest {
+    name: String,
+    span: chelis_deep::Span,
+}
+
+fn enumerate_test_fns(
+    decls: &[Decl],
+    filter: Option<&str>,
+    rel_display: &str,
+) -> Vec<DiscoveredTest> {
+    let mut out = Vec::new();
+    for decl in decls {
+        if let Decl::FunDef {
+            name, params, span, ..
+        } = decl
+            && name.starts_with("test_")
+            && params.is_empty()
+        {
+            let key = format!("{rel_display}::{name}");
+            if let Some(needle) = filter
+                && !key.contains(needle)
+            {
+                continue;
+            }
+            out.push(DiscoveredTest {
+                name: name.clone(),
+                span: *span,
+            });
+        }
+    }
+    out
+}
+
+fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
+    let mut out = Vec::new();
+    for decl in decls {
+        match decl {
+            Decl::Module { decls: inner, .. } => {
+                out.extend(flatten_module_decls(inner));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
 }
 
 fn load_check_build_decls(
