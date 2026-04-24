@@ -547,6 +547,12 @@ where
             RiscOp::Log => unary_map(&values[&node.inputs[0]], f64::ln),
             RiscOp::Sin => unary_map(&values[&node.inputs[0]], f64::sin),
             RiscOp::Sqrt => unary_map(&values[&node.inputs[0]], f64::sqrt),
+            RiscOp::Cos => unary_map(&values[&node.inputs[0]], f64::cos),
+            RiscOp::Tan => unary_map(&values[&node.inputs[0]], f64::tan),
+            RiscOp::Atan => unary_map(&values[&node.inputs[0]], f64::atan),
+            RiscOp::Abs => unary_map(&values[&node.inputs[0]], f64::abs),
+            RiscOp::Floor => unary_map(&values[&node.inputs[0]], f64::floor),
+            RiscOp::Ceil => unary_map(&values[&node.inputs[0]], f64::ceil),
             RiscOp::UniformLike { low, high, seed } => {
                 uniform_like(&values[&node.inputs[0]].shape, *low, *high, *seed)
             }
@@ -648,6 +654,14 @@ where
                         FusedStepOp::Log => unary_map(resolve(&step.input_indices[0]), f64::ln),
                         FusedStepOp::Sin => unary_map(resolve(&step.input_indices[0]), f64::sin),
                         FusedStepOp::Sqrt => unary_map(resolve(&step.input_indices[0]), f64::sqrt),
+                        FusedStepOp::Cos => unary_map(resolve(&step.input_indices[0]), f64::cos),
+                        FusedStepOp::Tan => unary_map(resolve(&step.input_indices[0]), f64::tan),
+                        FusedStepOp::Atan => unary_map(resolve(&step.input_indices[0]), f64::atan),
+                        FusedStepOp::Abs => unary_map(resolve(&step.input_indices[0]), f64::abs),
+                        FusedStepOp::Floor => {
+                            unary_map(resolve(&step.input_indices[0]), f64::floor)
+                        }
+                        FusedStepOp::Ceil => unary_map(resolve(&step.input_indices[0]), f64::ceil),
                     };
                     intermediates.push(result);
                 }

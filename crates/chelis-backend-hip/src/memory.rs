@@ -137,6 +137,12 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Log
                 | RiscOp::Sin
                 | RiscOp::Sqrt
+                | RiscOp::Cos
+                | RiscOp::Tan
+                | RiscOp::Atan
+                | RiscOp::Abs
+                | RiscOp::Floor
+                | RiscOp::Ceil
                 | RiscOp::UniformLike { .. }
                 | RiscOp::Dropout { .. }
                 | RiscOp::Sum { .. }

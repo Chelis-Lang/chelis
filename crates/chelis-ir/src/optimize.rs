@@ -40,6 +40,12 @@ pub fn constant_fold(dag: &mut Dag) {
                     RiscOp::Log => Some(v.ln()),
                     RiscOp::Sin => Some(v.sin()),
                     RiscOp::Sqrt => Some(v.sqrt()),
+                    RiscOp::Cos => Some(v.cos()),
+                    RiscOp::Tan => Some(v.tan()),
+                    RiscOp::Atan => Some(v.atan()),
+                    RiscOp::Abs => Some(v.abs()),
+                    RiscOp::Floor => Some(v.floor()),
+                    RiscOp::Ceil => Some(v.ceil()),
                     _ => None,
                 };
                 if let Some(val) = result {

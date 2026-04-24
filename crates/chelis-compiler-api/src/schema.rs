@@ -772,6 +772,12 @@ pub enum WireFusedStepOp {
     Log,
     Sin,
     Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,6 +799,12 @@ pub enum WireRiscOp {
     Log,
     Sin,
     Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
     UniformLike {
         low: f64,
         high: f64,

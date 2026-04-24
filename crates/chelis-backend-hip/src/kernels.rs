@@ -590,6 +590,30 @@ pub fn segmented_reduce_small_fused(
                 let a = resolve(&step.input_indices[0]);
                 format!("sqrtf({a})")
             }
+            FusedStepOp::Cos => {
+                let a = resolve(&step.input_indices[0]);
+                format!("cosf({a})")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("tanf({a})")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("atanf({a})")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&step.input_indices[0]);
+                format!("fabsf({a})")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&step.input_indices[0]);
+                format!("floorf({a})")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&step.input_indices[0]);
+                format!("ceilf({a})")
+            }
         };
         step_lines.push(format!("    float v{si} = {expr};"));
     }
@@ -736,6 +760,30 @@ pub fn segmented_reduce_large_fused(
             FusedStepOp::Sqrt => {
                 let a = resolve(&step.input_indices[0]);
                 format!("sqrtf({a})")
+            }
+            FusedStepOp::Cos => {
+                let a = resolve(&step.input_indices[0]);
+                format!("cosf({a})")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("tanf({a})")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("atanf({a})")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&step.input_indices[0]);
+                format!("fabsf({a})")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&step.input_indices[0]);
+                format!("floorf({a})")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&step.input_indices[0]);
+                format!("ceilf({a})")
             }
         };
         step_lines.push(format!("    float v{si} = {expr};"));
@@ -887,6 +935,30 @@ pub fn reduce_fused(
             FusedStepOp::Sqrt => {
                 let a = resolve(&step.input_indices[0]);
                 format!("sqrtf({a})")
+            }
+            FusedStepOp::Cos => {
+                let a = resolve(&step.input_indices[0]);
+                format!("cosf({a})")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("tanf({a})")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("atanf({a})")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&step.input_indices[0]);
+                format!("fabsf({a})")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&step.input_indices[0]);
+                format!("floorf({a})")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&step.input_indices[0]);
+                format!("ceilf({a})")
             }
         };
         step_lines.push(format!("      float v{si} = {expr};"));
@@ -1045,6 +1117,30 @@ pub fn fused_elementwise(
             FusedStepOp::Sqrt => {
                 let a = resolve(&step.input_indices[0]);
                 format!("sqrtf({a})")
+            }
+            FusedStepOp::Cos => {
+                let a = resolve(&step.input_indices[0]);
+                format!("cosf({a})")
+            }
+            FusedStepOp::Tan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("tanf({a})")
+            }
+            FusedStepOp::Atan => {
+                let a = resolve(&step.input_indices[0]);
+                format!("atanf({a})")
+            }
+            FusedStepOp::Abs => {
+                let a = resolve(&step.input_indices[0]);
+                format!("fabsf({a})")
+            }
+            FusedStepOp::Floor => {
+                let a = resolve(&step.input_indices[0]);
+                format!("floorf({a})")
+            }
+            FusedStepOp::Ceil => {
+                let a = resolve(&step.input_indices[0]);
+                format!("ceilf({a})")
             }
         };
         step_lines.push(format!("  float v{si} = {expr};"));

@@ -1549,6 +1549,12 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Log => WireRiscOp::Log,
         RiscOp::Sin => WireRiscOp::Sin,
         RiscOp::Sqrt => WireRiscOp::Sqrt,
+        RiscOp::Cos => WireRiscOp::Cos,
+        RiscOp::Tan => WireRiscOp::Tan,
+        RiscOp::Atan => WireRiscOp::Atan,
+        RiscOp::Abs => WireRiscOp::Abs,
+        RiscOp::Floor => WireRiscOp::Floor,
+        RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
             low: *low,
             high: *high,
@@ -1603,6 +1609,12 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         FusedStepOp::Log => WireFusedStepOp::Log,
                         FusedStepOp::Sin => WireFusedStepOp::Sin,
                         FusedStepOp::Sqrt => WireFusedStepOp::Sqrt,
+                        FusedStepOp::Cos => WireFusedStepOp::Cos,
+                        FusedStepOp::Tan => WireFusedStepOp::Tan,
+                        FusedStepOp::Atan => WireFusedStepOp::Atan,
+                        FusedStepOp::Abs => WireFusedStepOp::Abs,
+                        FusedStepOp::Floor => WireFusedStepOp::Floor,
+                        FusedStepOp::Ceil => WireFusedStepOp::Ceil,
                     },
                     input_indices: step
                         .input_indices

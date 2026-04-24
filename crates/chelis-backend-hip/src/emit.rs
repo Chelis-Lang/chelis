@@ -548,6 +548,12 @@ impl HipEmitter {
             RiscOp::Log => Some("kernel_log".into()),
             RiscOp::Sin => Some("kernel_sin".into()),
             RiscOp::Sqrt => Some("kernel_sqrt".into()),
+            RiscOp::Cos => Some("kernel_cos".into()),
+            RiscOp::Tan => Some("kernel_tan".into()),
+            RiscOp::Atan => Some("kernel_atan".into()),
+            RiscOp::Abs => Some("kernel_abs".into()),
+            RiscOp::Floor => Some("kernel_floor".into()),
+            RiscOp::Ceil => Some("kernel_ceil".into()),
             RiscOp::UniformLike { .. } => Some("kernel_uniform_like".into()),
             RiscOp::Dropout { .. } => None,
             RiscOp::Sum { axis } => {
@@ -603,6 +609,12 @@ impl HipEmitter {
             RiscOp::Log => kernels::unary_func(name, "logf"),
             RiscOp::Sin => kernels::unary_func(name, "sinf"),
             RiscOp::Sqrt => kernels::unary_func(name, "sqrtf"),
+            RiscOp::Cos => kernels::unary_func(name, "cosf"),
+            RiscOp::Tan => kernels::unary_func(name, "tanf"),
+            RiscOp::Atan => kernels::unary_func(name, "atanf"),
+            RiscOp::Abs => kernels::unary_func(name, "fabsf"),
+            RiscOp::Floor => kernels::unary_func(name, "floorf"),
+            RiscOp::Ceil => kernels::unary_func(name, "ceilf"),
             RiscOp::UniformLike { .. } => kernels::uniform_like(name),
             RiscOp::Sum { axis } => {
                 let input_id = node.inputs[0];
@@ -705,6 +717,24 @@ impl HipEmitter {
             }
             RiscOp::Sqrt => {
                 self.emit_unary_launch(id, "kernel_sqrt", &node.inputs, &node.output_type)
+            }
+            RiscOp::Cos => {
+                self.emit_unary_launch(id, "kernel_cos", &node.inputs, &node.output_type)
+            }
+            RiscOp::Tan => {
+                self.emit_unary_launch(id, "kernel_tan", &node.inputs, &node.output_type)
+            }
+            RiscOp::Atan => {
+                self.emit_unary_launch(id, "kernel_atan", &node.inputs, &node.output_type)
+            }
+            RiscOp::Abs => {
+                self.emit_unary_launch(id, "kernel_abs", &node.inputs, &node.output_type)
+            }
+            RiscOp::Floor => {
+                self.emit_unary_launch(id, "kernel_floor", &node.inputs, &node.output_type)
+            }
+            RiscOp::Ceil => {
+                self.emit_unary_launch(id, "kernel_ceil", &node.inputs, &node.output_type)
             }
             RiscOp::UniformLike { low, high, seed } => {
                 self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)
@@ -1576,6 +1606,12 @@ impl HipEmitter {
             | RiscOp::Log
             | RiscOp::Sin
             | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
             | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Sum { .. }

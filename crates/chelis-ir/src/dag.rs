@@ -188,6 +188,12 @@ pub enum FusedStepOp {
     Log,
     Sin,
     Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
 }
 
 /// Input reference within a fused chain.
@@ -214,6 +220,12 @@ pub enum RiscOp {
     Log,
     Sin,
     Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
     UniformLike {
         low: f64,
         high: f64,

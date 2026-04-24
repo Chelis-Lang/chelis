@@ -20,6 +20,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "log",
     "sin",
     "sqrt",
+    "cos",
+    "tan",
+    "atan",
+    "abs",
+    "floor",
+    "ceil",
     "uniform_like",
     "cmplt",
     "sub",
@@ -437,6 +443,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("log", &mut env, &mut vg);
     tensor_unop("sin", &mut env, &mut vg);
     tensor_unop("sqrt", &mut env, &mut vg);
+    tensor_unop("cos", &mut env, &mut vg);
+    tensor_unop("tan", &mut env, &mut vg);
+    tensor_unop("atan", &mut env, &mut vg);
+    tensor_unop("abs", &mut env, &mut vg);
+    tensor_unop("floor", &mut env, &mut vg);
+    tensor_unop("ceil", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
     cmplt_sig("cmplt", &mut env, &mut vg);

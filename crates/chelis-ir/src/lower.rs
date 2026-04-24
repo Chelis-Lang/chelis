@@ -458,6 +458,12 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "log"
                         | "sin"
                         | "sqrt"
+                        | "cos"
+                        | "tan"
+                        | "atan"
+                        | "abs"
+                        | "floor"
+                        | "ceil"
                         | "relu"
                         | "sigmoid"
                         | "cmplt"
@@ -2566,6 +2572,36 @@ impl LowerCtx {
                 let node = self.lower_transcendental(RiscOp::Sqrt, x, ty);
                 self.attach_reuse_hint(node, app_span, &[x])
             }
+            "cos" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "cos input");
+                let node = self.lower_transcendental(RiscOp::Cos, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "tan" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "tan input");
+                let node = self.lower_transcendental(RiscOp::Tan, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "atan" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "atan input");
+                let node = self.lower_transcendental(RiscOp::Atan, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "abs" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "abs input");
+                let node = self.lower_transcendental(RiscOp::Abs, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "floor" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "floor input");
+                let node = self.lower_transcendental(RiscOp::Floor, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "ceil" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "ceil input");
+                let node = self.lower_transcendental(RiscOp::Ceil, x, ty);
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
                 let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
@@ -3255,6 +3291,24 @@ impl LowerCtx {
                     }
                     "sqrt" => {
                         LoweredValue::Node(self.dag.add_node(RiscOp::Sqrt, vec![current_node], ty))
+                    }
+                    "cos" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Cos, vec![current_node], ty))
+                    }
+                    "tan" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Tan, vec![current_node], ty))
+                    }
+                    "atan" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Atan, vec![current_node], ty))
+                    }
+                    "abs" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Abs, vec![current_node], ty))
+                    }
+                    "floor" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Floor, vec![current_node], ty))
+                    }
+                    "ceil" => {
+                        LoweredValue::Node(self.dag.add_node(RiscOp::Ceil, vec![current_node], ty))
                     }
                     "relu" => {
                         LoweredValue::Node(tier2::lower_relu(&mut self.dag, current_node, &ty))
