@@ -1818,6 +1818,7 @@ impl Parser {
                     "Random" | "random" => Ok(EffectExpr::Random(tok.span)),
                     "Accum" | "accum" => Ok(EffectExpr::Accum(tok.span)),
                     "IO" | "io" => Ok(EffectExpr::Io(tok.span)),
+                    "Test" | "test" => Ok(EffectExpr::Test(tok.span)),
                     _ => Err(ParseError::Expected {
                         expected: "effect name".into(),
                         found: name,
@@ -1832,6 +1833,7 @@ impl Parser {
                     "Random" => Ok(EffectExpr::Random(tok.span)),
                     "Accum" => Ok(EffectExpr::Accum(tok.span)),
                     "IO" => Ok(EffectExpr::Io(tok.span)),
+                    "Test" => Ok(EffectExpr::Test(tok.span)),
                     "Resource" => {
                         self.expect(&TokenKind::LParen)?;
                         let device = match self.peek().clone() {

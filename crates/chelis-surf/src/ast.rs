@@ -205,6 +205,7 @@ pub enum EffectExpr {
     Random(Span),
     Accum(Span),
     Io(Span),
+    Test(Span),
     Resource(String, Span),
 }
 
@@ -215,6 +216,7 @@ impl EffectExpr {
             | Self::Random(span)
             | Self::Accum(span)
             | Self::Io(span)
+            | Self::Test(span)
             | Self::Resource(_, span) => *span,
         }
     }

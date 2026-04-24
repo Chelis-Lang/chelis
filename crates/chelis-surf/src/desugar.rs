@@ -230,6 +230,7 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
             EffectExpr::Random(_) => sym("random"),
             EffectExpr::Accum(_) => sym("accum"),
             EffectExpr::Io(_) => sym("io"),
+            EffectExpr::Test(_) => sym("test"),
             EffectExpr::Resource(device, _) => node(
                 "resource",
                 vec![deep::Expr::Atom(deep::Atom::Str(device.clone()), sp())],
@@ -241,7 +242,10 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
 
 fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>) -> deep::Expr {
     match (effects, ty_expr) {
-        (Some(effects), deep::Expr::List(list, span)) if !effects.is_empty() => {
+        // An explicit `! { ... }` clause — even the empty `! {}` — must be preserved in
+        // the Deep AST so the effect checker can distinguish "declared empty" from
+        // "no annotation" when validating declared vs inferred effects.
+        (Some(effects), deep::Expr::List(list, span)) => {
             let mut elements = list.elements;
             if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = elements.first()
                 && tag == "t-fn"
