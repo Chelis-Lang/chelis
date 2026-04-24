@@ -3105,6 +3105,271 @@ private theorem runtimeLinear_letBind_via_db
   · intro ell hLocs hVLoc
     exact hsep ell hLocs (by simp [locRefs, hVLoc])
 
+private theorem mem_locRefsClauses_of_mem_clause
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term} {ell : Loc}
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hell : ell ∈ locRefs hb) :
+    ell ∈ locRefsClauses clauses := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases cl with ⟨op0, x0, k0, hb0⟩
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [locRefsClauses, hell]
+      · simp [locRefsClauses, ih htl]
+
+private theorem runtimeLinear_handleOpDirect_via_db
+    {Sigma : StoreTyp}
+    {op : EffectLabel} {v : Term} {epsH : EffectRow}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {x k : String} {hb : Term} {tRet t : Typ} {eps : EffectRow} {locs : List Loc}
+    (hTyp : HasType [] Sigma [] (Term.handle epsH (Term.perform op v) clauses) t eps [])
+    (hv : IsValue v)
+    (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hScope : WellScoped (Term.handle epsH (Term.perform op v) clauses))
+    (hLinear : RuntimeLinear (Term.handle epsH (Term.perform op v) clauses))
+    (hsep : LocRefsSeparated locs (locRefs (Term.handle epsH (Term.perform op v) clauses))) :
+    RuntimeLinear (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) ∧
+      LocRefsSeparated
+        (locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k)) locs ∧
+      LocRefsSeparated locs
+        (locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k)) := by
+  rcases HasType.handle_inv_strong_bridge hTyp with
+    ⟨GammaBody, epsB, hPerform, _hOpsIn, _hClsIn, _hCover, hClauses, hSub⟩
+  have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPerform
+  subst hGammaBody
+  rcases HasType.perform_inv_bridge hPerform with
+    ⟨tArgV, _epsV, hV, hPerfSig, _hSubPerf⟩
+  rcases ClausesTyped.mem_inv hClauses hmem with
+    ⟨tArgClause, tRetClause, slotX, slotK, hClauseSig, hBody⟩
+  obtain ⟨tArgStep, hStepSig⟩ := hsig
+  have hArgEq : tArgClause = tArgV := OpSigMatch.arg_unique hClauseSig hPerfSig
+  have hRetEq : tRetClause = tRet := OpSigMatch.ret_unique hClauseSig hStepSig
+  have hRetGoal : t = tRet := OpSigMatch.ret_unique hPerfSig hStepSig
+  subst tArgClause
+  subst tRetClause
+  subst t
+  let tK : Typ := Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)
+  have hScopePerform : WellScoped (Term.perform op v) := wellScoped_handle_body hScope
+  have hScopeV : WellScoped v := by
+    simpa [WellScoped, boundVars] using hScopePerform
+  have hClosedV : Closed v := has_type_closed_term_of_closed_input hV
+  have hVNil : HasType [] Sigma [] v tArgV [] [] :=
+    HasType.value_eff_polymorphic_bridge hV hv []
+  rcases wellScoped_handle_clause hScope hmem with
+    ⟨hxk, hxHb, hkHb, hHbScope⟩
+  have hkV : k ∉ boundVars v := by
+    have hkBody := (wellScoped_handle_clause_not_in_body hScope hmem).2
+    simpa [boundVars] using hkBody
+  have hLocs : (locRefs v ++ locRefsClauses clauses).Nodup := by
+    simpa [RuntimeLinear, locRefs] using hLinear
+  rcases List.nodup_append.mp hLocs with ⟨hlinV, hlinClauses, _⟩
+  have hsepVClauses : LocRefsSeparated (locRefs v) (locRefsClauses clauses) :=
+    locRefsSeparated_left_of_nodup_append hLocs
+  have hsepClausesV : LocRefsSeparated (locRefsClauses clauses) (locRefs v) :=
+    locRefsSeparated_right_of_nodup_append hLocs
+  have hClausesV : (locRefsClauses clauses ++ locRefs v).Nodup := by
+    refine List.nodup_append.mpr ?_
+    refine ⟨hlinClauses, hlinV, ?_⟩
+    intro ell hcls ell' hv' heq
+    subst ell'
+    exact hsepClausesV ell hcls hv'
+  rcases runtimeLinear_clause_mem_separated (rhsRefs := locRefs v) hmem hClausesV with
+    ⟨hlinHb, hsepHbV, hsepVHb⟩
+  have hsepHbLocs : LocRefsSeparated (locRefs hb) locs := by
+    intro ell hhb hlocs
+    exact hsep ell hlocs (by
+      simp [locRefs]
+      exact Or.inr (mem_locRefsClauses_of_mem_clause hmem hhb))
+  have hsepLocsHb : LocRefsSeparated locs (locRefs hb) := by
+    intro ell hlocs hhb
+    exact hsep ell hlocs (by
+      simp [locRefs]
+      exact Or.inr (mem_locRefsClauses_of_mem_clause hmem hhb))
+  have hsepVLocs : LocRefsSeparated (locRefs v) locs := by
+    intro ell hvloc hlocs
+    exact hsep ell hlocs (by simp [locRefs, hvloc])
+  have hsepLocsV : LocRefsSeparated locs (locRefs v) := by
+    intro ell hlocs hvloc
+    exact hsep ell hlocs (by simp [locRefs, hvloc])
+  have hBodyLex : LexicallyScoped [(x, some tArgV), (k, some tK)] hb :=
+    lexical_handle_clause (lexical_nil hScope) hmem
+  rcases transport_typing_lexical hBody hBodyLex with
+    ⟨hbDB, hEraseHb, hBodyDB⟩
+  rcases transport_typing_lexical hVNil (lexical_nil hScopeV) with
+    ⟨vDB, hEraseV, hVDB⟩
+  have hVUnderK : HasType [] Sigma [(k, some tK)] v tArgV [] [(k, some tK)] := by
+    simpa using hasType_prefix_weaken hVNil [(k, some tK)]
+  rcases transport_typing_lexical hVUnderK (lexical_singleton hkV hScopeV) with
+    ⟨vDBK, hEraseVK, hVDBK0⟩
+  have hEraseVK' :
+      eraseTerm (ctxEnv [(k, some tK)]) v = some vDB := by
+    simpa [ctxEnv, linearCtxDom] using eraseTerm_suffix hEraseV [k]
+  have hvEq : vDBK = vDB := by
+    have : some vDBK = some vDB := by simpa [hEraseVK] using hEraseVK'
+    exact Option.some.inj this
+  have hVDBK : HasTypeDB [] Sigma [some tK] vDB tArgV [] [some tK] := by
+    cases hvEq
+    simpa [eraseCtx] using hVDBK0
+  have hBodyShape :
+      HasTypeDB [] Sigma (LinearCtxDB.insertAt 1 (some tArgV) [some tK]) hbDB tRet
+        (EffectRow.removeOps epsB epsH) (LinearCtxDB.insertAt 1 slotX [slotK]) := by
+    simpa [tK] using hBodyDB
+  have hlinHbDB : RuntimeLinearDB hbDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseHb).1 hlinHb
+  have hlinVDB : RuntimeLinearDB vDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseV).1 hlinV
+  have hsepVHbDB :
+      LocRefsSeparated (locRefsDB vDB) (locRefsDB hbDB) := by
+    simpa [eraseTerm_locRefs hEraseV, eraseTerm_locRefs hEraseHb] using hsepVHb
+  have hsepHbVDB :
+      LocRefsSeparated (locRefsDB hbDB) (locRefsDB vDB) := by
+    simpa [eraseTerm_locRefs hEraseV, eraseTerm_locRefs hEraseHb] using hsepHbV
+  have hsepVLocsDB :
+      LocRefsSeparated (locRefsDB vDB) locs := by
+    simpa [eraseTerm_locRefs hEraseV] using hsepVLocs
+  have hsepLocsVDB :
+      LocRefsSeparated locs (locRefsDB vDB) := by
+    simpa [eraseTerm_locRefs hEraseV] using hsepLocsV
+  have hsepHbLocsDB :
+      LocRefsSeparated (locRefsDB hbDB) locs := by
+    simpa [eraseTerm_locRefs hEraseHb] using hsepHbLocs
+  have hsepLocsHbDB :
+      LocRefsSeparated locs (locRefsDB hbDB) := by
+    simpa [eraseTerm_locRefs hEraseHb] using hsepLocsHb
+  have hEraseAfterX :
+      eraseTerm [k] (subst hb v x) = some (substDBAux 1 vDB hbDB) := by
+    simpa [tK] using
+      eraseTerm_subst_tail (ρ := [k]) (v := v) (x := x)
+        (by simp [hxk]) hEraseV hEraseHb hxHb
+  have hFirstTyping :
+      HasTypeDB [] Sigma [some tK] (substDBAux 1 vDB hbDB) tRet
+        (EffectRow.removeOps epsB epsH) [slotK] := by
+    cases hslotX : slotX with
+    | none =>
+        exact subst_preserves_typing_db_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          (v := vDB) (t_v := tArgV) 1 [some tK] [slotK]
+          (some tArgV) none
+          (by simp) (by simp) rfl rfl
+          (Or.inr (Or.inl ⟨rfl, rfl⟩)) hVDBK
+    | some tKeep =>
+        have htKeep : tKeep = tArgV := by
+          have hLiveIn :
+              (LinearCtxDB.insertAt 1 (some tArgV) [some tK])[1]? = some (some tArgV) := by
+            simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape) 1 tArgV hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotX] using hLive
+          · simp [hslotX] at hDead
+        cases htKeep
+        exact subst_preserves_typing_db_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          (v := vDB) (t_v := tArgV) 1 [some tK] [slotK]
+          (some tArgV) (some tArgV)
+          (by simp) (by simp) rfl rfl
+          (Or.inl ⟨rfl, rfl⟩) hVDBK
+  have hFirstRes :
+      RuntimeLinearDB (substDBAux 1 vDB hbDB) ∧
+        LocRefsSeparated (locRefsDB (substDBAux 1 vDB hbDB)) locs ∧
+        LocRefsSeparated locs (locRefsDB (substDBAux 1 vDB hbDB)) := by
+    cases hslotX : slotX with
+    | none =>
+        exact runtimeLinearDB_subst_dead_gen
+          (h := by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape)
+          vDB tArgV 1 [some tK] [slotK] locs
+          (by simp) (by simp) rfl rfl hVDBK
+          hlinVDB hsepVHbDB hsepHbVDB hsepVLocsDB hsepLocsVDB
+          hlinHbDB hsepHbLocsDB hsepLocsHbDB
+    | some tKeep =>
+        have htKeep : tKeep = tArgV := by
+          have hLiveIn :
+              (LinearCtxDB.insertAt 1 (some tArgV) [some tK])[1]? = some (some tArgV) := by
+            simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [LinearCtxDB.insertAt, hslotX] using hBodyShape) 1 tArgV hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotX] using hLive
+          · simp [hslotX] at hDead
+        cases htKeep
+        exact runtimeLinearDB_subst_live_gen_separated
+          (Γ1 := [some tK]) (Γ2 := [slotK]) (v := vDB) (rhsRefs := locs)
+          1 (by simp) (by simp) (by simpa [hslotX] using hBodyShape)
+          hlinHbDB hsepHbLocsDB hsepLocsHbDB
+  have hIdBody0 :
+      HasType [] Sigma [("y", some tRet)] (Term.var "y") tRet [] [("y", none)] := by
+    simpa using (HasType.var [] Sigma [] [] "y" tRet)
+  have hIdBody :
+      HasType [] Sigma [("y", some tRet)] (Term.var "y") tRet
+        (EffectRow.removeOps epsB epsH) [("y", none)] := by
+    exact HasType.subEff [] Sigma
+      [("y", some tRet)] [("y", none)]
+      (Term.var "y") tRet [] (EffectRow.removeOps epsB epsH)
+      hIdBody0 (by intro op hop; cases hop)
+  have hIdAbs :
+      HasType [] Sigma []
+        (Term.abs "y" tRet (Term.var "y"))
+        tK [] [] := by
+    exact HasType.abs [] Sigma [] []
+      "y" tRet tRet (EffectRow.removeOps epsB epsH)
+      (Term.var "y") none hIdBody
+  have hIdScope : WellScoped (Term.abs "y" tRet (Term.var "y")) := by
+    simp [WellScoped, boundVars]
+  rcases transport_typing_lexical hIdAbs (lexical_nil hIdScope) with
+    ⟨idDB, hEraseId, hIdDB⟩
+  have hIdLocsDB : locRefsDB idDB = [] := by
+    simpa [locRefs] using eraseTerm_locRefs hEraseId
+  have hkAfterX : k ∉ boundVars (subst hb v x) := by
+    exact subst_notBound hb v x k hkHb hkV
+  have hEraseFinal :
+      eraseTerm [] (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) =
+        some (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) := by
+    simpa using
+      eraseTerm_subst_head (ρ := []) (v := Term.abs "y" tRet (Term.var "y")) (x := k)
+        hEraseId hEraseAfterX hkAfterX
+  have hFinalRes :
+      RuntimeLinearDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) ∧
+        LocRefsSeparated (locRefsDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB))) locs ∧
+        LocRefsSeparated locs (locRefsDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB))) := by
+    cases hslotK : slotK with
+    | none =>
+        exact runtimeLinearDB_subst_dead_separated
+          (Γ := []) (rhsRefs := locs)
+          0 (by simp) (by simpa [hslotK] using hFirstTyping) hIdDB
+          (by simpa [hIdLocsDB, RuntimeLinearDB] using (show RuntimeLinear (Term.abs "y" tRet (Term.var "y")) by
+            simp [RuntimeLinear, locRefs]))
+          (by simpa [hIdLocsDB, LocRefsSeparated])
+          (by simpa [hIdLocsDB, LocRefsSeparated])
+          (by simpa [hIdLocsDB, LocRefsSeparated])
+          (by simpa [hIdLocsDB, LocRefsSeparated])
+          hFirstRes.1 hFirstRes.2.1 hFirstRes.2.2
+    | some tKeep =>
+        have htKeep : tKeep = tK := by
+          have hLiveIn : ([some tK])[0]? = some (some tK) := by simp
+          have hMono := hasTypeDB_live_slot_monotone
+            (by simpa [hslotK] using hFirstTyping) 0 tK hLiveIn
+          rcases hMono with hLive | hDead
+          · simpa [hslotK] using hLive
+          · simp [hslotK] at hDead
+        subst htKeep
+        exact runtimeLinearDB_subst_live_gen_separated
+          (Γ1 := []) (Γ2 := []) (v := idDB) (rhsRefs := locs)
+          0 (by simp) (by simp) (by simpa [hslotK] using hFirstTyping)
+          hFirstRes.1 hFirstRes.2.1 hFirstRes.2.2
+  have hlocsFinal :
+      locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) =
+        locRefsDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) := by
+    simpa using eraseTerm_locRefs hEraseFinal
+  refine ⟨?_, ?_, ?_⟩
+  · exact (eraseTerm_runtimeLinear_iff hEraseFinal).2 hFinalRes.1
+  · simpa [hlocsFinal] using hFinalRes.2.1
+  · simpa [hlocsFinal] using hFinalRes.2.2
+
 /-- Step-indexed preservation with the runtime-linearity and frame-local
     store-agreement invariants made explicit. `locs` tracks the
     locations mentioned by any outer frame surrounding the current redex;
