@@ -58,10 +58,16 @@ then typing is preserved for some post-step store typing `Sigma'`.
 
 This extra `RuntimeLinear` premise is necessary: the Lean tree contains a concrete closed, well-typed counterexample showing that unconditional runtime preservation is false once explicit store locations can be duplicated in sibling subterms. The `ctx` case was closed by weakening the store-side transport to frame-local agreement on the untouched context locations rather than global store monotonicity.
 
-The remaining open preservation cases are the agreed calculus-level blockers:
+That premise is still not the final answer. The current branch now also shows:
 
+- `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
+- but `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
+
+So the immediate remaining preservation work is:
+
+- settle the stronger handler-aware runtime invariant
 - `tgrad`, still upstream of `AdjointTyping.lean`
-- `tvmap`, still upstream of `AddDim.lean`
+- `tvmap`, now a local preservation hole rather than an `AddDim.lean` blocker
 
 ## WS3.11 — `DimSafety.lean`
 
@@ -75,12 +81,10 @@ Corollary of preservation + effect monotonicity lemma. Relatively small.
 
 Store invariant maintenance proof. Case analysis on reduction rules showing the live-location invariant is preserved. Depends on WS3.3 (store model).
 
-This workstream now also carries the runtime-side invariant needed to make the strengthened preservation theorem compositional:
+This workstream now also carries the runtime-side invariant needed to make preservation compositional. The earlier “preserve `RuntimeLinear`” theorem shape is now known to be false, and the first “preserve `ActiveRuntimeLinear`” repair is also insufficient. The actual remaining task is to define and prove the stronger handler-aware invariant that:
 
-- one-step preservation of `RuntimeLinear` for checked runtime configurations, or
-- an equivalent theorem showing all configurations reachable from checked source programs are `RuntimeLinear`
-
-Without that extra theorem, the current `Preservation.lean` result can be applied once but not iterated through an execution sequence.
+- ignores dormant clause bodies for captured-continuation duplication, but
+- still constrains dormant clause bodies strongly enough for `handleOpDirect`
 
 ## WS3.14 — `ADCorrectness.lean`
 

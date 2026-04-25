@@ -44,8 +44,8 @@ For each reduction rule, show the result is well-typed. The current mechanized s
 
 This extra premise is not cosmetic. The Lean development now contains a concrete closed, well-typed counterexample showing that unconditional preservation is false for runtime terms with duplicated explicit locations in sibling subterms. The paper proof therefore has to split the argument into two pieces:
 
-1. preservation under the `RuntimeLinear` premise
-2. a separate invariant showing evaluation from checked source programs stays in runtime-linear configurations
+1. preservation under the final stronger handler-aware runtime invariant
+2. a separate invariant showing evaluation from checked source programs stays inside that invariant
 
 The hard cases:
 
@@ -66,11 +66,11 @@ If `Δ; ⊢ e : τ ! ∅` then evaluation never encounters an unhandled `perform
 
 Using the heap store semantics. If a binding at location `ℓ` is consumed (not borrowed, not copied), then `σ(ℓ)` is accessed exactly once and `ℓ` is deallocated. The theorem: no well-typed program accesses a deallocated location. Proof: maintain an invariant that the set of live locations in `σ` corresponds exactly to the live bindings in `Γ`. Linear consumption removes from both `Γ` and `σ`. Borrowing reads without removing from either. The invariant is preserved by each reduction step (by case analysis on the reduction rules).
 
-This workstream now also needs the runtime-location side invariant that closes the preservation loop:
+This workstream now also needs the runtime-location side invariant that closes the preservation loop. The earlier candidate theorem
 
 - if a checked runtime configuration is `RuntimeLinear`, one reduction step preserves `RuntimeLinear`
 
-Without this lemma, preservation cannot be iterated across multi-step evaluation because the strengthened premise would only be available for the first step.
+is false, and the naive handler-specific repair is not strong enough either. The remaining theorem-design task is to state the stronger handler-aware invariant that the Lean development can actually preserve.
 
 ## WS2.9 — AD correctness (Theorem 5)
 

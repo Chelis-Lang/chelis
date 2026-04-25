@@ -31,7 +31,7 @@ Contributions:
 
 1. LaCaDiLE: a core calculus for tensor computation with algebraic effects, linear types, and named dimension indexing, realizing the DiLL connection between differentiation and linearity
 2. Metatheory: five theorems — type soundness, dimension safety, effect correctness, linearity soundness, AD correctness
-3. Full mechanization in Lean 4 (supplementary material)
+3. Lean 4 mechanization of the core metatheory, with the final theorem package stated honestly in the supplementary material
 4. Implementation evidence: Chelis, a compiler for a full language extending LaCaDiLE, targeting CPU and GPU
 
 ## WS4.3 — §2 Motivation and Examples (~2 pages)
@@ -70,11 +70,12 @@ Reduction rules including heap store. Figures. The interesting rules:
 
 All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant, and the runtime-linearity invariant needed to iterate preservation. Full proofs in supplementary appendix.
 
-The current Lean development forces one important correction to the paper statement of preservation: the honest runtime theorem is preservation for well-typed runtime-linear configurations, not unconditional runtime preservation. The section should therefore:
+The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. The section should therefore:
 
-1. state preservation with the `RuntimeLinear` premise
-2. explain the closed well-typed counterexample showing why the unconditional statement is false for arbitrary runtime terms with duplicated explicit locations
-3. immediately follow with the theorem that checked source programs remain in runtime-linear configurations, so the strengthened preservation theorem still composes over evaluation sequences
+1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
+2. explain the captured-handler counterexample against plain `RuntimeLinear`
+3. explain the direct-handler counterexample showing that the first `ActiveRuntimeLinear` repair is still too weak
+4. state the final stronger handler-aware invariant once it is settled in Lean
 
 ## WS4.7 — §6 Implementation (~1.5 pages)
 
@@ -93,7 +94,7 @@ Comparison table:
 | Linear Haskell | ✗ (monadic) | ✓ | ✗ | ✗ | N/A | ✗ |
 | DiLL | ✗ | ✓ (linear logic) | ✗ | ✓ (differential) | N/A (no computation) | ✓ (on paper) |
 | Sized types | ✗ | ✗ | ✓ (dependent) | ✗ | N/A | Various |
-| **LaCaDiLE** | **✓ (row-poly)** | **✓ (consume/borrow/copy)** | **✓ (named)** | **✓ (Diff + Accum)** | **Explicit (typed borrows in tape)** | **✓ (Lean 4)** |
+| **LaCaDiLE** | **✓ (row-poly)** | **✓ (consume/borrow/copy)** | **✓ (named)** | **✓ (Diff + Accum)** | **Explicit (typed borrows in tape)** | **In progress (Lean 4)** |
 
 The Tape/AD memory column highlights a practical consequence of the theory: LaCaDiLE's type system makes AD memory management visible and safe. PyTorch's autograd tape is a major source of memory leaks; LaCaDiLE's linearity + explicit tape borrows prevent this by construction.
 
@@ -106,4 +107,4 @@ Key comparisons to develop deeply:
 
 ## WS4.9 — §8 Conclusion (~0.5 pages)
 
-Restate: first mechanized soundness proof for a tensor calculus with effects, linearity, and dimension indexing. The DiLL connection realized computationally. Future work: higher-order AD, multi-shot handlers with graded linearity, GPU backend verification.
+Restate the contribution without overclaiming the unfinished mechanization status on the active branch. The DiLL connection is realized computationally; the Lean package must be described in the exact proved-vs-admitted terms that ship in the supplement.

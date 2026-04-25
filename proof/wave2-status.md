@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after closing the DB-backed preservation wrappers and the captured-context preservation cases.
+Snapshot on branch `chelis-proof` after restoring a green root build and recording the current runtime-invariant boundary in `Preservation.lean`.
 
 ## Acceptance Oracle
 
@@ -10,47 +10,56 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 
 ## Current State
 
-- Verified baseline before the `SubstitutionDB.lean` fix: 5 active `sorry` declarations
-  - `LaCaDiLE/AdjointTyping.lean:213`
-  - `LaCaDiLE/Preservation.lean:392`
-  - `LaCaDiLE/Substitution.lean:516`
-  - `LaCaDiLE/Substitution.lean:1098`
-  - `LaCaDiLE/SubstitutionDB.lean:1751`
-- Current branch state is materially different from that baseline:
-  - `TranslationDB.lean`'s four DB-backed preservation wrappers are closed
-  - `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, and `ctx`
-  - the preservation theorem now carries an explicit `RuntimeLinear` premise for closed runtime terms
-  - the only remaining `Preservation.lean` admissions are the agreed calculus-level blockers `tgrad` and `tvmap`
+- `cd proof/lean && lake build` is green again on the current branch head.
+- `TranslationDB.lean`'s four DB-backed preservation wrappers are closed.
+- `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, and `ctx`.
+- `AddDim.lean` is no longer the `tvmap` upstream blocker; `addDim_preserves_typing` is proved.
+- The branch still contains 9 executable `sorry`s on the main proof path:
+  - `LaCaDiLE/Substitution.lean`: `weakening_insert`, `subst_preserves_typing`
+  - `LaCaDiLE/AdjointTyping.lean`: 4 admissions in the adjoint path
+  - `LaCaDiLE/Preservation.lean`: `tgrad`, `tvmap`
+  - `LaCaDiLE/Translation.lean`: one isolated named→DB well-formedness admit
 
-The branch still contains admitted lemmas outside those two cases, notably in `Substitution.lean`, `AdjointTyping.lean`, `SubstitutionDB.lean`, and `Translation.lean`. The critical-path meaning of the inventory has changed: the main blocker is no longer generic substitution-dependent preservation, but the runtime-linearity loop plus the tensor-specific upstream lemmas.
+The current theorem-shape boundary is now explicit in Lean:
+
+- plain `RuntimeLinear` is too weak as a generic preservation premise
+- `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
+- `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
 
 ## What Closed Recently
 
-- `LinearitySoundness` is fully proved.
+- `LinearitySoundness.lean`'s current theorem is the store-wellformedness preservation result, not the final Theorem 4 package.
 - The AddDim multiset refactor landed, including the `Quotient.sound` proof path.
 - `plug_preserves_typing` is fully proved across all 19 evaluation-context cases.
 - `Progress` was restructured around the three-way outcome (`value / steps / stuck-on-perform`) and is down to a single remaining admission outside this file.
 - Store weakening infrastructure and the effect-scoping lemma `hasType_perform_eff_mem` are proved.
-- `SubstitutionDB.lean`'s last remaining admission, `hasTypeDB_cap_weaken_tgrad_body`, is now closed by composing capability weakening with a new adjacent-capability swap lemma.
+- `SubstitutionDB.lean`'s last remaining admission is closed.
 - The old `SlotCorr` / `SlotKillsOnly` bridge has been deleted; `CtxCorr` is now the only translation correspondence layer.
 - `OpSigMatch` has been tightened to a functional operation-signature witness, which closed the direct handler wrapper in `TranslationDB.lean`.
 - The operational semantics now mint a fresh captured continuation binder instead of hardcoding `_kArg`.
 - `Preservation.lean` now closes the generic `ctx` case by using frame-local store agreement over untouched context locations instead of global store monotonicity.
+- `Preservation.lean` now also contains explicit counterexamples showing:
+  - why unconditional runtime preservation is false
+  - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 
 ## Remaining Critical Path
 
-1. `RuntimeLinear` propagation
-   `Preservation.lean` is now honest but conditional: it proves one-step type preservation for closed runtime-linear programs. To iterate that theorem over a reduction sequence, the branch still needs a theorem that checked runtime configurations preserve `RuntimeLinear` across one step, or an equivalent reachability theorem from checked source terms.
+1. Handler-aware runtime invariant
+   The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The direct-handler counterexample shows the final invariant must track dormant handler clauses more precisely.
 
-2. `AdjointTyping.lean`
+2. `Substitution.lean`
+   `weakening_insert` and named `subst_preserves_typing` are still live admits on the soundness path.
+
+3. `AdjointTyping.lean`
    This remains the upstream blocker for the `tgrad` preservation case and the eventual AD-correctness wave.
 
-3. `AddDim.lean` / `tvmap`
-   The dimension-representation side is still the upstream blocker for the `tvmap` preservation case.
+4. `Preservation.lean` / `tvmap`
+   `tvmap` is now a local preservation hole, not an `AddDim.lean` blocker.
 
 ## Next Moves
 
-1. Prove the runtime-linearity invariant needed to re-establish the strengthened preservation premise after each step.
-2. Sync the paper-facing workstreams so §5 states preservation with the `RuntimeLinear` premise and explains why checked source programs still satisfy it along execution.
-3. Return to `AdjointTyping.lean` for the `tgrad` blocker once the runtime-linearity loop is closed.
-4. Leave `tvmap` behind the dimension-representation / `AddDim` work rather than pushing `Preservation.lean` directly.
+1. State the correct stronger handler-aware runtime invariant, using the new direct-handler counterexample as the acceptance test for theorem shape.
+2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
+3. Close the named substitution admits in `Substitution.lean`.
+4. Resolve the `Accum` signature / adjoint-typing contradiction and then return to `tgrad`.
+5. Close the now-local `tvmap` hole in `Preservation.lean`.

@@ -2,7 +2,9 @@
 
 A subproject of the Chelis repo. Distinct from the main Chelis language work; lives entirely under `proof/`.
 
-**Goal:** publish **LaCaDiLE** (Lambda Calculus for Differentiable Linear Effects) at POPL 2027. A core tensor calculus with algebraic effects, linear types, and named-dimension indexing, with five theorems mechanized in Lean 4: type soundness, dimension safety, effect correctness, linearity soundness, and AD correctness.
+**Goal:** publish **LaCaDiLE** (Lambda Calculus for Differentiable Linear Effects) at POPL 2027. The target proof package is a core tensor calculus with algebraic effects, linear types, and named-dimension indexing, with five theorems mechanized in Lean 4: type soundness, dimension safety, effect correctness, linearity soundness, and AD correctness.
+
+**Current state:** the Lean root build is green (`cd proof/lean && lake build`), but the metatheory is not complete yet. The active branch still contains admitted lemmas on the named-substitution path, the AD/`Accum` path, and the remaining `tgrad` / `tvmap` preservation cases; several downstream theorem files are still stubs.
 
 **Target venue:** PACMPL Issue POPL 2027
 **Submission deadline:** July 9, 2026 (AoE)
@@ -27,7 +29,7 @@ Ehrhard and Regnier's differential linear logic established that differentiation
 | [`workstreams/`](workstreams/) | One file per workstream (WS1–WS6). |
 | [`scripts/`](scripts/) | Python helpers (toolchain checker and its tests). |
 | [`paper/`](paper/) | Reserved for LaTeX sources. Empty until WS4 begins. |
-| [`lean/`](lean/) | Houses the Lean 4 mechanization. Pinned to `leanprover/lean4:v4.29.0` via [`lean/lean-toolchain`](lean/lean-toolchain). Actual `.lean` sources land here during WS3. |
+| [`lean/`](lean/) | Houses the Lean 4 mechanization. Pinned to `leanprover/lean4:v4.29.0` via [`lean/lean-toolchain`](lean/lean-toolchain). This tree is active and is the branch proof oracle. |
 
 ## Naming
 
