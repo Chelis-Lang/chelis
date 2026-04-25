@@ -2551,7 +2551,14 @@ fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
                 .iter()
                 .zip(tmpl_dims.iter())
                 .map(|(d, t)| match (d, t) {
-                    (Dim::Wildcard, Dim::Lit(_) | Dim::Name(_) | Dim::Var(_)) => t.clone(),
+                    // Only narrow Wildcard → concrete literal. Substituting
+                    // Dim::Name or Dim::Var into the generalized scheme can
+                    // bind a function-parameter-bound name (`tensor[n, f32]`
+                    // where n is the def's int64 param) into the type, which
+                    // overflows the inference stack when the resulting
+                    // scheme is later instantiated. Concrete literals are
+                    // self-contained and safe.
+                    (Dim::Wildcard, Dim::Lit(_)) => t.clone(),
                     _ => d.clone(),
                 })
                 .collect();
