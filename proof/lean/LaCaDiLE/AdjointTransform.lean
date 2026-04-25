@@ -65,6 +65,17 @@ def freshName (base : String) (n : Nat) : String :=
 --   * Structural recursion covers every other term former with a vestigial
 --     `perform accum` leaf. Phase 2 T9 replaces these with the proper
 --     T0 §4 adjoint rules.
+
+/-- Leaf adjoint skeleton under the current monomorphic
+    `accum : unit -> unit` signature. Consume the incoming seed
+    linearly, then emit a unit-valued `accum` operation. This keeps
+    the seed's context threading available to `AdjointTyping` without
+    pretending the current calculus can transport tensor payloads
+    through `accum`. -/
+def adjointLeaf (gSeed : Term) (n : Nat) : Term :=
+  Term.letBind (freshName "adjA" n) gSeed
+    (Term.perform EffectLabel.accum Term.unit)
+
 mutual
 
 /-- The adjoint term-to-term transformation, counter-threaded form.
@@ -83,21 +94,21 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
   match body with
   | Term.var y =>
       -- Parameter gradient: if y is the differentiated parameter, the
-      -- incoming seed IS the contribution. Either way, emit accum and
-      -- let the handler's origin filter decide.
+      -- current skeleton consumes the incoming seed and emits a unit
+      -- accum marker. Either way, let the handler's origin filter decide.
       if y = x then
-        Term.perform EffectLabel.accum gSeed
+        adjointLeaf gSeed n
       else
-        Term.perform EffectLabel.accum gSeed
+        adjointLeaf gSeed n
   | Term.const _ _ =>
       -- No inputs; the handler's const-origin filter drops this.
-      Term.perform EffectLabel.accum gSeed
+      adjointLeaf gSeed n
   | Term.unit =>
       -- Unit has no gradient; linearity preserved by accum-emission.
-      Term.perform EffectLabel.accum gSeed
+      adjointLeaf gSeed n
   | Term.loc _ =>
       -- Runtime locations don't appear in source programs under grad.
-      Term.perform EffectLabel.accum gSeed
+      adjointLeaf gSeed n
   | Term.add e1 e2 =>
       -- No tape; copy(gSeed) and route to each operand. Sub-adjoints
       -- have type `unit` (each emits `perform accum`); sequence them
