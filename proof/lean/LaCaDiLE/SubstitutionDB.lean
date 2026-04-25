@@ -5336,6 +5336,164 @@ private theorem activeRuntimeLinearDB_value_binary_premises
     locRefsSeparated_right_of_append hsep_app_v
   ⟩
 
+private theorem activeLocRefsSeparated_of_locRefsSeparated
+    {e1 e2 : TermDB}
+    (hsep : LocRefsSeparated (locRefsDB e1) (locRefsDB e2)) :
+    LocRefsSeparated (activeLocRefsDB e1) (activeLocRefsDB e2) := by
+  intro ell hmem1 hmem2
+  exact hsep ell
+    (mem_activeLocRefsDB_subset (e := e1) hmem1)
+    (mem_activeLocRefsDB_subset (e := e2) hmem2)
+
+private theorem activeLocRefsSeparated_rhs_of_locRefsSeparated
+    {e : TermDB} {rhsRefs : List Loc}
+    (hsep : LocRefsSeparated (locRefsDB e) rhsRefs) :
+    LocRefsSeparated (activeLocRefsDB e) rhsRefs := by
+  intro ell hmem hrhs
+  exact hsep ell (mem_activeLocRefsDB_subset (e := e) hmem) hrhs
+
+private theorem activeLocRefsSeparated_lhs_of_locRefsSeparated
+    {lhsRefs : List Loc} {e : TermDB}
+    (hsep : LocRefsSeparated lhsRefs (locRefsDB e)) :
+    LocRefsSeparated lhsRefs (activeLocRefsDB e) := by
+  intro ell hlhs hmem
+  exact hsep ell hlhs (mem_activeLocRefsDB_subset (e := e) hmem)
+
+private theorem activeRuntimeLinearDB_append_term_of
+    {e1 e2 : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (h1 : ActiveRuntimeLinearDB e1)
+    (h2 : ActiveRuntimeLinearDB e2)
+    (hsep : LocRefsSeparated (locRefsDB e1) (locRefsDB e2)) :
+    ActiveRuntimeLinearDB (mk e1 e2) := by
+  have happ : (activeLocRefsDB e1 ++ activeLocRefsDB e2).Nodup := by
+    refine nodup_append_of_runtimeLinear_separated h1 h2 ?_
+    exact activeLocRefsSeparated_of_locRefsSeparated hsep
+  simpa [ActiveRuntimeLinearDB, hshape] using happ
+
+private theorem activeRuntimeLinearDB_handle_of
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (hbody : ActiveRuntimeLinearDB body) :
+    ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) := by
+  simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsClausesDB] using hbody
+
+mutual
+
+private theorem deepActiveRuntimeLinearDB_liftAux
+    (c d : Nat) {e : TermDB}
+    (h : DeepActiveRuntimeLinearDB e) :
+    DeepActiveRuntimeLinearDB (liftAux c d e) := by
+  match e with
+  | TermDB.var i =>
+      by_cases hlt : i < c
+      · simp [DeepActiveRuntimeLinearDB, liftAux, hlt]
+      · simp [DeepActiveRuntimeLinearDB, liftAux, hlt]
+  | TermDB.abs t body =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux (c + 1) d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.app e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux c d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.letBind e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux (c + 1) d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.copy e =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.letpair e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux (c + 2) d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.pair e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux c d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.fst e =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.snd e =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.unit =>
+      simp [DeepActiveRuntimeLinearDB, liftAux]
+  | TermDB.const v ds =>
+      simp [DeepActiveRuntimeLinearDB, liftAux]
+  | TermDB.add e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux c d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.mul e1 e2 =>
+      rcases h with ⟨hact, h1, h2⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d h1,
+        deepActiveRuntimeLinearDB_liftAux c d h2⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.sum e i =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.expand e i k =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.uniformLike e lo hi =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.grad t tOut body =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux (c + 1) d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.vmap t body =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux (c + 1) d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.handle epsH body clauses =>
+      rcases h with ⟨hact, hbody, hclauses⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody,
+        deepActiveRuntimeLinearClausesDB_liftClausesAux c d hclauses⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsClausesDB,
+        activeLocRefsDB_liftAux, activeLocRefsClausesDB_liftClausesAux] using hact
+  | TermDB.perform op e =>
+      rcases h with ⟨hact, hbody⟩
+      refine ⟨?_, deepActiveRuntimeLinearDB_liftAux c d hbody⟩
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
+  | TermDB.loc ell =>
+      simp [DeepActiveRuntimeLinearDB, liftAux]
+
+private theorem deepActiveRuntimeLinearClausesDB_liftClausesAux
+    (c d : Nat) {clauses : List (EffectLabel × TermDB)}
+    (h : DeepActiveRuntimeLinearClausesDB clauses) :
+    DeepActiveRuntimeLinearClausesDB (liftClausesAux c d clauses) := by
+  match clauses with
+  | [] =>
+      simp [DeepActiveRuntimeLinearClausesDB, liftClausesAux]
+  | (_, hb) :: rest =>
+      rcases h with ⟨hhb, hrest⟩
+      simpa [DeepActiveRuntimeLinearClausesDB, liftClausesAux] using
+        And.intro
+          (deepActiveRuntimeLinearDB_liftAux (c + 2) d hhb)
+          (deepActiveRuntimeLinearClausesDB_liftClausesAux c d hrest)
+
+end
+
+private theorem deepActiveRuntimeLinearDB_lift
+    {e : TermDB}
+    (h : DeepActiveRuntimeLinearDB e) :
+    DeepActiveRuntimeLinearDB (lift e) := by
+  simpa [lift] using deepActiveRuntimeLinearDB_liftAux 0 1 h
+
 private theorem deepActiveRuntimeLinearDB_active
     {e : TermDB}
     (h : DeepActiveRuntimeLinearDB e) :
