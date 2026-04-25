@@ -3381,6 +3381,78 @@ theorem transport_typing_lexical
       · exact ClausesTypedDB.cons Delta Sigma (eraseCtx Gamma2) (eraseCtx Gamma3)
           slotK slotX t tArg tRet epsR op hbDB restDB hMatch hTyBody' hTyRest
 
+/-- A concrete witness that the old named substitution theorem shape
+    is false without a lexical-scoping premise. The abstraction body
+    is syntactically `var "x"`, but the named `HasType.var` rule can
+    consume the OUTER `x : unit` slot instead of the inner binder
+    `x : unit × unit`. Substituting for the outer `x` leaves the term
+    unchanged syntactically, but the resulting term is not typable at
+    the old result type under the empty context. -/
+def substShadowingCounterTerm : Term :=
+  Term.abs "x" (Typ.pair Typ.unit Typ.unit) (Term.var "x")
+
+theorem substShadowingCounterTerm_typed
+    {Sigma : StoreTyp} :
+    HasType [] Sigma
+      [("x", some Typ.unit)]
+      substShadowingCounterTerm
+      (Typ.arrow (Typ.pair Typ.unit Typ.unit) Typ.unit [])
+      []
+      [("x", none)] := by
+  have hBody :
+      HasType [] Sigma
+        ([("x", some Typ.unit)] ++ [("x", some (Typ.pair Typ.unit Typ.unit))])
+        (Term.var "x") Typ.unit []
+        ([("x", none)] ++ [("x", some (Typ.pair Typ.unit Typ.unit))]) := by
+    simpa using
+      (HasType.var [] Sigma [] [("x", some (Typ.pair Typ.unit Typ.unit))] "x" Typ.unit)
+  simpa [substShadowingCounterTerm] using
+    (HasType.abs [] Sigma
+      [("x", some Typ.unit)]
+      [("x", none)]
+      "x"
+      (Typ.pair Typ.unit Typ.unit)
+      Typ.unit
+      []
+      (Term.var "x")
+      (some (Typ.pair Typ.unit Typ.unit))
+      hBody)
+
+theorem substShadowingCounterTerm_not_retypable
+    {Sigma : StoreTyp} :
+    ¬ ∃ GammaOut,
+      HasType [] Sigma [] substShadowingCounterTerm
+        (Typ.arrow (Typ.pair Typ.unit Typ.unit) Typ.unit []) [] GammaOut := by
+  intro h
+  rcases h with ⟨GammaOut, hTy⟩
+  rcases HasType.abs_inv hTy with
+    ⟨tRet, epsBody, GammaBody, slot, hArrow, hBody, _hOut⟩
+  cases hArrow
+  have hMem : ("x", some Typ.unit) ∈ ([("x", some (Typ.pair Typ.unit Typ.unit))] : LinearCtx) :=
+    HasType.var_mem_of_typing hBody
+  simpa using hMem
+
+theorem subst_preserves_typing_shape_false
+    {Sigma : StoreTyp} :
+    HasType [] Sigma
+      [("x", some Typ.unit)]
+      substShadowingCounterTerm
+      (Typ.arrow (Typ.pair Typ.unit Typ.unit) Typ.unit [])
+      []
+      [("x", none)] ∧
+    HasType [] Sigma [] Term.unit Typ.unit [] [] ∧
+    Closed Term.unit ∧
+    ¬ ∃ GammaOut,
+      HasType [] Sigma []
+        (subst substShadowingCounterTerm Term.unit "x")
+        (Typ.arrow (Typ.pair Typ.unit Typ.unit) Typ.unit [])
+        []
+        GammaOut := by
+  refine ⟨substShadowingCounterTerm_typed, HasType.unit [] Sigma [], ?_, ?_⟩
+  · simp [Closed, freeVars]
+  · simpa [substShadowingCounterTerm, subst] using
+      (substShadowingCounterTerm_not_retypable (Sigma := Sigma))
+
 
 mutual
 
