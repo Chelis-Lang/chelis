@@ -25,6 +25,7 @@ The current theorem-shape boundary is now explicit in Lean:
 - plain `RuntimeLinear` is too weak as a generic preservation premise
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
+- the recursive `DeepActiveRuntimeLinear` repair is still too weak globally: a typed deep-active beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later that overlap becomes active and breaks the invariant
 
 ## What Closed Recently
 
@@ -45,7 +46,7 @@ The current theorem-shape boundary is now explicit in Lean:
 ## Remaining Critical Path
 
 1. Handler-aware runtime invariant
-   The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The direct-handler counterexample shows the final invariant must track dormant handler clauses more precisely.
+   The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
 
 2. `Substitution.lean`
    `weakening_insert` and named `subst_preserves_typing` are still live admits on the soundness path.
@@ -58,7 +59,7 @@ The current theorem-shape boundary is now explicit in Lean:
 
 ## Next Moves
 
-1. State the correct stronger handler-aware runtime invariant, using the new direct-handler counterexample as the acceptance test for theorem shape.
+1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
 3. Close the named substitution admits in `Substitution.lean`.
 4. Resolve the `Accum` signature / adjoint-typing contradiction and then return to `tgrad`.

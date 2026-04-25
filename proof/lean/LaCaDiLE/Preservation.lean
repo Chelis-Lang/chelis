@@ -3377,6 +3377,9 @@ private def deepActiveGapTerm : Term :=
 private def deepActiveGapTerm' : Term :=
   subst deepActiveGapAbsBody (Term.loc 1) "x"
 
+private def deepActiveGapTerm'' : Term :=
+  Term.pair (Term.loc 1) deepActiveGapClauseBody
+
 /-- The current DB-side deep-active dead-substitution theorem is
     stronger than the named beta wrapper actually needs: a typed
     deep-active beta step can preserve the invariant even when the
@@ -3507,6 +3510,48 @@ theorem deepActiveRuntimeLinear_beta_bridge_gap :
   · simp [LocRefsSeparated, locRefs, locRefsClauses,
       deepActiveGapAbsBody, deepActiveGapHandle,
       deepActiveGapClauses, deepActiveGapClauseBody]
+
+/-- The beta-gap witness is a real compositionality failure for the
+    current deep-active invariant, not just a wrapper inconvenience.
+    After beta exposes the dormant handler beside an active sibling
+    with the same location, one contextual `handleOpDirect` step makes
+    that overlap active and breaks `DeepActiveRuntimeLinear`. -/
+theorem deepActiveRuntimeLinear_beta_gap_two_step_counterexample :
+    HasType [] ctxCounterStoreTyp [] deepActiveGapTerm
+      (Typ.pair (Typ.tensor DimList.empty) Typ.unit) [] [] ∧
+    DeepActiveRuntimeLinear deepActiveGapTerm ∧
+    Step ⟨ctxCounterSigma, deepActiveGapTerm⟩
+      ⟨ctxCounterSigma, deepActiveGapTerm'⟩ ∧
+    DeepActiveRuntimeLinear deepActiveGapTerm' ∧
+    Step ⟨ctxCounterSigma, deepActiveGapTerm'⟩
+      ⟨ctxCounterSigma, deepActiveGapTerm''⟩ ∧
+    ¬ DeepActiveRuntimeLinear deepActiveGapTerm'' := by
+  rcases deepActiveRuntimeLinear_beta_bridge_gap with
+    ⟨hTyp, hDeep0, hStep0, hDeep1, _hGap⟩
+  refine ⟨hTyp, hDeep0, hStep0, hDeep1, ?_, ?_⟩
+  · have hInner :
+        Step ⟨ctxCounterSigma, deepActiveGapHandle⟩
+          ⟨ctxCounterSigma, deepActiveGapClauseBody⟩ := by
+      simpa [deepActiveGapHandle, deepActiveGapClauses,
+        deepActiveGapClauseBody, subst] using
+        (Step.handleOpDirect ctxCounterSigma
+          EffectLabel.accum Term.unit
+          [EffectLabel.accum]
+          deepActiveGapClauses
+          "y" "k" deepActiveGapClauseBody Typ.unit
+          IsValue.unit
+          ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+          (by simp [deepActiveGapClauses]))
+    simpa [deepActiveGapTerm', deepActiveGapTerm'',
+      deepActiveGapAbsBody, deepActiveGapHandle,
+      deepActiveGapClauseBody, deepActiveGapClauses,
+      plug, subst, substClauses] using
+      (Step.ctx ctxCounterSigma ctxCounterSigma
+        (EvalCtx.pairR (Term.loc 1))
+        deepActiveGapHandle deepActiveGapClauseBody hInner)
+  · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      deepActiveGapTerm'', deepActiveGapClauseBody]
 
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}

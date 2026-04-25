@@ -71,6 +71,7 @@ This workstream now also needs the runtime-location side invariant that closes t
 - if a checked runtime configuration is `RuntimeLinear`, one reduction step preserves `RuntimeLinear`
 
 is false, and the naive handler-specific repair is not strong enough either. The remaining theorem-design task is to state the stronger handler-aware invariant that the Lean development can actually preserve.
+is false, and the naive handler-specific repair is not strong enough either. The current recursive `DeepActiveRuntimeLinear` candidate is still not enough: Lean now contains a typed two-step witness where beta exposes a dormant clause beside an active sibling with the same location, and a subsequent contextual direct-handler step activates that overlap. So the remaining theorem-design task is to state the stronger cross-boundary handler-aware invariant that the Lean development can actually preserve.
 
 ## WS2.9 — AD correctness (Theorem 5)
 

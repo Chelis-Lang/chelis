@@ -75,7 +75,8 @@ The current Lean development forces a stronger correction to the paper statement
 1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
 2. explain the captured-handler counterexample against plain `RuntimeLinear`
 3. explain the direct-handler counterexample showing that the first `ActiveRuntimeLinear` repair is still too weak
-4. state the final stronger handler-aware invariant once it is settled in Lean
+4. explain the new deep-active two-step counterexample, where beta exposes a dormant clause beside an active sibling and a later contextual direct-handler step activates that overlap
+5. state the final stronger cross-boundary handler-aware invariant once it is settled in Lean
 
 ## WS4.7 — §6 Implementation (~1.5 pages)
 

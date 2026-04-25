@@ -62,10 +62,11 @@ That premise is still not the final answer. The current branch now also shows:
 
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - but `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
+- and the recursive `DeepActiveRuntimeLinear` repair is still not compositional: a typed beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later the invariant fails
 
 So the immediate remaining preservation work is:
 
-- settle the stronger handler-aware runtime invariant
+- settle the stronger cross-boundary handler-aware runtime invariant
 - `tgrad`, still upstream of `AdjointTyping.lean`
 - `tvmap`, now a local preservation hole rather than an `AddDim.lean` blocker
 
@@ -81,10 +82,11 @@ Corollary of preservation + effect monotonicity lemma. Relatively small.
 
 Store invariant maintenance proof. Case analysis on reduction rules showing the live-location invariant is preserved. Depends on WS3.3 (store model).
 
-This workstream now also carries the runtime-side invariant needed to make preservation compositional. The earlier “preserve `RuntimeLinear`” theorem shape is now known to be false, and the first “preserve `ActiveRuntimeLinear`” repair is also insufficient. The actual remaining task is to define and prove the stronger handler-aware invariant that:
+This workstream now also carries the runtime-side invariant needed to make preservation compositional. The earlier “preserve `RuntimeLinear`” theorem shape is now known to be false, and the first “preserve `ActiveRuntimeLinear`” repair is also insufficient. The recursive `DeepActiveRuntimeLinear` repair is still too weak because it does not constrain dormant clause bodies relative to the surrounding active frame. The actual remaining task is to define and prove the stronger handler-aware invariant that:
 
 - ignores dormant clause bodies for captured-continuation duplication, but
 - still constrains dormant clause bodies strongly enough for `handleOpDirect`
+- and preserves the necessary separation between dormant clause bodies and surrounding active siblings across intermediate steps such as beta
 
 ## WS3.14 — `ADCorrectness.lean`
 

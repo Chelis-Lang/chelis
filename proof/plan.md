@@ -5,10 +5,10 @@
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
 - Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, and the remaining executable admits are concentrated in `Substitution.lean`, `AdjointTyping.lean`, `Preservation.lean`, and one isolated well-formedness admit in `Translation.lean`
-- The preservation theorem is no longer blocked on generic context/store plumbing. The active blocker is theorem shape: plain `RuntimeLinear` is false, and the first `ActiveRuntimeLinear` repair is still too weak for direct handled operations
+- The preservation theorem is no longer blocked on generic context/store plumbing. The active blocker is theorem shape: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
 - `AddDim.lean` is closed; `tvmap` is now a local preservation hole rather than an upstream dimension-transport blocker
 - Immediate critical path:
-  1. settle the stronger handler-aware runtime invariant
+  1. settle the stronger cross-boundary handler-aware runtime invariant
   2. close named substitution (`weakening_insert`, `subst_preserves_typing`)
   3. resolve the `Accum` signature / adjoint-typing contradiction for `tgrad`
   4. close the local `tvmap` hole
