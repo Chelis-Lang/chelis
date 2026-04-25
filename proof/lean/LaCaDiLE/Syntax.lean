@@ -571,6 +571,324 @@ def DeepActiveRuntimeLinearClauses :
 
 end
 
+theorem mem_activeLocRefs_subset
+    {e : Term} {ell : Loc}
+    (h : ell ∈ activeLocRefs e) :
+    ell ∈ locRefs e := by
+  match e with
+  | Term.var x =>
+      simp [activeLocRefs] at h
+  | Term.abs x t body =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := body) h
+  | Term.app e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.letBind x e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.copy e =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.letpair x y e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.pair e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.fst e =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.snd e =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.unit =>
+      simp [activeLocRefs] at h
+  | Term.const c ds =>
+      simp [activeLocRefs] at h
+  | Term.add e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.mul e1 e2 =>
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
+  | Term.sum e d =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.expand e d =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.uniformLike e lo hi =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.grad x t tOut body =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := body) h
+  | Term.vmap x t body =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := body) h
+  | Term.handle epsH body clauses =>
+      have hbody : ell ∈ activeLocRefs body := by
+        simpa [activeLocRefs, activeLocRefsClauses, activeLocRefsClauses_eq_nil] using h
+      have hbody' : ell ∈ locRefs body := mem_activeLocRefs_subset (e := body) hbody
+      simpa [locRefs] using Or.inl hbody'
+  | Term.perform op e =>
+      simpa [activeLocRefs, locRefs] using
+        mem_activeLocRefs_subset (e := e) h
+  | Term.loc ell' =>
+      simpa [activeLocRefs, locRefs] using h
+
+theorem runtimeLinear_active
+    {e : Term}
+    (h : RuntimeLinear e) :
+    ActiveRuntimeLinear e := by
+  match e with
+  | Term.var x =>
+      simp [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] at h ⊢
+  | Term.abs x t body =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := body) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.app e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.letBind x e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.copy e =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.letpair x y e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.pair e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.fst e =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.snd e =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.unit =>
+      simp [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] at h ⊢
+  | Term.const c ds =>
+      simp [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] at h ⊢
+  | Term.add e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.mul e1 e2 =>
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinear_active (e := e1) h1
+      have hAct2 := runtimeLinear_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinear] using hAct1,
+        by simpa [ActiveRuntimeLinear] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefs_subset hmem1) ell
+        (mem_activeLocRefs_subset hmem2) rfl
+  | Term.sum e d =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.expand e d =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.uniformLike e lo hi =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.grad x t tOut body =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := body) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.vmap x t body =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := body) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.handle epsH body clauses =>
+      have hsplit : (locRefs body ++ locRefsClauses clauses).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨hBody, _hClauses, _hsep⟩
+      have hActBody := runtimeLinear_active (e := body) hBody
+      simpa [ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+        activeLocRefsClauses_eq_nil] using hActBody
+  | Term.perform op e =>
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.loc ell =>
+      simp [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] at h ⊢
+
+mutual
+
+theorem runtimeLinear_deepActive
+    : ∀ {e : Term}, RuntimeLinear e -> DeepActiveRuntimeLinear e
+  | Term.var _, _ => by
+      simp [DeepActiveRuntimeLinear]
+  | Term.abs x t body, h => by
+      refine ⟨runtimeLinear_active h, ?_⟩
+      exact runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)
+  | Term.app e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.letBind x e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.copy e, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.letpair x y e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.pair e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.fst e, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.snd e, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.unit, _ => by
+      simp [DeepActiveRuntimeLinear]
+  | Term.const _ _, _ => by
+      simp [DeepActiveRuntimeLinear]
+  | Term.add e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.mul e1 e2, h => by
+      have hsplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive h1,
+        runtimeLinear_deepActive h2⟩
+  | Term.sum e _, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.expand e _, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.uniformLike e _ _, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.grad _ _ _ body, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.vmap _ _ body, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.handle _ body clauses, h => by
+      have hsplit : (locRefs body ++ locRefsClauses clauses).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hsplit with ⟨hBody, hClauses, _hsep⟩
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive hBody,
+        runtimeLinearClauses_deepActive hClauses⟩
+  | Term.perform _ e, h => by
+      exact ⟨runtimeLinear_active h,
+        runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
+  | Term.loc _, _ => by
+      simp [DeepActiveRuntimeLinear]
+termination_by
+  e _ => sizeOf e
+
+theorem runtimeLinearClauses_deepActive
+    : ∀ {clauses : List (EffectLabel × String × String × Term)},
+      (locRefsClauses clauses).Nodup ->
+      DeepActiveRuntimeLinearClauses clauses
+  | [], _ => by
+      simp [DeepActiveRuntimeLinearClauses]
+  | (_, _, _, hb) :: rest, h => by
+      have hsplit : (locRefs hb ++ locRefsClauses rest).Nodup := by
+        simpa [locRefsClauses] using h
+      rcases List.nodup_append.mp hsplit with ⟨hHead, hTail, _hsep⟩
+      exact ⟨runtimeLinear_deepActive hHead, runtimeLinearClauses_deepActive hTail⟩
+termination_by
+  clauses _ => sizeOf clauses
+
+end
+
 /-! ## Bound-variable set (Wave 2 freshness predicate)
 
 `boundVars e` lists every binder occurrence inside `e`. Combined with
