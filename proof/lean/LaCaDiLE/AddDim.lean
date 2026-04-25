@@ -387,7 +387,7 @@ theorem addDim_preserves_typing
       have := ih
       simp only [addDimCtx_append, addDimCtx_singleton] at this
       exact this
-    -- Apply `HasType.tvmap` reusing `dIn` as the fresh-for-the-outer-vmap dim.
+    -- Apply `HasType.tvmap` reusing the term's stored inner batch dimension `dIn`.
     have key := HasType.tvmap Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
                   x (addDim d t1) (addDim d t2) (addDimTerm d e) eps dIn
                   (slot.map (addDim d)) ih'

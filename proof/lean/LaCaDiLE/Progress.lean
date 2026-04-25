@@ -577,8 +577,8 @@ theorem progress_aux
          Step.tconst sigma v ds (storeFreshLoc sigma) rfl⟩)
   | grad x tv tOut body =>
       exact Or.inr (Or.inl ⟨sigma, _, Step.tgrad sigma x tv tOut body⟩)
-  | vmap x tv body =>
-      exact Or.inr (Or.inl ⟨sigma, _, Step.tvmap sigma x tv body (Dim.lit 0)⟩)
+  | vmap x tv d body =>
+      exact Or.inr (Or.inl ⟨sigma, _, Step.tvmap sigma x tv d body⟩)
   | pair e1 e2 =>
       -- `Term.pair` can only type at `Typ.pair`, so first project `t`
       -- to its pair components via a custom inversion. We then do the

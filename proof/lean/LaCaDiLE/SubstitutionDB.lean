@@ -367,16 +367,16 @@ private theorem runtimeLinearDB_subst_grad_dead_of_separated
     h
 
 private theorem runtimeLinearDB_subst_vmap_dead_of_separated
-    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {t : Typ} {d : Dim} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
     (h :
       RuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
       LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
       LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
-    RuntimeLinearDB (substDBAux j v (TermDB.vmap t body)) ∧
-      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t body))) rhsRefs ∧
-      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t body))) := by
+    RuntimeLinearDB (substDBAux j v (TermDB.vmap t d body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t d body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t d body))) := by
   exact runtimeLinearDB_subst_shifted_passthrough_of_separated
-    (mk := TermDB.vmap t)
+    (mk := TermDB.vmap t d)
     (hshape := by intro e'; simp [locRefsDB])
     (hsubst := by simp [substDBAux])
     h
@@ -403,8 +403,8 @@ private theorem runtimeLinearDB_grad_body
   simpa [RuntimeLinearDB, locRefsDB] using h
 
 private theorem runtimeLinearDB_vmap_body
-    {t : Typ} {body : TermDB}
-    (h : RuntimeLinearDB (TermDB.vmap t body)) :
+    {t : Typ} {d : Dim} {body : TermDB}
+    (h : RuntimeLinearDB (TermDB.vmap t d body)) :
     RuntimeLinearDB body := by
   simpa [RuntimeLinearDB, locRefsDB] using h
 
@@ -5624,7 +5624,7 @@ private theorem deepActiveRuntimeLinearDB_liftAux
       rcases h with ⟨hact, hbody⟩
       refine ⟨?_, deepActiveRuntimeLinearDB_liftAux (c + 1) d hbody⟩
       simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
-  | TermDB.vmap t body =>
+  | TermDB.vmap t dMap body =>
       rcases h with ⟨hact, hbody⟩
       refine ⟨?_, deepActiveRuntimeLinearDB_liftAux (c + 1) d hbody⟩
       simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsDB_liftAux] using hact
@@ -5814,16 +5814,16 @@ private theorem deepActiveRuntimeLinearDB_subst_grad_dead_of_separated
   · simpa [substDBAux, locRefsDB] using h.2.2
 
 private theorem deepActiveRuntimeLinearDB_subst_vmap_dead_of_separated
-    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {t : Typ} {d : Dim} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
     (h :
       DeepActiveRuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
       LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
       LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
-    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.vmap t body)) ∧
-      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t body))) rhsRefs ∧
-      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t body))) := by
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.vmap t d body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t d body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t d body))) := by
   refine ⟨?_, ?_, ?_⟩
-  · have hact : ActiveRuntimeLinearDB (TermDB.vmap t (substDBAux (j + 1) (lift v) body)) := by
+  · have hact : ActiveRuntimeLinearDB (TermDB.vmap t d (substDBAux (j + 1) (lift v) body)) := by
       simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
     simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
   · simpa [substDBAux, locRefsDB] using h.2.1
@@ -6275,7 +6275,7 @@ theorem deepActiveRuntimeLinearDB_subst_none_gen
   | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
       intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
       have hsplit :
-          ActiveRuntimeLinearDB (TermDB.vmap t1 body) ∧
+          ActiveRuntimeLinearDB (TermDB.vmap t1 d body) ∧
             DeepActiveRuntimeLinearDB body := by
         simpa [DeepActiveRuntimeLinearDB] using hdeep
       have heq : Γ_in.insertAt j none = Γ_out.insertAt j none := hin.symm.trans hout
@@ -6827,7 +6827,7 @@ theorem deepActiveRuntimeLinearDB_subst_live_gen
   | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
       intro v t_v j Γ_in Γ_out hj_in hj_out hin hout hdeep
       have hsplit :
-          ActiveRuntimeLinearDB (TermDB.vmap t1 body) ∧
+          ActiveRuntimeLinearDB (TermDB.vmap t1 d body) ∧
             DeepActiveRuntimeLinearDB body := by
         simpa [DeepActiveRuntimeLinearDB] using hdeep
       have heq : Γ_in.insertAt j (some t_v) = Γ_out.insertAt j (some t_v) := hin.symm.trans hout
@@ -8503,7 +8503,7 @@ theorem deepActiveRuntimeLinearDB_subst_dead_gen
       intro v t_v j Γ_in Γ_out rhsRefs hj_in hj_out hin hout h_v
         hdeep_v hsep_v_e hsep_e_v hsep_v_rhs hsep_rhs_v hdeep_e hsep_e_rhs hsep_rhs_e
       have hsplit :
-          ActiveRuntimeLinearDB (TermDB.vmap t1 body) ∧
+          ActiveRuntimeLinearDB (TermDB.vmap t1 d body) ∧
             DeepActiveRuntimeLinearDB body := by
         simpa [DeepActiveRuntimeLinearDB] using hdeep_e
       have hin_body : some t1 :: Γ =

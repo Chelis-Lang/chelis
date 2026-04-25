@@ -3553,84 +3553,6 @@ theorem deepActiveRuntimeLinear_beta_gap_two_step_counterexample :
       ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
       deepActiveGapTerm'', deepActiveGapClauseBody]
 
-private def tvmapCounterDim0 : Dim := Dim.lit 0
-
-private def tvmapCounterDim1 : Dim := Dim.lit 1
-
-private def tvmapCounterBase : Typ := Typ.tensor DimList.empty
-
-private def tvmapCounterBatch0 : Typ :=
-  Typ.tensor (DimList.cons tvmapCounterDim0 DimList.empty)
-
-private def tvmapCounterBatch1 : Typ :=
-  Typ.tensor (DimList.cons tvmapCounterDim1 DimList.empty)
-
-private def tvmapCounterType : Typ :=
-  Typ.arrow tvmapCounterBatch0 tvmapCounterBatch0 []
-
-private def tvmapCounterTerm : Term :=
-  Term.vmap "x" tvmapCounterBase (Term.var "x")
-
-private def tvmapCounterTerm' : Term :=
-  Term.abs "x" tvmapCounterBatch1 (Term.var "x")
-
-private theorem tvmapCounterBatch_ne :
-    tvmapCounterBatch0 ≠ tvmapCounterBatch1 := by
-  intro hEq
-  injection hEq with hDims
-  have hPerm : List.Perm [tvmapCounterDim0] [tvmapCounterDim1] :=
-    Quotient.exact hDims
-  have hMem :
-      tvmapCounterDim0 ∈ ([tvmapCounterDim1] : List Dim) :=
-    hPerm.subset (by simp)
-  simp [tvmapCounterDim0, tvmapCounterDim1] at hMem
-
-private theorem tvmapCounterTerm'_not_retypable :
-    ¬ ∃ GammaOut,
-      HasType [] [] [] tvmapCounterTerm'
-        tvmapCounterType [] GammaOut := by
-  intro h
-  rcases h with ⟨GammaOut, hTy⟩
-  rcases HasType.abs_inv hTy with
-    ⟨tRet, epsBody, GammaBody, slot, hArrow, hBody, _hOut⟩
-  have hRet : tRet = tvmapCounterBatch0 := by
-    injection hArrow with _hArg hRet _hEff
-    exact hRet.symm
-  subst tRet
-  have hMem :
-      ("x", some tvmapCounterBatch0) ∈
-        ([("x", some tvmapCounterBatch1)] : LinearCtx) :=
-    HasType.var_mem_of_typing hBody
-  simp at hMem
-  exact tvmapCounterBatch_ne hMem
-
-/-- Concrete witness that the current `tvmap` theorem shape is false:
-    `Term.vmap` does not store the batch dimension, but both typing and
-    stepping quantify over one. A term can be typed using one dimension
-    choice and stepped using another, so preservation fails before any
-    store-side reasoning starts. -/
-theorem preservation_tvmap_counterexample :
-    HasType [] [] [] tvmapCounterTerm tvmapCounterType [] [] ∧
-    WellScoped tvmapCounterTerm ∧
-    Step ⟨[], tvmapCounterTerm⟩ ⟨[], tvmapCounterTerm'⟩ ∧
-    ¬ ∃ GammaOut,
-      HasType [] [] [] tvmapCounterTerm'
-        tvmapCounterType [] GammaOut := by
-  refine ⟨?_, ?_, ?_, tvmapCounterTerm'_not_retypable⟩
-  · have hBody :
-        HasType [] [] [("x", some tvmapCounterBase)]
-          (Term.var "x") tvmapCounterBase []
-          [("x", none)] := by
-      exact HasType.var [] [] [] [] "x" tvmapCounterBase
-    simpa [tvmapCounterTerm, tvmapCounterType, tvmapCounterBase,
-      tvmapCounterBatch0, tvmapCounterDim0] using
-      (HasType.tvmap [] [] [] "x" tvmapCounterBase tvmapCounterBase
-        (Term.var "x") [] tvmapCounterDim0 none hBody)
-  · simp [tvmapCounterTerm, WellScoped, boundVars]
-  · simpa [tvmapCounterTerm, tvmapCounterTerm', tvmapCounterBase,
-      tvmapCounterBatch1, tvmapCounterDim1, addDim] using
-      (Step.tvmap [] "x" tvmapCounterBase (Term.var "x") tvmapCounterDim1)
-
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
@@ -5220,7 +5142,7 @@ private theorem preservation_aux
   | tgrad s x tv tOut body =>
       intro locs hsep h_linear t eps h_typ h_scope
       sorry
-  | tvmap s x tv body d =>
+  | tvmap s x tv d body =>
       intro locs hsep h_linear t eps h_typ h_scope
       sorry
   | ctx sigma sigma' E e0 e0' h_inner ih =>

@@ -161,7 +161,7 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       -- Nested grad is out of T0 §0 scope; structurally recurse so
       -- adjointFrom stays total. Phase 2 T9 may reject this case.
       adjointFrom e x gSeed n
-  | Term.vmap _ _ e =>
+  | Term.vmap _ _ _ e =>
       -- vmap-in-grad-body is out of T0 §0 scope; same treatment.
       adjointFrom e x gSeed n
   | Term.perform _ e => adjointFrom e x gSeed n

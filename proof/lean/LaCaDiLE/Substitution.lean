@@ -128,7 +128,7 @@ theorem subst_notFree
           simp only [bne_iff_ne, ne_eq]
           exact fun heq => hy heq.symm
         simp [subst, hy, subst_notFree body v x hx_body]
-  | Term.vmap y t body =>
+  | Term.vmap y t d body =>
       simp only [freeVars] at h
       by_cases hy : y = x
       · simp [subst, hy]
@@ -287,7 +287,7 @@ theorem mem_locRefs_subst
         exact Or.inl hmem
       · simp [subst, hy] at hmem
         exact mem_locRefs_subst body v x ell hmem
-  | Term.vmap y t body =>
+  | Term.vmap y t d body =>
       by_cases hy : y = x
       · simp [subst, hy] at hmem
         exact Or.inl hmem
@@ -468,7 +468,7 @@ theorem mem_boundVars_subst
         · exact Or.inl (Or.inl hmem)
         · exact Or.elim (mem_boundVars_subst body v x z hmem)
             (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
-  | Term.vmap y t body =>
+  | Term.vmap y t d body =>
       by_cases hy : y = x
       · simp [subst, hy, boundVars] at hmem ⊢
         exact Or.inl hmem

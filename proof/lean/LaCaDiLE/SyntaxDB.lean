@@ -60,7 +60,7 @@ inductive TermDB where
   | uniformLike (e : TermDB) (lo : Float) (hi : Float)
   -- AD / vectorization transforms
   | grad    (t : Typ) (tOut : Typ) (body : TermDB)
-  | vmap    (t : Typ) (body : TermDB)
+  | vmap    (t : Typ) (d : Dim) (body : TermDB)
   -- effects: handler clauses as (op, body) pairs; body sees arg at index
   -- 1 and continuation at index 0 under its two positional binders
   | handle  (epsH : EffectRow) (body : TermDB)
@@ -97,7 +97,7 @@ def locRefsDB : TermDB → List Loc
   | TermDB.expand e _ _ => locRefsDB e
   | TermDB.uniformLike e _ _ => locRefsDB e
   | TermDB.grad _ _ body => locRefsDB body
-  | TermDB.vmap _ body => locRefsDB body
+  | TermDB.vmap _ _ body => locRefsDB body
   | TermDB.handle _ body clauses => locRefsDB body ++ locRefsClausesDB clauses
   | TermDB.perform _ e => locRefsDB e
   | TermDB.loc ell => [ell]
@@ -132,7 +132,7 @@ def activeLocRefsDB : TermDB → List Loc
   | TermDB.expand e _ _ => activeLocRefsDB e
   | TermDB.uniformLike e _ _ => activeLocRefsDB e
   | TermDB.grad _ _ body => activeLocRefsDB body
-  | TermDB.vmap _ body => activeLocRefsDB body
+  | TermDB.vmap _ _ body => activeLocRefsDB body
   | TermDB.handle _ body clauses => activeLocRefsDB body ++ activeLocRefsClausesDB clauses
   | TermDB.perform _ e => activeLocRefsDB e
   | TermDB.loc ell => [ell]
@@ -218,8 +218,8 @@ def DeepActiveRuntimeLinearDB : TermDB → Prop
   | TermDB.grad t tOut body =>
       ActiveRuntimeLinearDB (TermDB.grad t tOut body) ∧
       DeepActiveRuntimeLinearDB body
-  | TermDB.vmap t body =>
-      ActiveRuntimeLinearDB (TermDB.vmap t body) ∧
+  | TermDB.vmap t d body =>
+      ActiveRuntimeLinearDB (TermDB.vmap t d body) ∧
       DeepActiveRuntimeLinearDB body
   | TermDB.handle epsH body clauses =>
       ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) ∧
@@ -304,7 +304,7 @@ theorem mem_activeLocRefsDB_subset
   | TermDB.grad t tOut body =>
       simpa [activeLocRefsDB, locRefsDB] using
         mem_activeLocRefsDB_subset (e := body) h
-  | TermDB.vmap t body =>
+  | TermDB.vmap t d body =>
       simpa [activeLocRefsDB, locRefsDB] using
         mem_activeLocRefsDB_subset (e := body) h
   | TermDB.handle epsH body clauses =>
@@ -429,7 +429,7 @@ theorem runtimeLinearDB_active
   | TermDB.grad t tOut body =>
       simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
         runtimeLinearDB_active (e := body) (by simpa [RuntimeLinearDB, locRefsDB] using h)
-  | TermDB.vmap t body =>
+  | TermDB.vmap t d body =>
       simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
         runtimeLinearDB_active (e := body) (by simpa [RuntimeLinearDB, locRefsDB] using h)
   | TermDB.handle epsH body clauses =>
@@ -520,7 +520,7 @@ theorem runtimeLinearDB_deepActive
   | TermDB.grad _ _ body, h => by
       exact ⟨runtimeLinearDB_active h,
         runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
-  | TermDB.vmap _ body, h => by
+  | TermDB.vmap _ _ body, h => by
       exact ⟨runtimeLinearDB_active h,
         runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
   | TermDB.handle _ body clauses, h => by
@@ -590,7 +590,7 @@ def liftAux (c d : Nat) : TermDB → TermDB
   | TermDB.uniformLike e lo hi => TermDB.uniformLike (liftAux c d e) lo hi
   | TermDB.grad t tOut body =>
       TermDB.grad t tOut (liftAux (c + 1) d body)
-  | TermDB.vmap t body => TermDB.vmap t (liftAux (c + 1) d body)
+  | TermDB.vmap t dMap body => TermDB.vmap t dMap (liftAux (c + 1) d body)
   | TermDB.handle epsH body clauses =>
       TermDB.handle epsH (liftAux c d body) (liftClausesAux c d clauses)
   | TermDB.perform op e => TermDB.perform op (liftAux c d e)
@@ -654,8 +654,8 @@ def substDBAux (j : Nat) (v : TermDB) : TermDB → TermDB
       TermDB.uniformLike (substDBAux j v e) lo hi
   | TermDB.grad t tOut body =>
       TermDB.grad t tOut (substDBAux (j + 1) (lift v) body)
-  | TermDB.vmap t body =>
-      TermDB.vmap t (substDBAux (j + 1) (lift v) body)
+  | TermDB.vmap t dMap body =>
+      TermDB.vmap t dMap (substDBAux (j + 1) (lift v) body)
   | TermDB.handle epsH body clauses =>
       TermDB.handle epsH (substDBAux j v body)
                     (substClausesDBAux j v clauses)
@@ -757,7 +757,7 @@ theorem locRefsDB_liftAux
       simp [liftAux, locRefsDB, locRefsDB_liftAux c d e]
   | TermDB.grad t tOut body =>
       simp [liftAux, locRefsDB, locRefsDB_liftAux (c + 1) d body]
-  | TermDB.vmap t body =>
+  | TermDB.vmap t dMap body =>
       simp [liftAux, locRefsDB, locRefsDB_liftAux (c + 1) d body]
   | TermDB.handle epsH body clauses =>
       simp [liftAux, locRefsDB,
@@ -829,7 +829,7 @@ theorem activeLocRefsDB_liftAux
       simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
   | TermDB.grad t tOut body =>
       simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux (c + 1) d body]
-  | TermDB.vmap t body =>
+  | TermDB.vmap t dMap body =>
       simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux (c + 1) d body]
   | TermDB.handle epsH body clauses =>
       simp [liftAux, activeLocRefsDB, activeLocRefsClausesDB,
@@ -942,7 +942,7 @@ theorem mem_locRefsDB_substDBAux
       simp [substDBAux, locRefsDB] at hmem ⊢
       exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
         Or.inl (fun h => Or.inr (by simpa using h))
-  | TermDB.vmap t body =>
+  | TermDB.vmap t dMap body =>
       simp [substDBAux, locRefsDB] at hmem ⊢
       exact Or.elim (mem_locRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
         Or.inl (fun h => Or.inr (by simpa using h))
@@ -1045,7 +1045,7 @@ theorem mem_activeLocRefsDB_substDBAux
       simp [substDBAux, activeLocRefsDB] at hmem ⊢
       exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
         Or.inl (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
-  | TermDB.vmap t body =>
+  | TermDB.vmap t dMap body =>
       simp [substDBAux, activeLocRefsDB] at hmem ⊢
       exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
         Or.inl (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))

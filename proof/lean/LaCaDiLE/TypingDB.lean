@@ -215,7 +215,7 @@ inductive HasTypeDB :
       (t1 t2 : Typ) (body : TermDB) (eps : EffectRow) (d : Dim) :
       HasTypeDB Delta Sigma (some t1 :: Gamma) body t2 eps
                 (slot :: Gamma) →
-      HasTypeDB Delta Sigma Gamma (TermDB.vmap t1 body)
+      HasTypeDB Delta Sigma Gamma (TermDB.vmap t1 d body)
                 (Typ.arrow (addDim d t1) (addDim d t2) eps) [] Gamma
 
   | loc

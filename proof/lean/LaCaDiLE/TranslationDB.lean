@@ -697,8 +697,8 @@ def eraseTerm (rho : BinderEnv) : Term → Option TermDB
       TermDB.uniformLike <$> eraseTerm rho e <*> pure lo <*> pure hi
   | Term.grad x t tOut body =>
       TermDB.grad t tOut <$> eraseTerm (x :: rho) body
-  | Term.vmap x t body =>
-      TermDB.vmap t <$> eraseTerm (x :: rho) body
+  | Term.vmap x t d body =>
+      TermDB.vmap t d <$> eraseTerm (x :: rho) body
   | Term.handle epsH body clauses => do
       let body' <- eraseTerm rho body
       let clauses' <- eraseClauses rho clauses
@@ -788,8 +788,8 @@ def eraseTermNames (rho : BinderNameSlots) : Term → Option TermDB
       TermDB.uniformLike <$> eraseTermNames rho e <*> pure lo <*> pure hi
   | Term.grad x t tOut body =>
       TermDB.grad t tOut <$> eraseTermNames (some x :: rho) body
-  | Term.vmap x t body =>
-      TermDB.vmap t <$> eraseTermNames (some x :: rho) body
+  | Term.vmap x t d body =>
+      TermDB.vmap t d <$> eraseTermNames (some x :: rho) body
   | Term.handle epsH body clauses => do
       let body' <- eraseTermNames rho body
       let clauses' <- eraseClausesNames rho clauses
@@ -944,9 +944,9 @@ theorem eraseTermNames_map_some
       simpa using
         congrArg (Option.map (TermDB.grad t tOut))
           (eraseTermNames_map_some (x :: rho) body)
-  | Term.vmap x t body => by
+  | Term.vmap x t d body => by
       simpa using
-        congrArg (Option.map (TermDB.vmap t))
+        congrArg (Option.map (TermDB.vmap t d))
           (eraseTermNames_map_some (x :: rho) body)
   | Term.handle epsH body clauses => by
       simp [eraseTermNames, eraseTerm, eraseTermNames_map_some rho body,
@@ -1076,7 +1076,7 @@ theorem eraseTerm_locRefs :
         simp [eraseTerm, hbody] at hErase
       cases hErase
       simpa [locRefs, locRefsDB] using eraseTerm_locRefs hbody
-  | ρ, Term.vmap x t body, eDB, hErase => by
+  | ρ, Term.vmap x t d body, eDB, hErase => by
       rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
         simp [eraseTerm, hbody] at hErase
       cases hErase
@@ -1232,7 +1232,7 @@ theorem eraseTerm_activeLocRefs :
         simp [eraseTerm, hbody] at hErase
       cases hErase
       simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs hbody
-  | ρ, Term.vmap x t body, eDB, hErase => by
+  | ρ, Term.vmap x t d body, eDB, hErase => by
       rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
         simp [eraseTerm, hbody] at hErase
       cases hErase
@@ -1530,13 +1530,13 @@ theorem eraseTerm_deepActiveRuntimeLinear_iff :
           activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody]
       simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
         and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff hbody)
-  | ρ, Term.vmap x t body, eDB, hErase => by
+  | ρ, Term.vmap x t d body, eDB, hErase => by
       rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
         simp [eraseTerm, hbody] at hErase
       cases hErase
       have hAct :
-          ActiveRuntimeLinear (Term.vmap x t body) ↔
-            ActiveRuntimeLinearDB (TermDB.vmap t bodyDB) := by
+          ActiveRuntimeLinear (Term.vmap x t d body) ↔
+            ActiveRuntimeLinearDB (TermDB.vmap t d bodyDB) := by
         simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
           activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody]
       simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
@@ -1686,11 +1686,11 @@ theorem eraseTerm_suffix :
       cases h
       simpa [eraseTerm, List.cons_append] using
         congrArg (Option.map (TermDB.grad t tOut)) (eraseTerm_suffix hbody σ)
-  | ρ, Term.vmap x t body, eDB, h, σ => by
+  | ρ, Term.vmap x t d body, eDB, h, σ => by
       rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;> simp [eraseTerm, hbody] at h
       cases h
       simpa [eraseTerm, List.cons_append] using
-        congrArg (Option.map (TermDB.vmap t)) (eraseTerm_suffix hbody σ)
+        congrArg (Option.map (TermDB.vmap t d)) (eraseTerm_suffix hbody σ)
   | ρ, Term.handle epsH body clauses, eDB, h, σ => by
       rcases hbody : eraseTerm ρ body with _ | bodyDB <;> simp [eraseTerm, hbody] at h
       rcases hcls : eraseClauses ρ clauses with _ | clsDB <;> simp [eraseTerm, hbody, hcls] at h
@@ -2380,8 +2380,8 @@ theorem lexical_grad_body
     exact hbody.1
 
 theorem lexical_vmap_body
-    {Gamma : LinearCtx} {x : String} {tx : Typ} {body : Term}
-    (h : LexicallyScoped Gamma (Term.vmap x tx body)) :
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {d : Dim} {body : Term}
+    (h : LexicallyScoped Gamma (Term.vmap x tx d body)) :
     LexicallyScoped (Gamma ++ [(x, some tx)]) body := by
   rcases h with ⟨hnd, hdom, hws⟩
   have hxGamma : x ∉ linearCtxDom Gamma := by
@@ -3340,7 +3340,7 @@ theorem transport_typing_lexical
           HasTypeDB Delta Sigma (some t1 :: eraseCtx Gamma) bodyDB t2 eps
             (slot :: eraseCtx Gamma) := by
         simpa [eraseCtx_append_singleton] using hTyBody
-      refine ⟨TermDB.vmap t1 bodyDB, ?_, ?_⟩
+      refine ⟨TermDB.vmap t1 d bodyDB, ?_, ?_⟩
       · simp [eraseTerm, hEraseBody']
       · exact HasTypeDB.tvmap Delta Sigma (eraseCtx Gamma) slot t1 t2 bodyDB eps d
           hTyBody'
@@ -3559,11 +3559,11 @@ theorem eraseTerm_liftAux_len :
       cases h
       simpa [liftAux] using
         congrArg (TermDB.grad t tOut) (eraseTerm_liftAux_len hbody)
-  | ρ, Term.vmap x t body, eDB, h => by
+  | ρ, Term.vmap x t d body, eDB, h => by
       rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;> simp [eraseTerm, hbody] at h
       cases h
       simpa [liftAux] using
-        congrArg (TermDB.vmap t) (eraseTerm_liftAux_len hbody)
+        congrArg (TermDB.vmap t d) (eraseTerm_liftAux_len hbody)
   | ρ, Term.handle epsH body clauses, eDB, h => by
       rcases hbody : eraseTerm ρ body with _ | bodyDB <;> simp [eraseTerm, hbody] at h
       rcases hcls : eraseClauses ρ clauses with _ | clsDB <;> simp [eraseTerm, hbody, hcls] at h
@@ -3792,7 +3792,7 @@ theorem eraseTerm_subst_tail
         simpa [lift] using
           (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
       simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih']
-  | Term.vmap y t body, bodyDB, hbody, hx => by
+  | Term.vmap y t d body, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases hbody' : eraseTerm (y :: (ρ ++ [x])) body with _ | bodyDB' <;> simp [eraseTerm, hbody'] at hbody
       cases hbody
@@ -4094,7 +4094,7 @@ theorem eraseTerm_subst_split
         simpa [lift] using
           (eraseTerm_liftAux_len (ρ := []) (e := v) (eDB := vDB) hv)
       simp [eraseTerm, subst, hyx, substDBAux, hvlift, ih', List.cons_append]
-  | Term.vmap y t body, bodyDB, hbody, hx => by
+  | Term.vmap y t d body, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases hbody' : eraseTerm (y :: (ρin ++ x :: ρout)) body with _ | bodyDB' <;>
         simp [eraseTerm, hbody'] at hbody
@@ -4309,7 +4309,7 @@ theorem subst_commute_closed
         · subst z
           simp [subst, hzx]
         · simp [subst, hzx, hzy, subst_commute_closed body v1 v2 x y hxy hv1 hv2]
-  | Term.vmap z t body =>
+  | Term.vmap z t d body =>
       by_cases hzx : z = x
       · subst z
         simp [subst, hxy]

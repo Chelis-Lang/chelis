@@ -68,7 +68,7 @@ So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
 - `tgrad`, still upstream of `AdjointTyping.lean`
-- `tvmap`, no longer blocked by `AddDim.lean`, but still theorem-shape-false until the term and rules are forced to share one batch-dimension choice
+- `tvmap`, no longer blocked by `AddDim.lean` or theorem shape; the remaining work is the actual preservation proof on the explicit batch-dimension surface
 
 ## WS3.11 — `DimSafety.lean`
 

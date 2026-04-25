@@ -13,7 +13,7 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `cd proof/lean && lake build` is green again on the current branch head.
 - `TranslationDB.lean`'s four DB-backed preservation wrappers are closed.
 - `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, and `ctx`.
-- `AddDim.lean` is no longer the `tvmap` upstream blocker, but `tvmap` is also not a mere local proof hole: `Preservation.lean` now contains a concrete mismatch witness showing the current unannotated batch-dimension rule surface is false.
+- `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
 - The branch still contains 9 executable `sorry`s on the main proof path:
   - `LaCaDiLE/Substitution.lean`: `weakening_insert`, `subst_preserves_typing`
   - `LaCaDiLE/AdjointTyping.lean`: 4 admissions in the adjoint path
@@ -26,7 +26,7 @@ The current theorem-shape boundary is now explicit in Lean:
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
 - the recursive `DeepActiveRuntimeLinear` repair is still too weak globally: a typed deep-active beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later that overlap becomes active and breaks the invariant
-- the current `tvmap` surface is also theorem-shape-false: `Term.vmap` does not record the chosen batch dimension, but both `HasType.tvmap` and `Step.tvmap` quantify over one, so a term can be typed with one dimension choice and stepped with another
+- `tvmap` is no longer blocked on theorem shape: typing and stepping now share the batch dimension through the explicit `vmap` term annotation
 
 ## What Closed Recently
 
@@ -56,7 +56,7 @@ The current theorem-shape boundary is now explicit in Lean:
    This remains the upstream blocker for the `tgrad` preservation case and the eventual AD-correctness wave.
 
 4. `Preservation.lean` / `tvmap`
-   `AddDim.lean` is closed, but the current `tvmap` rule surface is false until typing and stepping are forced to use the same batch dimension.
+   `AddDim.lean` is closed and the explicit-dimension `vmap` repair is in. The remaining work is the actual `tvmap` preservation proof.
 
 ## Next Moves
 
@@ -64,4 +64,4 @@ The current theorem-shape boundary is now explicit in Lean:
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
 3. Close the named substitution admits in `Substitution.lean`.
 4. Resolve the `Accum` signature / adjoint-typing contradiction and then return to `tgrad`.
-5. Repair the `tvmap` dimension-choice surface, then return to the remaining `tvmap` preservation proof.
+5. Return to the remaining `tvmap` preservation proof on the explicit-dimension surface.

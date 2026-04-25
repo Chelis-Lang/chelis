@@ -7,12 +7,12 @@
 - Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, and the remaining executable admits are concentrated in `Substitution.lean`, `AdjointTyping.lean`, and `Preservation.lean`
 - The preservation theorem is no longer blocked on generic context/store plumbing. The active blocker is theorem shape: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
 - `Substitution.lean`'s current named substitution theorem shape is now also known to be false on arbitrary named derivations without a lexical or derivation-guided restriction
-- `AddDim.lean` is closed, but `tvmap` is not just a local proof hole: `Preservation.lean` now contains a concrete mismatch witness showing that the current unannotated batch-dimension rule surface is false as stated
+- `AddDim.lean` is closed, and the earlier `tvmap` dimension-choice mismatch has now been repaired by making the batch dimension explicit in the term syntax; the remaining `tvmap` work is back on the preservation side
 - Immediate critical path:
   1. settle the stronger cross-boundary handler-aware runtime invariant
   2. close named substitution (`weakening_insert`, `subst_preserves_typing`)
   3. resolve the `Accum` signature / adjoint-typing contradiction for `tgrad`
-  4. repair the `tvmap` dimension-choice surface so typing and stepping use the same batch dimension
+  4. close the remaining `tvmap` preservation proof on the explicit batch-dimension surface
 
 This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
 

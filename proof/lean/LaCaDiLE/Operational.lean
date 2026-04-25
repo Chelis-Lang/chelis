@@ -52,9 +52,9 @@ def subst (target : Term) (v : Term) (x : String) : Term :=
   | Term.grad y t tOut body =>
       if y = x then Term.grad y t tOut body
       else Term.grad y t tOut (subst body v x)
-  | Term.vmap y t body =>
-      if y = x then Term.vmap y t body
-      else Term.vmap y t (subst body v x)
+  | Term.vmap y t d body =>
+      if y = x then Term.vmap y t d body
+      else Term.vmap y t d (subst body v x)
   | Term.handle epsH body clauses =>
       Term.handle epsH (subst body v x) (substClauses clauses v x)
   | Term.perform op e => Term.perform op (subst e v x)
@@ -1356,8 +1356,8 @@ inductive Step : Config → Config → Prop
   -- Wave 0 P6: body is now lifted via `addDimTerm` (defined in
   -- `Syntax.lean`) rather than passing `e` through unchanged.
   | tvmap
-      (sigma : Store) (x : String) (t : Typ) (e : Term) (d : Dim) :
-      Step ⟨sigma, Term.vmap x t e⟩
+      (sigma : Store) (x : String) (t : Typ) (d : Dim) (e : Term) :
+      Step ⟨sigma, Term.vmap x t d e⟩
            ⟨sigma, Term.abs x (addDim d t) (addDimTerm d e)⟩
 
   -- E-Ctx: congruence closure via evaluation contexts (Wave 0.5).

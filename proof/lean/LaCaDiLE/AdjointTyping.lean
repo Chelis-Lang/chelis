@@ -179,7 +179,7 @@ def AdjointMulTyped (Delta : CapCtx) (Sigma : StoreTyp) (dsE : DimList) :
   | Term.expand e _      => AdjointMulTyped Delta Sigma dsE e
   | Term.uniformLike e _ _ => AdjointMulTyped Delta Sigma dsE e
   | Term.grad _ _ _ body => AdjointMulTyped Delta Sigma dsE body
-  | Term.vmap _ _ body   => AdjointMulTyped Delta Sigma dsE body
+  | Term.vmap _ _ _ body   => AdjointMulTyped Delta Sigma dsE body
   | Term.handle _ body _ => AdjointMulTyped Delta Sigma dsE body
   | Term.perform _ e     => AdjointMulTyped Delta Sigma dsE e
 
@@ -281,7 +281,7 @@ private theorem adjoint_typed_aux
         (by unfold AdjointMulTyped at h_e; exact h_e)
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
               h_seed h_e1 h_fresh_s h_fresh_s'
-  | Term.vmap _ _ e1 =>
+  | Term.vmap _ _ _ e1 =>
       simp only [adjointFrom]
       have h_e1 : AdjointMulTyped Delta Sigma dsE e1 :=
         (by unfold AdjointMulTyped at h_e; exact h_e)

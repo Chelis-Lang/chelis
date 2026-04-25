@@ -35,7 +35,7 @@
 --   position-2 term with the continuation at index 0 and the argument
 --   at index 1. `clauseToDB` emits this positional shape.
 -- * `Term.grad x t tOut body` discards `x` and runs the body under a
---   new head binder. `Term.vmap x t body` discards `x` similarly.
+--   new head binder. `Term.vmap x t d body` discards `x` similarly.
 
 import LaCaDiLE.Syntax
 import LaCaDiLE.SyntaxDB
@@ -111,8 +111,8 @@ def termToDB (env : List String) : Term → TermDB
       TermDB.uniformLike (termToDB env e) lo hi
   | Term.grad x t tOut body =>
       TermDB.grad t tOut (termToDB (x :: env) body)
-  | Term.vmap x t body =>
-      TermDB.vmap t (termToDB (x :: env) body)
+  | Term.vmap x t d body =>
+      TermDB.vmap t d (termToDB (x :: env) body)
   | Term.handle epsH body clauses =>
       TermDB.handle epsH (termToDB env body) (clausesToDB env clauses)
   | Term.perform op e => TermDB.perform op (termToDB env e)

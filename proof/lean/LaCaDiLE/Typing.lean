@@ -303,7 +303,7 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
       (slot : Option Typ) :
       HasType Delta Sigma (Gamma ++ [(x, some t1)]) e t2 eps
               (Gamma ++ [(x, slot)]) →
-      HasType Delta Sigma Gamma (Term.vmap x t1 e)
+      HasType Delta Sigma Gamma (Term.vmap x t1 d e)
               (Typ.arrow (addDim d t1) (addDim d t2) eps) [] Gamma
 
   -- T-Loc: runtime locations.

@@ -287,7 +287,7 @@ inductive Term where
   | uniformLike (e : Term) (lo : Float) (hi : Float)
   -- AD / vectorization transforms (restricted to literal abstractions per T-Grad)
   | grad    (x : String) (t : Typ) (tOut : Typ) (body : Term)
-  | vmap    (x : String) (t : Typ) (body : Term)
+  | vmap    (x : String) (t : Typ) (d : Dim) (body : Term)
   -- effects: clauses are (op, arg-var, cont-var, body) tuples
   | handle  (epsH : EffectRow) (body : Term)
             (clauses : List (EffectLabel × String × String × Term))
@@ -331,7 +331,7 @@ def addDimTerm (d : Dim) : Term → Term
   | Term.uniformLike e lo hi => Term.uniformLike (addDimTerm d e) lo hi
   | Term.grad x t tOut body =>
       Term.grad x (addDim d t) (addDim d tOut) (addDimTerm d body)
-  | Term.vmap x t body => Term.vmap x (addDim d t) (addDimTerm d body)
+  | Term.vmap x t dMap body => Term.vmap x (addDim d t) dMap (addDimTerm d body)
   | Term.handle epsH body clauses =>
       Term.handle epsH (addDimTerm d body) (addDimClauses d clauses)
   | Term.perform op e => Term.perform op (addDimTerm d e)
@@ -378,7 +378,7 @@ def freeVars : Term → List String
   | Term.expand e _ => freeVars e
   | Term.uniformLike e _ _ => freeVars e
   | Term.grad x _ _ body => (freeVars body).filter (· != x)
-  | Term.vmap x _ body => (freeVars body).filter (· != x)
+  | Term.vmap x _ _ body => (freeVars body).filter (· != x)
   | Term.handle _ body clauses => freeVars body ++ freeVarsClauses clauses
   | Term.perform _ e => freeVars e
   | Term.loc _ => []
@@ -422,7 +422,7 @@ def locRefs : Term → List Loc
   | Term.expand e _ => locRefs e
   | Term.uniformLike e _ _ => locRefs e
   | Term.grad _ _ _ body => locRefs body
-  | Term.vmap _ _ body => locRefs body
+  | Term.vmap _ _ _ body => locRefs body
   | Term.handle _ body clauses => locRefs body ++ locRefsClauses clauses
   | Term.perform _ e => locRefs e
   | Term.loc ell => [ell]
@@ -460,7 +460,7 @@ def activeLocRefs : Term → List Loc
   | Term.expand e _ => activeLocRefs e
   | Term.uniformLike e _ _ => activeLocRefs e
   | Term.grad _ _ _ body => activeLocRefs body
-  | Term.vmap _ _ body => activeLocRefs body
+  | Term.vmap _ _ _ body => activeLocRefs body
   | Term.handle _ body clauses => activeLocRefs body ++ activeLocRefsClauses clauses
   | Term.perform _ e => activeLocRefs e
   | Term.loc ell => [ell]
@@ -550,8 +550,8 @@ def DeepActiveRuntimeLinear : Term → Prop
   | Term.grad x t tOut body =>
       ActiveRuntimeLinear (Term.grad x t tOut body) ∧
       DeepActiveRuntimeLinear body
-  | Term.vmap x t body =>
-      ActiveRuntimeLinear (Term.vmap x t body) ∧
+  | Term.vmap x t d body =>
+      ActiveRuntimeLinear (Term.vmap x t d body) ∧
       DeepActiveRuntimeLinear body
   | Term.handle epsH body clauses =>
       ActiveRuntimeLinear (Term.handle epsH body clauses) ∧
@@ -636,7 +636,7 @@ theorem mem_activeLocRefs_subset
   | Term.grad x t tOut body =>
       simpa [activeLocRefs, locRefs] using
         mem_activeLocRefs_subset (e := body) h
-  | Term.vmap x t body =>
+  | Term.vmap x t d body =>
       simpa [activeLocRefs, locRefs] using
         mem_activeLocRefs_subset (e := body) h
   | Term.handle epsH body clauses =>
@@ -763,7 +763,7 @@ theorem runtimeLinear_active
   | Term.grad x t tOut body =>
       simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
         runtimeLinear_active (e := body) (by simpa [RuntimeLinear, locRefs] using h)
-  | Term.vmap x t body =>
+  | Term.vmap x t d body =>
       simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
         runtimeLinear_active (e := body) (by simpa [RuntimeLinear, locRefs] using h)
   | Term.handle epsH body clauses =>
@@ -855,7 +855,7 @@ theorem runtimeLinear_deepActive
   | Term.grad _ _ _ body, h => by
       exact ⟨runtimeLinear_active h,
         runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
-  | Term.vmap _ _ body, h => by
+  | Term.vmap _ _ _ body, h => by
       exact ⟨runtimeLinear_active h,
         runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
   | Term.handle _ body clauses, h => by
@@ -918,7 +918,7 @@ def boundVars : Term → List String
   | Term.expand e _ => boundVars e
   | Term.uniformLike e _ _ => boundVars e
   | Term.grad x _ _ body => x :: boundVars body
-  | Term.vmap x _ body => x :: boundVars body
+  | Term.vmap x _ _ body => x :: boundVars body
   | Term.handle _ body clauses => boundVars body ++ boundVarsClauses clauses
   | Term.perform _ e => boundVars e
   | Term.loc _ => []
@@ -972,8 +972,8 @@ theorem wellScoped_grad_iff (x : String) (t tOut : Typ) (body : Term) :
       x ∉ boundVars body ∧ WellScoped body := by
   simp [WellScoped, boundVars]
 
-theorem wellScoped_vmap_iff (x : String) (t : Typ) (body : Term) :
-    WellScoped (Term.vmap x t body) ↔
+theorem wellScoped_vmap_iff (x : String) (t : Typ) (d : Dim) (body : Term) :
+    WellScoped (Term.vmap x t d body) ↔
       x ∉ boundVars body ∧ WellScoped body := by
   simp [WellScoped, boundVars]
 
@@ -990,10 +990,10 @@ theorem wellScoped_grad_body
   exact (wellScoped_grad_iff x t tOut body).mp h
 
 theorem wellScoped_vmap_body
-    {x : String} {t : Typ} {body : Term}
-    (h : WellScoped (Term.vmap x t body)) :
+    {x : String} {t : Typ} {d : Dim} {body : Term}
+    (h : WellScoped (Term.vmap x t d body)) :
     x ∉ boundVars body ∧ WellScoped body := by
-  exact (wellScoped_vmap_iff x t body).mp h
+  exact (wellScoped_vmap_iff x t d body).mp h
 
 theorem wellScoped_letpair_names_ne
     {x y : String} {e1 e2 : Term}

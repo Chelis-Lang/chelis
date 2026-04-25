@@ -65,7 +65,7 @@ Reduction rules including heap store. Figures. The interesting rules:
 - The tape: forward-pass borrows saved for backward-pass reference
 - Effect handling with one-shot continuation capture
 - Store allocation/deallocation tied to linearity; `copy` as physical allocation
-- `vmap` must use the same batch-dimension choice in typing and stepping; the current unannotated formulation is now known to admit a mismatch witness in Lean, so the paper rule text has to be phrased in a way that forces one shared choice
+- `vmap` should be presented with one explicit shared batch-dimension choice in both typing and stepping; the Lean mechanization now uses that annotated surface directly
 
 ## WS4.6 — §5 Metatheory (~3 pages)
 
