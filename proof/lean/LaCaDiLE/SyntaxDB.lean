@@ -239,6 +239,321 @@ def DeepActiveRuntimeLinearClausesDB :
 
 end
 
+theorem mem_activeLocRefsDB_subset
+    {e : TermDB} {ell : Loc}
+    (h : ell ∈ activeLocRefsDB e) :
+    ell ∈ locRefsDB e := by
+  match e with
+  | TermDB.var i =>
+      simp [activeLocRefsDB] at h
+  | TermDB.abs t body =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := body) h
+  | TermDB.app e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.letBind e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.copy e =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.letpair e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.pair e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.fst e =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.snd e =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.unit =>
+      simp [activeLocRefsDB] at h
+  | TermDB.const c ds =>
+      simp [activeLocRefsDB] at h
+  | TermDB.add e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.mul e1 e2 =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_activeLocRefsDB_subset (e := e1) h)
+      · exact Or.inr (mem_activeLocRefsDB_subset (e := e2) h)
+  | TermDB.sum e i =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.expand e i k =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.uniformLike e lo hi =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.grad t tOut body =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := body) h
+  | TermDB.vmap t body =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := body) h
+  | TermDB.handle epsH body clauses =>
+      simp [activeLocRefsDB, locRefsDB] at h ⊢
+      exact Or.inl (mem_activeLocRefsDB_subset (e := body) h)
+  | TermDB.perform op e =>
+      simpa [activeLocRefsDB, locRefsDB] using
+        mem_activeLocRefsDB_subset (e := e) h
+  | TermDB.loc ell' =>
+      simpa [activeLocRefsDB, locRefsDB] using h
+
+theorem runtimeLinearDB_active
+    {e : TermDB}
+    (h : RuntimeLinearDB e) :
+    ActiveRuntimeLinearDB e := by
+  match e with
+  | TermDB.var i =>
+      simp [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] at h ⊢
+  | TermDB.abs t body =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := body) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.app e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.letBind e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.copy e =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.letpair e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.pair e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.fst e =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.snd e =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.unit =>
+      simp [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] at h ⊢
+  | TermDB.const c ds =>
+      simp [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] at h ⊢
+  | TermDB.add e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.mul e1 e2 =>
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, hsep⟩
+      have hAct1 := runtimeLinearDB_active (e := e1) h1
+      have hAct2 := runtimeLinearDB_active (e := e2) h2
+      refine List.nodup_append.mpr ?_
+      refine ⟨by simpa [ActiveRuntimeLinearDB] using hAct1,
+        by simpa [ActiveRuntimeLinearDB] using hAct2, ?_⟩
+      intro ell hmem1 ell' hmem2 hEq
+      subst ell'
+      exact hsep ell (mem_activeLocRefsDB_subset hmem1) ell
+        (mem_activeLocRefsDB_subset hmem2) rfl
+  | TermDB.sum e i =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.expand e i k =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.uniformLike e lo hi =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.grad t tOut body =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := body) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.vmap t body =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := body) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.handle epsH body clauses =>
+      have hsplit : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨hBody, _hClauses, _hsep⟩
+      have hActBody := runtimeLinearDB_active (e := body) hBody
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsClausesDB] using hActBody
+  | TermDB.perform op e =>
+      simpa [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] using
+        runtimeLinearDB_active (e := e) (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.loc ell =>
+      simp [RuntimeLinearDB, ActiveRuntimeLinearDB, locRefsDB, activeLocRefsDB] at h ⊢
+
+mutual
+
+theorem runtimeLinearDB_deepActive
+    : ∀ {e : TermDB}, RuntimeLinearDB e -> DeepActiveRuntimeLinearDB e
+  | TermDB.var _, _ => by
+      simp [DeepActiveRuntimeLinearDB]
+  | TermDB.abs t body, h => by
+      refine ⟨runtimeLinearDB_active h, ?_⟩
+      exact runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)
+  | TermDB.app e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.letBind e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.copy e, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.letpair e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.pair e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.fst e, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.snd e, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.unit, _ => by
+      simp [DeepActiveRuntimeLinearDB]
+  | TermDB.const _ _, _ => by
+      simp [DeepActiveRuntimeLinearDB]
+  | TermDB.add e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.mul e1 e2, h => by
+      have hsplit : (locRefsDB e1 ++ locRefsDB e2).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨h1, h2, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive h1,
+        runtimeLinearDB_deepActive h2⟩
+  | TermDB.sum e _, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.expand e _ _, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.uniformLike e _ _, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.grad _ _ body, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.vmap _ body, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.handle _ body clauses, h => by
+      have hsplit : (locRefsDB body ++ locRefsClausesDB clauses).Nodup := by
+        simpa [RuntimeLinearDB, locRefsDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨hBody, hClauses, _hsep⟩
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive hBody,
+        runtimeLinearClausesDB_deepActive hClauses⟩
+  | TermDB.perform _ e, h => by
+      exact ⟨runtimeLinearDB_active h,
+        runtimeLinearDB_deepActive (by simpa [RuntimeLinearDB, locRefsDB] using h)⟩
+  | TermDB.loc _, _ => by
+      simp [DeepActiveRuntimeLinearDB]
+termination_by
+  e _ => sizeOf e
+
+theorem runtimeLinearClausesDB_deepActive
+    : ∀ {clauses : List (EffectLabel × TermDB)},
+      (locRefsClausesDB clauses).Nodup ->
+      DeepActiveRuntimeLinearClausesDB clauses
+  | [], _ => by
+      simp [DeepActiveRuntimeLinearClausesDB]
+  | (op, hb) :: rest, h => by
+      have hsplit : (locRefsDB hb ++ locRefsClausesDB rest).Nodup := by
+        simpa [locRefsClausesDB] using h
+      rcases List.nodup_append.mp hsplit with ⟨hHead, hTail, _hsep⟩
+      exact ⟨runtimeLinearDB_deepActive hHead, runtimeLinearClausesDB_deepActive hTail⟩
+termination_by
+  clauses _ => sizeOf clauses
+
+end
+
 /-! ## Lifting (shift)
 --
 --
