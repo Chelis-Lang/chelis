@@ -5685,6 +5685,166 @@ private theorem deepActiveRuntimeLinearDB_handle_of
       (activeRuntimeLinearDB_handle_of (deepActiveRuntimeLinearDB_active hbody))
       (And.intro hbody hclauses)
 
+private theorem deepActiveRuntimeLinearDB_subst_abs_dead_of_separated
+    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.abs t body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.abs t body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.abs t body))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.abs t (substDBAux (j + 1) (lift v) body)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_copy_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.copy e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.copy e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.copy e))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.copy (substDBAux j v e)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_fst_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.fst e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.fst e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.fst e))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.fst (substDBAux j v e)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_snd_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.snd e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.snd e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.snd e))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.snd (substDBAux j v e)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_sum_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j i : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.sum e i)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.sum e i))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.sum e i))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.sum (substDBAux j v e) i) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_expand_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j i k : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.expand e i k)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.expand e i k))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.expand e i k))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.expand (substDBAux j v e) i k) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_uniformLike_dead_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat} {lo hi : Float}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.uniformLike e lo hi)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.uniformLike e lo hi))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.uniformLike e lo hi))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.uniformLike (substDBAux j v e) lo hi) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_grad_dead_of_separated
+    {t tOut : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.grad t tOut body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.grad t tOut body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.grad t tOut body))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.grad t tOut (substDBAux (j + 1) (lift v) body)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_vmap_dead_of_separated
+    {t : Typ} {body v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux (j + 1) (lift v) body) ∧
+      LocRefsSeparated (locRefsDB (substDBAux (j + 1) (lift v) body)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux (j + 1) (lift v) body))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.vmap t body)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.vmap t body))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.vmap t body))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.vmap t (substDBAux (j + 1) (lift v) body)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
+private theorem deepActiveRuntimeLinearDB_subst_perform_dead_of_separated
+    {op : EffectLabel} {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    (h :
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.perform op e)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.perform op e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.perform op e))) := by
+  refine ⟨?_, ?_, ?_⟩
+  · have hact : ActiveRuntimeLinearDB (TermDB.perform op (substDBAux j v e)) := by
+      simpa [ActiveRuntimeLinearDB, activeLocRefsDB] using deepActiveRuntimeLinearDB_active h.1
+    simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact h.1
+  · simpa [substDBAux, locRefsDB] using h.2.1
+  · simpa [substDBAux, locRefsDB] using h.2.2
+
 @[reducible] def DeepActiveSubstNoneMotive1 : (Δ' : CapCtx) → (S' : StoreTyp) →
     (Γ1 : LinearCtxDB) → (e : TermDB) → (t : Typ) →
     (eps : EffectRow) → (Γ2 : LinearCtxDB) →
