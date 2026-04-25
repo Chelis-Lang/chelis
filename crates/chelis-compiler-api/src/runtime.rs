@@ -766,9 +766,20 @@ impl<'a> EvalContext<'a> {
             "sin" => float_unop(args, f64::sin),
             "sqrt" => float_unop(args, f64::sqrt),
             "eq" => compare_eq(args),
-            "neq" => compare_eq(args).and_then(|value| match value {
-                RuntimeValue::Bool(value) => Ok(RuntimeValue::Bool(!value)),
-                other => Err(format!("unexpected neq result {other:?}")),
+            "neq" => compare_eq(args).map(|value| match value {
+                RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
+                RuntimeValue::Tensor(t) => RuntimeValue::Tensor(RuntimeTensorValue {
+                    value: IrTensorValue::from_vec(
+                        t.value.shape.clone(),
+                        t.value
+                            .data
+                            .iter()
+                            .map(|x| if *x == 0.0 { 1.0 } else { 0.0 })
+                            .collect(),
+                    ),
+                    precision: Prim::Bool,
+                }),
+                other => other,
             }),
             "cmplt" => {
                 if let (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) =
@@ -1941,6 +1952,12 @@ fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
         (Some(RuntimeValue::String(lhs)), Some(RuntimeValue::String(rhs))) => {
             Ok(RuntimeValue::Bool(lhs == rhs))
         }
+        // Element-wise tensor-tensor equality. The build-target lane already
+        // supports this; the host evaluator was returning an error, blocking
+        // IntCol/BoolCol construction and tensor-level is_nan in chelis test.
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            tensor_compare_value(lhs, rhs, |a, b| a == b).map(RuntimeValue::Tensor)
+        }
         other => Err(format!("eq/neq expect matching scalar args, got {other:?}")),
     }
 }
@@ -1955,6 +1972,11 @@ fn ordered_compare(
         }
         (Some(RuntimeValue::Float(lhs)), Some(RuntimeValue::Float(rhs))) => {
             Ok(RuntimeValue::Bool(cmp(*lhs, *rhs)))
+        }
+        // Element-wise tensor-tensor ordering. Mirrors the build-target lane
+        // and unblocks the same downstream tensor-level boolean ops.
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            tensor_compare_value(lhs, rhs, cmp).map(RuntimeValue::Tensor)
         }
         other => Err(format!(
             "ordered comparison expects matching numeric args, got {other:?}"

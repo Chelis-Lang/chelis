@@ -5920,8 +5920,11 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let rank = list_literal_len(shape_expr).unwrap_or(1);
-                return Type::Tensor(vec![Dim::Wildcard; rank], precision);
+                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
+                    let rank = list_literal_len(shape_expr).unwrap_or(1);
+                    vec![Dim::Wildcard; rank]
+                });
+                return Type::Tensor(dims, precision);
             }
 
             Type::Tensor(vec![Dim::Wildcard], precision)
@@ -5944,8 +5947,11 @@ fn infer_reshape_app(
                     errors.push(te.into());
                     return Type::Error;
                 }
-                let rank = list_literal_len(shape_expr).unwrap_or(1);
-                return Type::Tensor(vec![Dim::Wildcard; rank], precision);
+                let dims = list_literal_dims(shape_expr).unwrap_or_else(|| {
+                    let rank = list_literal_len(shape_expr).unwrap_or(1);
+                    vec![Dim::Wildcard; rank]
+                });
+                return Type::Tensor(dims, precision);
             }
 
             Type::Tensor(vec![Dim::Wildcard], precision)
@@ -5990,6 +5996,92 @@ fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
         return None;
     }
     Some(children(list).len())
+}
+
+/// If `expr` is a list literal whose every element is a concrete int literal
+/// (`5`, `lit 5`, or `cast(5, int64)` / `cast(5, int32)`), return the dim
+/// vector with each element as `Dim::Lit(N)`. Handles both the `(list ...)`
+/// tag form and the desugared Cons/Nil chain — surface list literals lower
+/// to the chain form by the time reshape is type-checked.
+///
+/// Returns `None` if any element is not a concrete integer or the list is
+/// not closed by a `Nil` — the caller falls back to `Dim::Wildcard`.
+///
+/// Without this, `reshape(t, [2, 1, 3])` infers as
+/// `tensor[Wildcard, Wildcard, Wildcard, p]` and a function declared as
+/// `-> tensor[2, 1, 3, f32]` reports a body/signature mismatch — RT-A1W1
+/// CRIT root cause (#35).
+fn list_literal_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
+    if let deep::Expr::List(list, _) = expr
+        && get_tag(list) == Some("list")
+    {
+        return children(list)
+            .iter()
+            .map(extract_int_for_dim)
+            .map(|opt| opt.map(Dim::Lit))
+            .collect();
+    }
+    cons_chain_int_dims(expr)
+}
+
+/// Walk a `Cons(head, Cons(head, ..., Nil))` chain and collect each head as
+/// a `Dim::Lit`. Returns `None` if the chain isn't closed by `Nil` or any
+/// head fails to extract as a concrete int.
+fn cons_chain_int_dims(expr: &deep::Expr) -> Option<Vec<Dim>> {
+    let mut dims = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let deep::Expr::List(list, _) = cursor else {
+            return None;
+        };
+        match get_tag(list)? {
+            "var" => {
+                let name = children(list).first().and_then(symbol_name)?;
+                if name == "Nil" {
+                    return Some(dims);
+                }
+                return None;
+            }
+            "app" => {
+                let app_children = children(list);
+                let func = app_children.first()?;
+                if !is_builtin_var(func, "Cons") {
+                    return None;
+                }
+                let head = app_children.get(1)?;
+                let tail = app_children.get(2)?;
+                dims.push(Dim::Lit(extract_int_for_dim(head)?));
+                cursor = tail;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Extract an int literal from a Deep expr, looking through `cast(N, int64)`
+/// and `cast(N, int32)` — both are common in Chelis dim lists since integer
+/// literals default to int32 and require an explicit cast for int64 contexts.
+/// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
+/// of the `cast` var, depending on how far desugaring has progressed.
+fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
+    if let Some(value) = extract_int_literal(expr) {
+        return Some(value);
+    }
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    match get_tag(list)? {
+        "cast" => extract_int_literal(children(list).first()?),
+        "app" => {
+            let app_children = children(list);
+            let func = app_children.first()?;
+            if !is_builtin_var(func, "cast") {
+                return None;
+            }
+            extract_int_literal(app_children.get(1)?)
+        }
+        _ => None,
+    }
 }
 
 fn check_layer_norm_signature(
