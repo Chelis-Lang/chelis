@@ -785,6 +785,79 @@ end
 
 mutual
 
+theorem activeLocRefsDB_liftAux
+    (c d : Nat) (e : TermDB) :
+    activeLocRefsDB (liftAux c d e) = activeLocRefsDB e := by
+  match e with
+  | TermDB.var i =>
+      by_cases h : i < c <;> simp [liftAux, activeLocRefsDB, h]
+  | TermDB.abs t body =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux (c + 1) d body]
+  | TermDB.app e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux c d e2]
+  | TermDB.letBind e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux (c + 1) d e2]
+  | TermDB.copy e =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.letpair e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux (c + 2) d e2]
+  | TermDB.pair e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux c d e2]
+  | TermDB.fst e =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.snd e =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.unit =>
+      simp [liftAux, activeLocRefsDB]
+  | TermDB.const v ds =>
+      simp [liftAux, activeLocRefsDB]
+  | TermDB.add e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux c d e2]
+  | TermDB.mul e1 e2 =>
+      simp [liftAux, activeLocRefsDB,
+        activeLocRefsDB_liftAux c d e1, activeLocRefsDB_liftAux c d e2]
+  | TermDB.sum e i =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.expand e i k =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.uniformLike e lo hi =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.grad t tOut body =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux (c + 1) d body]
+  | TermDB.vmap t body =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux (c + 1) d body]
+  | TermDB.handle epsH body clauses =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsClausesDB,
+        activeLocRefsDB_liftAux c d body,
+        activeLocRefsClausesDB_liftClausesAux c d clauses]
+  | TermDB.perform op e =>
+      simp [liftAux, activeLocRefsDB, activeLocRefsDB_liftAux c d e]
+  | TermDB.loc ell =>
+      simp [liftAux, activeLocRefsDB]
+
+theorem activeLocRefsClausesDB_liftClausesAux
+    (c d : Nat) (clauses : List (EffectLabel × TermDB)) :
+    activeLocRefsClausesDB (liftClausesAux c d clauses) = activeLocRefsClausesDB clauses := by
+  match clauses with
+  | [] =>
+      simp [liftClausesAux, activeLocRefsClausesDB]
+  | _ :: rest =>
+      simp [liftClausesAux, activeLocRefsClausesDB,
+        activeLocRefsClausesDB_liftClausesAux c d rest]
+
+end
+
+@[simp] theorem activeLocRefsDB_lift (e : TermDB) :
+    activeLocRefsDB (lift e) = activeLocRefsDB e := by
+  simpa [lift] using activeLocRefsDB_liftAux 0 1 e
+
+mutual
+
 theorem mem_locRefsDB_substDBAux
     (j : Nat) (v e : TermDB) (ell : Loc)
     (hmem : ell ∈ locRefsDB (substDBAux j v e)) :
