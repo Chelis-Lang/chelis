@@ -1080,6 +1080,23 @@ fn cmd_internal_test_file(
     filter: Option<&str>,
     timeout: Duration,
 ) -> Result<i32, String> {
+    // Hidden testing knob — gates the regression test for per-file
+    // subprocess isolation in `crates/chelis-cli/tests/phase3t_subprocess_isolation.rs`.
+    // Both env vars must be set together so a production user cannot trip
+    // this by accident with a single stray variable. The value of
+    // CHELIS_TEST_FORCE_ABORT is treated as a substring filter on the
+    // worker's `--rel-display`: only files whose displayed path contains
+    // that substring abort. This lets a regression test crash one file
+    // and let the sibling worker run normally even though both inherit
+    // the same env. Aborts via std::process::abort() to mimic a hard
+    // crash (stack overflow, SIGABRT, etc.).
+    if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1")
+        && let Ok(needle) = env::var("CHELIS_TEST_FORCE_ABORT")
+        && !needle.is_empty()
+        && rel_display.contains(&needle)
+    {
+        std::process::abort();
+    }
     let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let graph = chelis_reef::prepare_reef_graph(&cwd)?;
     let file_result = run_test_file(&graph, file, filter, rel_display, timeout);
