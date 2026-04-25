@@ -11,8 +11,9 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -25,8 +26,74 @@ fn runtime_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
+/// Locate `target/debug/` for this workspace by walking up from the test binary's
+/// own location. The test binary lives at `<target>/debug/deps/<binary>`, so
+/// the parent of its parent is the debug directory we want.
+fn target_debug_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe failed");
+    // exe = <target>/debug/deps/<test_bin>
+    exe.parent()
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+        .expect("could not resolve target/debug dir from current_exe")
+}
+
+/// Ensure `target/debug/libchelis_runtime.a` exists. When `chelis-runtime` is built
+/// transitively as a dev-dependency (rather than as the top-level package), cargo
+/// only emits the staticlib to `target/debug/deps/libchelis_runtime-<hash>.a` and
+/// does not promote it to the conventional `target/debug/libchelis_runtime.a` path.
+/// The test gcc invocation links against the conventional path, so this helper
+/// copies the hashed artifact into place on first use. Idempotent and
+/// thread-safe.
+fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
+    if canonical.exists() {
+        return Ok(());
+    }
+    let deps_dir = canonical
+        .parent()
+        .expect("canonical lib path has no parent")
+        .join("deps");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(&deps_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
+            let meta = entry.metadata()?;
+            let mtime = meta.modified()?;
+            match &newest {
+                Some((cur, _)) if *cur >= mtime => {}
+                _ => newest = Some((mtime, entry.path())),
+            }
+        }
+    }
+    let Some((_, hashed)) = newest else {
+        return Err(std::io::Error::other(format!(
+            "no libchelis_runtime-*.a found in {}",
+            deps_dir.display()
+        )));
+    };
+    // Atomic copy: write to a temp file in the same dir, then rename.
+    let tmp = canonical.with_extension("a.tmp");
+    fs::copy(&hashed, &tmp)?;
+    fs::rename(&tmp, canonical)?;
+    Ok(())
+}
+
 fn runtime_lib_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/libchelis_runtime.a")
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let canonical = target_debug_dir().join("libchelis_runtime.a");
+        if let Err(e) = ensure_runtime_static_lib(&canonical) {
+            panic!(
+                "failed to materialize libchelis_runtime.a at {}: {}",
+                canonical.display(),
+                e
+            );
+        }
+        canonical
+    })
+    .clone()
 }
 
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
