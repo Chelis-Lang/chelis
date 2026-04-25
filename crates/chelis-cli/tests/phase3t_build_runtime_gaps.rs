@@ -174,6 +174,91 @@ y = forward(x, w, b)
 }
 
 #[test]
+fn reef_std_attention_scaled_dot_product_builds_and_produces_expected_output() {
+    // scaled_dot_product_attention(q, k, v, scale):
+    //   kt      = permute(k, 1, 0)
+    //   scores  = matmul(q, kt)
+    //   scaled  = mul(scores, scale)
+    //   weights = softmax(scaled, -1)
+    //   out     = matmul(weights, v)
+    //
+    // Pin a row-uniform case: q and k both zero, scale all-ones. scores = 0,
+    // scaled = 0, softmax(0,0,0,0) = [0.25, 0.25, 0.25, 0.25] per row.
+    // With v = [[1,1,1,1], [2,2,2,2], [3,3,3,3], [4,4,4,4]] each output
+    // row is the uniform mean of v's rows = [2.5, 2.5, 2.5, 2.5].
+    //
+    // The body uses matmul / softmax / permute which the host evaluator
+    // doesn't support; build path is the only way to exercise this end-to-end.
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-attention-build");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Nn.Attention (scaled_dot_product_attention)
+
+zero_row = [cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)]
+ones_row = [cast(1.0, f32), cast(1.0, f32), cast(1.0, f32), cast(1.0, f32)]
+
+q = (pad_sequences_to([zero_row, zero_row, zero_row, zero_row], cast(4, int64), cast(0.0, f32)) : tensor[4, 4, f32])
+k = (pad_sequences_to([zero_row, zero_row, zero_row, zero_row], cast(4, int64), cast(0.0, f32)) : tensor[4, 4, f32])
+v = (pad_sequences_to([
+  [cast(1.0, f32), cast(1.0, f32), cast(1.0, f32), cast(1.0, f32)],
+  [cast(2.0, f32), cast(2.0, f32), cast(2.0, f32), cast(2.0, f32)],
+  [cast(3.0, f32), cast(3.0, f32), cast(3.0, f32), cast(3.0, f32)],
+  [cast(4.0, f32), cast(4.0, f32), cast(4.0, f32), cast(4.0, f32)]
+], cast(4, int64), cast(0.0, f32)) : tensor[4, 4, f32])
+scale = (pad_sequences_to([ones_row, ones_row, ones_row, ones_row], cast(4, int64), cast(0.0, f32)) : tensor[4, 4, f32])
+attn = scaled_dot_product_attention(q, k, v, scale)
+"#,
+    );
+
+    let stdout = build_and_run(&reef_home, &app_pkg);
+    // Every output element ≈ 2.5. Match the leading three significant digits.
+    assert!(
+        stdout.contains("2.5"),
+        "expected attention output to contain 2.5 (uniform-mean of v); got:\n{stdout}"
+    );
+}
+
+#[test]
+fn reef_std_crossentropy_loss_builds_and_produces_expected_output() {
+    // CrossEntropy.loss(logits, labels) =
+    //   softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg
+    //
+    // For batch=1, classes=2:
+    //   logits = [[2.0, 1.0]]
+    //   softmax = [exp(2)/(exp(2)+exp(1)), exp(1)/(exp(2)+exp(1))]
+    //           = [0.7310585, 0.2689414]
+    //   log     = [-0.3132617, -1.3132617]
+    //   labels  = [[1.0, 0.0]]   (one-hot on class 0)
+    //   prod    = [-0.3132617, 0.0]
+    //   sum/-   = 0.3132617
+    //
+    // The body uses `softmax` and `sum` reductions which are not in the host
+    // evaluator runtime, so eval would crash. Build path must produce
+    // ≈ 0.3132 (i.e. -log(softmax)_correct_class).
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-crossentropy-build");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Loss.CrossEntropy (loss)
+
+logits = (pad_sequences_to([[cast(2.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32)) : tensor[1, 2, f32])
+labels = (pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)]], cast(2, int64), cast(0.0, f32)) : tensor[1, 2, f32])
+nll = loss(logits, labels)
+"#,
+    );
+
+    let stdout = build_and_run(&reef_home, &app_pkg);
+    // Expected 0.3132. Match the leading three significant digits.
+    assert!(
+        stdout.contains("0.313"),
+        "expected cross-entropy loss to contain 0.313; got:\n{stdout}"
+    );
+}
+
+#[test]
 fn reef_std_rmsnorm_forward_builds_and_runs() {
     // RmsNorm.forward(x, gain, eps) normalizes by sqrt(mean(x^2) + eps).
     // For x = [3, 4]:
