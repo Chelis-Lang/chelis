@@ -3551,6 +3551,47 @@ private theorem runtimeLinear_plug_replace
   | perform op =>
       simpa [RuntimeLinear, plug, locRefs] using hNew
 
+private theorem deepActiveRuntimeLinear_multiPlug_chainNodup
+    {Es : EvalCtxChain} {e : Term}
+    (h : DeepActiveRuntimeLinear (multiPlug Es e)) :
+    (activeChainLocRefs Es).Nodup := by
+  induction Es generalizing e with
+  | nil =>
+      simp [activeChainLocRefs]
+  | cons E Es ih =>
+      rcases deepActiveRuntimeLinear_plug (E := E) (e := multiPlug Es e) h with
+        ⟨hInner, hCtx, hSep, _hSepSymm⟩
+      refine List.nodup_append.mpr ⟨deepActiveCtx_activeNodup hCtx, ih hInner, ?_⟩
+      intro ell hmemE ell' hmemEs hEq
+      subst ell'
+      have hLocMulti : ell ∈ activeLocRefs (multiPlug Es e) := by
+        exact (mem_activeLocRefs_multiPlug Es e ell).2 (Or.inl hmemEs)
+      exact hSep ell hmemE hLocMulti
+
+private theorem deepActiveRuntimeLinear_plug_replace
+    {E : EvalCtx} {e e' : Term}
+    (hOld : DeepActiveRuntimeLinear (plug E e))
+    (hNew : DeepActiveRuntimeLinear e')
+    (hSepCtxNew : LocRefsSeparated (activeCtxLocRefs E) (activeLocRefs e'))
+    (hSepNewCtx : LocRefsSeparated (activeLocRefs e') (activeCtxLocRefs E)) :
+    DeepActiveRuntimeLinear (plug E e') := by
+  rcases deepActiveRuntimeLinear_plug (E := E) (e := e) hOld with
+    ⟨_hInner, hCtx, _hSepOld, _hSepOldSymm⟩
+  exact deepActiveRuntimeLinear_plug_of hCtx hNew hSepCtxNew hSepNewCtx
+
+private theorem deepActiveRuntimeLinear_multiPlug_replace
+    {Es : EvalCtxChain} {e e' : Term}
+    (hOld : DeepActiveRuntimeLinear (multiPlug Es e))
+    (hNew : DeepActiveRuntimeLinear e')
+    (hSepCtxNew : LocRefsSeparated (activeChainLocRefs Es) (activeLocRefs e'))
+    (hSepNewCtx : LocRefsSeparated (activeLocRefs e') (activeChainLocRefs Es)) :
+    DeepActiveRuntimeLinear (multiPlug Es e') := by
+  rcases deepActiveRuntimeLinear_multiPlug (Es := Es) (e := e) hOld with
+    ⟨_hInner, hEs, _hSepOld, _hSepOldSymm⟩
+  exact deepActiveRuntimeLinear_multiPlug_of
+    (deepActiveRuntimeLinear_multiPlug_chainNodup hOld)
+    hEs hNew hSepCtxNew hSepNewCtx
+
 private theorem runtimeLinear_clause_mem_separated
     {clauses : List (EffectLabel × String × String × Term)}
     {op : EffectLabel} {x k : String} {hb : Term} {rhsRefs : List Loc}
