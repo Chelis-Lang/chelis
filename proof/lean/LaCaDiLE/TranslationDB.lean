@@ -1286,6 +1286,315 @@ theorem eraseTerm_activeRuntimeLinear_iff
     ActiveRuntimeLinear e ↔ ActiveRuntimeLinearDB eDB := by
   simpa [ActiveRuntimeLinear, ActiveRuntimeLinearDB, eraseTerm_activeLocRefs hErase]
 
+private theorem and_iff_congr2
+    {A B C D : Prop}
+    (h1 : A ↔ C) (h2 : B ↔ D) :
+    (A ∧ B) ↔ (C ∧ D) := by
+  constructor
+  · intro h
+    exact ⟨h1.mp h.1, h2.mp h.2⟩
+  · intro h
+    exact ⟨h1.mpr h.1, h2.mpr h.2⟩
+
+private theorem and_iff_congr3
+    {A B C D E F : Prop}
+    (h1 : A ↔ D) (h2 : B ↔ E) (h3 : C ↔ F) :
+    (A ∧ B ∧ C) ↔ (D ∧ E ∧ F) := by
+  constructor
+  · intro h
+    exact ⟨h1.mp h.1, h2.mp h.2.1, h3.mp h.2.2⟩
+  · intro h
+    exact ⟨h1.mpr h.1, h2.mpr h.2.1, h3.mpr h.2.2⟩
+
+mutual
+
+theorem eraseTerm_deepActiveRuntimeLinear_iff :
+    ∀ {ρ : BinderEnv} {e : Term} {eDB : TermDB},
+      eraseTerm ρ e = some eDB ->
+      (DeepActiveRuntimeLinear e ↔ DeepActiveRuntimeLinearDB eDB)
+  | ρ, Term.var x, eDB, hErase => by
+      cases hρx : lookupBinder ρ x with
+      | none =>
+          simp [eraseTerm, hρx] at hErase
+      | some i =>
+          simp [eraseTerm, hρx] at hErase
+          cases hErase
+          simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB,
+            ActiveRuntimeLinear, ActiveRuntimeLinearDB]
+  | ρ, Term.abs x t body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.abs x t body) ↔
+            ActiveRuntimeLinearDB (TermDB.abs t bodyDB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff hbody)
+  | ρ, Term.app e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.app e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.app e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.letBind x e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm (x :: ρ) e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.letBind x e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.letBind e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.copy e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.copy e) ↔
+            ActiveRuntimeLinearDB (TermDB.copy eDB') := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.letpair x y e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm (y :: x :: ρ) e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.letpair x y e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.letpair e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.pair e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.pair e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.pair e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.fst e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.fst e) ↔
+            ActiveRuntimeLinearDB (TermDB.fst eDB') := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.snd e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.snd e) ↔
+            ActiveRuntimeLinearDB (TermDB.snd eDB') := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.unit, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB,
+        ActiveRuntimeLinear, ActiveRuntimeLinearDB]
+  | ρ, Term.const c ds, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB,
+        ActiveRuntimeLinear, ActiveRuntimeLinearDB]
+  | ρ, Term.add e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.add e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.add e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.mul e1 e2, eDB, hErase => by
+      rcases h1 : eraseTerm ρ e1 with _ | e1DB <;>
+        simp [eraseTerm, h1] at hErase
+      rcases h2 : eraseTerm ρ e2 with _ | e2DB <;>
+        simp [eraseTerm, h1, h2] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.mul e1 e2) ↔
+            ActiveRuntimeLinearDB (TermDB.mul e1DB e2DB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff h1)
+          (eraseTerm_deepActiveRuntimeLinear_iff h2)
+  | ρ, Term.sum e d, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          have hAct :
+              ActiveRuntimeLinear (Term.sum e d) ↔
+                ActiveRuntimeLinearDB (TermDB.sum eDB0 (eraseDim d)) := by
+            simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+              activeLocRefs, activeLocRefsDB,
+              eraseTerm_activeLocRefs he]
+          simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+            and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.expand e d, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          have hAct :
+              ActiveRuntimeLinear (Term.expand e d) ↔
+                ActiveRuntimeLinearDB (TermDB.expand eDB0 (eraseDim d) 0) := by
+            simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+              activeLocRefs, activeLocRefsDB,
+              eraseTerm_activeLocRefs he]
+          simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+            and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.uniformLike e lo hi, eDB, hErase => by
+      cases he : eraseTerm ρ e with
+      | none =>
+          simp [eraseTerm, he] at hErase
+          cases hErase
+      | some eDB0 =>
+          simp [eraseTerm, he] at hErase
+          injection hErase with hEq
+          subst hEq
+          have hAct :
+              ActiveRuntimeLinear (Term.uniformLike e lo hi) ↔
+                ActiveRuntimeLinearDB (TermDB.uniformLike eDB0 lo hi) := by
+            simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+              activeLocRefs, activeLocRefsDB,
+              eraseTerm_activeLocRefs he]
+          simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+            and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.grad x t tOut body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.grad x t tOut body) ↔
+            ActiveRuntimeLinearDB (TermDB.grad t tOut bodyDB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff hbody)
+  | ρ, Term.vmap x t body, eDB, hErase => by
+      rcases hbody : eraseTerm (x :: ρ) body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.vmap x t body) ↔
+            ActiveRuntimeLinearDB (TermDB.vmap t bodyDB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs hbody]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff hbody)
+  | ρ, Term.handle epsH body clauses, eDB, hErase => by
+      rcases hbody : eraseTerm ρ body with _ | bodyDB <;>
+        simp [eraseTerm, hbody] at hErase
+      rcases hclauses : eraseClauses ρ clauses with _ | clausesDB <;>
+        simp [eraseTerm, hbody, hclauses] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.handle epsH body clauses) ↔
+            ActiveRuntimeLinearDB (TermDB.handle epsH bodyDB clausesDB) := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB,
+          eraseTerm_activeLocRefs hbody, eraseClauses_activeLocRefs hclauses]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr3 hAct
+          (eraseTerm_deepActiveRuntimeLinear_iff hbody)
+          (eraseClauses_deepActiveRuntimeLinear_iff hclauses)
+  | ρ, Term.perform op e, eDB, hErase => by
+      rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
+      cases hErase
+      have hAct :
+          ActiveRuntimeLinear (Term.perform op e) ↔
+            ActiveRuntimeLinearDB (TermDB.perform op eDB') := by
+        simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
+          activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
+      simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
+        and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
+  | ρ, Term.loc ell, eDB, hErase => by
+      simp [eraseTerm] at hErase
+      cases hErase
+      simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB,
+        ActiveRuntimeLinear, ActiveRuntimeLinearDB]
+
+theorem eraseClauses_deepActiveRuntimeLinear_iff :
+    ∀ {ρ : BinderEnv}
+      {clauses : List (EffectLabel × String × String × Term)}
+      {clausesDB : List (EffectLabel × TermDB)},
+      eraseClauses ρ clauses = some clausesDB ->
+      (DeepActiveRuntimeLinearClauses clauses ↔ DeepActiveRuntimeLinearClausesDB clausesDB)
+  | ρ, [], clausesDB, hErase => by
+      simp [eraseClauses] at hErase
+      cases hErase
+      simp [DeepActiveRuntimeLinearClauses, DeepActiveRuntimeLinearClausesDB]
+  | ρ, (op, x, k, hb) :: rest, clausesDB, hErase => by
+      rcases hhb : eraseTerm (k :: x :: ρ) hb with _ | hbDB <;>
+        simp [eraseClauses, hhb] at hErase
+      rcases hrest : eraseClauses ρ rest with _ | restDB <;>
+        simp [eraseClauses, hhb, hrest] at hErase
+      cases hErase
+      simp [DeepActiveRuntimeLinearClauses, DeepActiveRuntimeLinearClausesDB,
+        eraseTerm_deepActiveRuntimeLinear_iff hhb,
+        eraseClauses_deepActiveRuntimeLinear_iff hrest]
+
+end
+
 mutual
 
 theorem eraseTerm_suffix :

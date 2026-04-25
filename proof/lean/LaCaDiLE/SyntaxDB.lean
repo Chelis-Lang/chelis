@@ -160,6 +160,85 @@ def ActiveRuntimeLinearDB (e : TermDB) : Prop :=
 def RuntimeLinearDB (e : TermDB) : Prop :=
   (locRefsDB e).Nodup
 
+mutual
+
+/-- DB-side recursive closure of `ActiveRuntimeLinearDB`. This mirrors
+    `Syntax.DeepActiveRuntimeLinear` and checks dormant handler clause
+    bodies recursively rather than folding them into the active
+    footprint directly. -/
+def DeepActiveRuntimeLinearDB : TermDB → Prop
+  | TermDB.var _ => True
+  | TermDB.abs t body =>
+      ActiveRuntimeLinearDB (TermDB.abs t body) ∧
+      DeepActiveRuntimeLinearDB body
+  | TermDB.app e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.app e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.letBind e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.letBind e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.copy e =>
+      ActiveRuntimeLinearDB (TermDB.copy e) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.letpair e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.letpair e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.pair e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.pair e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.fst e =>
+      ActiveRuntimeLinearDB (TermDB.fst e) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.snd e =>
+      ActiveRuntimeLinearDB (TermDB.snd e) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.unit => True
+  | TermDB.const _ _ => True
+  | TermDB.add e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.add e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.mul e1 e2 =>
+      ActiveRuntimeLinearDB (TermDB.mul e1 e2) ∧
+      DeepActiveRuntimeLinearDB e1 ∧
+      DeepActiveRuntimeLinearDB e2
+  | TermDB.sum e i =>
+      ActiveRuntimeLinearDB (TermDB.sum e i) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.expand e i k =>
+      ActiveRuntimeLinearDB (TermDB.expand e i k) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.uniformLike e lo hi =>
+      ActiveRuntimeLinearDB (TermDB.uniformLike e lo hi) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.grad t tOut body =>
+      ActiveRuntimeLinearDB (TermDB.grad t tOut body) ∧
+      DeepActiveRuntimeLinearDB body
+  | TermDB.vmap t body =>
+      ActiveRuntimeLinearDB (TermDB.vmap t body) ∧
+      DeepActiveRuntimeLinearDB body
+  | TermDB.handle epsH body clauses =>
+      ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) ∧
+      DeepActiveRuntimeLinearDB body ∧
+      DeepActiveRuntimeLinearClausesDB clauses
+  | TermDB.perform op e =>
+      ActiveRuntimeLinearDB (TermDB.perform op e) ∧
+      DeepActiveRuntimeLinearDB e
+  | TermDB.loc _ => True
+
+def DeepActiveRuntimeLinearClausesDB :
+    List (EffectLabel × TermDB) → Prop
+  | [] => True
+  | (_, hb) :: rest =>
+      DeepActiveRuntimeLinearDB hb ∧
+      DeepActiveRuntimeLinearClausesDB rest
+
+end
+
 /-! ## Lifting (shift)
 --
 --

@@ -3129,6 +3129,98 @@ theorem activeRuntimeLinear_handleOpCtxs_repaired :
       · simp [ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
           handleCtxCounterClauses, handleCtxCounterBody, multiPlug, plug, subst])
 
+/-- The recursive active-footprint invariant keeps the captured-handler
+    repairs above: the dormant clause body is checked once, but not
+    spuriously duplicated by continuation capture. -/
+theorem deepActiveRuntimeLinear_handleOpCtx_repaired :
+    DeepActiveRuntimeLinear handleCtxCounterTerm ∧
+    Step ⟨[], handleCtxCounterTerm⟩ ⟨[], handleCtxCounterTerm'⟩ ∧
+    DeepActiveRuntimeLinear handleCtxCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handleCtxCounterTerm, handleCtxCounterClauses, handleCtxCounterBody, plug]
+  · exact Step.handleOpCtx []
+      EffectLabel.accum Term.unit
+      [EffectLabel.accum] EvalCtx.copy
+      handleCtxCounterClauses
+      "x" "k" handleCtxCounterBody Typ.unit
+      IsValue.unit
+      ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+      (by simp [handleCtxCounterClauses])
+      (by simp)
+      (by simp [EvalCtx.noHandleFor])
+  · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handleCtxCounterTerm', handleCtxCounterTerm,
+      handleCtxCounterClauses, handleCtxCounterBody, plug, subst]
+
+theorem deepActiveRuntimeLinear_handleOpCtxs_repaired :
+    DeepActiveRuntimeLinear handleCtxCounterTerm ∧
+    Step ⟨[], handleCtxCounterTerm⟩ ⟨[], handleCtxCounterTerm'⟩ ∧
+    DeepActiveRuntimeLinear handleCtxCounterTerm' := by
+  simpa [handleCtxCounterTerm, handleCtxCounterTerm', multiPlug] using
+    (show DeepActiveRuntimeLinear
+        (Term.handle [EffectLabel.accum]
+          (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+          handleCtxCounterClauses) ∧
+      Step
+        ⟨[],
+          Term.handle [EffectLabel.accum]
+            (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+            handleCtxCounterClauses⟩
+        ⟨[],
+          subst (subst handleCtxCounterBody Term.unit "x")
+            (Term.abs
+              (capturedContName
+                (Term.handle [EffectLabel.accum]
+                  (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                  handleCtxCounterClauses))
+              Typ.unit
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy]
+                  (Term.var
+                    (capturedContName
+                      (Term.handle [EffectLabel.accum]
+                        (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                        handleCtxCounterClauses))))
+                handleCtxCounterClauses))
+            "k"⟩ ∧
+      DeepActiveRuntimeLinear
+        (subst (subst handleCtxCounterBody Term.unit "x")
+          (Term.abs
+            (capturedContName
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                handleCtxCounterClauses))
+            Typ.unit
+            (Term.handle [EffectLabel.accum]
+              (multiPlug [EvalCtx.copy]
+                (Term.var
+                  (capturedContName
+                    (Term.handle [EffectLabel.accum]
+                      (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                      handleCtxCounterClauses))))
+              handleCtxCounterClauses))
+          "k") by
+      refine ⟨?_, ?_, ?_⟩
+      · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+          ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+          handleCtxCounterClauses, handleCtxCounterBody, multiPlug, plug]
+      · exact Step.handleOpCtxs []
+          EffectLabel.accum Term.unit
+          [EffectLabel.accum] [EvalCtx.copy]
+          handleCtxCounterClauses
+          "x" "k" handleCtxCounterBody Typ.unit
+          IsValue.unit
+          ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+          (by simp [handleCtxCounterClauses])
+          (by simp)
+          (by simp [EvalCtxChain.noHandleFor, EvalCtx.noHandleFor])
+      · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+          ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+          handleCtxCounterClauses, handleCtxCounterBody, multiPlug, plug, subst])
+
 private def handleDirectCounterBody : Term :=
   Term.letBind "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
 
@@ -3250,6 +3342,17 @@ theorem activeRuntimeLinear_handleOpDirect_counterexample :
         ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
         (by simp [handleDirectCounterClauses]))
   · simp [ActiveRuntimeLinear, handleDirectCounterTerm', activeLocRefs]
+
+/-- The recursive candidate invariant rejects the direct-handler witness
+    before reduction: the duplicated locations were dormant under
+    `ActiveRuntimeLinear`, but they are visible in the clause body's own
+    active footprint. -/
+theorem deepActiveRuntimeLinear_handleOpDirect_blocks_counterexample :
+    ¬ DeepActiveRuntimeLinear handleDirectCounterTerm := by
+  simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handleDirectCounterTerm, handleDirectCounterClauses,
+    handleDirectCounterBody]
 
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}

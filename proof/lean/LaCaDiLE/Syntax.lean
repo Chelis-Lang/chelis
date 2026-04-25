@@ -491,6 +491,86 @@ def ActiveRuntimeLinear (e : Term) : Prop :=
 def RuntimeLinear (e : Term) : Prop :=
   (locRefs e).Nodup
 
+mutual
+
+/-- Recursive closure of `ActiveRuntimeLinear`: every subterm must have
+    a duplicate-free active runtime footprint, and dormant handler
+    clause bodies are checked recursively instead of being ignored
+    wholesale. This is a candidate invariant for iterating
+    preservation across handler steps. -/
+def DeepActiveRuntimeLinear : Term → Prop
+  | Term.var _ => True
+  | Term.abs x t body =>
+      ActiveRuntimeLinear (Term.abs x t body) ∧
+      DeepActiveRuntimeLinear body
+  | Term.app e1 e2 =>
+      ActiveRuntimeLinear (Term.app e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.letBind x e1 e2 =>
+      ActiveRuntimeLinear (Term.letBind x e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.copy e =>
+      ActiveRuntimeLinear (Term.copy e) ∧
+      DeepActiveRuntimeLinear e
+  | Term.letpair x y e1 e2 =>
+      ActiveRuntimeLinear (Term.letpair x y e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.pair e1 e2 =>
+      ActiveRuntimeLinear (Term.pair e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.fst e =>
+      ActiveRuntimeLinear (Term.fst e) ∧
+      DeepActiveRuntimeLinear e
+  | Term.snd e =>
+      ActiveRuntimeLinear (Term.snd e) ∧
+      DeepActiveRuntimeLinear e
+  | Term.unit => True
+  | Term.const _ _ => True
+  | Term.add e1 e2 =>
+      ActiveRuntimeLinear (Term.add e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.mul e1 e2 =>
+      ActiveRuntimeLinear (Term.mul e1 e2) ∧
+      DeepActiveRuntimeLinear e1 ∧
+      DeepActiveRuntimeLinear e2
+  | Term.sum e d =>
+      ActiveRuntimeLinear (Term.sum e d) ∧
+      DeepActiveRuntimeLinear e
+  | Term.expand e d =>
+      ActiveRuntimeLinear (Term.expand e d) ∧
+      DeepActiveRuntimeLinear e
+  | Term.uniformLike e lo hi =>
+      ActiveRuntimeLinear (Term.uniformLike e lo hi) ∧
+      DeepActiveRuntimeLinear e
+  | Term.grad x t tOut body =>
+      ActiveRuntimeLinear (Term.grad x t tOut body) ∧
+      DeepActiveRuntimeLinear body
+  | Term.vmap x t body =>
+      ActiveRuntimeLinear (Term.vmap x t body) ∧
+      DeepActiveRuntimeLinear body
+  | Term.handle epsH body clauses =>
+      ActiveRuntimeLinear (Term.handle epsH body clauses) ∧
+      DeepActiveRuntimeLinear body ∧
+      DeepActiveRuntimeLinearClauses clauses
+  | Term.perform op e =>
+      ActiveRuntimeLinear (Term.perform op e) ∧
+      DeepActiveRuntimeLinear e
+  | Term.loc _ => True
+
+def DeepActiveRuntimeLinearClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, _, _, hb) :: rest =>
+      DeepActiveRuntimeLinear hb ∧
+      DeepActiveRuntimeLinearClauses rest
+
+end
+
 /-! ## Bound-variable set (Wave 2 freshness predicate)
 
 `boundVars e` lists every binder occurrence inside `e`. Combined with
