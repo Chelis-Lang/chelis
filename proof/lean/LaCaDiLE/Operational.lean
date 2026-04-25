@@ -1090,6 +1090,39 @@ theorem capturedContName_freshInTerm
   · intro hmem
     exact freshNameAvoiding_not_mem _ (List.mem_append.mpr (Or.inr hmem))
 
+/-- Seed binder minted for `grad` operational steps. It must avoid the
+    differentiated parameter name and be fresh for the body so the
+    inserted seed variable cannot be captured or accidentally shadow the
+    outer parameter binding. -/
+def gradSeedName (x : String) (e : Term) : String :=
+  freshNameAvoiding (x :: (freeVars e ++ boundVars e))
+
+theorem gradSeedName_freshInTerm
+    (x : String) (e : Term) :
+    freshInTerm (gradSeedName x e) e := by
+  unfold freshInTerm gradSeedName
+  refine ⟨?_, ?_⟩
+  · intro hmem
+    exact freshNameAvoiding_not_mem
+      (x :: (freeVars e ++ boundVars e))
+      (List.mem_cons_of_mem _ (List.mem_append.mpr (Or.inl hmem)))
+  · intro hmem
+    exact freshNameAvoiding_not_mem
+      (x :: (freeVars e ++ boundVars e))
+      (List.mem_cons_of_mem _ (List.mem_append.mpr (Or.inr hmem)))
+
+/-- Temporary binder minted for sequencing the unit-valued handled
+    adjoint result in `E-Grad` before returning the parameter value. -/
+def gradResultName (x : String) (e : Term) : String :=
+  freshNameAvoiding (gradSeedName x e :: x :: (freeVars e ++ boundVars e))
+
+/-- Start counter for the adjoint transform inside `E-Grad`. Choosing a
+    counter above the exposed binder-name lengths keeps all internal
+    `freshName` binders disjoint from the grad parameter and seed
+    binders. -/
+def gradAdjointCounter (x gs : String) : Nat :=
+  maxStringLength [x, gs] + 1
+
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
     congruence closure via evaluation contexts. -/
@@ -1328,9 +1361,11 @@ inductive Step : Config → Config → Prop
 
   /- ## AD and vectorization transforms -/
 
-  -- E-Grad: grad(λx:t.e)  ↦  λx:t. λgs:tOut. handle[{Accum}]
-  --                              (adjoint(e, x, gs))
-  --                              with {accum(p, k) → k(p)}
+  -- E-Grad: grad(λx:t.e)  ↦  λx:t. λgs:tOut.
+  --                              let _ = handle[{Accum}]
+  --                                         (adjointFrom(e, x, gs, n))
+  --                                         with {accum(p, k) → k(p)}
+  --                              in x
   --
   -- The constructor takes `tOut` as an extra parameter so preservation can
   -- pick the output type of `e` from the typing derivation. The paper's
@@ -1346,11 +1381,14 @@ inductive Step : Config → Config → Prop
       Step ⟨sigma, Term.grad x t tOut e⟩
            ⟨sigma,
             Term.abs x t
-              (Term.abs "gs" tOut
-                (Term.handle [EffectLabel.accum]
-                  (adjoint e x (Term.var "gs"))
-                  [(EffectLabel.accum, "p", "k",
-                    Term.app (Term.var "k") (Term.var "p"))]))⟩
+              (Term.abs (gradSeedName x e) tOut
+                (Term.letBind (gradResultName x e)
+                  (Term.handle [EffectLabel.accum]
+                    (adjointFrom e x (Term.var (gradSeedName x e))
+                      (gradAdjointCounter x (gradSeedName x e)))
+                    [(EffectLabel.accum, "p", "k",
+                      Term.app (Term.var "k") (Term.var "p"))])
+                  (Term.var x)))⟩
 
   -- E-Vmap: vmap(λx:t.e)  ↦  λx:addDim(d, t). addDimTerm(d, e)
   -- Wave 0 P6: body is now lifted via `addDimTerm` (defined in

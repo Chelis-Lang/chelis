@@ -26,6 +26,7 @@ import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
 import LaCaDiLE.AddDim
+import LaCaDiLE.AdjointTyping
 import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
@@ -1681,6 +1682,56 @@ theorem HasType.vmap_inv
       exact ⟨hGamma, t2, epsBody, slot, ht, hBody⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
+
+/-- Grad inversion with trailing `subEff` stripped. The term itself is
+    pure, so the interesting payload is the body derivation and the
+    exact arrow result type. -/
+theorem HasType.grad_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {x : String} {tArg tOut : Typ} {body : Term}
+    {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.grad x tArg tOut body) t eps Gamma2) :
+    Gamma1 = Gamma2 ∧
+    ∃ ds dsOut epsBody slot,
+      tArg = Typ.tensor ds ∧
+      tOut = Typ.tensor dsOut ∧
+      t = Typ.arrow (Typ.tensor ds)
+            (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody) [] ∧
+      subsetEffRow epsBody DiffCompat = true ∧
+      HasType (Capability.diff :: Delta) Sigma
+        (Gamma1 ++ [(x, some (Typ.tensor ds))]) body (Typ.tensor dsOut) epsBody
+        (Gamma2 ++ [(x, slot)]) := by
+  generalize heq : Term.grad x tArg tOut body = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tgrad Delta Sigma Gamma x' ds dsOut body' epsBody slot hBody hsub =>
+      cases heq
+      exact ⟨rfl, ds, dsOut, epsBody, slot, rfl, rfl, rfl, hsub, hBody⟩
+  | subEff Delta Sigma Gamma Gamma' e t' eps0 eps1 hInner hSub ih =>
+      obtain ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hBody⟩ := ih heq
+      exact ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hBody⟩
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+private theorem freshName_length_gt_used
+    {used : List String} {base : String} {m : Nat}
+    (hgt : maxStringLength used < m) :
+    maxStringLength used < (freshName base m).toList.length := by
+  rw [freshName_toList, List.length_append, List.length_cons, List.length_replicate]
+  omega
+
+private theorem adjointNamesFresh_of_length_bound
+    {Γ : LinearCtx} {n : Nat}
+    (hn : maxStringLength (linearCtxDom Γ) < n) :
+    AdjointNamesFresh n Γ := by
+  intro m hm _base _hbase hmem
+  have hle : (freshName _base m).toList.length ≤ maxStringLength (linearCtxDom Γ) :=
+    mem_maxStringLength hmem
+  have hgtm : maxStringLength (linearCtxDom Γ) < m := Nat.lt_of_lt_of_le hn hm
+  have hgtlen :
+      maxStringLength (linearCtxDom Γ) < (freshName _base m).toList.length :=
+    freshName_length_gt_used (used := linearCtxDom Γ) hgtm
+  exact Nat.not_lt_of_ge hle hgtlen
 
 /-- Extract the typed hole term from a closed one-frame evaluation
     context. The inner term may have a different type/effect row from
@@ -5235,8 +5286,306 @@ private theorem preservation_aux
           (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub),
         h_wf, fun _ _ _ hlook => hlook⟩
   | tgrad s x tv tOut body =>
-      intro locs hsep h_linear t eps h_typ h_scope
-      sorry
+      intro locs _hsep _hlinear t eps h_typ _h_scope
+      rcases HasType.grad_inv h_typ with
+        ⟨_hGamma, ds, dsOut, epsBody, slot, hTv, hTOut, hT, hDiffCompat, hBody⟩
+      subst tv
+      subst tOut
+      subst t
+      let gs := gradSeedName x body
+      let tmp := gradResultName x body
+      let n := gradAdjointCounter x gs
+      let epsAdj : EffectRow := EffectRow.union epsBody [EffectLabel.accum]
+      let epsHandle : EffectRow := EffectRow.removeOps epsAdj [EffectLabel.accum]
+      let clauseBody := Term.app (Term.var "k") (Term.var "p")
+      let clauses : List (EffectLabel × String × String × Term) :=
+        [(EffectLabel.accum, "p", "k", clauseBody)]
+      have hFullLen : maxStringLength [x, gs] < n := by
+        simpa [n, gs, gradAdjointCounter] using Nat.lt_succ_self (maxStringLength [x, gs])
+      have hFreshFull :
+          AdjointNamesFresh n
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx) := by
+        apply adjointNamesFresh_of_length_bound
+        simpa [linearCtxDom, n, gs] using hFullLen
+      have hxle : maxStringLength [x] ≤ maxStringLength [x, gs] := by
+        have : x ∈ [x, gs] := by simp
+        simpa [maxStringLength] using mem_maxStringLength this
+      have hFreshSmall :
+          AdjointNamesFresh n
+            ([(x, some (Typ.tensor ds))] : LinearCtx) := by
+        apply adjointNamesFresh_of_length_bound
+        have hSmallLen : maxStringLength [x] < n := Nat.lt_of_le_of_lt hxle hFullLen
+        simpa [linearCtxDom, n, gs] using hSmallLen
+      have hAdj :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+            (adjointFrom body x (Term.var gs) n)
+            Typ.unit
+            epsAdj
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx) := by
+        exact adjointFrom_preserves_typing [] Sigma [] x gs ds dsOut body epsBody n slot
+          hBody hDiffCompat hFreshFull hFreshSmall
+      have hClauseSig : OpSigMatch EffectLabel.accum Typ.unit Typ.unit := by
+        simp [OpSigMatch, opArgType, opRetType]
+      have hVarK :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+            (Term.var "k")
+            (Typ.arrow Typ.unit Typ.unit epsHandle)
+            []
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ("k", none)] : LinearCtx) := by
+        simpa [List.append_assoc, epsHandle] using
+          (HasType.var [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit)] : LinearCtx)
+            ([] : LinearCtx) "k" (Typ.arrow Typ.unit Typ.unit epsHandle))
+      have hVarP :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ("k", none)] : LinearCtx)
+            (Term.var "p")
+            Typ.unit
+            []
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+              ("k", none)] : LinearCtx) := by
+        simpa [List.append_assoc] using
+          (HasType.var [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([("k", none)] : LinearCtx) "p" Typ.unit)
+      have hClauseBody :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+            clauseBody
+            Typ.unit
+            epsHandle
+            ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+              ("k", none)] : LinearCtx) := by
+        have hClauseBodyRaw :
+            HasType [] Sigma
+              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+                ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+              clauseBody
+              Typ.unit
+              (EffectRow.union (EffectRow.union [] []) epsHandle)
+              ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+                ("k", none)] : LinearCtx) := by
+          simpa [clauseBody] using
+            (HasType.app [] Sigma
+              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+                ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+                ("k", none)] : LinearCtx)
+              ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+                ("k", none)] : LinearCtx)
+              (Term.var "k") (Term.var "p") Typ.unit Typ.unit epsHandle [] [] hVarK hVarP)
+        have hClauseBodySub :
+            SubEffRow (EffectRow.union (EffectRow.union [] []) epsHandle) epsHandle := by
+          intro op hop
+          simpa [EffectRow.union, List.mem_filter] using hop
+        exact HasType.subEff [] Sigma
+          ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+            ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+          ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+            ("k", none)] : LinearCtx)
+          clauseBody
+          Typ.unit
+          (EffectRow.union (EffectRow.union [] []) epsHandle)
+          epsHandle
+          hClauseBodyRaw
+          hClauseBodySub
+      have hClausesNil :
+          ClausesTyped [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            Typ.unit
+            epsHandle
+            [] :=
+        ClausesTyped.nil [] Sigma
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          Typ.unit epsHandle
+      have hClauses :
+          ClausesTyped [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            Typ.unit
+            epsHandle
+            clauses := by
+        exact ClausesTyped.cons [] Sigma
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          Typ.unit Typ.unit Typ.unit epsHandle
+          EffectLabel.accum "p" "k" clauseBody [] none none
+          hClauseSig hClauseBody hClausesNil
+      have hHandleRaw :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+            (Term.handle [EffectLabel.accum]
+              (adjointFrom body x (Term.var gs) n)
+              clauses)
+            Typ.unit
+            epsHandle
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx) := by
+        refine HasType.handle [] Sigma
+          ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          (adjointFrom body x (Term.var gs) n)
+          clauses
+          Typ.unit
+          [EffectLabel.accum]
+          epsAdj
+          hAdj
+          ?_
+          ?_
+          ?_
+          hClauses
+        · intro op hop
+          simp at hop
+          subst op
+          by_cases hacc : EffectLabel.accum ∈ epsBody
+          · exact List.mem_append_left _ hacc
+          · apply List.mem_append_right
+            simp [EffectRow.union, hacc]
+        · intro cl hmem
+          simp [clauses, clauseBody] at hmem
+          rcases hmem with rfl
+          simp
+        · intro op hop
+          simp at hop
+          subst op
+          refine ⟨(EffectLabel.accum, "p", "k", clauseBody), ?_, rfl⟩
+          simp [clauses]
+      have hHandleSub : SubEffRow epsHandle epsBody := by
+        intro op hop
+        have hopInfo : op ∈ epsAdj ∧ op ≠ EffectLabel.accum := by
+          simpa [epsHandle, EffectRow.removeOps, EffectRow.removeOp, List.mem_filter] using hop
+        have hopAdj : op ∈ epsAdj := hopInfo.1
+        have hopNe : op ≠ EffectLabel.accum := by
+          intro hEq
+          exact hopInfo.2 hEq
+        simp [epsAdj, EffectRow.union, List.mem_append, List.mem_filter] at hopAdj
+        rcases hopAdj with hopBody | hopAccum
+        · exact hopBody
+        · exfalso
+          exact hopNe hopAccum.1
+      have hHandle :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+            (Term.handle [EffectLabel.accum]
+              (adjointFrom body x (Term.var gs) n)
+              clauses)
+            Typ.unit
+            epsBody
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx) := by
+        exact HasType.subEff [] Sigma
+          ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          _
+          Typ.unit
+          epsHandle
+          epsBody
+          hHandleRaw
+          hHandleSub
+      have hReturn :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, none), (tmp, some Typ.unit)] : LinearCtx)
+            (Term.var x)
+            (Typ.tensor ds)
+            []
+            ([(x, none), (gs, none), (tmp, some Typ.unit)] : LinearCtx) := by
+        simpa [List.append_assoc] using
+          (HasType.var [] Sigma
+            ([] : LinearCtx)
+            ([(gs, none), (tmp, some Typ.unit)] : LinearCtx)
+            x (Typ.tensor ds))
+      have hLet :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+            (Term.letBind tmp
+              (Term.handle [EffectLabel.accum]
+                (adjointFrom body x (Term.var gs) n)
+                clauses)
+              (Term.var x))
+            (Typ.tensor ds)
+            epsBody
+            ([(x, none), (gs, none)] : LinearCtx) := by
+        simpa [List.append_assoc, EffectRow.union, tmp, clauses] using
+          (HasType.letBind [] Sigma
+            ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
+            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, none), (gs, none)] : LinearCtx)
+            tmp
+            (Term.handle [EffectLabel.accum]
+              (adjointFrom body x (Term.var gs) n)
+              clauses)
+            (Term.var x)
+            Typ.unit
+            (Typ.tensor ds)
+            epsBody
+            []
+            (some Typ.unit)
+            hHandle
+            hReturn)
+      have hInner :
+          HasType [] Sigma
+            ([(x, some (Typ.tensor ds))] : LinearCtx)
+            (Term.abs gs (Typ.tensor dsOut)
+              (Term.letBind tmp
+                (Term.handle [EffectLabel.accum]
+                  (adjointFrom body x (Term.var gs) n)
+                  clauses)
+                (Term.var x)))
+            (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
+            []
+            ([(x, none)] : LinearCtx) := by
+        exact HasType.abs [] Sigma
+          ([(x, some (Typ.tensor ds))] : LinearCtx)
+          ([(x, none)] : LinearCtx)
+          gs
+          (Typ.tensor dsOut)
+          (Typ.tensor ds)
+          epsBody
+          _
+          none
+          hLet
+      have hGrad :
+          HasType [] Sigma []
+            (Term.abs x (Typ.tensor ds)
+              (Term.abs gs (Typ.tensor dsOut)
+                (Term.letBind tmp
+                  (Term.handle [EffectLabel.accum]
+                    (adjointFrom body x (Term.var gs) n)
+                    clauses)
+                  (Term.var x))))
+            (Typ.arrow
+              (Typ.tensor ds)
+              (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
+              [])
+            []
+            [] := by
+        exact HasType.abs [] Sigma [] []
+          x
+          (Typ.tensor ds)
+          (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
+          []
+          _
+          none
+          hInner
+      exact ⟨Sigma,
+        HasType.subEff [] Sigma [] []
+          _
+          (Typ.arrow
+            (Typ.tensor ds)
+            (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
+            [])
+          []
+          eps
+          hGrad
+          (fun _ hop => by cases hop),
+        h_wf,
+        fun _ _ _ hlook => hlook⟩
   | tvmap s x tv d body =>
       intro locs hsep _hlinear t eps h_typ _hscope
       rcases HasType.vmap_inv h_typ with ⟨_hGamma, tBody, epsBody, slot, htEq, hBody⟩

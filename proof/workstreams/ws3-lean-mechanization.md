@@ -67,8 +67,8 @@ That premise is still not the final answer. The current branch now also shows:
 So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
-- `tgrad`, still upstream of `AdjointTyping.lean`
-- `tvmap` is now closed on the explicit batch-dimension surface
+- the preservation file itself is now closed on the executable branch, including `tgrad` and `tvmap`
+- the remaining AD-side admission has moved back into `AdjointTyping.lean`
 
 ## WS3.11 — `DimSafety.lean`
 

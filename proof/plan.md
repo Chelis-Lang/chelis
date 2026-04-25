@@ -4,14 +4,14 @@
 
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
-- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, and the remaining executable admits are concentrated in `Substitution.lean`, `AdjointTyping.lean`, and `Preservation.lean`
-- `Preservation.lean` is no longer blocked on generic context/store plumbing or `tvmap`; the remaining executable preservation admit is `tgrad`. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
+- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, and the remaining executable admits are concentrated in `Substitution.lean` and `AdjointTyping.lean`
+- `Preservation.lean` is now admit-free on the executable branch, including `tgrad` and `tvmap`. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
 - `Substitution.lean`'s current named substitution theorem shape is now also known to be false on arbitrary named derivations without a lexical or derivation-guided restriction
 - `AddDim.lean` is closed, the earlier `tvmap` dimension-choice mismatch was repaired by making the batch dimension explicit in the term syntax, and the remaining `tvmap` preservation proof is now closed
 - Immediate critical path:
   1. settle the stronger cross-boundary handler-aware runtime invariant
   2. close named substitution (`weakening_insert`, `subst_preserves_typing`)
-  3. resolve the `Accum` signature / adjoint-typing contradiction for `tgrad`
+  3. finish the remaining admitted adjoint cases in `AdjointTyping.lean`, then return to the AD-correctness wave
 
 This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
 

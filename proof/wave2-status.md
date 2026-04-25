@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build and recording the current runtime-invariant boundary in `Preservation.lean`.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing the executable `tgrad` preservation case, and recording the current runtime-invariant boundary in `Preservation.lean`.
 
 ## Acceptance Oracle
 
@@ -12,12 +12,11 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 
 - `cd proof/lean && lake build` is green again on the current branch head.
 - `TranslationDB.lean`'s four DB-backed preservation wrappers are closed.
-- `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, `ctx`, and `tvmap`.
+- `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, `ctx`, `tgrad`, and `tvmap`.
 - `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
-- The branch still contains 7 executable `sorry`s on the main proof path:
+- The branch still contains 3 executable `sorry`s on the main proof path:
   - `LaCaDiLE/Substitution.lean`: `weakening_insert`, `subst_preserves_typing`
-  - `LaCaDiLE/AdjointTyping.lean`: 4 admissions in the adjoint path
-  - `LaCaDiLE/Preservation.lean`: `tgrad`
+  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission in the adjoint path
   - `LaCaDiLE/Translation.lean`: admit-free, but its forward bridge is now explicitly lexical rather than a total named→DB transport theorem
 
 The current theorem-shape boundary is now explicit in Lean:
@@ -53,11 +52,11 @@ The current theorem-shape boundary is now explicit in Lean:
    `weakening_insert` and named `subst_preserves_typing` are still live admits on the soundness path.
 
 3. `AdjointTyping.lean`
-   This remains the upstream blocker for the `tgrad` preservation case and the eventual AD-correctness wave.
+   `tgrad` preservation is now closed, but the remaining admitted adjoint cases still block the final AD-correctness wave.
 
 ## Next Moves
 
 1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
 3. Close the named substitution admits in `Substitution.lean`.
-4. Resolve the `Accum` signature / adjoint-typing contradiction and then return to `tgrad`.
+4. Finish the remaining admitted adjoint cases and then return to the AD-correctness wave.
