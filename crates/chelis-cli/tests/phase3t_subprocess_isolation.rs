@@ -165,6 +165,17 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
         crash_row.contains("worker exited") || crash_row.contains("worker killed by signal"),
         "crash.ch row should mention worker exit/signal; got: {crash_row}\nfull stdout=\n{stdout}"
     );
+    // RT-A3 MEDIUM B2: when killed by a signal, the row must name the signal
+    // (e.g. "SIGABRT (6)") so SIGABRT vs SIGKILL are distinguishable. The
+    // env-hatch uses std::process::abort, which delivers SIGABRT(6).
+    if crash_row.contains("worker killed by signal") {
+        assert!(
+            crash_row.contains("SIGABRT (6)"),
+            "signal-killed crash.ch row should name the signal as 'SIGABRT (6)' \
+             (RT-A3 MEDIUM B2 — drop signal number was the symptom); \
+             got: {crash_row}\nfull stdout=\n{stdout}"
+        );
+    }
 
     // (b) Sibling file still ran to completion: tests/fine.ch::test_ok PASS.
     let fine_row = row_for_test_in_file(&stdout, "tests/fine.ch", "test_ok")

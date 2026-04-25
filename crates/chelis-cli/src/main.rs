@@ -973,6 +973,40 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+/// Render the signal that killed a worker (e.g. "SIGABRT (6)").
+/// On unix we read it from `ExitStatusExt::signal()`; on other platforms we
+/// fall back to "<unknown>" because no signal concept exists.
+#[cfg(unix)]
+fn worker_signal_str(status: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match status.signal() {
+        Some(n) => {
+            let name = match n {
+                1 => "SIGHUP",
+                2 => "SIGINT",
+                3 => "SIGQUIT",
+                4 => "SIGILL",
+                6 => "SIGABRT",
+                7 => "SIGBUS",
+                8 => "SIGFPE",
+                9 => "SIGKILL",
+                11 => "SIGSEGV",
+                13 => "SIGPIPE",
+                14 => "SIGALRM",
+                15 => "SIGTERM",
+                _ => "signal",
+            };
+            format!("{name} ({n})")
+        }
+        None => "<unknown>".to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn worker_signal_str(_status: &std::process::ExitStatus) -> String {
+    "<unknown>".to_string()
+}
+
 /// Spawn `chelis __test_file <file> --rel-display ... --filter ... --timeout N`
 /// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
 /// child crash (stack overflow, panic in the evaluator) only kills the child;
@@ -1054,11 +1088,11 @@ fn run_test_file_subprocess(
     // Child exited abnormally (signal, abort, crash before any output).
     if rows.is_empty() && !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let signal_code = output.status.code();
-        let msg = if let Some(code) = signal_code {
+        let msg = if let Some(code) = output.status.code() {
             format!("worker exited {code}: {}", stderr.trim())
         } else {
-            format!("worker killed by signal: {}", stderr.trim())
+            let signal_str = worker_signal_str(&output.status);
+            format!("worker killed by signal {signal_str}: {}", stderr.trim())
         };
         rows.push(TestRow {
             file: rel_display.to_string(),
