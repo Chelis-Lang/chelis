@@ -5144,6 +5144,198 @@ theorem activeRuntimeLinearDB_subst_live_gen_separated
   · rw [hlocs]
     exact hsep_rhs_e
 
+@[simp] theorem activeRuntimeLinearDB_lift
+    (e : TermDB) :
+    ActiveRuntimeLinearDB (lift e) ↔ ActiveRuntimeLinearDB e := by
+  simp [ActiveRuntimeLinearDB, activeLocRefsDB_lift]
+
+private theorem activeRuntimeLinearDB_unary_of_separated
+    {e : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e) = activeLocRefsDB e)
+    (hlin : ActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (activeLocRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (activeLocRefsDB e)) :
+    ActiveRuntimeLinearDB (mk e) ∧
+      LocRefsSeparated (activeLocRefsDB (mk e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (mk e)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · simpa [ActiveRuntimeLinearDB, hshape] using hlin
+  · simpa [hshape] using hsep_erhs
+  · simpa [hshape] using hsep_rhs_e
+
+private theorem activeRuntimeLinearDB_lift_of_separated
+    {e : TermDB} {rhsRefs : List Loc} :
+    ActiveRuntimeLinearDB e →
+    LocRefsSeparated (activeLocRefsDB e) rhsRefs →
+    LocRefsSeparated rhsRefs (activeLocRefsDB e) →
+    ActiveRuntimeLinearDB (lift e) ∧
+      LocRefsSeparated (activeLocRefsDB (lift e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (lift e)) := by
+  intro hlin hsep_erhs hsep_rhs_e
+  exact activeRuntimeLinearDB_unary_of_separated (activeLocRefsDB_lift e) hlin hsep_erhs hsep_rhs_e
+
+private theorem activeRuntimeLinearDB_lift2_of_separated
+    {e : TermDB} {rhsRefs : List Loc} :
+    ActiveRuntimeLinearDB e →
+    LocRefsSeparated (activeLocRefsDB e) rhsRefs →
+    LocRefsSeparated rhsRefs (activeLocRefsDB e) →
+    ActiveRuntimeLinearDB (lift (lift e)) ∧
+      LocRefsSeparated (activeLocRefsDB (lift (lift e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (lift (lift e))) := by
+  intro hlin hsep_erhs hsep_rhs_e
+  have h1 := activeRuntimeLinearDB_lift_of_separated (e := e) (rhsRefs := rhsRefs) hlin hsep_erhs hsep_rhs_e
+  exact activeRuntimeLinearDB_lift_of_separated (e := lift e) (rhsRefs := rhsRefs) h1.1 h1.2.1 h1.2.2
+
+private theorem activeRuntimeLinearDB_subst_passthrough_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {mk : TermDB → TermDB}
+    (hshape : ∀ e', activeLocRefsDB (mk e') = activeLocRefsDB e')
+    (hsubst : substDBAux j v (mk e) = mk (substDBAux j v e))
+    (h :
+      ActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v e))) :
+    ActiveRuntimeLinearDB (substDBAux j v (mk e)) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v (mk e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v (mk e))) := by
+  rw [hsubst]
+  exact activeRuntimeLinearDB_unary_of_separated
+    (hshape (substDBAux j v e)) h.1 h.2.1 h.2.2
+
+private theorem activeRuntimeLinearDB_subst_shifted_passthrough_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {mk : TermDB → TermDB}
+    (hshape : ∀ e', activeLocRefsDB (mk e') = activeLocRefsDB e')
+    (hsubst : substDBAux j v (mk e) = mk (substDBAux (j + 1) (lift v) e))
+    (h :
+      ActiveRuntimeLinearDB (substDBAux (j + 1) (lift v) e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux (j + 1) (lift v) e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux (j + 1) (lift v) e))) :
+    ActiveRuntimeLinearDB (substDBAux j v (mk e)) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v (mk e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v (mk e))) := by
+  rw [hsubst]
+  exact activeRuntimeLinearDB_unary_of_separated
+    (hshape (substDBAux (j + 1) (lift v) e)) h.1 h.2.1 h.2.2
+
+private theorem activeRuntimeLinearDB_subst_shifted2_passthrough_of_separated
+    {e v : TermDB} {rhsRefs : List Loc} {j : Nat}
+    {mk : TermDB → TermDB}
+    (hshape : ∀ e', activeLocRefsDB (mk e') = activeLocRefsDB e')
+    (hsubst : substDBAux j v (mk e) = mk (substDBAux (j + 2) (lift (lift v)) e))
+    (h :
+      ActiveRuntimeLinearDB (substDBAux (j + 2) (lift (lift v)) e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux (j + 2) (lift (lift v)) e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux (j + 2) (lift (lift v)) e))) :
+    ActiveRuntimeLinearDB (substDBAux j v (mk e)) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v (mk e))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v (mk e))) := by
+  rw [hsubst]
+  exact activeRuntimeLinearDB_unary_of_separated
+    (hshape (substDBAux (j + 2) (lift (lift v)) e)) h.1 h.2.1 h.2.2
+
+private theorem activeRuntimeLinearDB_append_term_both
+    {e1 e2 : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (h : ActiveRuntimeLinearDB (mk e1 e2)) :
+    ActiveRuntimeLinearDB e1 ∧ ActiveRuntimeLinearDB e2 ∧
+      LocRefsSeparated (activeLocRefsDB e1) (activeLocRefsDB e2) ∧
+      LocRefsSeparated (activeLocRefsDB e2) (activeLocRefsDB e1) := by
+  have happ : (activeLocRefsDB e1 ++ activeLocRefsDB e2).Nodup := by
+    simpa [ActiveRuntimeLinearDB, hshape] using h
+  exact runtimeLinearDB_append_inv_both happ
+
+private theorem activeRuntimeLinearDB_append_left_consuming_premises
+    {e1 e2 : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (hlin : ActiveRuntimeLinearDB (mk e1 e2))
+    (hsep_mk_rhs : LocRefsSeparated (activeLocRefsDB (mk e1 e2)) rhsRefs)
+    (hsep_rhs_mk : LocRefsSeparated rhsRefs (activeLocRefsDB (mk e1 e2))) :
+    ActiveRuntimeLinearDB e1 ∧
+      ActiveRuntimeLinearDB e2 ∧
+      LocRefsSeparated (activeLocRefsDB e1) (activeLocRefsDB e2 ++ rhsRefs) ∧
+      LocRefsSeparated (activeLocRefsDB e2 ++ rhsRefs) (activeLocRefsDB e1) ∧
+      LocRefsSeparated (activeLocRefsDB e2) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB e2) := by
+  rcases activeRuntimeLinearDB_append_term_both hshape hlin with ⟨h1, h2, hsep12, hsep21⟩
+  have hsep1rhs : LocRefsSeparated (activeLocRefsDB e1) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (activeLocRefsDB e1 ++ activeLocRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_left_of_append hsep_app_rhs
+  have hsep2rhs : LocRefsSeparated (activeLocRefsDB e2) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (activeLocRefsDB e1 ++ activeLocRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_right_of_append hsep_app_rhs
+  have hsep_rhs1 : LocRefsSeparated rhsRefs (activeLocRefsDB e1) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (activeLocRefsDB e1 ++ activeLocRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_app
+  have hsep_rhs2 : LocRefsSeparated rhsRefs (activeLocRefsDB e2) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (activeLocRefsDB e1 ++ activeLocRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_app
+  refine ⟨h1, h2, ?_, ?_, hsep2rhs, hsep_rhs2⟩
+  · exact locRefsSeparated_lhs_append hsep12 hsep1rhs
+  · exact locRefsSeparated_append hsep21 hsep_rhs1
+
+private theorem activeRuntimeLinearDB_append_right_consuming_premises
+    {e1 e2 : TermDB} {rhsRefs : List Loc}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (hlin : ActiveRuntimeLinearDB (mk e1 e2))
+    (hsep_mk_rhs : LocRefsSeparated (activeLocRefsDB (mk e1 e2)) rhsRefs)
+    (hsep_rhs_mk : LocRefsSeparated rhsRefs (activeLocRefsDB (mk e1 e2))) :
+    ActiveRuntimeLinearDB e1 ∧
+      ActiveRuntimeLinearDB e2 ∧
+      LocRefsSeparated (activeLocRefsDB e1) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB e1) ∧
+      LocRefsSeparated (activeLocRefsDB e2) (activeLocRefsDB e1 ++ rhsRefs) ∧
+      LocRefsSeparated (activeLocRefsDB e1 ++ rhsRefs) (activeLocRefsDB e2) := by
+  rcases activeRuntimeLinearDB_append_term_both hshape hlin with ⟨h1, h2, hsep12, hsep21⟩
+  have hsep1rhs : LocRefsSeparated (activeLocRefsDB e1) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (activeLocRefsDB e1 ++ activeLocRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_left_of_append hsep_app_rhs
+  have hsep2rhs : LocRefsSeparated (activeLocRefsDB e2) rhsRefs := by
+    have hsep_app_rhs : LocRefsSeparated (activeLocRefsDB e1 ++ activeLocRefsDB e2) rhsRefs := by
+      simpa [hshape] using hsep_mk_rhs
+    exact locRefsSeparated_right_of_append hsep_app_rhs
+  have hsep_rhs1 : LocRefsSeparated rhsRefs (activeLocRefsDB e1) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (activeLocRefsDB e1 ++ activeLocRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_left_of_rhs_append hsep_rhs_app
+  have hsep_rhs2 : LocRefsSeparated rhsRefs (activeLocRefsDB e2) := by
+    have hsep_rhs_app : LocRefsSeparated rhsRefs (activeLocRefsDB e1 ++ activeLocRefsDB e2) := by
+      simpa [hshape] using hsep_rhs_mk
+    exact locRefsSeparated_right_of_rhs_append hsep_rhs_app
+  refine ⟨h1, h2, hsep1rhs, hsep_rhs1, ?_, ?_⟩
+  · exact locRefsSeparated_lhs_append hsep21 hsep2rhs
+  · exact locRefsSeparated_append hsep12 hsep_rhs2
+
+private theorem activeRuntimeLinearDB_value_binary_premises
+    {e1 e2 v : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (hsep_v_mk : LocRefsSeparated (activeLocRefsDB v) (activeLocRefsDB (mk e1 e2)))
+    (hsep_mk_v : LocRefsSeparated (activeLocRefsDB (mk e1 e2)) (activeLocRefsDB v)) :
+    LocRefsSeparated (activeLocRefsDB v) (activeLocRefsDB e1) ∧
+      LocRefsSeparated (activeLocRefsDB e1) (activeLocRefsDB v) ∧
+      LocRefsSeparated (activeLocRefsDB v) (activeLocRefsDB e2) ∧
+      LocRefsSeparated (activeLocRefsDB e2) (activeLocRefsDB v) := by
+  have hsep_v_app : LocRefsSeparated (activeLocRefsDB v) (activeLocRefsDB e1 ++ activeLocRefsDB e2) := by
+    simpa [hshape] using hsep_v_mk
+  have hsep_app_v : LocRefsSeparated (activeLocRefsDB e1 ++ activeLocRefsDB e2) (activeLocRefsDB v) := by
+    simpa [hshape] using hsep_mk_v
+  exact ⟨
+    locRefsSeparated_left_of_rhs_append hsep_v_app,
+    locRefsSeparated_left_of_append hsep_app_v,
+    locRefsSeparated_right_of_rhs_append hsep_v_app,
+    locRefsSeparated_right_of_append hsep_app_v
+  ⟩
+
 private theorem deepActiveRuntimeLinearDB_active
     {e : TermDB}
     (h : DeepActiveRuntimeLinearDB e) :
