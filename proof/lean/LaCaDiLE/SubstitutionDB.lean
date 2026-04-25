@@ -5378,6 +5378,38 @@ private theorem activeRuntimeLinearDB_handle_of
     ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) := by
   simpa [ActiveRuntimeLinearDB, activeLocRefsDB, activeLocRefsClausesDB] using hbody
 
+private theorem activeLocRefsSeparated_substDBAux_right
+    {lhs e v : TermDB} {j : Nat}
+    (hsep_lhs_e : LocRefsSeparated (activeLocRefsDB lhs) (activeLocRefsDB e))
+    (hsep_lhs_v : LocRefsSeparated (activeLocRefsDB lhs) (locRefsDB v)) :
+    LocRefsSeparated (activeLocRefsDB lhs) (activeLocRefsDB (substDBAux j v e)) := by
+  intro ell hlhs hsubst
+  rcases mem_activeLocRefsDB_substDBAux j v e ell hsubst with he | hv
+  · exact hsep_lhs_e ell hlhs he
+  · exact hsep_lhs_v ell hlhs (mem_activeLocRefsDB_subset (e := v) hv)
+
+private theorem activeLocRefsSeparated_substDBAux_left
+    {e rhs v : TermDB} {j : Nat}
+    (hsep_e_rhs : LocRefsSeparated (activeLocRefsDB e) (activeLocRefsDB rhs))
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) (activeLocRefsDB rhs)) :
+    LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) (activeLocRefsDB rhs) := by
+  intro ell hsubst hrhs
+  rcases mem_activeLocRefsDB_substDBAux j v e ell hsubst with he | hv
+  · exact hsep_e_rhs ell he hrhs
+  · exact hsep_v_rhs ell (mem_activeLocRefsDB_subset (e := v) hv) hrhs
+
+private theorem activeRuntimeLinearDB_append_term_of_active_separated
+    {e1 e2 : TermDB}
+    {mk : TermDB → TermDB → TermDB}
+    (hshape : activeLocRefsDB (mk e1 e2) = activeLocRefsDB e1 ++ activeLocRefsDB e2)
+    (h1 : ActiveRuntimeLinearDB e1)
+    (h2 : ActiveRuntimeLinearDB e2)
+    (hsep : LocRefsSeparated (activeLocRefsDB e1) (activeLocRefsDB e2)) :
+    ActiveRuntimeLinearDB (mk e1 e2) := by
+  have happ : (activeLocRefsDB e1 ++ activeLocRefsDB e2).Nodup :=
+    nodup_append_of_runtimeLinear_separated h1 h2 hsep
+  simpa [ActiveRuntimeLinearDB, hshape] using happ
+
 mutual
 
 private theorem deepActiveRuntimeLinearDB_liftAux
