@@ -4,14 +4,14 @@ def read_csv(path: string) -> List[Dict[string, string]] = { match try_read_csv(
   | Some(rows) => rows
   | None => fail(string_concat("read_csv failed for ", path))
 } }
-def try_read_csv(path: string) -> Option[List[Dict[string, string]]] = {
+def try_read_csv(path: string) -> Option[List[Dict[string, string]]] = { if not(file_exists(path)) then None else {
   raw_lines = read_lines(path)
   lines = filter(fn (line: string) -> gt(string_len(line), cast(0, int64)), raw_lines)
   if eq(len(lines), cast(0, int64)) then Some([]) else match parse_line(index(lines, cast(0, int64))) with {
     | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)), [])
     | None => None
   }
-}
+} }
 def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[string, string]]) -> Option[List[Dict[string, string]]] = { if eq(len(lines), cast(0, int64)) then Some(rows) else {
   line = index(lines, cast(0, int64))
   match parse_line(line) with {

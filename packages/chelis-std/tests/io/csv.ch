@@ -8,14 +8,6 @@ import Std.Test (assert_eq_int, assert_eq_string, assert_true, fail)
 -- string-parsing entrypoint exported (the internal `parse_line` is private).
 -- We therefore round-trip via `write_file` + the public reader. Every test
 -- uses a unique fixture path under `/tmp` so test order is irrelevant.
---
--- Documented gap: `try_read_csv("/nonexistent/path")` does NOT return `None`.
--- The underlying `read_lines` raises an evaluator error when the path is
--- missing, so the failure surfaces as an evaluation crash rather than `None`.
--- Covering that case requires either (a) a `parse_csv(text)` string entrypoint,
--- or (b) wrapping the `read_lines` call in `file_exists` inside `try_read_csv`.
--- Both are upstream changes to `Std.IO.Csv` and out of scope for the self-test
--- suite. See phase 3t A1 Wave 2 follow-up.
 
 def check_field(rows: List[Dict[string, string]], i: int64, k: string, expected: string, label: string) -> unit ! { Test } = { match dict_get(index(rows, i), k) with {
   | Some(v) => assert_eq_string(v, expected, label)
@@ -82,6 +74,17 @@ def test_quoted_field_with_escaped_quote() -> unit ! { Test, IO } = {
   rows = read_csv(path)
   _ = assert_eq_int(len(rows), cast(1, int64), "escaped-quote CSV -> 1 row")
   check_field(rows, cast(0, int64), "k", "he said \"hi\"", "doubled \"\" decodes to literal \"")
+}
+
+def test_try_read_csv_missing_path_returns_none() -> unit ! { Test, IO } = {
+  -- Path that cannot exist (random suffix unique to this test). Previously
+  -- this crashed the worker: `read_lines` raised an evaluator error and
+  -- `try_read_csv` propagated it instead of catching it as None. Fix:
+  -- `try_read_csv` now precheckes `file_exists(path)` and returns None.
+  match try_read_csv("/tmp/chelis_std_test_csv_definitely_missing_x9q7p2.csv") with {
+    | Some(_) => fail("try_read_csv on missing path must be None, got Some")
+    | None => assert_true(true, "missing path -> None (not a crash)")
+  }
 }
 
 def test_unterminated_quote_returns_none() -> unit ! { Test, IO } = {
