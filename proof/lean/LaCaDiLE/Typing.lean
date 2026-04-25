@@ -689,6 +689,18 @@ theorem clauses_typed_free_vars
     ∀ z, z ∈ freeVarsClauses cls → z ∈ linearCtxDom Gamma2 :=
   clauses_typed_free_vars_aux h
 
+theorem clauses_typed_same_ctx
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) :
+    Gamma2 = Gamma3 := by
+  match h with
+  | ClausesTyped.nil _ _ _ _ _ =>
+      rfl
+  | ClausesTyped.cons _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hRest =>
+      exact clauses_typed_same_ctx hRest
+
 theorem has_type_closed_term_of_closed_input
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
