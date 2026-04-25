@@ -436,6 +436,53 @@ end
 
 mutual
 
+/-- Lifting a term through `addDimTerm` changes tensor shapes but does
+    not change which runtime locations the term mentions. -/
+theorem locRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, locRefs (addDimTerm d e) = locRefs e
+  | Term.var _ => rfl
+  | Term.abs _ _ body => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d body
+  | Term.app e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.letBind _ e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.copy e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.letpair _ _ e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.fst e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.snd e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.unit => rfl
+  | Term.const _ _ => rfl
+  | Term.add e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
+  | Term.sum e _ => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.expand e _ => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.uniformLike e _ _ => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.grad _ _ _ body => by
+      simpa [addDimTerm, locRefs] using locRefs_addDimTerm d body
+  | Term.vmap _ _ _ body => by
+      simpa [addDimTerm, locRefs] using locRefs_addDimTerm d body
+  | Term.handle _ body clauses => by
+      simp [addDimTerm, locRefs, locRefs_addDimTerm d body, locRefs_addDimClauses d clauses]
+  | Term.perform _ e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.loc _ => rfl
+
+/-- Companion to `locRefs_addDimTerm` for handler clauses. -/
+theorem locRefs_addDimClauses (d : Dim) :
+    ∀ clauses : List (EffectLabel × String × String × Term),
+      locRefsClauses (addDimClauses d clauses) = locRefsClauses clauses
+  | [] => rfl
+  | (_, _, _, hb) :: rest => by
+      simp [addDimClauses, locRefsClauses, locRefs_addDimTerm d hb, locRefs_addDimClauses d rest]
+
+end
+
+mutual
+
 /-- `activeLocRefs e` collects only the explicit runtime locations that
     are active in the current evaluation surface of `e`. Unlike
     `locRefs`, this does not descend into dormant handler clause bodies:

@@ -68,11 +68,11 @@ So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
 - `tgrad`, still upstream of `AdjointTyping.lean`
-- `tvmap`, no longer blocked by `AddDim.lean` or theorem shape; the remaining work is the actual preservation proof on the explicit batch-dimension surface
+- `tvmap` is now closed on the explicit batch-dimension surface
 
 ## WS3.11 — `DimSafety.lean`
 
-Corollary of preservation + dimension-specific lemmas. Relatively small once the `tvmap` rule surface and runtime invariant are both settled, but it now also depends on re-establishing the preservation premise across steps so preservation can be iterated over multi-step execution.
+Corollary of preservation + dimension-specific lemmas. Smaller now that the `tvmap` rule surface and preservation case are both settled, but it still depends on re-establishing the stronger preservation premise across steps so preservation can be iterated over multi-step execution.
 
 ## WS3.12 — `EffectCorrectness.lean`
 

@@ -4,7 +4,7 @@ A subproject of the Chelis repo. Distinct from the main Chelis language work; li
 
 **Goal:** publish **LaCaDiLE** (Lambda Calculus for Differentiable Linear Effects) at POPL 2027. The target proof package is a core tensor calculus with algebraic effects, linear types, and named-dimension indexing, with five theorems mechanized in Lean 4: type soundness, dimension safety, effect correctness, linearity soundness, and AD correctness.
 
-**Current state:** the Lean root build is green (`cd proof/lean && lake build`), but the metatheory is not complete yet. The active branch still contains admitted lemmas on the named-substitution path, the AD/`Accum` path, and the remaining `tgrad` / `tvmap` preservation cases; several downstream theorem files are still stubs. The current proof-design blockers are now explicit: the final runtime invariant for handled terms is still unsettled, the current named substitution theorem shape is false on arbitrary named derivations, and `tvmap` is now back to being an honest preservation proof obligation on the newly explicit batch-dimension surface.
+**Current state:** the Lean root build is green (`cd proof/lean && lake build`), but the metatheory is not complete yet. The active branch still contains admitted lemmas on the named-substitution path, the AD/`Accum` path, and the remaining `tgrad` preservation case; several downstream theorem files are still stubs. The current proof-design blockers are now explicit: the stronger runtime-invariant story for handled terms is still unsettled, the current named substitution theorem shape is false on arbitrary named derivations, and `tvmap` is now closed on the explicit batch-dimension surface.
 
 **Target venue:** PACMPL Issue POPL 2027
 **Submission deadline:** July 9, 2026 (AoE)

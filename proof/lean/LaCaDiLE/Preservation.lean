@@ -25,6 +25,7 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
+import LaCaDiLE.AddDim
 import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
@@ -423,6 +424,74 @@ theorem StoreWf.lookup_isSome_of_typing
 -- storeLookup_isSome_remove_ne, mem_storeTypDom_remove_iff, and
 -- StoreWf.remove_extend all moved to Store.lean so LinearitySoundness
 -- can use them without cross-file imports.
+
+/-- Lift `addDim d` only on the store-typing entries whose locations
+    occur in `locs`, leaving every other entry unchanged. This is the
+    store-side repair needed by the `tvmap` preservation case: the
+    transformed body needs lifted typings for its own referenced
+    locations, but untouched outer-frame locations must keep their
+    original types to satisfy `StoreTypOn`. -/
+def addDimStoreTypOn (d : Dim) (locs : List Loc) (Sigma : StoreTyp) : StoreTyp :=
+  Sigma.map (fun p =>
+    if p.1 ∈ locs then (p.1, addDim d p.2) else p)
+
+private theorem addDimStoreTypOn_entry_fst
+    (d : Dim) (locs : List Loc) (p : Loc × Typ) :
+    (if p.1 ∈ locs then (p.1, addDim d p.2) else p).1 = p.1 := by
+  by_cases hmem : p.1 ∈ locs <;> simp [hmem]
+
+theorem storeTypDom_addDimStoreTypOn
+    (d : Dim) (locs : List Loc) (Sigma : StoreTyp) :
+    storeTypDom (addDimStoreTypOn d locs Sigma) = storeTypDom Sigma := by
+  unfold addDimStoreTypOn storeTypDom
+  induction Sigma with
+  | nil =>
+      rfl
+  | cons hd tl ih =>
+      simp [addDimStoreTypOn_entry_fst, ih]
+
+theorem addDimStoreTypOn_lookup_mem
+    (d : Dim) (locs : List Loc) (Sigma : StoreTyp) (ell : Loc)
+    (hmem : ell ∈ locs) :
+    storeTypLookup (addDimStoreTypOn d locs Sigma) ell =
+      storeTypLookup (addDimStoreTyp d Sigma) ell := by
+  induction Sigma with
+  | nil =>
+      simp [storeTypLookup, addDimStoreTypOn, addDimStoreTyp]
+  | cons hd tl ih =>
+      by_cases hhd : hd.1 = ell
+      · subst hhd
+        simp [storeTypLookup, addDimStoreTypOn, addDimStoreTyp, hmem]
+      · by_cases hhdmem : hd.1 ∈ locs
+        · simp [storeTypLookup, addDimStoreTypOn, addDimStoreTyp, hhd, hhdmem] at ih ⊢
+          exact ih
+        · simp [storeTypLookup, addDimStoreTypOn, addDimStoreTyp, hhd, hhdmem] at ih ⊢
+          exact ih
+
+theorem addDimStoreTypOn_lookup_not_mem
+    (d : Dim) (locs : List Loc) (Sigma : StoreTyp) (ell : Loc)
+    (hnot : ell ∉ locs) :
+    storeTypLookup (addDimStoreTypOn d locs Sigma) ell =
+      storeTypLookup Sigma ell := by
+  induction Sigma with
+  | nil =>
+      simp [storeTypLookup, addDimStoreTypOn]
+  | cons hd tl ih =>
+      by_cases hhd : hd.1 = ell
+      · subst hhd
+        simp [storeTypLookup, addDimStoreTypOn, hnot]
+      · by_cases hhdmem : hd.1 ∈ locs
+        · simp [storeTypLookup, addDimStoreTypOn, hhd, hhdmem] at ih ⊢
+          exact ih
+        · simp [storeTypLookup, addDimStoreTypOn, hhd, hhdmem] at ih ⊢
+          exact ih
+
+theorem StoreWf.addDimStoreTypOn
+    {sigma : Store} {Sigma : StoreTyp}
+    (d : Dim) (locs : List Loc)
+    (h_wf : StoreWf sigma Sigma) :
+    StoreWf sigma (addDimStoreTypOn d locs Sigma) := by
+  simpa [StoreWf, storeTypDom_addDimStoreTypOn d locs Sigma] using h_wf
 
 /-- Handle inversion with subEff widening. `eps = removeOps epsB epsH`
     equation dropped; only the body sub-derivation is extracted. -/
@@ -1584,6 +1653,32 @@ theorem HasType.handle_inv_strong
       refine ⟨Γ2, epsB, hb, hHsubB, hClIn, hClCov, hcls, ?_⟩
       intro op hop
       exact hSub op (hwit op hop)
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+/-- Vmap inversion with subEff widening. The term itself is pure, so
+    we only recover the body derivation and the exact arrow result
+    type; any outer effect-row widening is handled separately by
+    reapplying `HasType.subEff` to the rebuilt abstraction. -/
+theorem HasType.vmap_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {x : String} {t1 : Typ} {d : Dim} {body : Term}
+    {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.vmap x t1 d body) t eps Gamma2) :
+    Gamma1 = Gamma2 ∧
+    ∃ t2 epsBody slot,
+      t = Typ.arrow (addDim d t1) (addDim d t2) epsBody ∧
+      HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) body t2 epsBody
+        (Gamma2 ++ [(x, slot)]) := by
+  generalize heq : Term.vmap x t1 d body = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tvmap Delta Sigma Gamma x' t1' t2' body' epsBody d' slot hBody =>
+      cases heq
+      exact ⟨rfl, t2', epsBody, slot, rfl, hBody⟩
+  | subEff Delta Sigma Gamma Gamma' e t' eps0 eps1 hInner hSub ih =>
+      obtain ⟨hGamma, t2, epsBody, slot, ht, hBody⟩ := ih heq
+      exact ⟨hGamma, t2, epsBody, slot, ht, hBody⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -5143,8 +5238,48 @@ private theorem preservation_aux
       intro locs hsep h_linear t eps h_typ h_scope
       sorry
   | tvmap s x tv d body =>
-      intro locs hsep h_linear t eps h_typ h_scope
-      sorry
+      intro locs hsep _hlinear t eps h_typ _hscope
+      rcases HasType.vmap_inv h_typ with ⟨_hGamma, tBody, epsBody, slot, htEq, hBody⟩
+      subst t
+      let Sigma' := addDimStoreTypOn d (locRefs body) Sigma
+      have hBodyLifted :
+          HasType [] (addDimStoreTyp d Sigma)
+            [(x, some (addDim d tv))]
+            (addDimTerm d body)
+            (addDim d tBody) epsBody
+            [(x, slot.map (addDim d))] := by
+        simpa using addDim_preserves_typing d hBody
+      have hBodySelective :
+          HasType [] Sigma'
+            [(x, some (addDim d tv))]
+            (addDimTerm d body)
+            (addDim d tBody) epsBody
+            [(x, slot.map (addDim d))] := by
+        apply hasType_store_weaken_on_locRefs hBodyLifted
+        intro ell tEll hmem hlook
+        have hmemBody : ell ∈ locRefs body := by
+          simpa [locRefs_addDimTerm (d := d) (e := body)] using hmem
+        simpa [Sigma', addDimStoreTypOn_lookup_mem d (locRefs body) Sigma ell hmemBody] using hlook
+      have hAbs :
+          HasType [] Sigma' []
+            (Term.abs x (addDim d tv) (addDimTerm d body))
+            (Typ.arrow (addDim d tv) (addDim d tBody) epsBody) [] [] := by
+        exact HasType.abs [] Sigma' [] []
+          x (addDim d tv) (addDim d tBody) epsBody
+          (addDimTerm d body) (slot.map (addDim d)) hBodySelective
+      have hsepBody : LocRefsSeparated locs (locRefs body) := by
+        simpa [locRefs] using hsep
+      have hOn : StoreTypOn locs Sigma Sigma' := by
+        intro ell tEll hmem hlook
+        have hnot : ell ∉ locRefs body := hsepBody ell hmem
+        simpa [Sigma', addDimStoreTypOn_lookup_not_mem d (locRefs body) Sigma ell hnot] using hlook
+      exact ⟨Sigma',
+        HasType.subEff [] Sigma' [] []
+          (Term.abs x (addDim d tv) (addDimTerm d body))
+          (Typ.arrow (addDim d tv) (addDim d tBody) epsBody) [] eps hAbs
+          (fun _ hop => by cases hop),
+        StoreWf.addDimStoreTypOn d (locRefs body) h_wf,
+        hOn⟩
   | ctx sigma sigma' E e0 e0' h_inner ih =>
       intro locs hsep h_linear t eps h_typ h_scope
       have h_scope_inner : WellScoped e0 := wellScoped_plug_inner h_scope
