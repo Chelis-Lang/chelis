@@ -274,13 +274,10 @@ theorem addDim_preserves_typing
     -- addDim d tArg / addDim d tRet are still in the OpSigMatch
     -- relation: each constructor is preserved by prepending d.
     have hMatch' : OpSigMatch op (addDim d tArg) (addDim d tRet) := by
-      cases hMatch with
-      | accumTensor ds => simpa [addDim] using OpSigMatch.accumTensor (DimList.cons d ds)
-      | accumUnit      => simpa [addDim] using OpSigMatch.accumUnit
-      | random         => simpa [addDim] using OpSigMatch.random
-      | resource       => simpa [addDim] using OpSigMatch.resource
-      | io             => simpa [addDim] using OpSigMatch.io
-      | fail           => simpa [addDim] using OpSigMatch.fail
+      rcases hMatch with ⟨hArg, hRet⟩
+      subst hArg
+      subst hRet
+      cases op <;> simp [OpSigMatch, opArgType, opRetType, addDim]
     exact HasType.perform Delta (addDimStoreTyp d Sigma)
       (addDimCtx d Gamma1) (addDimCtx d Gamma2)
       op (addDimTerm d e) (addDim d tArg) (addDim d tRet) eps ih hMatch'
@@ -362,20 +359,23 @@ theorem addDim_preserves_typing
     simp [addDimClauses]
     exact ClausesTyped.nil Delta (addDimStoreTyp d Sigma)
       (addDimCtx d Gamma2) (addDim d t) epsR
-  | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK _hhb _hrest ihhb ihrest =>
+  | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK hhb _hrest ihhb ihrest ihrest_db =>
     simp [addDimClauses]
+    have hhb' : OpSigMatch op (addDim d tArg) (addDim d tRet) := by
+      rcases hhb with ⟨hArg, hRet⟩
+      subst hArg
+      subst hRet
+      cases op <;> simp [OpSigMatch, opArgType, opRetType, addDim]
     have ihhb' : HasType Delta (addDimStoreTyp d Sigma)
         (addDimCtx d Gamma2 ++ [(x, some (addDim d tArg)),
                                 (k, some (Typ.arrow (addDim d tRet) (addDim d t) epsR))])
         (addDimTerm d hb) (addDim d t) epsR
         (addDimCtx d Gamma3 ++ [(x, slotX.map (addDim d)), (k, slotK.map (addDim d))]) := by
-      have := ihhb
-      rw [addDimCtx_append] at this
-      simpa [addDimCtx, List.map, addDim] using this
+      simpa [addDimCtx_append, addDimCtx_singleton, addDim] using ihrest
     exact ClausesTyped.cons Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma2) (addDimCtx d Gamma3)
       (addDim d t) (addDim d tArg) (addDim d tRet) epsR op x k
       (addDimTerm d hb) (addDimClauses d rest)
-      (slotX.map (addDim d)) (slotK.map (addDim d)) ihhb' ihrest
+      (slotX.map (addDim d)) (slotK.map (addDim d)) hhb' ihhb' ihrest_db
   | tvmap Delta Sigma Gamma x t1 t2 e eps dIn slot _h ih =>
     -- Stage 2 closes tvmap via `addDim_comm`: the outer lift by `d`
     -- and the inner vmap lift by `dIn` commute, because both prepend

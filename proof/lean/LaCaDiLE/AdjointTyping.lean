@@ -10,10 +10,11 @@
 -- forwarded effects of the original body, which must lie in
 -- DiffCompat).
 --
--- Wave 3 calculus refinement: T-Perform now uses an `OpSigMatch`
--- relation that lets `perform accum` take a tensor argument. This
--- unblocks the var/const/unit/loc base cases, which all emit
--- `Term.perform EffectLabel.accum gSeed` with `gSeed : tensor[dsOut]`.
+-- Wave 3 calculus refinement originally expected an `OpSigMatch`
+-- witness that lets `perform accum` take a tensor argument. The
+-- current global `OpSigMatch` in `Syntax.lean` instead fixes `accum`
+-- at `unit -> unit`, so the adjoint path is now blocked on a
+-- calculus-level signature decision rather than a local proof script.
 --
 -- Wave 4 Track B: the helper `adjoint_typed_aux` is counter-threaded
 -- (via `adjointFrom` rather than `adjoint`) and carries a freshness
@@ -204,10 +205,15 @@ private theorem adjoint_typed_aux
   have leaf_perform :
       HasType Delta Sigma Gamma_s
         (Term.perform EffectLabel.accum gSeed) Typ.unit
-        (EffectRow.union [EffectLabel.accum] epsSeed) Gamma_s' :=
-    HasType.perform Delta Sigma Gamma_s Gamma_s'
+        (EffectRow.union [EffectLabel.accum] epsSeed) Gamma_s' := by
+    have hAccumSig : OpSigMatch EffectLabel.accum (Typ.tensor dsE) Typ.unit := by
+      -- Blocked: `AdjointTransform` emits `perform accum gSeed` with a
+      -- tensor-valued seed, but the current global `OpSigMatch`
+      -- identifies `accum` with the monomorphic signature `unit -> unit`.
+      sorry
+    exact HasType.perform Delta Sigma Gamma_s Gamma_s'
       EffectLabel.accum gSeed (Typ.tensor dsE) Typ.unit epsSeed
-      h_seed (OpSigMatch.accumTensor dsE)
+      h_seed hAccumSig
   match e with
   -- Leaf cases.
   | Term.var _ =>

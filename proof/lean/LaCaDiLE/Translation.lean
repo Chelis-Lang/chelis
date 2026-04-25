@@ -382,14 +382,18 @@ theorem hasType_to_hasTypeDB
       simp only [clausesToDB]
       exact ClausesTypedDB.nil Δ' S' (ctxToDB Γ2) t_ epsR
   | cons Δ' S' Γ2 Γ3 t_ tArg tRet epsR op x k hb rest slotX slotK
-         _h_body _h_rest ih_body ih_rest =>
+         _h_body _h_rest h_rest ih_rest ih_rest_db =>
       simp only [clausesToDB]
-      rw [ctxToDB_append_pair, envOfCtx_append_pair] at ih_body
-      rw [ctxToDB_append_pair] at ih_body
+      have ih_rest' :
+          HasTypeDB Δ' S'
+            (some (Typ.arrow tRet t_ epsR) :: some tArg :: ctxToDB Γ2)
+            (termToDB (k :: x :: envOfCtx Γ2) hb) t_ epsR
+            (slotK :: slotX :: ctxToDB Γ3) := by
+        simpa [ctxToDB_append_pair, envOfCtx_append_pair] using ih_rest
       exact ClausesTypedDB.cons Δ' S' (ctxToDB Γ2) (ctxToDB Γ3)
         slotK slotX t_ tArg tRet epsR op
         (termToDB (k :: x :: envOfCtx Γ2) hb) (clausesToDB (envOfCtx Γ2) rest)
-        ih_body ih_rest
+        _h_body ih_rest' ih_rest_db
   | handle Δ' S' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
            h_body hSubsH hClsH hCover _h_cls ih_body ih_cls =>
       simp only [termToDB]
