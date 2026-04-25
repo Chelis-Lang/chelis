@@ -2533,6 +2533,59 @@ fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
     }
 }
 
+/// Narrow `Dim::Wildcard` slots in `ty` against the matching positions in
+/// `template`, replacing each Wildcard with the template's concrete dim
+/// (`Dim::Lit` or `Dim::Name`) where one is available. Used after a defsig
+/// unify to ensure the scheme registered for callers reflects the declared
+/// concrete shape rather than the body's permissive wildcards (#39).
+///
+/// This is structural and conservative: it only walks shapes that match
+/// (same rank for tensors, same arity for fn/tuple/adt), and only narrows
+/// Wildcard → concrete. Other dim shapes (Var, existing Lit/Name) are
+/// preserved. If shapes don't line up, the input is returned unchanged so
+/// genuine type errors flagged by `unify` aren't masked.
+fn narrow_wildcards_with(ty: &Type, template: &Type) -> Type {
+    match (ty, template) {
+        (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
+            let new_dims = dims
+                .iter()
+                .zip(tmpl_dims.iter())
+                .map(|(d, t)| match (d, t) {
+                    (Dim::Wildcard, Dim::Lit(_) | Dim::Name(_) | Dim::Var(_)) => t.clone(),
+                    _ => d.clone(),
+                })
+                .collect();
+            Type::Tensor(new_dims, *prec)
+        }
+        (Type::Fn(args, ret), Type::Fn(t_args, t_ret)) if args.len() == t_args.len() => {
+            let new_args = args
+                .iter()
+                .zip(t_args.iter())
+                .map(|(a, t)| narrow_wildcards_with(a, t))
+                .collect();
+            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret));
+            Type::Fn(new_args, new_ret)
+        }
+        (Type::Tuple(ts), Type::Tuple(t_ts)) if ts.len() == t_ts.len() => {
+            let new_ts = ts
+                .iter()
+                .zip(t_ts.iter())
+                .map(|(t, tt)| narrow_wildcards_with(t, tt))
+                .collect();
+            Type::Tuple(new_ts)
+        }
+        (Type::Adt(n, args), Type::Adt(_, t_args)) if args.len() == t_args.len() => {
+            let new_args = args
+                .iter()
+                .zip(t_args.iter())
+                .map(|(a, t)| narrow_wildcards_with(a, t))
+                .collect();
+            Type::Adt(n.clone(), new_args)
+        }
+        _ => ty.clone(),
+    }
+}
+
 fn tensor_concat_result_type(element_ty: &Type) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(
@@ -2818,18 +2871,32 @@ fn infer_top_level(
             total_nodes,
         );
 
-        // Enforce defsig: body must match declared signature
-        if let Some(decl_ty) = declared_ty
-            && let Err(_te) = unify(&body_ty, &decl_ty, subst)
-        {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("def '{}' body doesn't match declared signature", name),
-                vec![],
-            ));
-        }
+        // Enforce defsig: body must match declared signature.
+        //
+        // After unify succeeds, the body's inferred type may still carry
+        // `Dim::Wildcard` slots (e.g. from `pad_sequences_to`, `concat`,
+        // `to_tensor`) because `unify_dim` treats Wildcard as a permissive
+        // matches-anything sentinel. Generalizing the raw body would expose
+        // those wildcards to callers, who would then silently accept any
+        // concrete dim. Narrow the body's Wildcards against the declared
+        // template so the scheme registered for callers reflects the
+        // declared concrete shape (#39).
+        let scheme_body = if let Some(decl_ty) = declared_ty {
+            if let Err(_te) = unify(&body_ty, &decl_ty, subst) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("def '{}' body doesn't match declared signature", name),
+                    vec![],
+                ));
+            }
+            let resolved_body = subst.apply(&body_ty);
+            let resolved_decl = subst.apply(&decl_ty);
+            narrow_wildcards_with(&resolved_body, &resolved_decl)
+        } else {
+            body_ty
+        };
 
-        let scheme = env.generalize(&body_ty, subst);
+        let scheme = env.generalize(&scheme_body, subst);
         env.bind(name, scheme);
     } else {
         // Any other top-level expression

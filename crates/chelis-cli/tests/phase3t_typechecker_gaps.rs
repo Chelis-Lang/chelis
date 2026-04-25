@@ -1,22 +1,21 @@
 //! Phase 3t.A1 follow-up — captured type-checker gaps (#39).
 //!
-//! These tests pin the *current observed behavior* of known type-checker
-//! soundness gaps so the fix is tracked by a runnable case rather than only
-//! prose. They are `#[ignore]`'d so default `cargo test` stays green; flip
-//! the inversion in the assertion when the underlying gap is fixed.
+//! These tests pin the locked behavior of #39 — defsig dim enforcement
+//! through wildcard-bearing bodies — so a regression doesn't silently
+//! re-open the soundness gap.
 //!
-//! ## #39 — defsig dim enforcement leaks through wildcard inference
+//! ## #39 — defsig dim enforcement leaks through wildcard inference (FIXED)
 //!
 //! When a function declared with concrete tensor dims has a body whose
 //! inferred type contains `Dim::Wildcard` (e.g. `pad_sequences_to`,
 //! `to_tensor` produce wildcard dims), the unify between the body type
 //! and the declared signature succeeds because `unify_dim` treats Wildcard
-//! as a matches-anything sentinel. After unification, `infer_top_level`
-//! generalizes `body_ty` (which still holds the wildcards) instead of the
-//! declared concrete type, so callers that pass the result to a function
-//! expecting different concrete dims are silently accepted.
+//! as a matches-anything sentinel. The fix in `infer_top_level` narrows
+//! the body's wildcards against the declared template before generalizing,
+//! so callers see the declared concrete shape and dim mismatches surface
+//! as `DimensionMismatch` errors.
 //!
-//! Pure-sig case (no body) DOES catch the mismatch — see the second test.
+//! Pure-sig case (no body) also catches the mismatch — see the second test.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -107,13 +106,13 @@ result = do_thing(make_3)
 }
 
 #[test]
-#[ignore = "captured #39 gap: defsig dim enforcement leaks through wildcard inference. Bug, not feature. The make() body inferred type carries Dim::Wildcard from pad_sequences_to; unify(Wildcard, Lit(N)) succeeds; generalize stores wildcards; callers see polymorphic dims. Naive fix (use declared_ty for the scheme) breaks 5 workspace tests via linearity. Re-enable + invert assertion once the ascription-narrowing fix lands."]
 fn defsig_dim_enforcement_leaks_through_wildcard_body_in_callers() {
-    // The bug: `make` is declared to return `tensor[1, 3, f32]`, but its
-    // body inferred type is `tensor[*, *, f32]` (Wildcard dims from
-    // pad_sequences_to). `do_thing` expects `tensor[32, 128, f32]`. The
-    // call should fail with `DimensionMismatch: Lit(32) vs Lit(1)` but
-    // instead `chelis check` reports score 1 with no errors.
+    // `make` is declared to return `tensor[1, 3, f32]`, but its body
+    // inferred type carries Wildcard dims from `pad_sequences_to`.
+    // `do_thing` expects `tensor[32, 128, f32]`. The call must fail with
+    // `DimensionMismatch: Lit(32) vs Lit(1)`. Before the #39 fix,
+    // `chelis check` silently reported score ~1 with no errors because
+    // wildcards leaked into the generalized scheme.
     let (_dir, reef_home, app_pkg) = make_app("phase3t-tc-defsig-leak");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -127,15 +126,16 @@ def make() -> tensor[1, 3, f32] =
 result = do_thing(make())
 "#,
     );
-    // When the bug is fixed, this assertion holds and the test passes.
-    // While the bug stands, `check` returns score 1 with no errors, so the
-    // expected `failure()` here would not match.
+    // `chelis check` exits 0 even with errors in the JSON; assert on the
+    // JSON content rather than process exit status (matches the working
+    // baseline test's pattern).
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
-        .failure()
-        .stdout(predicate::str::contains("DimensionMismatch"));
+        .stdout(predicate::str::contains("DimensionMismatch"))
+        .stdout(predicate::str::contains("Lit(32)"))
+        .stdout(predicate::str::contains("Lit(1)"));
 }
