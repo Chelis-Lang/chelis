@@ -310,3 +310,82 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
         "fine.ch test_ok row should be PASS; got: {fine_row}\nfull stdout=\n{stdout}"
     );
 }
+
+#[test]
+fn worker_streams_rows_so_pre_crash_passes_survive() {
+    // RT-A3 D1 regression: when a worker aborts mid-file, the rows it had
+    // already produced must survive on stdout. Previously the worker
+    // collected every row in a Vec and only printed them at the end, so a
+    // stack overflow on test #90 silently dropped the 89 prior PASS rows.
+    //
+    // Setup: a file with three tests. CHELIS_TEST_ABORT_AFTER_TEST is set
+    // to "test_two" so the worker emits rows for test_one and test_two,
+    // then aborts before test_three. With streaming the parent must see
+    // both rows; without it, only the synthetic worker-crash row would
+    // appear.
+    let (_dir, pkg) = make_reef_package("phase3t-iso-stream");
+    write_file(
+        &pkg.join("tests/many.ch"),
+        r#"module Iso.Tests.Stream
+
+def test_one() -> unit = test_assert(true, "first runs and is captured pre-abort")
+def test_two() -> unit = test_assert(true, "second runs and triggers post-row abort")
+def test_three() -> unit = test_assert(true, "third never runs because worker aborted")
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_ABORT_AFTER_TEST", "test_two")
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1 because the worker aborted; stdout={stdout}\nstderr={stderr}"
+    );
+
+    let one = row_for_test_in_file(&stdout, "tests/many.ch", "test_one").unwrap_or_else(|| {
+        panic!("test_one row missing — streaming did not preserve pre-crash rows.\nstdout={stdout}")
+    });
+    assert!(
+        one.contains("PASS"),
+        "test_one row should be PASS (streamed before worker aborted); got: {one}\nfull stdout=\n{stdout}"
+    );
+
+    let two = row_for_test_in_file(&stdout, "tests/many.ch", "test_two")
+        .unwrap_or_else(|| panic!("test_two row missing — streaming did not preserve the row before the abort.\nstdout={stdout}"));
+    assert!(
+        two.contains("PASS"),
+        "test_two row should be PASS (emitted just before worker_aborted abort); got: {two}\nfull stdout=\n{stdout}"
+    );
+
+    // test_three never ran — the worker died after emitting test_two's row.
+    // The parent emits a synthetic <file> crash row to cover the dropped tests.
+    let crash_row = row_for_test_in_file(&stdout, "tests/many.ch", "<file>")
+        .unwrap_or_else(|| panic!("synthetic <file> crash row missing from:\nstdout={stdout}"));
+    assert!(
+        crash_row.contains("FAIL")
+            && (crash_row.contains("worker killed by signal")
+                || crash_row.contains("worker exited")),
+        "<file> row should report the worker crash; got: {crash_row}\nfull stdout=\n{stdout}"
+    );
+
+    // Summary counts: test_one PASS, test_two PASS, <file> FAIL.
+    // test_three never appears.
+    assert!(
+        !stdout.contains("test_three "),
+        "test_three should not appear (worker died before running it); got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("2 passed, 1 failed"),
+        "expected '2 passed, 1 failed' summary (test_one+test_two pass, <file> crash); got:\n{stdout}"
+    );
+}

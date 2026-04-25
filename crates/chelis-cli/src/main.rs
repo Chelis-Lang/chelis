@@ -1085,8 +1085,25 @@ fn run_test_file_subprocess(
         });
     }
 
-    // Child exited abnormally (signal, abort, crash before any output).
-    if rows.is_empty() && !output.status.success() {
+    // Child exited abnormally. Emit a synthetic file-level crash row when:
+    //   * killed by signal (exit code is None) — the worker died mid-file
+    //     and any tests after the last streamed row are lost. This case
+    //     covers RT-A3 D1 (streaming preserves the rows up to the crash;
+    //     this row covers the rest).
+    //   * exit > 1 — the worker hit an internal error path, not a normal
+    //     test-failure exit.
+    //   * rows is empty AND exit != 0 — even with a "normal" exit 1, no
+    //     rows means the worker emitted nothing for some reason; surface
+    //     the failure so it does not silently disappear.
+    // Exit 1 with at least one row is the normal "some test failed" exit
+    // and does not warrant a synthetic row.
+    let worker_crashed = match output.status.code() {
+        None => true,
+        Some(0) => false,
+        Some(1) => rows.is_empty(),
+        Some(_) => true,
+    };
+    if worker_crashed {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = if let Some(code) = output.status.code() {
             format!("worker exited {code}: {}", stderr.trim())
@@ -1133,24 +1150,63 @@ fn cmd_internal_test_file(
     }
     let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let graph = chelis_reef::prepare_reef_graph(&cwd)?;
-    let file_result = run_test_file(&graph, file, filter, rel_display, timeout);
-    let rows = match file_result {
-        Ok(rows) => rows,
-        Err(err) => vec![TestRow {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut failed = 0usize;
+    let mut io_err: Option<String> = None;
+    // RT-A3 D1 streaming-regression hatch: when this env var is set (and
+    // CHELIS_TEST_INTERNAL_TESTING=1), the worker aborts immediately after
+    // emitting the row for the test whose name contains the configured
+    // substring, simulating a stack-overflow / abort partway through a
+    // file. The streaming write+flush below means earlier rows survive.
+    let abort_after_test_substring =
+        if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1") {
+            env::var("CHELIS_TEST_ABORT_AFTER_TEST").ok()
+        } else {
+            None
+        };
+    // RT-A3 D1: write+flush per row so a mid-file worker crash preserves
+    // the rows emitted before it. Previously the worker buffered every row
+    // in a Vec and printed all of them on exit, so a stack-overflow on test
+    // #90 silently dropped the 89 prior PASS rows.
+    let file_result = run_test_file(&graph, file, filter, rel_display, timeout, |row| {
+        if io_err.is_some() {
+            return;
+        }
+        if let Err(e) = writeln!(out, "{}", row.to_json()) {
+            io_err = Some(e.to_string());
+            return;
+        }
+        if let Err(e) = out.flush() {
+            io_err = Some(e.to_string());
+            return;
+        }
+        if row.status == TestStatus::Fail {
+            failed += 1;
+        }
+        if let Some(needle) = abort_after_test_substring.as_deref()
+            && !needle.is_empty()
+            && row.test.contains(needle)
+        {
+            std::process::abort();
+        }
+    });
+    if let Some(e) = io_err {
+        return Err(e);
+    }
+    if let Err(err) = file_result {
+        // Read/parse failures surface as one synthetic file-level row, the
+        // same shape the parent's worker-crash path emits, so the renderer
+        // does not need a special case.
+        let row = TestRow {
             file: rel_display.to_string(),
             test: "<file>".to_string(),
             status: TestStatus::Fail,
             message: Some(err),
-        }],
-    };
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut failed = 0usize;
-    for row in &rows {
+        };
         writeln!(out, "{}", row.to_json()).map_err(|e| e.to_string())?;
-        if row.status == TestStatus::Fail {
-            failed += 1;
-        }
+        out.flush().map_err(|e| e.to_string())?;
+        failed += 1;
     }
     Ok(if failed == 0 { 0 } else { 1 })
 }
@@ -1225,13 +1281,17 @@ fn json_string(s: &str) -> String {
 /// Execute every `test_*` function in `file` and return one `TestRow` per
 /// selected test. Returns `Err` only when the file itself cannot be read
 /// or parsed — compile/runtime failures surface as per-row `FAIL` entries.
-fn run_test_file(
+fn run_test_file<F>(
     graph: &chelis_reef::PreparedReefGraph,
     file: &Path,
     filter: Option<&str>,
     rel_display: &str,
     timeout: Duration,
-) -> Result<Vec<TestRow>, String> {
+    mut on_row: F,
+) -> Result<(), String>
+where
+    F: FnMut(&TestRow),
+{
     let source = fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
     let parsed = chelis_surf::parser::parse_str(&source)
         .map_err(|e| format!("parse {}: {e}", file.display()))?;
@@ -1245,28 +1305,30 @@ fn run_test_file(
     let matched_tests = match enumerate_test_fns(&flat_decls, filter, rel_display) {
         EnumerationOutcome::Tests(tests) => tests,
         EnumerationOutcome::Error(msg) => {
-            return Ok(vec![TestRow {
+            on_row(&TestRow {
                 file: rel_display.to_string(),
                 test: "<file>".to_string(),
                 status: TestStatus::Fail,
                 message: Some(msg),
-            }]);
+            });
+            return Ok(());
         }
     };
     if matched_tests.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     // File-level compile pre-check (RT3 H2). If the whole module doesn't
     // type-check, emit ONE file-level failure row instead of cascading the
     // same compile error across every discovered test.
     if let Err(compile_err) = chelis_reef::compile_with_reef_graph(graph, &flat_decls) {
-        return Ok(vec![TestRow {
+        on_row(&TestRow {
             file: rel_display.to_string(),
             test: "<file>".to_string(),
             status: TestStatus::Fail,
             message: Some(format!("compile: {compile_err}")),
-        }]);
+        });
+        return Ok(());
     }
 
     // Module-init pre-check (RT3 H1). Evaluate the flat module alone — any
@@ -1274,22 +1336,21 @@ fn run_test_file(
     // `module-init` row and cascades every discovered test to FAIL. This
     // matches the plan's worked example output.
     if let Some(init_err) = eval_module_init(graph, &flat_decls, timeout) {
-        let mut rows = Vec::with_capacity(matched_tests.len() + 1);
-        rows.push(TestRow {
+        on_row(&TestRow {
             file: rel_display.to_string(),
             test: "module-init".to_string(),
             status: TestStatus::Fail,
             message: Some(init_err),
         });
         for test in &matched_tests {
-            rows.push(TestRow {
+            on_row(&TestRow {
                 file: rel_display.to_string(),
                 test: test.name.clone(),
                 status: TestStatus::Fail,
                 message: Some("module-init failed".to_string()),
             });
         }
-        return Ok(rows);
+        return Ok(());
     }
 
     // Per-test isolation via filtered host-program eval. Synthesize ONE
@@ -1324,12 +1385,13 @@ fn run_test_file(
     let prepared_reef = match chelis_reef::compile_with_reef_graph(graph, &synth_decls) {
         Ok(p) => p,
         Err(err) => {
-            return Ok(vec![TestRow {
+            on_row(&TestRow {
                 file: rel_display.to_string(),
                 test: "<file>".to_string(),
                 status: TestStatus::Fail,
                 message: Some(format!("compile: {err}")),
-            }]);
+            });
+            return Ok(());
         }
     };
     let source_text = chelis_surf::format::format_program(&prepared_reef.decls);
@@ -1352,16 +1414,16 @@ fn run_test_file(
                 .map(|d| d.message.clone())
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Ok(vec![TestRow {
+            on_row(&TestRow {
                 file: rel_display.to_string(),
                 test: "<file>".to_string(),
                 status: TestStatus::Fail,
                 message: Some(format!("compile: {msg}")),
-            }]);
+            });
+            return Ok(());
         }
     };
 
-    let mut rows = Vec::with_capacity(matched_tests.len());
     for (test, synth_name) in matched_tests.iter().zip(synth_test_names.iter()) {
         let root = synth_name.clone();
         let handle = prepared_eval.clone();
@@ -1387,14 +1449,14 @@ fn run_test_file(
             },
         };
 
-        rows.push(TestRow {
+        on_row(&TestRow {
             file: rel_display.to_string(),
             test: test.name.clone(),
             status,
             message,
         });
     }
-    Ok(rows)
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
