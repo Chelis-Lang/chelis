@@ -14,7 +14,7 @@
 //! `chelis test tests/` from inside the staged package. The summary line
 //! `N passed, 0 failed` is parsed and N is asserted >= 150 so we leave
 //! headroom for new self-tests but catch a silent regression that drops the
-//! corpus below its current floor (175 as of this commit).
+//! corpus below its current floor (178 as of this commit).
 //!
 //! Pattern mirrors `phase3t_pseudo_nautilus.rs`.
 
@@ -23,8 +23,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-/// Floor on the chelis-std self-test count. Current corpus is 175 passing
-/// tests across 26 files; the floor is set 25 below current to leave headroom
+/// Floor on the chelis-std self-test count. Current corpus is 178 passing
+/// tests across 27 files; the floor is set 28 below current to leave headroom
 /// for additions while still failing if a regression silently drops tests.
 const MIN_PASSED: u32 = 150;
 
@@ -50,7 +50,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 #[test]
-#[ignore = "manual gate: ~170s runtime; runs the full 175-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test phase3t_chelis_std_self -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
+#[ignore = "manual gate: ~170s runtime; runs the full 178-test chelis-std self-test corpus under chelis test. Invoke via `cargo test -p chelis-cli --test phase3t_chelis_std_self -- --ignored --nocapture`. CI/manual gate; not on the inner-loop budget per CLAUDE.md."]
 fn chelis_std_self_test_corpus_passes_under_chelis_test() {
     // Stage chelis-std into a tempdir so the test does not touch the
     // checked-in package on disk and is isolated from any developer-local

@@ -1509,6 +1509,34 @@ impl<'a> EvalContext<'a> {
                     ))
                 }
             }
+            "test_assert_eq_tensor_int64" => {
+                // Bit-exact tensor equality for int64 tensors. Std.Test
+                // exposes this as `assert_eq_tensor_int64` because
+                // `assert_close_tensor` types only on f32 tensors and is
+                // tolerance-based — neither fits int64 reduction outputs
+                // (e.g. `argmax`/`argmin` which return int64 indices).
+                let actual = expect_tensor_arg(args, 0)?;
+                let expected = expect_tensor_arg(args, 1)?;
+                let label = expect_string_arg(args, 2)?;
+                let actual_data = &actual.value.data;
+                let expected_data = &expected.value.data;
+                if actual_data.len() != expected_data.len() {
+                    return Err(format!(
+                        "assert_eq_tensor_int64 ({label}): length mismatch, expected {} elements, got {}",
+                        expected_data.len(),
+                        actual_data.len()
+                    ));
+                }
+                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
+                    if a != e {
+                        return Err(format!(
+                            "assert_eq_tensor_int64 ({label}): at index {i} expected {} got {}",
+                            e as i64, a as i64
+                        ));
+                    }
+                }
+                Ok(RuntimeValue::Unit)
+            }
             "test_assert_close_tensor" => {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;

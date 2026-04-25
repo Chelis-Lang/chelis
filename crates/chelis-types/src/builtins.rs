@@ -75,6 +75,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "test_assert_eq_bool",
     "test_assert_eq_string",
     "test_assert_close_tensor",
+    "test_assert_eq_tensor_int64",
     "string_len",
     "string_concat",
     "string_slice",
@@ -593,6 +594,26 @@ pub fn builtin_env() -> (Env, VarGen) {
                         Type::Var(tensor_tv),
                         Type::Var(tensor_tv),
                         Type::Prim(Prim::F32),
+                        Type::Prim(Prim::String),
+                    ],
+                    Box::new(Type::Unit),
+                ),
+            },
+        );
+    }
+    {
+        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> unit
+        // Bit-exact comparison; the Std.Test wrapper restricts a to int64.
+        let tensor_tv = vg.fresh_tvar();
+        env.bind(
+            "test_assert_eq_tensor_int64".to_string(),
+            Scheme {
+                tvars: vec![tensor_tv],
+                dvars: vec![],
+                body: Type::Fn(
+                    vec![
+                        Type::Var(tensor_tv),
+                        Type::Var(tensor_tv),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),

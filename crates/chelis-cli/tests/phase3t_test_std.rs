@@ -457,6 +457,49 @@ ran = test_case()
 }
 
 #[test]
+fn std_test_assert_eq_tensor_int64_pass() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-tensor-i64-pass");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_tensor_int64)
+
+def test_case() -> unit ! { Test } =
+  assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), "eq-tensor-i64-pass")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    assert_eval_succeeds(&reef_home, &app_pkg);
+}
+
+#[test]
+fn std_test_assert_eq_tensor_int64_fail_reports_label() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-tensor-i64-fail");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Test (assert_eq_tensor_int64)
+
+def test_case() -> unit ! { Test } =
+  assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(7, int64), cast(2, int64)]), "eq-tensor-i64-fail")
+
+ran = test_case()
+"#,
+    );
+    assert_check_clean(&reef_home, &app_pkg);
+    // The runtime emits `at index <i> expected <e> got <a>`.
+    assert_eval_fails_with(
+        &reef_home,
+        &app_pkg,
+        &["assert_eq_tensor_int64 (eq-tensor-i64-fail): at index 1 expected 7 got 1"],
+    );
+}
+
+#[test]
 fn std_test_assert_shape_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-shape-pass");
     write_file(

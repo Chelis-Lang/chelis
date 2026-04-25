@@ -1,5 +1,5 @@
 module Std.Test
-export (assert_true, assert_false, assert_eq, assert_eq_int, assert_eq_bool, assert_eq_string, assert_close, assert_close_tensor, assert_shape, fail)
+export (assert_true, assert_false, assert_eq, assert_eq_int, assert_eq_bool, assert_eq_string, assert_close, assert_close_tensor, assert_eq_tensor_int64, assert_shape, fail)
 def assert_true(cond: bool, label: string) -> unit ! { Test } = test_assert(cond, label)
 def assert_false(cond: bool, label: string) -> unit ! { Test } = test_assert(not(cond), label)
 def assert_eq(actual: f32, expected: f32, label: string) -> unit ! { Test } = test_assert_eq_f32(actual, expected, label)
@@ -20,6 +20,7 @@ def assert_close(actual: f32, expected: f32, tol: f32, label: string) -> unit ! 
   }
 }
 def assert_close_tensor[n](actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
+def assert_eq_tensor_int64[n](actual: tensor[n, int64], expected: tensor[n, int64], label: string) -> unit ! { Test } = test_assert_eq_tensor_int64(actual, expected, label)
 def assert_shape[n](t: tensor[n, f32], expected_n: int64, label: string) -> unit ! { Test } = {
   actual_n = cast(shape(t, cast(0, int32)), int64)
   ok = eq(actual_n, expected_n)

@@ -240,6 +240,7 @@ fn infer_app_effects(
                 | "test_assert_eq_bool"
                 | "test_assert_eq_string"
                 | "test_assert_close_tensor"
+                | "test_assert_eq_tensor_int64"
         )
     ) {
         effects.insert(Effect::Test);
