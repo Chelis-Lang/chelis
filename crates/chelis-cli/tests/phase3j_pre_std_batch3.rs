@@ -40,7 +40,7 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         r#"[package]
 name = "chelis-std"
 version = "0.1.0"
-compiler = "=0.2.4"
+compiler = "=0.2.5"
 module_prefix = "Std"
 "#,
     );
@@ -104,7 +104,7 @@ def rms_scale[n](x: tensor[n, f32], eps: f32) -> f32 = {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.2.4"
+compiler = "=0.2.5"
 module_prefix = "Demo"
 
 [dependencies]
