@@ -1,12 +1,10 @@
 module Std.Tests.Time
-import Std.Test (assert_eq_int, assert_eq_bool, assert_eq_string, fail)
+import Std.Test (assert_eq_int, assert_eq_bool, assert_eq_string, assert_true, fail)
 import Std.Time (date, try_date, duration, is_leap_year, add_days, days_between, date_lt, date_gt, date_to_string, parse_date, day_of_week_name, day_of_year)
-def test_is_leap_year() -> unit ! { Test } = {
-  _ = assert_eq_bool(is_leap_year(cast(2024, int64)), true, "2024 leap")
-  _ = assert_eq_bool(is_leap_year(cast(2023, int64)), false, "2023 not leap")
-  _ = assert_eq_bool(is_leap_year(cast(2000, int64)), true, "2000 leap (div 400)")
-  assert_eq_bool(is_leap_year(cast(1900, int64)), false, "1900 not leap (div 100 not 400)")
-}
+def test_is_leap_year_2024() -> unit ! { Test } = assert_eq_bool(is_leap_year(cast(2024, int64)), true, "2024 leap (div 4 not 100)")
+def test_is_leap_year_2023() -> unit ! { Test } = assert_eq_bool(is_leap_year(cast(2023, int64)), false, "2023 not leap (not div 4)")
+def test_is_leap_year_2000() -> unit ! { Test } = assert_eq_bool(is_leap_year(cast(2000, int64)), true, "2000 leap (div 400)")
+def test_is_leap_year_1900() -> unit ! { Test } = assert_eq_bool(is_leap_year(cast(1900, int64)), false, "1900 not leap (div 100 not 400)")
 def test_add_days_non_leap_year() -> unit ! { Test } = {
   start = date(cast(2026, int64), cast(1, int64), cast(1, int64))
   rolled = add_days(start, cast(365, int64))
@@ -34,18 +32,22 @@ def test_date_ordering() -> unit ! { Test } = {
   _ = assert_eq_bool(date_lt(d2, d1), false, "not d2 < d1")
   assert_eq_bool(date_gt(d1, d2), false, "not d1 > d2")
 }
-def test_invalid_date_via_try_date() -> unit ! { Test } = {
-  _ = match try_date(cast(2026, int64), cast(2, int64), cast(30, int64)) with {
+def test_try_date_rejects_feb_30_non_leap() -> unit ! { Test } = {
+  match try_date(cast(2026, int64), cast(2, int64), cast(30, int64)) with {
     | Some(_) => fail("2026-02-30 should not parse")
-    | None => assert_eq_bool(true, true, "2026-02-30 rejected")
+    | None => assert_true(true, "2026-02-30 rejected")
   }
-  _ = match try_date(cast(2024, int64), cast(2, int64), cast(29, int64)) with {
-    | Some(_) => assert_eq_bool(true, true, "2024-02-29 accepted")
+}
+def test_try_date_accepts_leap_day() -> unit ! { Test } = {
+  match try_date(cast(2024, int64), cast(2, int64), cast(29, int64)) with {
+    | Some(_) => assert_true(true, "2024-02-29 accepted")
     | None => fail("2024-02-29 should be valid leap day")
   }
+}
+def test_try_date_rejects_feb_30_leap_year() -> unit ! { Test } = {
   match try_date(cast(2024, int64), cast(2, int64), cast(30, int64)) with {
     | Some(_) => fail("2024-02-30 never exists")
-    | None => assert_eq_bool(true, true, "2024-02-30 rejected")
+    | None => assert_true(true, "2024-02-30 rejected even in leap year")
   }
 }
 def test_iso_round_trip() -> unit ! { Test } = {

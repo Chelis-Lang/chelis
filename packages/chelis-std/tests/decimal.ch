@@ -21,23 +21,17 @@ def test_mul_one_and_a_half_by_two() -> unit ! { Test } = {
   product = decimal_mul(decimal("1.5"), decimal("2.0"))
   assert_true(decimal_eq(product, decimal("3.0")), "1.5 * 2.0 == 3.0")
 }
-def test_ordering_basic() -> unit ! { Test } = {
-  a = decimal("0.1")
-  b = decimal("0.2")
-  _ = assert_true(decimal_lt(a, b), "0.1 < 0.2")
-  _ = assert_true(decimal_gt(b, a), "0.2 > 0.1")
-  _ = assert_true(decimal_lte(a, a), "0.1 <= 0.1")
-  _ = assert_true(decimal_gte(a, a), "0.1 >= 0.1")
-  assert_false(decimal_lt(a, a), "0.1 < 0.1 must be false")
-}
+def test_ordering_lt_strict() -> unit ! { Test } = assert_true(decimal_lt(decimal("0.1"), decimal("0.2")), "0.1 < 0.2")
+def test_ordering_gt_strict() -> unit ! { Test } = assert_true(decimal_gt(decimal("0.2"), decimal("0.1")), "0.2 > 0.1")
+def test_ordering_lte_reflexive() -> unit ! { Test } = assert_true(decimal_lte(decimal("0.1"), decimal("0.1")), "0.1 <= 0.1")
+def test_ordering_gte_reflexive() -> unit ! { Test } = assert_true(decimal_gte(decimal("0.1"), decimal("0.1")), "0.1 >= 0.1")
+def test_ordering_lt_irreflexive() -> unit ! { Test } = assert_false(decimal_lt(decimal("0.1"), decimal("0.1")), "0.1 < 0.1 must be false")
 def test_string_roundtrip() -> unit ! { Test } = {
   rendered = decimal_to_string(decimal("3.14"))
   assert_eq_string(rendered, "3.14", "decimal_to_string(decimal(\"3.14\")) == \"3.14\"")
 }
-def test_string_roundtrip_negative_and_zero() -> unit ! { Test } = {
-  _ = assert_eq_string(decimal_to_string(decimal("-2.50")), "-2.5", "negative trailing-zero normalises")
-  assert_eq_string(decimal_to_string(decimal("0")), "0", "zero renders as 0")
-}
+def test_string_roundtrip_negative() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal("-2.50")), "-2.5", "negative trailing-zero normalises")
+def test_string_roundtrip_zero() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal("0")), "0", "zero renders as 0")
 def test_to_float_half_exact() -> unit ! { Test } = {
   approx = decimal_to_float(decimal("0.5"))
   assert_close(cast(approx, f32), cast(0.5, f32), cast(0.0, f32), "decimal(0.5) -> f32 0.5 exactly")
@@ -54,9 +48,5 @@ def test_div_five_by_two_half_even_ties_to_even() -> unit ! { Test } = {
   q = decimal_div(decimal_from_int(cast(5, int64)), decimal_from_int(cast(2, int64)), cast(0, int64), round_half_even())
   assert_true(decimal_eq(q, decimal_from_int(cast(2, int64))), "5 / 2 half-even == 2 (banker's)")
 }
-def test_mul_scale_accumulation() -> unit ! { Test } = {
-  product = decimal_mul(decimal("0.1"), decimal("0.1"))
-  rendered = decimal_to_string(product)
-  _ = assert_true(decimal_eq(product, decimal("0.01")), "0.1 * 0.1 == 0.01")
-  assert_eq_string(rendered, "0.01", "decimal_to_string normalises 0.1*0.1 to \"0.01\"")
-}
+def test_mul_scale_accumulation_value() -> unit ! { Test } = assert_true(decimal_eq(decimal_mul(decimal("0.1"), decimal("0.1")), decimal("0.01")), "0.1 * 0.1 == 0.01 (value)")
+def test_mul_scale_accumulation_string() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal_mul(decimal("0.1"), decimal("0.1"))), "0.01", "decimal_to_string normalises 0.1*0.1 to \"0.01\"")

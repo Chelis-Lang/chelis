@@ -1,19 +1,6 @@
 module Std.Tests.Tensor.Construct
-import Std.Tensor.Construct (linspace, arange, stack, squeeze, unsqueeze)
-import Std.Test (assert_close_tensor, assert_eq_int, assert_shape)
-def call_squeeze_213(x: tensor[2, 1, 3, f32]) = {
-  squeezed = squeeze(x)
-  d0 = cast(shape(copy(squeezed), cast(0, int32)), int64)
-  d1 = cast(shape(squeezed, cast(1, int32)), int64)
-  [d0, d1]
-}
-def call_unsqueeze_23(x: tensor[2, 3, f32]) = {
-  unsqueezed = unsqueeze(x)
-  d0 = cast(shape(copy(unsqueezed), cast(0, int32)), int64)
-  d1 = cast(shape(copy(unsqueezed), cast(1, int32)), int64)
-  d2 = cast(shape(unsqueezed, cast(2, int32)), int64)
-  [d0, d1, d2]
-}
+import Std.Tensor.Construct (linspace, arange, stack)
+import Std.Test (assert_close_tensor, assert_eq_int, assert_shape, assert_true, fail)
 def test_arange_basic() -> unit ! { Test } = {
   xs = to_list(arange(cast(0, int32), cast(4, int32)))
   _ = assert_eq_int(len(xs), cast(4, int64), "arange(0,4) length")
@@ -54,11 +41,18 @@ def test_stack_two_rows() -> unit ! { Test } = {
   expected = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)])
   assert_close_tensor(flat, expected, cast(0.000001, f32), "stack flattened values")
 }
-def test_squeeze_drops_unit() -> unit ! { Test } = {
-  _ = call_squeeze_213
-  assert_eq_int(cast(2, int64), cast(2, int64), "squeeze wrapper present")
+def test_arange_empty_range_produces_empty_tensor() -> unit ! { Test } = {
+  xs = to_list(arange(cast(5, int32), cast(5, int32)))
+  assert_eq_int(len(xs), cast(0, int64), "arange(5,5) is empty")
 }
-def test_unsqueeze_inserts_unit() -> unit ! { Test } = {
-  _ = call_unsqueeze_23
-  assert_eq_int(cast(3, int64), cast(3, int64), "unsqueeze wrapper present")
+def test_linspace_count_zero_does_not_overrun() -> unit ! { Test } = {
+  actual = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, int32))
+  expected = to_tensor([cast(0.0, f32)])
+  assert_close_tensor(actual, expected, cast(0.000001, f32), "linspace count=0 falls into count<=1 branch and returns [start]")
+}
+def test_stack_total_element_count_matches_inputs() -> unit ! { Test } = {
+  rows = stack([to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]), to_tensor([cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)])])
+  flat = reshape(rows, [cast(6, int64)])
+  expected = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)])
+  assert_close_tensor(flat, expected, cast(0.000001, f32), "stack preserves elements in row-major order")
 }
