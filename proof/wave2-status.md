@@ -18,7 +18,7 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
   - `LaCaDiLE/Substitution.lean`: `weakening_insert`, `subst_preserves_typing`
   - `LaCaDiLE/AdjointTyping.lean`: 4 admissions in the adjoint path
   - `LaCaDiLE/Preservation.lean`: `tgrad`, `tvmap`
-  - `LaCaDiLE/Translation.lean`: one isolated named→DB well-formedness admit
+  - `LaCaDiLE/Translation.lean`: admit-free, but its forward bridge is now explicitly lexical rather than a total named→DB transport theorem
 
 The current theorem-shape boundary is now explicit in Lean:
 

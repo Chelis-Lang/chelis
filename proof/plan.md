@@ -4,7 +4,7 @@
 
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
-- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, and the remaining executable admits are concentrated in `Substitution.lean`, `AdjointTyping.lean`, `Preservation.lean`, and one isolated well-formedness admit in `Translation.lean`
+- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, and the remaining executable admits are concentrated in `Substitution.lean`, `AdjointTyping.lean`, and `Preservation.lean`
 - The preservation theorem is no longer blocked on generic context/store plumbing. The active blocker is theorem shape: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
 - `AddDim.lean` is closed; `tvmap` is now a local preservation hole rather than an upstream dimension-transport blocker
 - Immediate critical path:
