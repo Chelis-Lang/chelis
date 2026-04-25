@@ -50,6 +50,7 @@ This extra premise is not cosmetic. The Lean development now contains a concrete
 The hard cases:
 
 - `grad` reduction: the reduced term is `λx. handle[Accum] adjoint(e, x) with {...}`. The adjoint typing lemma (WS2.2) shows the adjoint body is well-typed with `Accum` in its effect row. The explicit `Accum` handler is well-typed by the standard `handle` rule, removing `Accum` from the effect row. This is clean because `grad`'s reduction reuses existing handle machinery.
+- `vmap` reduction: the final proof has to use one batch-dimension choice in both typing and stepping. The current unannotated Lean surface, where `Term.vmap` stores no dimension but `T-Vmap` and `E-Vmap` both quantify over one, is now known to be false by a concrete mismatch witness.
 - Effect handling with one-shot continuation: the continuation captures linear context. One-shot consumption (continuation is linear) preserves linearity. Uses the substitution lemma (WS2.1).
 - Store operations: allocation extends `σ` consistently; deallocation removes entries consumed linearly. `copy` allocates a fresh location with duplicated data. The store typing relation must be maintained.
 - Congruence (`ctx`): the proof needs frame-local store agreement, not global store monotonicity. The preserved invariant is agreement only on locations still mentioned by untouched sibling subterms.

@@ -68,11 +68,11 @@ So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
 - `tgrad`, still upstream of `AdjointTyping.lean`
-- `tvmap`, now a local preservation hole rather than an `AddDim.lean` blocker
+- `tvmap`, no longer blocked by `AddDim.lean`, but still theorem-shape-false until the term and rules are forced to share one batch-dimension choice
 
 ## WS3.11 — `DimSafety.lean`
 
-Corollary of preservation + dimension-specific lemmas. Relatively small once the `tvmap` / `addDim` blocker is resolved, but it now also depends on re-establishing the `RuntimeLinear` premise across steps so preservation can be iterated over multi-step execution.
+Corollary of preservation + dimension-specific lemmas. Relatively small once the `tvmap` rule surface and runtime invariant are both settled, but it now also depends on re-establishing the preservation premise across steps so preservation can be iterated over multi-step execution.
 
 ## WS3.12 — `EffectCorrectness.lean`
 
