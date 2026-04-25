@@ -4657,6 +4657,465 @@ theorem activeLocRefsDB_subst_none
     activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
   activeLocRefsDB_subst_none_gen h_e v j Γ Γ hj hj rfl rfl
 
+theorem activeRuntimeLinearDB_subst_none
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none))
+    (h_linear : ActiveRuntimeLinearDB e) :
+    ActiveRuntimeLinearDB (substDBAux j v e) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  rw [activeLocRefsDB_subst_none j hj h_e]
+  exact h_linear
+
+theorem activeRuntimeLinearDB_subst_none_separated
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none))
+    (h_linear : ActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (activeLocRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (activeLocRefsDB e)) :
+    ActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v e)) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  have hlocs : activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
+    activeLocRefsDB_subst_none j hj h_e
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
+theorem activeRuntimeLinearDB_subst_none_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j none) e t eps (Γ2.insertAt j none))
+    (h_linear : ActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (activeLocRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (activeLocRefsDB e)) :
+    ActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v e)) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  have hlocs : activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
+    activeLocRefsDB_subst_none_gen h_e v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
+/-- Motive bundle for the active-footprint analogue of the "live slot
+stays live" substitution theorem. -/
+@[reducible] def ActiveLocRefsSubstLiveMotive1 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 : LinearCtxDB) → (e : TermDB) → (t : Typ) →
+    (eps : EffectRow) → (Γ2 : LinearCtxDB) →
+    HasTypeDB Δ' S' Γ1 e t eps Γ2 → Prop :=
+  fun _Δ' _S' Γ1 e _t _eps Γ2 _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j (some t_v) →
+      activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e
+
+@[reducible] def ActiveLocRefsSubstLiveMotive2 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 Γ2 : LinearCtxDB) → (t : Typ) → (epsR : EffectRow) →
+    (cls : List (EffectLabel × TermDB)) →
+    ClausesTypedDB Δ' S' Γ1 Γ2 t epsR cls → Prop :=
+  fun _Δ' _S' Γ1 Γ2 _t _epsR cls _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j (some t_v) →
+      activeLocRefsClausesDB (substClausesDBAux j v cls) = activeLocRefsClausesDB cls
+
+theorem activeLocRefsDB_subst_live_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (v : TermDB) (t_v : Typ) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j (some t_v))
+    (hout : Γ2 = Γ_out.insertAt j (some t_v)) :
+    activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e := by
+  revert v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  change ActiveLocRefsSubstLiveMotive1 Δ S Γ1 e t eps Γ2 h
+  induction h using HasTypeDB.rec (motive_2 := ActiveLocRefsSubstLiveMotive2) with
+  | var Δ_ S_ Γ i ti hlook =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      by_cases hij : i = j
+      · subst hij
+        have hset : (Γ_in.insertAt i (some t_v)).set i none = Γ_out.insertAt i (some t_v) := by
+          simpa [hin] using hout
+        have hget : some none = some (some t_v) := by
+          simpa [LinearCtxDB.set_insertAt_eq, LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out] using
+            congrArg (fun G => G[i]?) hset
+        cases hget
+      · by_cases hlt : i < j
+        · simp [substDBAux, activeLocRefsDB, hij, hlt]
+        · simp [substDBAux, activeLocRefsDB, hij, hlt]
+  | unit Δ_ S_ Γ =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, activeLocRefsDB]
+  | abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have hin_body : some t1 :: Γ1 =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body (lift v) t_v (j + 1) (some t1 :: Γ_in) (slot :: Γ_out)
+          hj_in_body hj_out_body hin_body hout_body
+  | app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape :
+          HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 (Typ.arrow t1 t2 eps_) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 t1 eps2
+                    (Γ_out.insertAt j (some t_v)) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v t_v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have h2_shape :
+          HasTypeDB Δ_ S_
+            (LinearCtxDB.insertAt (j + 1) slot_mid (some t1 :: Γ_mid_base))
+            e2 t2 eps2
+            (LinearCtxDB.insertAt (j + 1) (some t_v) (slot :: Γ_out)) := by
+        rw [LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+        exact hout ▸ h2
+      have hj_mid_body : j + 1 ≤ (some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) (j + 1) hj_mid_body hj_out_body h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have hin_body : some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some t1 :: Γ_mid_base) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+      have hout_body : slot :: Γ3 =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 (lift v) t_v (j + 1) (some t1 :: Γ_mid_base) (slot :: Γ_out)
+        hj_mid_body hj_out_body hin_body hout_body
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 t_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape :
+          HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 (Typ.pair t1 t2) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have hin_body : some t2 :: some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 2) slot_mid (some t2 :: some t1 :: Γ_mid_base) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+      have hout_body : slot1 :: slot2 :: Γ3 =
+          LinearCtxDB.insertAt (j + 2) (some t_v) (slot1 :: slot2 :: Γ_out) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_mid_body : j + 2 ≤ (some t2 :: some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by simp; omega
+      have h2_shape :
+          HasTypeDB Δ_ S_
+            (LinearCtxDB.insertAt (j + 2) slot_mid (some t2 :: some t1 :: Γ_mid_base))
+            e2 t_ eps2
+            (LinearCtxDB.insertAt (j + 2) (some t_v) (slot1 :: slot2 :: Γ_out)) := by
+        exact hin_body ▸ hout_body ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) (j + 2) hj_mid_body hj_out_body h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 (lift (lift v)) t_v (j + 2)
+        (some t2 :: some t1 :: Γ_mid_base) (slot1 :: slot2 :: Γ_out)
+        hj_mid_body hj_out_body
+        (by simpa [LinearCtxDB.insertAt_cons_succ] using hin_body)
+        hout_body
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 t2 eps2
+                    (Γ_out.insertAt j (some t_v)) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v t_v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | const Δ_ S_ Γ v_ ds =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, activeLocRefsDB]
+  | tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j (some t_v)) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v t_v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in h1_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid) e2 (Typ.tensor ds) eps2
+                    (Γ_out.insertAt j (some t_v)) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h23_traj := subst_multi_decomp_h2 (t_v := t_v) j hj_mid hj_out h2_shape h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have h1' := ih1 v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have h2' := ih2 v t_v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, activeLocRefsDB, h1', h2']
+  | tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' hds' ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ih_hb ih_hcls =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have hb_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j (some t_v)) body ty epsB Γ2 := hin ▸ hb
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := t_v) j hj_in hb_shape (Or.inl rfl)
+      have h_slot_mid : slot_mid = some t_v ∨ slot_mid = none := by
+        rcases h12_traj with h | h | h <;> simp [h.1, h.2]
+      have hcls_shape :
+          ClausesTypedDB Δ_ S_ (Γ_mid_base.insertAt j slot_mid)
+            (Γ_out.insertAt j (some t_v)) ty
+            (EffectRow.removeOps epsB epsH) clauses := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ hcls
+      have h23_traj := by
+        exact clauses_subst_decomp_h2 (t_v := t_v) hcls_shape j hj_mid hj_out rfl rfl h_slot_mid
+      have hmid_live : slot_mid = some t_v := by
+        rcases h23_traj with h | h | h
+        · exact h.1
+        · cases h.2
+        · cases h.2
+      subst hmid_live
+      have hb' := ih_hb v t_v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq
+      have hcls' := ih_hcls v t_v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+      simp [substDBAux, activeLocRefsDB, activeLocRefsClausesDB, hb', hcls']
+  | tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have heq : Γ_in.insertAt j (some t_v) = Γ_out.insertAt j (some t_v) := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some (Typ.tensor ds) :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some (Typ.tensor ds) :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some (Typ.tensor ds) :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body (lift v) t_v (j + 1) (some (Typ.tensor ds) :: Γ_in) (slot :: Γ_in)
+          hj_in_body hj_out_body hin_body hout_body
+  | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have heq : Γ_in.insertAt j (some t_v) = Γ_out.insertAt j (some t_v) := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some t1 :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) (some t_v) (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body (lift v) t_v (j + 1) (some t1 :: Γ_in) (slot :: Γ_in)
+          hj_in_body hj_out_body hin_body hout_body
+  | loc Δ_ S_ Γ ell ti hlook =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substDBAux, activeLocRefsDB]
+  | subEff Δ_ S_ Γ Γ' e_ ti eps_ eps'_ hbody hSub ih_body =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simpa [substDBAux, activeLocRefsDB] using
+        ih_body v t_v j Γ_in Γ_out hj_in hj_out hin hout
+  | nil Δ_ S_ Γ ty epsR_ =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substClausesDBAux, activeLocRefsClausesDB]
+  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest
+      _ih_hb_typ ih_hrest =>
+      intro v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      have hrest' := ih_hrest v t_v j Γ_in Γ_out hj_in hj_out hin hout
+      simp [substClausesDBAux, activeLocRefsClausesDB, hrest']
+
+theorem activeLocRefsDB_subst_live
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v))) :
+    activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
+  activeLocRefsDB_subst_live_gen h_e v t_v j Γ Γ hj hj rfl rfl
+
+theorem activeRuntimeLinearDB_subst_live
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v)))
+    (h_linear : ActiveRuntimeLinearDB e) :
+    ActiveRuntimeLinearDB (substDBAux j v e) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  rw [activeLocRefsDB_subst_live j hj h_e]
+  exact h_linear
+
+theorem activeRuntimeLinearDB_subst_live_separated
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j (some t_v)) e t eps (Γ.insertAt j (some t_v)))
+    (h_linear : ActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (activeLocRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (activeLocRefsDB e)) :
+    ActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v e)) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  have hlocs : activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
+    activeLocRefsDB_subst_live j hj h_e
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
+theorem activeRuntimeLinearDB_subst_live_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j (some t_v)) e t eps (Γ2.insertAt j (some t_v)))
+    (h_linear : ActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (activeLocRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (activeLocRefsDB e)) :
+    ActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (activeLocRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (activeLocRefsDB (substDBAux j v e)) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  have hlocs : activeLocRefsDB (substDBAux j v e) = activeLocRefsDB e :=
+    activeLocRefsDB_subst_live_gen h_e v t_v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hlocs]
+    exact h_linear
+  · rw [hlocs]
+    exact hsep_erhs
+  · rw [hlocs]
+    exact hsep_rhs_e
+
 theorem locRefsDB_subst_none
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
     {e v : TermDB} {t : Typ} {eps : EffectRow}
