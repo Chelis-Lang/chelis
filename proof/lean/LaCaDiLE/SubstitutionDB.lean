@@ -6679,6 +6679,59 @@ theorem deepActiveRuntimeLinearDB_subst_live
     DeepActiveRuntimeLinearDB (substDBAux j v e) :=
   deepActiveRuntimeLinearDB_subst_live_gen h_e v t_v j Γ Γ hj hj rfl rfl hdeep
 
+theorem deepActiveRuntimeLinearClausesDB_subst_none_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × TermDB)}
+    (h : ClausesTypedDB Δ S Γ1 Γ2 t epsR cls)
+    (v : TermDB) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j none)
+    (hout : Γ2 = Γ_out.insertAt j none)
+    (hdeep : DeepActiveRuntimeLinearClausesDB cls) :
+    DeepActiveRuntimeLinearClausesDB (substClausesDBAux j v cls) := by
+  match h with
+  | ClausesTypedDB.nil _ _ _ _ _ =>
+      simp [substClausesDBAux, DeepActiveRuntimeLinearClausesDB]
+  | ClausesTypedDB.cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest =>
+      have hsplit :
+          DeepActiveRuntimeLinearDB hb ∧
+            DeepActiveRuntimeLinearClausesDB rest := by
+        simpa [DeepActiveRuntimeLinearClausesDB] using hdeep
+      have hin_body :
+          some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ2 =
+            LinearCtxDB.insertAt (j + 2) none
+              (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) := by
+        subst hin
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hout_body :
+          slot1 :: slot2 :: Γ3 =
+            LinearCtxDB.insertAt (j + 2) none
+              (slot1 :: slot2 :: Γ_out) := by
+        subst hout
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hj_in_body :
+          j + 2 ≤ (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in).length := by
+        simp; omega
+      have hj_out_body :
+          j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have hb' := deepActiveRuntimeLinearDB_subst_none_gen hb_typ (lift (lift v)) (j + 2)
+        (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+        (slot1 :: slot2 :: Γ_out) hj_in_body hj_out_body hin_body hout_body
+        hsplit.1
+      have hrest' := deepActiveRuntimeLinearClausesDB_subst_none_gen hrest v j Γ_in Γ_out
+        hj_in hj_out
+        (by simpa using hin) (by simpa using hout)
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearClausesDB, substClausesDBAux] using
+        And.intro hb' hrest'
+
 theorem deepActiveRuntimeLinearDB_subst_none_gen_separated
     {Δ : CapCtx} {S : StoreTyp}
     {Γ1 Γ2 : LinearCtxDB}
