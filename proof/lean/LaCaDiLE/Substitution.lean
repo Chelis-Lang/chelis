@@ -597,6 +597,72 @@ theorem append_singleton_inj {α} (G1 G2 : List α) (a b : α)
   have : [a] = [b] := this
   exact List.head_eq_of_cons_eq this
 
+/-! ### Named context insertion before a suffix
+
+The DB weakening proof uses a positional `insertAt` counted from the
+innermost end of the context. For named contexts, the corresponding
+operation is “insert immediately before the suffix of length `j`”.
+This keeps binder cases aligned with the existing tombstone-style body
+judgments: descending under one binder increments `j` by 1, under two
+binders by 2. -/
+
+private def insertAtHead {α : Type} : Nat → α → List α → List α
+  | 0, a, xs => a :: xs
+  | _ + 1, a, [] => [a]
+  | n + 1, a, x :: xs => x :: insertAtHead n a xs
+
+@[simp] theorem insertAtHead_zero {α : Type} (a : α) (xs : List α) :
+    insertAtHead 0 a xs = a :: xs := rfl
+
+@[simp] theorem insertAtHead_nil_succ {α : Type} (n : Nat) (a : α) :
+    insertAtHead (n + 1) a [] = [a] := rfl
+
+@[simp] theorem insertAtHead_cons_succ {α : Type} (n : Nat) (a x : α) (xs : List α) :
+    insertAtHead (n + 1) a (x :: xs) = x :: insertAtHead n a xs := rfl
+
+theorem insertAtHead_append_len {α : Type} (xs ys : List α) (a : α) :
+    insertAtHead xs.length a (xs ++ ys) = xs ++ a :: ys := by
+  induction xs with
+  | nil =>
+      simp [insertAtHead]
+  | cons x xs ih =>
+      simp [insertAtHead, ih]
+
+/-- Insert `entry` immediately before the suffix of length `j`. -/
+private def insertBeforeSuffix
+    (Γ : LinearCtx) (j : Nat) (entry : String × Option Typ) : LinearCtx :=
+  (insertAtHead j entry Γ.reverse).reverse
+
+theorem insertBeforeSuffix_eq_split
+    (GammaPre GammaPost : LinearCtx) (entry : String × Option Typ) :
+    insertBeforeSuffix (GammaPre ++ GammaPost) GammaPost.length entry =
+      GammaPre ++ [entry] ++ GammaPost := by
+  unfold insertBeforeSuffix
+  have h :=
+    insertAtHead_append_len GammaPost.reverse GammaPre.reverse entry
+  simpa [List.reverse_append, List.append_assoc] using congrArg List.reverse h
+
+@[simp] theorem insertBeforeSuffix_zero
+    (Γ : LinearCtx) (entry : String × Option Typ) :
+    insertBeforeSuffix Γ 0 entry = Γ ++ [entry] := by
+  simpa using insertBeforeSuffix_eq_split Γ [] entry
+
+@[simp] theorem insertBeforeSuffix_append_singleton
+    (Γ : LinearCtx) (j : Nat) (entry : String × Option Typ)
+    (x : String) (slot : Option Typ) :
+    insertBeforeSuffix (Γ ++ [(x, slot)]) (j + 1) entry =
+      insertBeforeSuffix Γ j entry ++ [(x, slot)] := by
+  unfold insertBeforeSuffix
+  simp [List.reverse_append, List.append_assoc]
+
+@[simp] theorem insertBeforeSuffix_append_pair
+    (Γ : LinearCtx) (j : Nat) (entry : String × Option Typ)
+    (x y : String) (slotX slotY : Option Typ) :
+    insertBeforeSuffix (Γ ++ [(x, slotX), (y, slotY)]) (j + 2) entry =
+      insertBeforeSuffix Γ j entry ++ [(x, slotX), (y, slotY)] := by
+  unfold insertBeforeSuffix
+  simp [List.reverse_append, List.append_assoc]
+
 /-! ### Freshness extraction helpers
 
 Position-indexed weakening (`weakening_insert` below) is the single
