@@ -41,6 +41,7 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.SyntaxDB
 import LaCaDiLE.Typing
 import LaCaDiLE.TypingDB
+import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
 
@@ -263,166 +264,34 @@ theorem exists_subst_of_clausesToDB
 /-! ## Forward typing preservation (Wave 5p)
 
 The main theorem `hasType_to_hasTypeDB` maps a named `HasType`
-derivation to a `HasTypeDB` derivation over the translated context
-and term. The induction is on the `HasType` derivation using the
-mutual recursor `HasType.rec` (with a motive_2 for clauses), and
-each case builds the corresponding `HasTypeDB` constructor. -/
+derivation to a DB typing derivation.
+
+The original exact statement
+
+`HasType Γ e ⟹ HasTypeDB (ctxToDB Γ) (termToDB (envOfCtx Γ) e)`
+
+is not sound for arbitrary named derivations: named `HasType.var` may
+consume any same-named slot in the context, while `termToDB` always
+chooses the innermost lexical binder. `TranslationDB.lean` closes the
+sound bridge by switching to derivation-guided erasure under a lexical
+scoping premise. This file re-exports that honest boundary instead of
+repeating the unsound total theorem shape. -/
+
+@[simp] theorem ctxToDB_eq_eraseCtx (Γ : LinearCtx) :
+    ctxToDB Γ = eraseCtx Γ := rfl
+
+@[simp] theorem envOfCtx_eq_ctxEnv (Γ : LinearCtx) :
+    envOfCtx Γ = ctxEnv Γ := rfl
 
 theorem hasType_to_hasTypeDB
     {Δ : CapCtx} {S : StoreTyp} {Γ Γ' : LinearCtx}
     {e : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Δ S Γ e t eps Γ') :
-    HasTypeDB Δ S (ctxToDB Γ) (termToDB (envOfCtx Γ) e)
-              t eps (ctxToDB Γ') := by
-  induction h using HasType.rec
-    (motive_2 := fun Δ' S' Γ2 Γ3 t' epsR cls _ =>
-      ClausesTypedDB Δ' S' (ctxToDB Γ2) (ctxToDB Γ3) t' epsR
-                     (clausesToDB (envOfCtx Γ2) cls)) with
-  | unit Δ' S' Γ_ =>
-      simp only [termToDB]
-      exact HasTypeDB.unit Δ' S' (ctxToDB Γ_)
-  | const Δ' S' Γ_ v ds =>
-      simp only [termToDB]
-      exact HasTypeDB.const Δ' S' (ctxToDB Γ_) v ds
-  | loc Δ' S' Γ_ ell t' hlook =>
-      simp only [termToDB]
-      exact HasTypeDB.loc Δ' S' (ctxToDB Γ_) ell t' hlook
-  | subEff Δ' S' Γ_ Γ'_ e_ t_ eps_ eps'_ _h hSub ih =>
-      exact HasTypeDB.subEff Δ' S' (ctxToDB Γ_) (ctxToDB Γ'_)
-        (termToDB (envOfCtx Γ_) e_) t_ eps_ eps'_ ih hSub
-  | fst Δ' S' Γ1 Γ2 e_ t1 t2 eps_ _h ih =>
-      simp only [termToDB]
-      exact HasTypeDB.fst Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) t1 t2 eps_ ih
-  | snd Δ' S' Γ1 Γ2 e_ t1 t2 eps_ _h ih =>
-      simp only [termToDB]
-      exact HasTypeDB.snd Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) t1 t2 eps_ ih
-  | copy Δ' S' Γ1 Γ2 e_ ds eps_ _h ih =>
-      simp only [termToDB]
-      exact HasTypeDB.copy Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) ds eps_ ih
-  | app Δ' S' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      exact HasTypeDB.app Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
-        t1 t2 eps_ eps1 eps2 ih1 ih2
-  | tpair Δ' S' Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      exact HasTypeDB.tpair Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
-        t1 t2 eps1 eps2 ih1 ih2
-  | tadd Δ' S' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      exact HasTypeDB.tadd Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
-        ds eps1 eps2 ih1 ih2
-  | tmul Δ' S' Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      exact HasTypeDB.tmul Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        (termToDB (envOfCtx Γ2) e1) (termToDB (envOfCtx Γ2) e2)
-        ds eps1 eps2 ih1 ih2
-  | tsum Δ' S' Γ1 Γ2 e_ ds d eps_ _h _hmem ih =>
-      simp only [termToDB]
-      exact HasTypeDB.tsum Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) ds 0 eps_ ih (rem ds d) (trivial)
-  | texpand Δ' S' Γ1 Γ2 e_ ds d eps_ _h ih =>
-      simp only [termToDB]
-      exact HasTypeDB.texpand Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) ds 0 0 eps_ ih (ins ds d) (trivial)
-  | uniformLike Δ' S' Γ1 Γ2 e_ ds lo hi eps_ _h ih =>
-      simp only [termToDB]
-      exact HasTypeDB.uniformLike Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        (termToDB (envOfCtx Γ1) e_) ds lo hi eps_ ih
-  | perform Δ' S' Γ1 Γ2 op e_ tArg tRet eps_ _h hM ih =>
-      simp only [termToDB]
-      exact HasTypeDB.perform Δ' S' (ctxToDB Γ1) (ctxToDB Γ2)
-        op (termToDB (envOfCtx Γ1) e_) tArg tRet eps_ ih hM
-  | abs Δ' S' Γ1 Γ2 x t1 t2 eps_ body slot _h ih =>
-      simp only [termToDB]
-      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
-      rw [ctxToDB_append_singleton] at ih
-      exact HasTypeDB.abs Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) slot t1 t2 eps_
-        (termToDB (x :: envOfCtx Γ1) body) ih
-  | letBind Δ' S' Γ1 Γ2 Γ3 x e1 e2 t1 t2 eps1 eps2 slot h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih2
-      rw [ctxToDB_append_singleton] at ih2
-      exact HasTypeDB.letBind Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        slot (termToDB (envOfCtx Γ2) e1) (termToDB (x :: envOfCtx Γ2) e2)
-        t1 t2 eps1 eps2 ih1 ih2
-  | letpair Δ' S' Γ1 Γ2 Γ3 x y e1 e2 t1 t2 t_ eps1 eps2 slotX slotY
-            h1 _h2 ih1 ih2 =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h1] at ih1 ⊢
-      rw [ctxToDB_append_pair, envOfCtx_append_pair] at ih2
-      rw [ctxToDB_append_pair] at ih2
-      exact HasTypeDB.letpair Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        slotY slotX
-        (termToDB (envOfCtx Γ2) e1) (termToDB (y :: x :: envOfCtx Γ2) e2)
-        t1 t2 t_ eps1 eps2 ih1 ih2
-  | tgrad Δ' S' Γ_ x ds dsOut body eps_ slot _h hsub ih =>
-      simp only [termToDB]
-      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
-      rw [ctxToDB_append_singleton] at ih
-      exact HasTypeDB.tgrad Δ' S' (ctxToDB Γ_) slot ds dsOut
-        (termToDB (x :: envOfCtx Γ_) body) eps_ ih hsub
-  | tvmap Δ' S' Γ_ x t1 t2 body eps_ d slot _h ih =>
-      simp only [termToDB]
-      rw [ctxToDB_append_singleton, envOfCtx_append_singleton] at ih
-      rw [ctxToDB_append_singleton] at ih
-      exact HasTypeDB.tvmap Δ' S' (ctxToDB Γ_) slot t1 t2
-        (termToDB (x :: envOfCtx Γ_) body) eps_ d ih
-  | nil Δ' S' Γ2 t_ epsR =>
-      simp only [clausesToDB]
-      exact ClausesTypedDB.nil Δ' S' (ctxToDB Γ2) t_ epsR
-  | cons Δ' S' Γ2 Γ3 t_ tArg tRet epsR op x k hb rest slotX slotK
-         _h_body _h_rest h_rest ih_rest ih_rest_db =>
-      simp only [clausesToDB]
-      have ih_rest' :
-          HasTypeDB Δ' S'
-            (some (Typ.arrow tRet t_ epsR) :: some tArg :: ctxToDB Γ2)
-            (termToDB (k :: x :: envOfCtx Γ2) hb) t_ epsR
-            (slotK :: slotX :: ctxToDB Γ3) := by
-        simpa [ctxToDB_append_pair, envOfCtx_append_pair] using ih_rest
-      exact ClausesTypedDB.cons Δ' S' (ctxToDB Γ2) (ctxToDB Γ3)
-        slotK slotX t_ tArg tRet epsR op
-        (termToDB (k :: x :: envOfCtx Γ2) hb) (clausesToDB (envOfCtx Γ2) rest)
-        _h_body ih_rest' ih_rest_db
-  | handle Δ' S' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
-           h_body hSubsH hClsH hCover _h_cls ih_body ih_cls =>
-      simp only [termToDB]
-      rw [hasType_envOfCtx_eq h_body] at ih_body ⊢
-      refine HasTypeDB.handle Δ' S' (ctxToDB Γ1) (ctxToDB Γ2) (ctxToDB Γ3)
-        (termToDB (envOfCtx Γ2) body)
-        (clausesToDB (envOfCtx Γ2) clauses) t_ epsH epsB
-        ih_body hSubsH ?_ ?_ ih_cls
-      · intro cl hmem
-        obtain ⟨orig, horig, hop⟩ := exists_orig_of_clausesToDB hmem
-        rw [← hop]; exact hClsH orig horig
-      · intro op hop
-        obtain ⟨cl, hmem, hcl_eq⟩ := hCover op hop
-        obtain ⟨hb', hmem'⟩ := exists_subst_of_clausesToDB cl hmem
-        exact ⟨(cl.1, hb'), hmem', hcl_eq⟩
-  | var Δ' S' Γpre Γpost x t_ =>
-      simp only [termToDB]
-      -- envIndex finds x at position |Γpost| when x ∉ names(Γpost).
-      -- This is a context well-formedness condition (no name shadowing).
-      have h_fresh : x ∉ (Γpost.map Prod.fst).reverse := by
-        sorry -- well-formedness: x not shadowed in Γpost
-      rw [envOfCtx_split]
-      rw [envIndex_not_mem _ _ _ h_fresh]
-      simp only [List.length_reverse, List.length_map]
-      have hlook := ctxToDB_split_getElem Γpre Γpost x (some t_)
-      have hset := ctxToDB_split_set Γpre Γpost x (some t_) none
-      have hvar := HasTypeDB.var Δ' S' (ctxToDB (Γpre ++ [(x, some t_)] ++ Γpost))
-        Γpost.length t_ hlook
-      rw [hset] at hvar
-      exact hvar
+    (h : HasType Δ S Γ e t eps Γ')
+    (hlex : LexicallyScoped Γ e) :
+    ∃ eDB,
+      eraseTerm (ctxEnv Γ) e = some eDB ∧
+      HasTypeDB Δ S (ctxToDB Γ) eDB t eps (ctxToDB Γ') := by
+  rcases transport_typing_lexical h hlex with ⟨eDB, hErase, hTy⟩
+  exact ⟨eDB, hErase, by simpa [ctxToDB_eq_eraseCtx] using hTy⟩
 
 end LaCaDiLE
