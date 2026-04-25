@@ -3592,6 +3592,104 @@ private theorem deepActiveRuntimeLinear_multiPlug_replace
     (deepActiveRuntimeLinear_multiPlug_chainNodup hOld)
     hEs hNew hSepCtxNew hSepNewCtx
 
+private theorem deepActiveRuntimeLinear_clause_mem
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hClauses : DeepActiveRuntimeLinearClauses clauses) :
+    DeepActiveRuntimeLinear hb := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases cl with ⟨op0, x0, k0, hb0⟩
+      rcases hClauses with ⟨hHead, hTail⟩
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        exact hHead
+      · exact ih htl hTail
+
+private theorem deepActiveRuntimeLinear_handle_body
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH body clauses)) :
+    DeepActiveRuntimeLinear body := by
+  simpa [DeepActiveRuntimeLinear] using h.2.1
+
+private theorem deepActiveRuntimeLinear_handle_clause_mem
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    DeepActiveRuntimeLinear hb := by
+  exact deepActiveRuntimeLinear_clause_mem hmem h.2.2
+
+private theorem deepActiveRuntimeLinear_identity_cont
+    {y : String} {t : Typ} :
+    DeepActiveRuntimeLinear (Term.abs y t (Term.var y)) := by
+  simp [DeepActiveRuntimeLinear, ActiveRuntimeLinear, activeLocRefs]
+
+private theorem deepActiveRuntimeLinear_captured_handle
+    {epsH : EffectRow} {E : EvalCtx} {e : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {y : String}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH (plug E e) clauses)) :
+    DeepActiveRuntimeLinear (Term.handle epsH (plug E (Term.var y)) clauses) := by
+  have hPlugVar :
+      DeepActiveRuntimeLinear (plug E (Term.var y)) := by
+    apply deepActiveRuntimeLinear_plug_replace
+      (hOld := deepActiveRuntimeLinear_handle_body h)
+    · simpa [DeepActiveRuntimeLinear]
+    · simpa [LocRefsSeparated, activeLocRefs]
+    · simpa [LocRefsSeparated, activeLocRefs]
+  exact ⟨by
+      simpa [ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses]
+        using deepActiveRuntimeLinear_active hPlugVar,
+    hPlugVar, h.2.2⟩
+
+private theorem deepActiveRuntimeLinear_captured_multiHandle
+    {epsH : EffectRow} {Es : EvalCtxChain} {e : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {y : String}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH (multiPlug Es e) clauses)) :
+    DeepActiveRuntimeLinear (Term.handle epsH (multiPlug Es (Term.var y)) clauses) := by
+  have hPlugVar :
+      DeepActiveRuntimeLinear (multiPlug Es (Term.var y)) := by
+    apply deepActiveRuntimeLinear_multiPlug_replace
+      (hOld := deepActiveRuntimeLinear_handle_body h)
+    · simpa [DeepActiveRuntimeLinear]
+    · simpa [LocRefsSeparated, activeLocRefs, activeChainLocRefs]
+    · simpa [LocRefsSeparated, activeLocRefs, activeChainLocRefs]
+  exact ⟨by
+      simpa [ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses]
+        using deepActiveRuntimeLinear_active hPlugVar,
+    hPlugVar, h.2.2⟩
+
+private theorem deepActiveRuntimeLinear_captured_cont
+    {epsH : EffectRow} {E : EvalCtx} {e : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {y : String} {t : Typ}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH (plug E e) clauses)) :
+    DeepActiveRuntimeLinear
+      (Term.abs y t (Term.handle epsH (plug E (Term.var y)) clauses)) := by
+  exact ⟨by
+      simpa [ActiveRuntimeLinear, activeLocRefs]
+        using deepActiveRuntimeLinear_active (deepActiveRuntimeLinear_captured_handle (y := y) h),
+    deepActiveRuntimeLinear_captured_handle (y := y) h⟩
+
+private theorem deepActiveRuntimeLinear_captured_multiCont
+    {epsH : EffectRow} {Es : EvalCtxChain} {e : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {y : String} {t : Typ}
+    (h : DeepActiveRuntimeLinear (Term.handle epsH (multiPlug Es e) clauses)) :
+    DeepActiveRuntimeLinear
+      (Term.abs y t (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) := by
+  exact ⟨by
+      simpa [ActiveRuntimeLinear, activeLocRefs]
+        using deepActiveRuntimeLinear_active (deepActiveRuntimeLinear_captured_multiHandle (y := y) h),
+    deepActiveRuntimeLinear_captured_multiHandle (y := y) h⟩
+
 private theorem runtimeLinear_clause_mem_separated
     {clauses : List (EffectLabel × String × String × Term)}
     {op : EffectLabel} {x k : String} {hb : Term} {rhsRefs : List Loc}
