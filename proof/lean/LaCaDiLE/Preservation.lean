@@ -5304,8 +5304,7 @@ private theorem preservation_aux
     runtime-linear counterexample shows this extra hypothesis is not
     optional: without it, the generic `ctx` case is false because a
     sibling subterm may retain a consumed location. The remaining open
-    cases are only the agreed calculus-level blockers `tgrad` and
-    `tvmap`. -/
+    case is only the agreed calculus-level blocker `tgrad`. -/
 theorem preservation
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term) (t : Typ) (eps : EffectRow)
