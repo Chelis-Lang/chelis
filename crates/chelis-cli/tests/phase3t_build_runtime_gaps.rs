@@ -4,29 +4,42 @@
 //! Several `Std.Nn` / `Std.Loss` modules use ops the host runtime does not
 //! support: `matmul`, `expand`, `softmax`, `sum` reductions, etc. Those
 //! modules type-check and lower to IR cleanly, and the C-build target emits
-//! correct kernels for them, but `chelis eval` (the host runtime) returns an
-//! error before the test bodies run. As a consequence Std self-tests for
-//! those modules can only assert importability + typecheck, not behavior.
+//! correct kernels for them, but `chelis eval` (the host runtime) returned an
+//! error before the test bodies could run. As a consequence Std self-tests
+//! for those modules could only assert importability + typecheck, not
+//! behavior.
 //!
-//! As of v0.2.4 + N2 fix (Nautilus upstream report), the host runtime gained
-//! `matmul`, `permute`, and `sum` evaluators. The remaining gaps for these
-//! fixtures are:
+//! As of v0.2.5 + N2 fix and the follow-up `expand`/`softmax` host wiring,
+//! the host runtime now supports `matmul`, `permute`, `sum`, `expand`, and
+//! `softmax`.
 //!
-//!   * `Linear.forward` — uses `expand` (host runtime: unsupported)
-//!   * `Attention.scaled_dot_product_attention` — uses `softmax`
-//!   * `CrossEntropy.loss` — uses `softmax`
+//!   * `Linear.forward` — uses `expand` (host runtime now supports the op
+//!     itself, but the dim-generic `batch` parameter still cannot be
+//!     resolved at host-evaluator runtime, so end-to-end eval still fails
+//!     with `unknown runtime name 'batch'`)
+//!   * `Attention.scaled_dot_product_attention` — fully eval-clean as of
+//!     this commit; cross-checked under `chelis test` in
+//!     `packages/chelis-std/tests/runtime/attention_eval_cross.ch`
+//!   * `CrossEntropy.loss` — `softmax` works, but the host evaluator's
+//!     `log`/`exp` builtins still only accept scalar floats; piping a
+//!     tensor through `log` errors with `float op expects float arg`.
+//!     Out of scope for this fix.
 //!   * `RmsNorm.forward` — uses `to_list` + `map` (already eval-clean)
 //!
-//! Closing the remaining `expand` / `softmax` gaps would let these run under
-//! `chelis eval` end-to-end. Self-tests for the matmul/permute/sum surface
-//! live in `packages/chelis-std/tests/runtime/`.
+//! Self-tests for the `matmul` / `permute` / `sum` / `expand` / `softmax`
+//! host evaluator surface live in `packages/chelis-std/tests/runtime/`.
+//! Closing the remaining `log`-on-tensor and dim-generic-resolution gaps
+//! would let `Linear.forward` and `CrossEntropy.loss` run end-to-end under
+//! `chelis eval` too. Tracked separately from the N2 / expand-softmax
+//! work — those gaps predate this fix.
 //!
 //! These integration tests close that gap on the build path: stage
 //! chelis-std into a tempdir reef home, write a `main.ch` that calls the
 //! module with concrete inputs, run `chelis build --target c`, compile the
-//! generated C with `gcc`, run the binary, and assert on stdout. If the
-//! eval lane later gains support for the missing ops, the same fixtures
-//! can be reused to cross-check eval vs. build outputs.
+//! generated C with `gcc`, run the binary, and assert on stdout. The
+//! attention fixture now has an eval-lane sibling at
+//! `packages/chelis-std/tests/runtime/attention_eval_cross.ch` that
+//! confirms eval-vs-build agreement on the uniform case.
 //!
 //! Pattern mirrors `phase3i_std::reef_std_generate_builds_and_runs_compiled_program`.
 

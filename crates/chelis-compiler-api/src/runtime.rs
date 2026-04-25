@@ -1640,6 +1640,23 @@ impl<'a> EvalContext<'a> {
                 }
                 tensor_permute_host(&tensor, &axes).map(RuntimeValue::Tensor)
             }
+            "expand" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                let count = expect_int_arg(args, 2)?;
+                if axis < 0 {
+                    return Err(format!("expand requires non-negative axis, got {axis}"));
+                }
+                if count <= 0 {
+                    return Err(format!("expand requires positive count, got {count}"));
+                }
+                tensor_expand_host(&tensor, axis as usize, count as usize).map(RuntimeValue::Tensor)
+            }
+            "softmax" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_softmax_host(&tensor, axis).map(RuntimeValue::Tensor)
+            }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -2522,6 +2539,145 @@ fn tensor_matmul_host(
     Ok(RuntimeTensorValue {
         value: IrTensorValue::from_vec(vec![m, n], out),
         precision: lhs.precision,
+    })
+}
+
+/// Replicate a tensor along a new axis. Matches the IR's `expand` semantics
+/// when the output rank is `input_rank + 1`: `expand(b, axis, count)` produces
+/// a tensor of shape `[..., count, ...]` (with `count` inserted at `axis`)
+/// where every "slice" along the new axis is a copy of `b`. Also handles the
+/// same-rank variant where the input axis has size 1 and is replicated to
+/// `count`.
+fn tensor_expand_host(
+    tensor: &RuntimeTensorValue,
+    axis: usize,
+    count: usize,
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = tensor.value.shape.clone();
+    let in_rank = in_shape.len();
+    if axis > in_rank {
+        return Err(format!(
+            "expand axis {axis} out of bounds for rank-{in_rank} tensor (insert position must be <= rank)"
+        ));
+    }
+
+    // Determine the output shape and the index-mapping mode.
+    //
+    // Mode A (insert): if `axis == in_rank` OR the existing axis at `axis`
+    // is not 1, we INSERT a new axis of size `count` at position `axis`.
+    // Mode B (replicate-singleton): if `axis < in_rank` and the existing
+    // axis at `axis` is 1, we REPLACE that axis with size `count`.
+    let (out_shape, same_rank) = if axis < in_rank && in_shape[axis] == 1 {
+        let mut out = in_shape.clone();
+        out[axis] = count;
+        (out, true)
+    } else {
+        let mut out = Vec::with_capacity(in_rank + 1);
+        out.extend_from_slice(&in_shape[..axis]);
+        out.push(count);
+        out.extend_from_slice(&in_shape[axis..]);
+        (out, false)
+    };
+
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    for (out_linear, slot) in out.iter_mut().enumerate() {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let in_indices: Vec<usize> = if same_rank {
+            // Replicate singleton: input axis stays 0; other axes pass through.
+            let mut idx = out_indices.clone();
+            idx[axis] = 0;
+            idx
+        } else {
+            // Insert: drop the inserted axis to recover the input index.
+            let mut idx = out_indices;
+            idx.remove(axis);
+            idx
+        };
+        let in_linear = indices_to_linear(&in_indices, &in_shape);
+        *slot = tensor.value.data[in_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// Numerically stable softmax along a single axis:
+/// `softmax(x, axis)[i] = exp(x[i] - max(x, axis)) / sum_j exp(x[j] - max(x, axis))`.
+/// Matches the spec §4.2 lowering used by `tier2::lower_softmax`.
+///
+/// Negative axes are normalized to `rank + axis` (e.g. `-1` is the last axis).
+fn tensor_softmax_host(
+    tensor: &RuntimeTensorValue,
+    axis: i64,
+) -> Result<RuntimeTensorValue, String> {
+    let rank = tensor.value.shape.len();
+    if rank == 0 {
+        return Err("softmax requires a tensor of rank >= 1".to_string());
+    }
+    let axis_usize = if axis < 0 {
+        let neg = (-axis) as usize;
+        if neg > rank {
+            return Err(format!("softmax axis {axis} out of bounds for rank {rank}"));
+        }
+        rank - neg
+    } else {
+        let a = axis as usize;
+        if a >= rank {
+            return Err(format!("softmax axis {axis} out of bounds for rank {rank}"));
+        }
+        a
+    };
+
+    let in_shape = tensor.value.shape.clone();
+    let axis_size = in_shape[axis_usize];
+    if axis_size == 0 {
+        return Err("softmax axis has size 0".to_string());
+    }
+    let numel = tensor_numel(&in_shape);
+    let mut out = vec![0.0_f64; numel];
+
+    // Iterate over each "slice" along the reduced axis: for every combination
+    // of the other axes, compute max -> exp(x - max) -> sum -> divide.
+    let mut reduced_shape = in_shape.clone();
+    reduced_shape[axis_usize] = 1;
+    let reduced_numel = tensor_numel(&reduced_shape);
+
+    for slice_linear in 0..reduced_numel {
+        let mut base_indices = linear_to_indices(slice_linear, &reduced_shape);
+        // First pass: max over the axis.
+        let mut max_val = f64::NEG_INFINITY;
+        for k in 0..axis_size {
+            base_indices[axis_usize] = k;
+            let in_linear = indices_to_linear(&base_indices, &in_shape);
+            let v = tensor.value.data[in_linear];
+            if v > max_val {
+                max_val = v;
+            }
+        }
+        // Second pass: sum of exp(x - max).
+        let mut sum_exp = 0.0_f64;
+        for k in 0..axis_size {
+            base_indices[axis_usize] = k;
+            let in_linear = indices_to_linear(&base_indices, &in_shape);
+            sum_exp += (tensor.value.data[in_linear] - max_val).exp();
+        }
+        if sum_exp == 0.0 {
+            return Err("softmax sum-of-exp is zero (numerical underflow)".to_string());
+        }
+        // Third pass: write exp(x - max) / sum.
+        for k in 0..axis_size {
+            base_indices[axis_usize] = k;
+            let in_linear = indices_to_linear(&base_indices, &in_shape);
+            let numer = (tensor.value.data[in_linear] - max_val).exp();
+            out[in_linear] = numer / sum_exp;
+        }
+    }
+
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(in_shape, out),
+        precision: tensor.precision,
     })
 }
 
@@ -3573,6 +3729,149 @@ y = matmul(a, b)
         assert!(
             err.contains("matmul") && err.contains("mismatch"),
             "expected matmul shared-axis diagnostic, got: {err}"
+        );
+    }
+
+    // ----- expand / softmax host evaluator coverage (#38 follow-up) -----
+    //
+    // Pins the closure of the second host-runtime gap from the N2 fix:
+    // `chelis test` / `chelis eval` erroring with `unsupported builtin
+    // 'expand'` / `'softmax'` when those primitives appear in a test's
+    // dependency graph (Std.Nn.Linear, Std.Nn.Attention, Std.Loss.CrossEntropy).
+
+    #[test]
+    fn host_runtime_expand_inserts_new_leading_axis() {
+        // Linear.forward calls `expand(b, 0, batch)` where `b` is a 1-D
+        // bias [out_dim] and the output is [batch, out_dim]. Pin that.
+        let checked = checked_surf(
+            r#"
+b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
+y = expand(b, cast(0, int32), cast(3, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("expand should evaluate under host runtime");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![3, 2]);
+        // Three replicas of [10, 100].
+        assert_eq!(
+            first_tensor_data(&outcome, "y"),
+            vec![10.0, 100.0, 10.0, 100.0, 10.0, 100.0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_expand_inserts_trailing_axis() {
+        // axis == rank inserts a new last axis.
+        let checked = checked_surf(
+            r#"
+b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+y = expand(b, cast(1, int32), cast(2, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("expand at trailing axis should evaluate");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        // [1, 2] expanded along new last axis with count 2 -> [[1,1],[2,2]].
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn host_runtime_expand_negative_count_errors() {
+        let checked = checked_surf(
+            r#"
+b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+y = expand(b, cast(0, int32), cast(0, int32))
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("expand with non-positive count must fail");
+        assert!(
+            err.contains("expand") && err.contains("count"),
+            "expected expand count diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn host_runtime_softmax_uniform_input_is_uniform_output() {
+        // softmax of all-zeros along axis 0 of length 3 is [1/3, 1/3, 1/3].
+        let checked = checked_surf(
+            r#"
+x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+y = softmax(x, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("softmax should evaluate under host runtime");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
+        let data = first_tensor_data(&outcome, "y");
+        for value in &data {
+            assert!(
+                (*value - 1.0 / 3.0).abs() < 1e-9,
+                "uniform softmax element should be 1/3, got {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_softmax_two_class_matches_reference() {
+        // softmax([1.0, 0.0], 0) = [exp(1)/(exp(1)+1), 1/(exp(1)+1)]
+        //                         ≈ [0.7310585, 0.2689414]
+        let checked = checked_surf(
+            r#"
+x = to_tensor([cast(1.0, f32), cast(0.0, f32)])
+y = softmax(x, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("softmax 2-class should evaluate");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2]);
+        let data = first_tensor_data(&outcome, "y");
+        let e = 1.0_f64.exp();
+        let expected = [e / (e + 1.0), 1.0 / (e + 1.0)];
+        for (got, want) in data.iter().zip(expected.iter()) {
+            assert!(
+                (*got - *want).abs() < 1e-6,
+                "softmax 2-class mismatch: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_softmax_numerical_stability_handles_large_inputs() {
+        // Without the max-subtraction trick, exp(1000) would overflow to
+        // inf and produce NaN. The stable lowering must still produce
+        // a normalized distribution.
+        let checked = checked_surf(
+            r#"
+x = to_tensor([cast(1000.0, f32), cast(1000.0, f32)])
+y = softmax(x, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("softmax with large inputs should remain numerically stable");
+        let data = first_tensor_data(&outcome, "y");
+        assert_eq!(data.len(), 2);
+        for value in &data {
+            assert!(
+                (*value - 0.5).abs() < 1e-9,
+                "softmax([1000,1000]) should be uniform 0.5, got {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_softmax_axis_out_of_bounds_errors() {
+        let checked = checked_surf(
+            r#"
+x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+y = softmax(x, cast(5, int32))
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("softmax with out-of-bounds axis must fail");
+        assert!(
+            err.contains("softmax") && err.contains("out of bounds"),
+            "expected softmax axis-bounds diagnostic, got: {err}"
         );
     }
 }
