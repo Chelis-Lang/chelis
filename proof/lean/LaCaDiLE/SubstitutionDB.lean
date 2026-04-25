@@ -4668,6 +4668,20 @@ theorem activeRuntimeLinearDB_subst_none
   rw [activeLocRefsDB_subst_none j hj h_e]
   exact h_linear
 
+theorem activeRuntimeLinearDB_subst_none_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j none) e t eps (Γ2.insertAt j none))
+    (h_linear : ActiveRuntimeLinearDB e) :
+    ActiveRuntimeLinearDB (substDBAux j v e) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  rw [activeLocRefsDB_subst_none_gen h_e v j Γ1 Γ2 hj_in hj_out rfl rfl]
+  exact h_linear
+
 theorem activeRuntimeLinearDB_subst_none_separated
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
     {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
@@ -5069,6 +5083,20 @@ theorem activeRuntimeLinearDB_subst_live
   rw [activeLocRefsDB_subst_live j hj h_e]
   exact h_linear
 
+theorem activeRuntimeLinearDB_subst_live_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j (some t_v)) e t eps (Γ2.insertAt j (some t_v)))
+    (h_linear : ActiveRuntimeLinearDB e) :
+    ActiveRuntimeLinearDB (substDBAux j v e) := by
+  unfold ActiveRuntimeLinearDB at h_linear ⊢
+  rw [activeLocRefsDB_subst_live_gen h_e v t_v j Γ1 Γ2 hj_in hj_out rfl rfl]
+  exact h_linear
+
 theorem activeRuntimeLinearDB_subst_live_separated
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
     {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
@@ -5115,6 +5143,522 @@ theorem activeRuntimeLinearDB_subst_live_gen_separated
     exact hsep_erhs
   · rw [hlocs]
     exact hsep_rhs_e
+
+private theorem deepActiveRuntimeLinearDB_active
+    {e : TermDB}
+    (h : DeepActiveRuntimeLinearDB e) :
+    ActiveRuntimeLinearDB e := by
+  cases e <;>
+    simp [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB,
+      activeLocRefsDB, activeLocRefsClausesDB] at h ⊢
+  all_goals
+    first
+    | exact h.1
+    | exact h
+
+@[reducible] def DeepActiveSubstNoneMotive1 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 : LinearCtxDB) → (e : TermDB) → (t : Typ) →
+    (eps : EffectRow) → (Γ2 : LinearCtxDB) →
+    HasTypeDB Δ' S' Γ1 e t eps Γ2 → Prop :=
+  fun _Δ' _S' Γ1 e _t _eps Γ2 _ =>
+    ∀ (v : TermDB) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j none →
+      Γ2 = Γ_out.insertAt j none →
+      DeepActiveRuntimeLinearDB e →
+      DeepActiveRuntimeLinearDB (substDBAux j v e)
+
+@[reducible] def DeepActiveSubstNoneMotive2 : (Δ' : CapCtx) → (S' : StoreTyp) →
+    (Γ1 Γ2 : LinearCtxDB) → (t : Typ) → (epsR : EffectRow) →
+    (cls : List (EffectLabel × TermDB)) →
+    ClausesTypedDB Δ' S' Γ1 Γ2 t epsR cls → Prop :=
+  fun _Δ' _S' Γ1 Γ2 _t _epsR cls _ =>
+    ∀ (v : TermDB) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j none →
+      Γ2 = Γ_out.insertAt j none →
+      DeepActiveRuntimeLinearClausesDB cls →
+      DeepActiveRuntimeLinearClausesDB (substClausesDBAux j v cls)
+
+theorem deepActiveRuntimeLinearDB_subst_none_gen
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e : TermDB} {t : Typ} {eps : EffectRow}
+    (h : HasTypeDB Δ S Γ1 e t eps Γ2)
+    (v : TermDB) (j : Nat)
+    (Γ_in Γ_out : LinearCtxDB)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ1 = Γ_in.insertAt j none)
+    (hout : Γ2 = Γ_out.insertAt j none)
+    (hdeep : DeepActiveRuntimeLinearDB e) :
+    DeepActiveRuntimeLinearDB (substDBAux j v e) := by
+  revert v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+  change DeepActiveSubstNoneMotive1 Δ S Γ1 e t eps Γ2 h
+  induction h using HasTypeDB.rec (motive_2 := DeepActiveSubstNoneMotive2) with
+  | var Δ_ S_ Γ i ti hlook =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout _hdeep
+      by_cases hij : i = j
+      · subst hij
+        rw [hin, LinearCtxDB.getElem?_insertAt_eq Γ_in i none (by simpa using hj_in)] at hlook
+        cases hlook
+      · by_cases hlt : i < j
+        · simp [substDBAux, DeepActiveRuntimeLinearDB, hij, hlt]
+        · simp [substDBAux, DeepActiveRuntimeLinearDB, hij, hlt]
+  | unit Δ_ S_ Γ =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout _hdeep
+      simp [substDBAux, DeepActiveRuntimeLinearDB]
+  | abs Δ_ S_ Γ1 Γ2 slot t1 t2 eps_ body hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.abs t1 body) ∧
+            DeepActiveRuntimeLinearDB body := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hin_body : some t1 :: Γ1 =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have hbody' := ih_body (lift v) (j + 1) (some t1 :: Γ_in) (slot :: Γ_out)
+        hj_in_body hj_out_body hin_body hout_body
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | app Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps_ eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.app e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape :
+          HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.arrow t1 t2 eps_) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 t1 eps2
+            (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux j v e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2_shape v j Γ_mid_base Γ_out hj_mid hj_out rfl rfl
+      have hact :
+          ActiveRuntimeLinearDB (TermDB.app (substDBAux j v e1) (substDBAux j v e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.app e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | letBind Δ_ S_ Γ1 Γ2 Γ3 slot e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.letBind e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hin_body : some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_mid_base) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← h_Γ2_eq]
+      have hout_body : slot :: Γ3 =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_out) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hout]
+      have hj_mid_body : j + 1 ≤ (some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_out).length := by simp; omega
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 (lift v) (j + 1) (some t1 :: Γ_mid_base) (slot :: Γ_out)
+        hj_mid_body hj_out_body hin_body hout_body
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux (j + 1) (lift v) e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2 (lift v) (j + 1)
+          (some t1 :: Γ_mid_base) (slot :: Γ_out) hj_mid_body hj_out_body hin_body hout_body
+      have hact :
+          ActiveRuntimeLinearDB
+            (TermDB.letBind (substDBAux j v e1) (substDBAux (j + 1) (lift v) e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.letBind e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | copy Δ_ S_ Γ1 Γ2 e_ ds eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB e_.copy ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | letpair Δ_ S_ Γ1 Γ2 Γ3 slot1 slot2 e1 e2 t1 t2 tR eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.letpair e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.pair t1 t2) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hin_body : some t2 :: some t1 :: Γ2 =
+          LinearCtxDB.insertAt (j + 2) none (some t2 :: some t1 :: Γ_mid_base) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← h_Γ2_eq]
+      have hout_body : slot1 :: slot2 :: Γ3 =
+          LinearCtxDB.insertAt (j + 2) none (slot1 :: slot2 :: Γ_out) := by
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ,
+            ← hout]
+      have hj_mid_body : j + 2 ≤ (some t2 :: some t1 :: Γ_mid_base).length := by simp; omega
+      have hj_out_body : j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by simp; omega
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 (lift (lift v)) (j + 2)
+        (some t2 :: some t1 :: Γ_mid_base) (slot1 :: slot2 :: Γ_out)
+        hj_mid_body hj_out_body hin_body hout_body
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux (j + 2) (lift (lift v)) e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2 (lift (lift v)) (j + 2)
+          (some t2 :: some t1 :: Γ_mid_base) (slot1 :: slot2 :: Γ_out)
+          hj_mid_body hj_out_body hin_body hout_body
+      have hact :
+          ActiveRuntimeLinearDB
+            (TermDB.letpair (substDBAux j v e1) (substDBAux (j + 2) (lift (lift v)) e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.letpair e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | tpair Δ_ S_ Γ1 Γ2 Γ3 e1 e2 t1 t2 eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.pair e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 t1 eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 t2 eps2
+            (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux j v e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2_shape v j Γ_mid_base Γ_out hj_mid hj_out rfl rfl
+      have hact :
+          ActiveRuntimeLinearDB (TermDB.pair (substDBAux j v e1) (substDBAux j v e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.pair e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | fst Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB e_.fst ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | snd Δ_ S_ Γ1 Γ2 e_ t1 t2 eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB e_.snd ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | const Δ_ S_ Γ c ds =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout _hdeep
+      simp [substDBAux, DeepActiveRuntimeLinearDB]
+  | tadd Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.add e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 (Typ.tensor ds) eps2
+            (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux j v e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2_shape v j Γ_mid_base Γ_out hj_mid hj_out rfl rfl
+      have hact :
+          ActiveRuntimeLinearDB (TermDB.add (substDBAux j v e1) (substDBAux j v e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.add e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | tmul Δ_ S_ Γ1 Γ2 Γ3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.mul e1 e2) ∧
+            DeepActiveRuntimeLinearDB e1 ∧ DeepActiveRuntimeLinearDB e2 := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) e1 (Typ.tensor ds) eps1 Γ2 := hin ▸ h1
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have h2_shape :
+          HasTypeDB Δ_ S_ (Γ_mid_base.insertAt j none) e2 (Typ.tensor ds) eps2
+            (Γ_out.insertAt j none) := by
+        rw [← h_Γ2_eq]
+        exact hout ▸ h2
+      have h1' := ih1 v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have h2' := ih2 v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+        hsplit.2.2
+      have hloc1 :
+          activeLocRefsDB (substDBAux j v e1) = activeLocRefsDB e1 :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hloc2 :
+          activeLocRefsDB (substDBAux j v e2) = activeLocRefsDB e2 :=
+        activeLocRefsDB_subst_none_gen h2_shape v j Γ_mid_base Γ_out hj_mid hj_out rfl rfl
+      have hact :
+          ActiveRuntimeLinearDB (TermDB.mul (substDBAux j v e1) (substDBAux j v e2)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.mul e1 e2) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, hloc1, hloc2] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro h1' h2')
+  | tsum Δ_ S_ Γ1 Γ2 e_ ds i eps_ hbody ds' hds' ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.sum e_ i) ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | texpand Δ_ S_ Γ1 Γ2 e_ ds i k eps_ hbody ds' hds' ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.expand e_ i k) ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | uniformLike Δ_ S_ Γ1 Γ2 e_ ds lo hi eps_ hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.uniformLike e_ lo hi) ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | perform Δ_ S_ Γ1 Γ2 op e_ tArg tRet eps_ hbody hM ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.perform op e_) ∧
+            DeepActiveRuntimeLinearDB e_ := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have hbody' := ih_body v j Γ_in Γ_out hj_in hj_out hin hout
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | handle Δ_ S_ Γ1 Γ2 Γ3 body clauses ty epsH epsB hb hSubsH hClsH hCover hcls ih_hb ih_hcls =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) ∧
+            DeepActiveRuntimeLinearDB body ∧ DeepActiveRuntimeLinearClausesDB clauses := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have h1_shape : HasTypeDB Δ_ S_ (Γ_in.insertAt j none) body ty epsB Γ2 := hin ▸ hb
+      obtain ⟨Γ_mid_base, slot_mid, h_Γ2_eq, _h_mid_len, hj_mid, h12_traj⟩ :=
+        subst_multi_decomp_h1 (t_v := Typ.unit) j hj_in h1_shape (Or.inr rfl)
+      have hmid_none : slot_mid = none := by
+        rcases h12_traj with h | h | h
+        · cases h.1
+        · cases h.1
+        · exact h.2
+      subst hmid_none
+      have hb' := ih_hb v j Γ_in Γ_mid_base hj_in hj_mid hin h_Γ2_eq hsplit.2.1
+      have hcls' := ih_hcls v j Γ_mid_base Γ_out hj_mid hj_out h_Γ2_eq hout
+        hsplit.2.2
+      have hlocBody :
+          activeLocRefsDB (substDBAux j v body) = activeLocRefsDB body :=
+        activeLocRefsDB_subst_none_gen h1_shape v j Γ_in Γ_mid_base hj_in hj_mid rfl h_Γ2_eq
+      have hact :
+          ActiveRuntimeLinearDB
+            (TermDB.handle epsH (substDBAux j v body) (substClausesDBAux j v clauses)) := by
+        have hactOrig : ActiveRuntimeLinearDB (TermDB.handle epsH body clauses) := hsplit.1
+        unfold ActiveRuntimeLinearDB at hactOrig ⊢
+        simpa [activeLocRefsDB, activeLocRefsClausesDB, hlocBody] using hactOrig
+      simpa [DeepActiveRuntimeLinearDB, substDBAux] using And.intro hact (And.intro hb' hcls')
+  | tgrad Δ_ S_ Γ slot ds dsOut body eps_ hbody hsub ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.grad (Typ.tensor ds) (Typ.tensor dsOut) body) ∧
+            DeepActiveRuntimeLinearDB body := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have heq : Γ_in.insertAt j none = Γ_out.insertAt j none := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some (Typ.tensor ds) :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (some (Typ.tensor ds) :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some (Typ.tensor ds) :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      have hbody' := ih_body (lift v) (j + 1) (some (Typ.tensor ds) :: Γ_in) (slot :: Γ_in)
+        hj_in_body hj_out_body hin_body hout_body
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | tvmap Δ_ S_ Γ slot t1 t2 body eps_ d hbody ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          ActiveRuntimeLinearDB (TermDB.vmap t1 body) ∧
+            DeepActiveRuntimeLinearDB body := by
+        simpa [DeepActiveRuntimeLinearDB] using hdeep
+      have heq : Γ_in.insertAt j none = Γ_out.insertAt j none := hin.symm.trans hout
+      obtain ⟨hbase, _⟩ := LinearCtxDB.insertAt_inj j heq
+      subst hbase
+      have hin_body : some t1 :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (some t1 :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hout_body : slot :: Γ =
+          LinearCtxDB.insertAt (j + 1) none (slot :: Γ_in) := by
+        rw [LinearCtxDB.insertAt_cons_succ, ← hin]
+      have hj_in_body : j + 1 ≤ (some t1 :: Γ_in).length := by simp; omega
+      have hj_out_body : j + 1 ≤ (slot :: Γ_in).length := by simp; omega
+      have hbody' := ih_body (lift v) (j + 1) (some t1 :: Γ_in) (slot :: Γ_in)
+        hj_in_body hj_out_body hin_body hout_body
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearDB, ActiveRuntimeLinearDB, activeLocRefsDB, substDBAux] using
+        And.intro (deepActiveRuntimeLinearDB_active hbody') hbody'
+  | loc Δ_ S_ Γ ell ti hlook =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout _hdeep
+      simp [substDBAux, DeepActiveRuntimeLinearDB]
+  | subEff Δ_ S_ Γ Γ' e_ ti eps_ eps'_ hbody hSub ih_body =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      exact ih_body v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+  | nil Δ_ S_ Γ ty epsR_ =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout _hdeep
+      simp [substClausesDBAux, DeepActiveRuntimeLinearClausesDB]
+  | cons Δ_ S_ Γ2 Γ3 slot1 slot2 ty tArg tRet epsR_ op hb rest hmatch hb_typ hrest
+      ih_hb_typ ih_hrest =>
+      intro v j Γ_in Γ_out hj_in hj_out hin hout hdeep
+      have hsplit :
+          DeepActiveRuntimeLinearDB hb ∧
+            DeepActiveRuntimeLinearClausesDB rest := by
+        simpa [DeepActiveRuntimeLinearClausesDB] using hdeep
+      have hin_body :
+          some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ2 =
+            LinearCtxDB.insertAt (j + 2) none
+              (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in) := by
+        subst hin
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hout_body :
+          slot1 :: slot2 :: Γ3 =
+            LinearCtxDB.insertAt (j + 2) none
+              (slot1 :: slot2 :: Γ_out) := by
+        subst hout
+        rw [show (j + 2 : Nat) = (j + 1) + 1 from rfl,
+            LinearCtxDB.insertAt_cons_succ, LinearCtxDB.insertAt_cons_succ]
+      have hj_in_body :
+          j + 2 ≤ (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in).length := by
+        simp; omega
+      have hj_out_body :
+          j + 2 ≤ (slot1 :: slot2 :: Γ_out).length := by
+        simp; omega
+      have hb' := ih_hb_typ (lift (lift v)) (j + 2)
+        (some (Typ.arrow tRet ty epsR_) :: some tArg :: Γ_in)
+        (slot1 :: slot2 :: Γ_out) hj_in_body hj_out_body hin_body hout_body
+        hsplit.1
+      have hrest' := ih_hrest v j Γ_in Γ_out hj_in hj_out
+        (by simpa using hin) (by simpa using hout)
+        hsplit.2
+      simpa [DeepActiveRuntimeLinearClausesDB, substClausesDBAux] using
+        And.intro hb' hrest'
+
+theorem deepActiveRuntimeLinearDB_subst_none
+    {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow}
+    (j : Nat) (hj : j ≤ Γ.length)
+    (h_e : HasTypeDB Δ S (Γ.insertAt j none) e t eps (Γ.insertAt j none))
+    (hdeep : DeepActiveRuntimeLinearDB e) :
+    DeepActiveRuntimeLinearDB (substDBAux j v e) :=
+  deepActiveRuntimeLinearDB_subst_none_gen h_e v j Γ Γ hj hj rfl rfl hdeep
 
 theorem locRefsDB_subst_none
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
