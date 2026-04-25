@@ -30,7 +30,7 @@ def test_normal_like_differs_across_seeds() -> unit ! { Test } = {
   a = with seed(1) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
   b = with seed(2) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   max_diff = max_abs_diff(a, b)
-  assert_true(gt(max_diff, cast(0.000001, f32)), "normal_like with different seeds produces different samples (max element-wise diff > 1e-6)")
+  assert_true(gt(max_diff, cast(0.5, f32)), "normal_like(seed=1) vs (seed=2): max element-wise diff > 0.5 across 64 draws")
 }
 def test_normal_like_preserves_template_shape() -> unit ! { Test } = {
   template = make_template(cast(64, int64))

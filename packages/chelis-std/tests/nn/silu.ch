@@ -1,6 +1,6 @@
 module Std.Tests.Nn.Silu
 import Std.Nn.Silu (forward, sigmoid_scalar)
-import Std.Test (assert_close, assert_close_tensor, assert_true)
+import Std.Test (assert_close, assert_close_tensor)
 def test_silu_zero_is_zero() -> unit ! { Test } = {
   x = cast(0.0, f32)
   out = mul(x, sigmoid_scalar(x))
@@ -10,13 +10,11 @@ def test_sigmoid_zero_is_one_half() -> unit ! { Test } = {
   out = sigmoid_scalar(cast(0.0, f32))
   assert_close(out, cast(0.5, f32), cast(0.000001, f32), "sigmoid(0) == 1 / (1 + exp(0)) == 0.5")
 }
-def test_sigmoid_bounded_in_unit_interval() -> unit ! { Test } = {
+def test_sigmoid_pins_closed_form_values_at_minus3_and_plus3() -> unit ! { Test } = {
   s_neg = sigmoid_scalar(cast(-3.0, f32))
   s_pos = sigmoid_scalar(cast(3.0, f32))
-  _ = assert_true(gt(s_neg, cast(0.0, f32)), "sigmoid(-3) > 0")
-  _ = assert_true(lt(s_neg, cast(1.0, f32)), "sigmoid(-3) < 1")
-  _ = assert_true(gt(s_pos, cast(0.0, f32)), "sigmoid(3) > 0")
-  assert_true(lt(s_pos, cast(1.0, f32)), "sigmoid(3) < 1")
+  _ = assert_close(s_neg, cast(0.04742587, f32), cast(0.0001, f32), "sigmoid(-3) ≈ 0.0474")
+  assert_close(s_pos, cast(0.95257413, f32), cast(0.0001, f32), "sigmoid(3) ≈ 0.9526")
 }
 def test_silu_large_positive_saturates_to_identity() -> unit ! { Test } = {
   x = cast(10.0, f32)

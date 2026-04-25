@@ -37,13 +37,13 @@ def test_kaiming_uniform_distinct_seeds_produce_distinct_samples() -> unit ! { T
   a = with seed(101) { kaiming_uniform(template8(), cast(4.0, f32)) }
   b = with seed(303) { kaiming_uniform(template8(), cast(4.0, f32)) }
   diff = sum_abs_diff(a, b)
-  assert_true(gt(diff, cast(0.000001, f32)), "kaiming_uniform(seed=101) != kaiming_uniform(seed=303)")
+  assert_true(gt(diff, cast(0.5, f32)), "kaiming_uniform(seed=101) vs (seed=303): sum |a - b| > 0.5 across 8 draws")
 }
 def test_kaiming_normal_distinct_seeds_produce_distinct_samples() -> unit ! { Test } = {
   a = with seed(202) { kaiming_normal(template8(), cast(4.0, f32)) }
   b = with seed(404) { kaiming_normal(template8(), cast(4.0, f32)) }
   diff = sum_abs_diff(a, b)
-  assert_true(gt(diff, cast(0.000001, f32)), "kaiming_normal(seed=202) != kaiming_normal(seed=404)")
+  assert_true(gt(diff, cast(0.5, f32)), "kaiming_normal(seed=202) vs (seed=404): sum |a - b| > 0.5 across 8 draws")
 }
 def test_kaiming_uniform_preserves_template_shape() -> unit ! { Test } = {
   out = with seed(11) { kaiming_uniform(template8(), cast(4.0, f32)) }
@@ -54,23 +54,16 @@ def test_kaiming_normal_preserves_template_shape() -> unit ! { Test } = {
   assert_shape(out, cast(8, int64), "kaiming_normal output rank-1 length matches template (8)")
 }
 def test_kaiming_uniform_respects_bound() -> unit ! { Test } = {
-  -- kaiming_uniform with fan_in=4 has bound = sqrt(6/4) ~= 1.2247449.
-  -- All samples must lie inside [-bound, bound]; we check max(|x|) <= bound + slack.
   out = with seed(13) { kaiming_uniform(template1024(), cast(4.0, f32)) }
   m = max_abs(out)
   assert_true(lt(m, cast(1.2249, f32)), "kaiming_uniform(fan_in=4) samples lie inside [-sqrt(6/4), sqrt(6/4)]")
 }
 def test_kaiming_uniform_std_matches_uniform_theory() -> unit ! { Test } = {
-  -- kaiming_uniform with fan_in=4: bound = sqrt(6/4); std of Uniform(-bound, bound)
-  -- is bound/sqrt(3) = sqrt(6/4)/sqrt(3) = sqrt(1/2) ~= 0.7071068. With n=1024
-  -- a 0.1-loose tolerance is well above sampling noise.
   out = with seed(14) { kaiming_uniform(template1024(), cast(4.0, f32)) }
   s = sample_std(out)
   assert_true(lt(abs_f32(sub(s, cast(0.7071, f32))), cast(0.1, f32)), "kaiming_uniform(fan_in=4) sample std ~= 0.7071")
 }
 def test_kaiming_normal_std_matches_normal_theory() -> unit ! { Test } = {
-  -- kaiming_normal with fan_in=4: std = sqrt(2/4) ~= 0.7071068. With n=1024
-  -- a 0.1-loose tolerance is well above Box-Muller sampling noise.
   out = with seed(15) { kaiming_normal(template1024(), cast(4.0, f32)) }
   s = sample_std(out)
   assert_true(lt(abs_f32(sub(s, cast(0.7071, f32))), cast(0.1, f32)), "kaiming_normal(fan_in=4) sample std ~= 0.7071")
