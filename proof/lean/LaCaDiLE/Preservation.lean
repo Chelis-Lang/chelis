@@ -3129,6 +3129,128 @@ theorem activeRuntimeLinear_handleOpCtxs_repaired :
       · simp [ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
           handleCtxCounterClauses, handleCtxCounterBody, multiPlug, plug, subst])
 
+private def handleDirectCounterBody : Term :=
+  Term.letBind "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
+
+private def handleDirectCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", handleDirectCounterBody)]
+
+private def handleDirectCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (Term.perform EffectLabel.accum Term.unit)
+    handleDirectCounterClauses
+
+private def handleDirectCounterTerm' : Term :=
+  Term.letBind "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
+
+/-- Narrowing `RuntimeLinear` to `ActiveRuntimeLinear` fixes the
+    captured-handler context cases above, but it is still too weak for
+    direct handled operations: a dormant clause body can become active
+    in one step and expose duplicated locations that were previously
+    hidden from the active footprint. -/
+theorem activeRuntimeLinear_handleOpDirect_counterexample :
+    HasType [] ctxCounterStoreTyp [] handleDirectCounterTerm
+      Typ.unit [] [] ∧
+    WellScoped handleDirectCounterTerm ∧
+    StoreWf ctxCounterSigma ctxCounterStoreTyp ∧
+    ActiveRuntimeLinear handleDirectCounterTerm ∧
+    Step ⟨ctxCounterSigma, handleDirectCounterTerm⟩
+      ⟨ctxCounterSigma, handleDirectCounterTerm'⟩ ∧
+    ¬ ActiveRuntimeLinear handleDirectCounterTerm' := by
+  let tDup : Typ := Typ.pair (Typ.tensor DimList.empty) (Typ.tensor DimList.empty)
+  let tK : Typ := Typ.arrow Typ.unit Typ.unit []
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · have hUnit :
+        HasType [] ctxCounterStoreTyp [] Term.unit Typ.unit [] [] := by
+      exact HasType.unit [] ctxCounterStoreTyp []
+    have hPerform :
+        HasType [] ctxCounterStoreTyp []
+          (Term.perform EffectLabel.accum Term.unit)
+          Typ.unit [EffectLabel.accum] [] := by
+      exact HasType.perform [] ctxCounterStoreTyp [] []
+        EffectLabel.accum Term.unit Typ.unit Typ.unit [] hUnit
+        (by simp [OpSigMatch, opArgType, opRetType])
+    have hLoc1 :
+        HasType [] ctxCounterStoreTyp
+          [("x", some Typ.unit), ("k", some tK)]
+          (Term.loc 1) (Typ.tensor DimList.empty) []
+          [("x", some Typ.unit), ("k", some tK)] := by
+      exact HasType.loc [] ctxCounterStoreTyp
+        [("x", some Typ.unit), ("k", some tK)] 1
+        (Typ.tensor DimList.empty) (by
+          simp [ctxCounterStoreTyp, storeTypLookup])
+    have hDup :
+        HasType [] ctxCounterStoreTyp
+          [("x", some Typ.unit), ("k", some tK)]
+          (Term.pair (Term.loc 1) (Term.loc 1)) tDup []
+          [("x", some Typ.unit), ("k", some tK)] := by
+      simpa [tDup, tK] using
+        (HasType.tpair [] ctxCounterStoreTyp
+          [("x", some Typ.unit), ("k", some tK)]
+          [("x", some Typ.unit), ("k", some tK)]
+          [("x", some Typ.unit), ("k", some tK)]
+          (Term.loc 1) (Term.loc 1)
+          (Typ.tensor DimList.empty) (Typ.tensor DimList.empty)
+          [] [] hLoc1 hLoc1)
+    have hUnitBody :
+        HasType [] ctxCounterStoreTyp
+          ([("x", some Typ.unit), ("k", some tK)] ++ [("z", some tDup)])
+          Term.unit Typ.unit []
+          ([("x", some Typ.unit), ("k", some tK)] ++ [("z", some tDup)]) := by
+      exact HasType.unit [] ctxCounterStoreTyp
+        ([("x", some Typ.unit), ("k", some tK)] ++ [("z", some tDup)])
+    have hBody :
+        HasType [] ctxCounterStoreTyp
+          [("x", some Typ.unit), ("k", some tK)]
+          handleDirectCounterBody Typ.unit []
+          [("x", some Typ.unit), ("k", some tK)] := by
+      simpa [handleDirectCounterBody, tDup, tK] using
+        (HasType.letBind [] ctxCounterStoreTyp
+          [("x", some Typ.unit), ("k", some tK)]
+          [("x", some Typ.unit), ("k", some tK)]
+          [("x", some Typ.unit), ("k", some tK)]
+          "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
+          tDup Typ.unit [] [] (some tDup) hDup hUnitBody)
+    have hClauses :
+        ClausesTyped [] ctxCounterStoreTyp [] [] Typ.unit []
+          handleDirectCounterClauses := by
+      exact ClausesTyped.cons [] ctxCounterStoreTyp [] [] Typ.unit Typ.unit Typ.unit []
+        EffectLabel.accum "x" "k" handleDirectCounterBody [] (some Typ.unit) (some tK)
+        (by simp [OpSigMatch, opArgType, opRetType]) hBody
+        (ClausesTyped.nil [] ctxCounterStoreTyp [] Typ.unit [])
+    exact HasType.handle [] ctxCounterStoreTyp [] [] [] 
+      (Term.perform EffectLabel.accum Term.unit)
+      handleDirectCounterClauses Typ.unit [EffectLabel.accum] [EffectLabel.accum]
+      hPerform
+      (by simp)
+      (by simp [handleDirectCounterClauses])
+      (by intro op hop; simp at hop; rcases hop with rfl; exact ⟨(EffectLabel.accum, "x", "k", handleDirectCounterBody), by simp [handleDirectCounterClauses], rfl⟩)
+      hClauses
+  · simpa [handleDirectCounterTerm, WellScoped, boundVars, boundVarsClauses,
+      handleDirectCounterClauses, handleDirectCounterBody] using
+      (show (["x", "k", "z"] : List String).Nodup by decide)
+  · refine ⟨?_, ?_⟩
+    · intro ell hmem
+      simp [ctxCounterSigma, ctxCounterStoreTyp, storeTypDom, storeLookup] at hmem ⊢
+      rcases hmem with rfl | rfl
+      · simp [ctxCounterSigma, storeLookup]
+      · simp [ctxCounterSigma, storeLookup]
+    · intro ell hsome
+      simp [ctxCounterSigma, storeLookup] at hsome
+      simpa [ctxCounterStoreTyp, storeTypDom, eq_comm] using hsome
+  · simp [ActiveRuntimeLinear, handleDirectCounterTerm, activeLocRefs, activeLocRefsClauses,
+      handleDirectCounterClauses]
+  · simpa [handleDirectCounterTerm', handleDirectCounterBody, subst] using
+      (Step.handleOpDirect ctxCounterSigma
+        EffectLabel.accum Term.unit [EffectLabel.accum]
+        handleDirectCounterClauses
+        "x" "k" handleDirectCounterBody Typ.unit
+        IsValue.unit
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [handleDirectCounterClauses]))
+  · simp [ActiveRuntimeLinear, handleDirectCounterTerm', activeLocRefs]
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
