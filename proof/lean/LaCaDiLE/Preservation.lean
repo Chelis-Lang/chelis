@@ -3354,6 +3354,160 @@ theorem deepActiveRuntimeLinear_handleOpDirect_blocks_counterexample :
     handleDirectCounterTerm, handleDirectCounterClauses,
     handleDirectCounterBody]
 
+private def deepActiveGapClauseBody : Term :=
+  Term.letBind "z" (Term.loc 1) Term.unit
+
+private def deepActiveGapClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "y", "k", deepActiveGapClauseBody)]
+
+private def deepActiveGapHandle : Term :=
+  Term.handle [EffectLabel.accum]
+    (Term.perform EffectLabel.accum Term.unit)
+    deepActiveGapClauses
+
+private def deepActiveGapAbsBody : Term :=
+  Term.pair (Term.var "x") deepActiveGapHandle
+
+private def deepActiveGapTerm : Term :=
+  Term.app
+    (Term.abs "x" (Typ.tensor DimList.empty) deepActiveGapAbsBody)
+    (Term.loc 1)
+
+private def deepActiveGapTerm' : Term :=
+  subst deepActiveGapAbsBody (Term.loc 1) "x"
+
+/-- The current DB-side deep-active dead-substitution theorem is
+    stronger than the named beta wrapper actually needs: a typed
+    deep-active beta step can preserve the invariant even when the
+    argument location is shared with an unchanged dormant clause body.
+    That overlap blocks the theorem's full-`locRefs` separation premise
+    without creating a real preservation failure. -/
+theorem deepActiveRuntimeLinear_beta_bridge_gap :
+    HasType [] ctxCounterStoreTyp [] deepActiveGapTerm
+      (Typ.pair (Typ.tensor DimList.empty) Typ.unit) [] [] ∧
+    DeepActiveRuntimeLinear deepActiveGapTerm ∧
+    Step ⟨ctxCounterSigma, deepActiveGapTerm⟩
+      ⟨ctxCounterSigma, deepActiveGapTerm'⟩ ∧
+    DeepActiveRuntimeLinear deepActiveGapTerm' ∧
+    ¬ LocRefsSeparated (locRefs (Term.loc 1)) (locRefs deepActiveGapAbsBody) := by
+  let tX : Typ := Typ.tensor DimList.empty
+  let tK : Typ := Typ.arrow Typ.unit Typ.unit []
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · have hLoc1Nil :
+        HasType [] ctxCounterStoreTyp [] (Term.loc 1) tX [] [] := by
+      exact HasType.loc [] ctxCounterStoreTyp [] 1 tX (by
+        simp [tX, ctxCounterStoreTyp, storeTypLookup])
+    have hUnit :
+        HasType [] ctxCounterStoreTyp [("x", none)] Term.unit Typ.unit []
+          [("x", none)] := by
+      exact HasType.unit [] ctxCounterStoreTyp [("x", none)]
+    have hPerform :
+        HasType [] ctxCounterStoreTyp [("x", none)]
+          (Term.perform EffectLabel.accum Term.unit)
+          Typ.unit [EffectLabel.accum] [("x", none)] := by
+      exact HasType.perform [] ctxCounterStoreTyp [("x", none)] [("x", none)]
+        EffectLabel.accum Term.unit Typ.unit Typ.unit [] hUnit
+        (by simp [OpSigMatch, opArgType, opRetType])
+    have hLoc1Clause :
+        HasType [] ctxCounterStoreTyp
+          [("x", none), ("y", some Typ.unit), ("k", some tK)]
+          (Term.loc 1) tX []
+          [("x", none), ("y", some Typ.unit), ("k", some tK)] := by
+      exact HasType.loc [] ctxCounterStoreTyp
+        [("x", none), ("y", some Typ.unit), ("k", some tK)] 1 tX (by
+          simp [tX, ctxCounterStoreTyp, storeTypLookup])
+    have hUnitBody :
+        HasType [] ctxCounterStoreTyp
+          ([("x", none), ("y", some Typ.unit), ("k", some tK)] ++
+            [("z", some tX)])
+          Term.unit Typ.unit []
+          ([("x", none), ("y", some Typ.unit), ("k", some tK)] ++
+            [("z", some tX)]) := by
+      exact HasType.unit [] ctxCounterStoreTyp
+        ([("x", none), ("y", some Typ.unit), ("k", some tK)] ++
+          [("z", some tX)])
+    have hClauseBody :
+        HasType [] ctxCounterStoreTyp
+          [("x", none), ("y", some Typ.unit), ("k", some tK)]
+          deepActiveGapClauseBody Typ.unit []
+          [("x", none), ("y", some Typ.unit), ("k", some tK)] := by
+      simpa [deepActiveGapClauseBody, tX, tK] using
+        (HasType.letBind [] ctxCounterStoreTyp
+          [("x", none), ("y", some Typ.unit), ("k", some tK)]
+          [("x", none), ("y", some Typ.unit), ("k", some tK)]
+          [("x", none), ("y", some Typ.unit), ("k", some tK)]
+          "z" (Term.loc 1) Term.unit tX Typ.unit [] [] (some tX)
+          hLoc1Clause hUnitBody)
+    have hClauses :
+        ClausesTyped [] ctxCounterStoreTyp
+          [("x", none)] [("x", none)] Typ.unit []
+          deepActiveGapClauses := by
+      exact ClausesTyped.cons [] ctxCounterStoreTyp
+        [("x", none)] [("x", none)]
+        Typ.unit Typ.unit Typ.unit []
+        EffectLabel.accum "y" "k" deepActiveGapClauseBody
+        [] (some Typ.unit) (some tK)
+        (by simp [OpSigMatch, opArgType, opRetType]) hClauseBody
+        (ClausesTyped.nil [] ctxCounterStoreTyp [("x", none)] Typ.unit [])
+    have hHandle :
+        HasType [] ctxCounterStoreTyp
+          [("x", none)] deepActiveGapHandle Typ.unit []
+          [("x", none)] := by
+      exact HasType.handle [] ctxCounterStoreTyp
+        [("x", none)] [("x", none)] [("x", none)]
+        (Term.perform EffectLabel.accum Term.unit)
+        deepActiveGapClauses Typ.unit
+        [EffectLabel.accum] [EffectLabel.accum]
+        hPerform
+        (by simp)
+        (by simp [deepActiveGapClauses])
+        (by
+          intro op hop
+          simp at hop
+          rcases hop with rfl
+          exact ⟨(EffectLabel.accum, "y", "k", deepActiveGapClauseBody),
+            by simp [deepActiveGapClauses], rfl⟩)
+        hClauses
+    have hVarX :
+        HasType [] ctxCounterStoreTyp [("x", some tX)]
+          (Term.var "x") tX [] [("x", none)] := by
+      exact HasType.var [] ctxCounterStoreTyp [] [] "x" tX
+    have hPairBody :
+        HasType [] ctxCounterStoreTyp
+          [("x", some tX)] deepActiveGapAbsBody
+          (Typ.pair tX Typ.unit) [] [("x", none)] := by
+      simpa [deepActiveGapAbsBody, tX] using
+        (HasType.tpair [] ctxCounterStoreTyp
+          [("x", some tX)] [("x", none)] [("x", none)]
+          (Term.var "x") deepActiveGapHandle
+          tX Typ.unit [] [] hVarX
+          (by simpa using hHandle))
+    have hAbs :
+        HasType [] ctxCounterStoreTyp []
+          (Term.abs "x" tX deepActiveGapAbsBody)
+          (Typ.arrow tX (Typ.pair tX Typ.unit) []) [] [] := by
+      exact HasType.abs [] ctxCounterStoreTyp [] []
+        "x" tX (Typ.pair tX Typ.unit) [] deepActiveGapAbsBody none hPairBody
+    simpa [deepActiveGapTerm, tX] using
+      (HasType.app [] ctxCounterStoreTyp [] [] []
+        (Term.abs "x" tX deepActiveGapAbsBody) (Term.loc 1)
+        tX (Typ.pair tX Typ.unit) [] [] [] hAbs hLoc1Nil)
+  · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      deepActiveGapTerm, deepActiveGapAbsBody, deepActiveGapHandle,
+      deepActiveGapClauses, deepActiveGapClauseBody]
+  · simpa [deepActiveGapTerm, deepActiveGapTerm'] using
+      (Step.beta ctxCounterSigma "x" (Typ.tensor DimList.empty)
+        deepActiveGapAbsBody (Term.loc 1) (IsValue.loc 1))
+  · simp [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearClauses,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      deepActiveGapTerm', deepActiveGapAbsBody, deepActiveGapHandle,
+      deepActiveGapClauses, deepActiveGapClauseBody, subst, substClauses]
+  · simp [LocRefsSeparated, locRefs, locRefsClauses,
+      deepActiveGapAbsBody, deepActiveGapHandle,
+      deepActiveGapClauses, deepActiveGapClauseBody]
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
