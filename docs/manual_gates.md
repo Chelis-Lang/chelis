@@ -76,6 +76,7 @@ assertion failures unless an explicit different success condition is given.
 | `phase3o_octant_oracle` (named oracle, not implemented) | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | Implementation pending in 3o coding work | 3o |
 | `phase3j_pre_std_oracle` (named, differs from shipped) | `cargo test -p chelis-cli phase3j_pre_std_oracle -- --exact` (shipped suite is `cargo test -p chelis-cli --test phase3j_pre_std`) | Reconcile naming or accept shipped suite as the de facto oracle | 3j-pre |
 | Phase 3f `skill_suite.rs` SKILL.md v2 validation | Run `skill_suite.rs` (when implemented) over every SKILL.md example against the current compiler | Implementation pending; depends on full Phase 3 surface | 3f |
+| Phase 3t chelis-std self-test corpus | `cargo test -p chelis-cli --test phase3t_chelis_std_self -- --ignored --nocapture` | None beyond default toolchain. Expected: 1 passed (the harness), reporting `>= 150` chelis-std self-tests; current is 171. Runtime ~170s, off the 60s inner-loop budget per CLAUDE.md — invoked manually or in a long-form CI job. | 3t |
 
 ## Also See
 
