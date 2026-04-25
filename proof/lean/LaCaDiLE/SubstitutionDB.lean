@@ -2601,6 +2601,91 @@ private theorem clausesRuntimeLinearDB_subst_dead_same_ctx_absurd
   exfalso
   exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
 
+private theorem deepActiveRuntimeLinearDB_subst_var_live_dead_separated
+    {v : TermDB} {rhsRefs : List Loc}
+    (j : Nat)
+    (hdeep_v : DeepActiveRuntimeLinearDB v)
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.var j)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.var j))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var j))) := by
+  simpa [substDBAux] using ⟨hdeep_v, hsep_v_rhs, hsep_rhs_v⟩
+
+private theorem deepActiveRuntimeLinearDB_subst_var_live_dead
+    {Γ_in Γ_out : LinearCtxDB}
+    {v : TermDB} {t_v ti : Typ} {rhsRefs : List Loc}
+    (i j : Nat)
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hlook : (Γ_in.insertAt j (some t_v))[i]? = some (some ti))
+    (hout : (Γ_in.insertAt j (some t_v)).set i none = Γ_out.insertAt j none)
+    (hdeep_v : DeepActiveRuntimeLinearDB v)
+    (hsep_v_rhs : LocRefsSeparated (locRefsDB v) rhsRefs)
+    (hsep_rhs_v : LocRefsSeparated rhsRefs (locRefsDB v)) :
+    DeepActiveRuntimeLinearDB (substDBAux j v (TermDB.var i)) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v (TermDB.var i))) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v (TermDB.var i))) := by
+  rcases Nat.lt_trichotomy i j with hij | rfl | hij
+  · by_cases hiΓ : i < Γ_in.length
+    · have hset :
+          (LinearCtxDB.insertAt j (some t_v) Γ_in).set i none =
+          LinearCtxDB.insertAt j (some t_v) (Γ_in.set i none) :=
+        LinearCtxDB.set_insertAt_lt Γ_in j (some t_v) i none hij hiΓ
+      rw [hset] at hout
+      have hlook_j := congrArg (fun G => G[j]?) hout
+      simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out, hij, hiΓ] at hlook_j
+    · exfalso
+      have hi_lt_len : i < Γ_in.length + 1 := by
+        have := (List.getElem?_eq_some_iff.mp hlook).1
+        rw [LinearCtxDB.length_insertAt] at this
+        exact this
+      have hi_eq : i = Γ_in.length := Nat.le_antisymm
+        (Nat.lt_succ_iff.mp hi_lt_len) (Nat.le_of_not_lt hiΓ)
+      omega
+  · rw [LinearCtxDB.getElem?_insertAt_eq Γ_in i (some t_v) hj_in] at hlook
+    have hti : ti = t_v := by simpa using hlook.symm
+    subst hti
+    exact deepActiveRuntimeLinearDB_subst_var_live_dead_separated
+      i hdeep_v hsep_v_rhs hsep_rhs_v
+  · have him1 : j ≤ i - 1 := by omega
+    have hi_eq : i - 1 + 1 = i := by omega
+    have hset :
+        (LinearCtxDB.insertAt j (some t_v) Γ_in).set i none =
+        LinearCtxDB.insertAt j (some t_v) (Γ_in.set (i - 1) none) := by
+      have := LinearCtxDB.set_insertAt_gt Γ_in j (some t_v) (i - 1) none him1
+      rw [hi_eq] at this
+      exact this
+    rw [hset] at hout
+    have hlook_j := congrArg (fun G => G[j]?) hout
+    simp [LinearCtxDB.getElem?_insertAt_eq, hj_in, hj_out, hij, him1] at hlook_j
+
+private theorem deepActiveRuntimeLinearDB_subst_dead_same_ctx_absurd
+    {e v : TermDB} {rhsRefs : List Loc}
+    {Γ Γ_in Γ_out : LinearCtxDB} {t_v : Typ} {j : Nat}
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ = Γ_in.insertAt j (some t_v))
+    (hout : Γ = Γ_out.insertAt j none) :
+    DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  exfalso
+  exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
+
+private theorem clausesDeepActiveRuntimeLinearDB_subst_dead_same_ctx_absurd
+    {cls : List (EffectLabel × TermDB)} {v : TermDB} {rhsRefs : List Loc}
+    {Γ Γ_in Γ_out : LinearCtxDB} {t_v : Typ} {j : Nat}
+    (hj_in : j ≤ Γ_in.length)
+    (hj_out : j ≤ Γ_out.length)
+    (hin : Γ = Γ_in.insertAt j (some t_v))
+    (hout : Γ = Γ_out.insertAt j none) :
+    DeepActiveRuntimeLinearClausesDB (substClausesDBAux j v cls) ∧
+      LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v cls)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsClausesDB (substClausesDBAux j v cls)) := by
+  exfalso
+  exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
+
 /-- Motive bundle for the consuming runtime-linearity theorem.
 The distinguished slot is live on input and dead on output, so only
 one recursive branch may actually inject `v`'s runtime locations;
@@ -6594,6 +6679,28 @@ theorem deepActiveRuntimeLinearDB_subst_live
     DeepActiveRuntimeLinearDB (substDBAux j v e) :=
   deepActiveRuntimeLinearDB_subst_live_gen h_e v t_v j Γ Γ hj hj rfl rfl hdeep
 
+theorem deepActiveRuntimeLinearDB_subst_none_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j none) e t eps (Γ2.insertAt j none))
+    (hdeep : DeepActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  have hdeep' :=
+    deepActiveRuntimeLinearDB_subst_none_gen h_e v j Γ1 Γ2 hj_in hj_out rfl rfl hdeep
+  have hlocs :=
+    locRefsDB_subst_none_gen h_e v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨hdeep', ?_, ?_⟩
+  · simpa [hlocs] using hsep_erhs
+  · simpa [hlocs] using hsep_rhs_e
+
 theorem locRefsDB_subst_none
     {Δ : CapCtx} {S : StoreTyp} {Γ : LinearCtxDB}
     {e v : TermDB} {t : Typ} {eps : EffectRow}
@@ -7085,6 +7192,28 @@ theorem runtimeLinearDB_subst_live_gen_separated
     exact hsep_erhs
   · rw [hlocs]
     exact hsep_rhs_e
+
+theorem deepActiveRuntimeLinearDB_subst_live_gen_separated
+    {Δ : CapCtx} {S : StoreTyp}
+    {Γ1 Γ2 : LinearCtxDB}
+    {e v : TermDB} {t t_v : Typ} {eps : EffectRow} {rhsRefs : List Loc}
+    (j : Nat)
+    (hj_in : j ≤ Γ1.length)
+    (hj_out : j ≤ Γ2.length)
+    (h_e : HasTypeDB Δ S (Γ1.insertAt j (some t_v)) e t eps (Γ2.insertAt j (some t_v)))
+    (hdeep : DeepActiveRuntimeLinearDB e)
+    (hsep_erhs : LocRefsSeparated (locRefsDB e) rhsRefs)
+    (hsep_rhs_e : LocRefsSeparated rhsRefs (locRefsDB e)) :
+    DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+      LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+      LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e)) := by
+  have hdeep' :=
+    deepActiveRuntimeLinearDB_subst_live_gen h_e v t_v j Γ1 Γ2 hj_in hj_out rfl rfl hdeep
+  have hlocs :=
+    locRefsDB_subst_live_gen h_e v t_v j Γ1 Γ2 hj_in hj_out rfl rfl
+  refine ⟨hdeep', ?_, ?_⟩
+  · simpa [hlocs] using hsep_erhs
+  · simpa [hlocs] using hsep_rhs_e
 
 theorem runtimeLinearDB_subst_dead_gen
     {Δ : CapCtx} {S : StoreTyp}
