@@ -1610,6 +1610,36 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_reduce_host(&tensor, axis, ReduceOp::Argmin).map(RuntimeValue::Tensor)
             }
+            "sum" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let axis = expect_int_arg(args, 1)?;
+                tensor_reduce_host(&tensor, axis, ReduceOp::Sum).map(RuntimeValue::Tensor)
+            }
+            "matmul" => {
+                let lhs = expect_tensor_arg(args, 0)?;
+                let rhs = expect_tensor_arg(args, 1)?;
+                tensor_matmul_host(&lhs, &rhs).map(RuntimeValue::Tensor)
+            }
+            "permute" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let rank = tensor.value.shape.len();
+                if args.len() != rank + 1 {
+                    return Err(format!(
+                        "permute expects {} axis arguments for rank-{rank} tensor, got {}",
+                        rank,
+                        args.len().saturating_sub(1)
+                    ));
+                }
+                let mut axes: Vec<usize> = Vec::with_capacity(rank);
+                for i in 0..rank {
+                    let raw = expect_int_arg(args, i + 1)?;
+                    if raw < 0 {
+                        return Err(format!("permute requires non-negative axis, got {raw}"));
+                    }
+                    axes.push(raw as usize);
+                }
+                tensor_permute_host(&tensor, &axes).map(RuntimeValue::Tensor)
+            }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -2334,6 +2364,7 @@ fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<usize>, Stri
 
 #[derive(Clone, Copy)]
 enum ReduceOp {
+    Sum,
     Min,
     Prod,
     Argmax,
@@ -2358,6 +2389,7 @@ fn tensor_reduce_host(
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let mut best_value = match op {
+            ReduceOp::Sum => 0.0,
             ReduceOp::Min => f64::INFINITY,
             ReduceOp::Prod => 1.0,
             ReduceOp::Argmax => f64::NEG_INFINITY,
@@ -2378,6 +2410,9 @@ fn tensor_reduce_host(
             let in_linear = indices_to_linear(&in_indices, &tensor.value.shape);
             let value = tensor.value.data[in_linear];
             match op {
+                ReduceOp::Sum => {
+                    best_value += value;
+                }
                 ReduceOp::Min => {
                     if value < best_value {
                         best_value = value;
@@ -2401,7 +2436,7 @@ fn tensor_reduce_host(
             }
         }
         out[out_linear] = match op {
-            ReduceOp::Min | ReduceOp::Prod => best_value,
+            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Prod => best_value,
             // Argmax/Argmin: store integer indices as integer-valued F32 per
             // the Phase 3j-pre Batch 1 caveat (documented on RiscOp::Argmax
             // and adv_argmax_output_stores_integer_valued_floats).
@@ -2411,6 +2446,82 @@ fn tensor_reduce_host(
     Ok(RuntimeTensorValue {
         value: IrTensorValue::from_vec(out_shape, out),
         precision: tensor.precision,
+    })
+}
+
+/// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
+/// source axis for output axis `i`.
+fn tensor_permute_host(
+    tensor: &RuntimeTensorValue,
+    axes: &[usize],
+) -> Result<RuntimeTensorValue, String> {
+    let rank = tensor.value.shape.len();
+    if axes.len() != rank {
+        return Err(format!(
+            "permute expects {rank} axis arguments for rank-{rank} tensor, got {}",
+            axes.len()
+        ));
+    }
+    let mut seen = vec![false; rank];
+    for &axis in axes {
+        if axis >= rank {
+            return Err(format!("permute axis {axis} out of bounds for rank {rank}"));
+        }
+        if seen[axis] {
+            return Err(format!("permute axes contain duplicate axis {axis}"));
+        }
+        seen[axis] = true;
+    }
+    let in_shape = tensor.value.shape.clone();
+    let out_shape: Vec<usize> = axes.iter().map(|&a| in_shape[a]).collect();
+    let out_numel = tensor_numel(&out_shape);
+    let mut out = vec![0.0_f64; out_numel];
+    for in_linear in 0..tensor.value.data.len() {
+        let in_indices = linear_to_indices(in_linear, &in_shape);
+        let out_indices: Vec<usize> = axes.iter().map(|&a| in_indices[a]).collect();
+        let out_linear = indices_to_linear(&out_indices, &out_shape);
+        out[out_linear] = tensor.value.data[in_linear];
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(out_shape, out),
+        precision: tensor.precision,
+    })
+}
+
+/// 2D matmul: lhs is [m, k], rhs is [k, n], output is [m, n].
+fn tensor_matmul_host(
+    lhs: &RuntimeTensorValue,
+    rhs: &RuntimeTensorValue,
+) -> Result<RuntimeTensorValue, String> {
+    if lhs.value.shape.len() != 2 || rhs.value.shape.len() != 2 {
+        return Err(format!(
+            "matmul host runtime currently supports only rank-2 × rank-2; got ranks {} and {}",
+            lhs.value.shape.len(),
+            rhs.value.shape.len()
+        ));
+    }
+    let m = lhs.value.shape[0];
+    let k_lhs = lhs.value.shape[1];
+    let k_rhs = rhs.value.shape[0];
+    let n = rhs.value.shape[1];
+    if k_lhs != k_rhs {
+        return Err(format!(
+            "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
+        ));
+    }
+    let mut out = vec![0.0_f64; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0_f64;
+            for kk in 0..k_lhs {
+                acc += lhs.value.data[i * k_lhs + kk] * rhs.value.data[kk * n + j];
+            }
+            out[i * n + j] = acc;
+        }
+    }
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![m, n], out),
+        precision: lhs.precision,
     })
 }
 
@@ -3331,6 +3442,137 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
         assert!(
             err.contains("invalid tolerance") && err.contains("nan-tol"),
             "got: {err}"
+        );
+    }
+
+    // ----- N2 fix: matmul / permute / sum host evaluator coverage -----
+    //
+    // Pins the closure of the upstream-reported gap: native `chelis test`
+    // erroring with `unsupported builtin 'matmul'` / `'permute'` / `'sum'`
+    // when those primitives appear in a test's dependency graph.
+
+    fn first_tensor_data(outcome: &RuntimeOutcome, name: &str) -> Vec<f64> {
+        match outcome.host_bindings.get(name) {
+            Some(RuntimeValue::Tensor(t)) => t.value.data.clone(),
+            other => panic!("expected tensor binding {name}, got {other:?}"),
+        }
+    }
+
+    fn first_tensor_shape(outcome: &RuntimeOutcome, name: &str) -> Vec<usize> {
+        match outcome.host_bindings.get(name) {
+            Some(RuntimeValue::Tensor(t)) => t.value.shape.clone(),
+            other => panic!("expected tensor binding {name}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_runtime_matmul_2x2_identity_passthrough() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, int64), cast(0.0, f32))
+y = matmul(a, b)
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("matmul should evaluate under host runtime");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![3.0, 5.0, 7.0, 11.0]);
+    }
+
+    #[test]
+    fn host_runtime_matmul_2x3_3x2_basic() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+y = matmul(a, b)
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("rectangular matmul should evaluate");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        // Row 0: [1*1+2*0+3*1, 1*0+2*1+3*1] = [4, 5]
+        // Row 1: [4*1+5*0+6*1, 4*0+5*1+6*1] = [10, 11]
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![4.0, 5.0, 10.0, 11.0]);
+    }
+
+    #[test]
+    fn host_runtime_permute_2x2_transpose_swaps_off_diagonal() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, int64), cast(0.0, f32))
+y = permute(a, 1, 0)
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("permute should evaluate under host runtime");
+        // Row-major: original [[1,2],[3,4]] -> transpose [[1,3],[2,4]]
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 3.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn host_runtime_permute_2x3_transpose_to_3x2() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+y = permute(a, 1, 0)
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("rectangular permute should evaluate");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![3, 2]);
+        // [[1,2,3],[4,5,6]] -> [[1,4],[2,5],[3,6]]
+        assert_eq!(
+            first_tensor_data(&outcome, "y"),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_sum_axis1_reduces_2x3_to_2() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+y = sum(a, cast(1, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("sum should evaluate under host runtime");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![6.0, 15.0]);
+    }
+
+    #[test]
+    fn host_runtime_sum_axis0_reduces_2x3_to_3() {
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+y = sum(a, cast(0, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("sum on axis 0 should evaluate");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn host_runtime_matmul_shared_axis_mismatch_errors() {
+        // Build a 2x3 and a 2x2 — shared axis is 3 vs 2, must fail.
+        let checked = checked_surf(
+            r#"
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+y = matmul(a, b)
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("matmul shared-axis mismatch must fail");
+        assert!(
+            err.contains("matmul") && err.contains("mismatch"),
+            "expected matmul shared-axis diagnostic, got: {err}"
         );
     }
 }

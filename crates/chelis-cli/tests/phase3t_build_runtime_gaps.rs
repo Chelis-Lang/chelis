@@ -8,6 +8,19 @@
 //! error before the test bodies run. As a consequence Std self-tests for
 //! those modules can only assert importability + typecheck, not behavior.
 //!
+//! As of v0.2.4 + N2 fix (Nautilus upstream report), the host runtime gained
+//! `matmul`, `permute`, and `sum` evaluators. The remaining gaps for these
+//! fixtures are:
+//!
+//!   * `Linear.forward` — uses `expand` (host runtime: unsupported)
+//!   * `Attention.scaled_dot_product_attention` — uses `softmax`
+//!   * `CrossEntropy.loss` — uses `softmax`
+//!   * `RmsNorm.forward` — uses `to_list` + `map` (already eval-clean)
+//!
+//! Closing the remaining `expand` / `softmax` gaps would let these run under
+//! `chelis eval` end-to-end. Self-tests for the matmul/permute/sum surface
+//! live in `packages/chelis-std/tests/runtime/`.
+//!
 //! These integration tests close that gap on the build path: stage
 //! chelis-std into a tempdir reef home, write a `main.ch` that calls the
 //! module with concrete inputs, run `chelis build --target c`, compile the
