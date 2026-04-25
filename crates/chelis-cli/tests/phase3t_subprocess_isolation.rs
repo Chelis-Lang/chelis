@@ -312,6 +312,158 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
 }
 
 #[test]
+fn filter_active_tags_file_level_crash_row() {
+    // Issue #44 regression: `chelis test --filter <substring>` previously
+    // emitted a synthetic `<file>` FAIL row for any test file whose worker
+    // crashed before per-test filtering even started (parse error, top-level
+    // type error, signal kill). That meant a user filtering for `test_foo`
+    // would see noise about an unrelated `legacy.ch` parse failure.
+    //
+    // Suppressing the row entirely was rejected: the file the user filtered
+    // for might *also* be the broken one — silent suppression would hide
+    // the real failure. Instead we ship Option 2: always emit the synthetic
+    // row, but prefix its message with `(filter inactive — file-level error)`
+    // when `--filter` is active, so the operator can see at a glance that
+    // the row is a file-level failure rather than a filtered-test FAIL.
+    //
+    // This test stages a tempdir reef package with two test files:
+    //   * `tests/foo.ch` — a real `def test_foo()` that should match the
+    //     filter and PASS.
+    //   * `tests/broken.ch` — invalid Chelis syntax. The worker fails at
+    //     `parse_str` before any test enumeration or filter check, surfaces
+    //     a worker-side `<file>` FAIL row, and exits 1.
+    //
+    // We then assert:
+    //   1. `tests/foo.ch::test_foo` PASSes.
+    //   2. The `tests/broken.ch` `<file>` row is present, FAILs, AND its
+    //      message starts with the filter-inactive marker.
+    //   3. Parent exits 1 because a file-level failure occurred even though
+    //      every successfully-run test passed.
+    let (_dir, pkg) = make_reef_package("issue-44-filter-tag");
+
+    write_file(
+        &pkg.join("tests/foo.ch"),
+        r#"module Iso.Tests.Foo
+
+def test_foo() -> unit = test_assert(true, "ok")
+"#,
+    );
+
+    // Genuinely invalid Chelis: the parser bails out before ever reaching
+    // module enumeration or compilation, exercising the worker's
+    // read/parse-failure `<file>` row path. (A type-only error like
+    // `def trigger() -> int64 = "string"` does NOT exercise this path
+    // because, with `--filter test_foo`, the worker enumerates zero
+    // matching tests and returns early before compile, leaving the file
+    // entirely silent. A real parse error fires regardless of filter.)
+    write_file(
+        &pkg.join("tests/broken.ch"),
+        r#"module Iso.Tests.Broken
+
+this is not valid chelis syntax at all !!
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "--filter", "test_foo", "tests/"])
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Foo passes — filter-matched test ran normally despite the unrelated
+    // broken sibling.
+    let foo_row = row_for_test_in_file(&stdout, "tests/foo.ch", "test_foo")
+        .unwrap_or_else(|| panic!("foo.ch test_foo row missing from:\nstdout={stdout}"));
+    assert!(
+        foo_row.contains("PASS"),
+        "foo.ch test_foo should PASS; got: {foo_row}\nfull stdout=\n{stdout}"
+    );
+
+    // Broken file's `<file>` row is present (Option 2: not suppressed) and
+    // tagged with the filter-inactive marker so the user can see it isn't
+    // a filter match.
+    let broken_row = row_for_test_in_file(&stdout, "tests/broken.ch", "<file>")
+        .unwrap_or_else(|| panic!("broken.ch <file> row missing from:\nstdout={stdout}"));
+    assert!(
+        broken_row.contains("FAIL"),
+        "broken.ch <file> row should FAIL; got: {broken_row}\nfull stdout=\n{stdout}"
+    );
+    assert!(
+        broken_row.contains("(filter inactive — file-level error)"),
+        "broken.ch <file> row should carry the filter-inactive marker under \
+         --filter (issue #44 — Option 2 chosen over silent suppression); \
+         got: {broken_row}\nfull stdout=\n{stdout}"
+    );
+    // Confirm the original error reason is still in the message — the tag
+    // is a *prefix*, not a replacement. Silent data loss is the bug we are
+    // explicitly avoiding here.
+    assert!(
+        broken_row.contains("parse"),
+        "broken.ch <file> row should still mention the underlying parse \
+         error; the marker must not displace the diagnostic. \
+         got: {broken_row}\nfull stdout=\n{stdout}"
+    );
+
+    // Parent exits 1 — Option 2 surfaces the failure rather than hiding it,
+    // so the runner has at least one FAIL to report.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1 (broken.ch surfaced as file-level FAIL under --filter); \
+         got {:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+
+    // Summary counts: test_foo PASS + broken.ch <file> FAIL.
+    assert!(
+        stdout.contains("1 passed, 1 failed"),
+        "expected '1 passed, 1 failed' summary; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn filter_inactive_marker_only_under_filter() {
+    // Negative parity for `filter_active_tags_file_level_crash_row`:
+    // running the same broken file WITHOUT `--filter` must NOT carry the
+    // filter-inactive marker. The marker is solely a UI hint that the
+    // emitted row isn't filter-matched; with no filter active, every row
+    // is "active", so tagging would be misleading.
+    let (_dir, pkg) = make_reef_package("issue-44-no-filter");
+
+    write_file(
+        &pkg.join("tests/broken.ch"),
+        r#"module Iso.Tests.Broken
+
+this is not valid chelis syntax at all !!
+"#,
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let broken_row = row_for_test_in_file(&stdout, "tests/broken.ch", "<file>")
+        .unwrap_or_else(|| panic!("broken.ch <file> row missing from:\nstdout={stdout}"));
+    assert!(
+        broken_row.contains("FAIL"),
+        "broken.ch <file> row should FAIL; got: {broken_row}\nfull stdout=\n{stdout}"
+    );
+    assert!(
+        !broken_row.contains("filter inactive"),
+        "broken.ch <file> row should NOT carry the filter-inactive marker \
+         when --filter is absent; got: {broken_row}\nfull stdout=\n{stdout}"
+    );
+}
+
+#[test]
 fn worker_streams_rows_so_pre_crash_passes_survive() {
     // RT-A3 D1 regression: when a worker aborts mid-file, the rows it had
     // already produced must survive on stdout. Previously the worker

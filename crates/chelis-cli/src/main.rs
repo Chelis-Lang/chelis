@@ -1007,6 +1007,47 @@ fn worker_signal_str(_status: &std::process::ExitStatus) -> String {
     "<unknown>".to_string()
 }
 
+/// Marker prepended to the `message` of a synthetic `<file>` row when the
+/// user invoked `chelis test --filter <substring>`.
+///
+/// Issue #44 design call (Option 2 — "emit but tag"): a worker that crashes
+/// before any per-test row streams (parse error, top-level type error,
+/// stack-overflow before the first test, signal kill) yields a synthetic
+/// `<file>` FAIL row attributed to that file. Under `--filter`, that row is
+/// **not** filter-matched — the failure is at the file level and we never got
+/// far enough to know whether the file contained a matching test name. We
+/// could:
+///   * Option 1: suppress the row entirely under `--filter`. Rejected: silent
+///     data loss is the dominant bug pattern in this repo, and "the file you
+///     filtered for happens to live in a file that won't parse" is exactly
+///     the case where a silent suppression would mislead the operator.
+///   * Option 2 (chosen): always emit the row but visually tag it so a user
+///     scanning filtered output can see at a glance "this row isn't filtered;
+///     it's a file-level failure". JSON consumers see the same prefix in the
+///     `message` field, so machine readers stay parseable.
+///   * Option 3 / 4 rejected as noted in the design notes — pre-enumerating
+///     by path heuristic or grepping for `def <name>` either gives the worst
+///     of both worlds or false-positives on commented code.
+///
+/// The marker text is part of the contract: regression tests assert on it.
+const FILTER_INACTIVE_MARKER: &str = "(filter inactive — file-level error) ";
+
+/// Tag the message of a file-level synthetic row to make it clear, under
+/// `--filter`, that the row isn't filter-matched. Idempotent: re-tagging an
+/// already-tagged row is a no-op so the parent never double-prefixes a row
+/// the worker already emitted with the marker.
+fn tag_filter_inactive(row: &mut TestRow) {
+    if row.test != "<file>" {
+        return;
+    }
+    let existing = row.message.take().unwrap_or_default();
+    if existing.starts_with(FILTER_INACTIVE_MARKER) {
+        row.message = Some(existing);
+        return;
+    }
+    row.message = Some(format!("{FILTER_INACTIVE_MARKER}{existing}"));
+}
+
 /// Spawn `chelis __test_file <file> --rel-display ... --filter ... --timeout N`
 /// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
 /// child crash (stack overflow, panic in the evaluator) only kills the child;
@@ -1117,6 +1158,17 @@ fn run_test_file_subprocess(
             status: TestStatus::Fail,
             message: Some(msg),
         });
+    }
+
+    // Issue #44: under `--filter`, prepend the "filter inactive" marker to
+    // every synthetic `<file>` row so the operator can tell at a glance that
+    // the row is a file-level error rather than a filter match. We tag here
+    // so the rule covers BOTH worker-emitted file-level rows (parse error,
+    // file-level compile error) and parent-synthesized worker-crash rows.
+    if filter.is_some() {
+        for row in &mut rows {
+            tag_filter_inactive(row);
+        }
     }
 
     rows
