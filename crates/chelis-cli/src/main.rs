@@ -262,6 +262,28 @@ enum ReefCommand {
     Build { path: Option<PathBuf> },
     /// Publish a package into the local Reef registry
     Publish { path: Option<PathBuf> },
+    /// Install prebuilt packages into the local Reef registry
+    ///
+    /// Populates `~/.chelis/reef/packages/<name>/<version>/` and updates
+    /// `~/.chelis/reef/index.json` from a known-good source.
+    ///
+    /// Currently the only supported source is `--from-monorepo`, which
+    /// copies prebuilt artifacts out of a chelis monorepo's
+    /// `packages/<name>/dist/` directory.
+    ///
+    /// `chelis reef build` does NOT auto-install dependencies. This is
+    /// the explicit population step.
+    Install {
+        /// Path to a chelis monorepo (the directory containing `packages/`).
+        ///
+        /// Required while Form B (URL/release fallback) is unimplemented.
+        #[arg(long, value_name = "PATH")]
+        from_monorepo: Option<PathBuf>,
+        /// `<name>` or `<name>=<version>` selectors. If omitted with
+        /// `--from-monorepo`, every package in the monorepo is installed.
+        #[arg(value_name = "NAME[=VERSION]")]
+        packages: Vec<String>,
+    },
 }
 
 fn main() {
@@ -817,6 +839,40 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Shell: {}", artifacts.shell_path.display());
             println!("Archive: {}", artifacts.archive_path.display());
+        }
+        ReefCommand::Install {
+            from_monorepo,
+            packages,
+        } => {
+            let Some(monorepo_root) = from_monorepo else {
+                return Err("`chelis reef install` requires a source. \
+                     Pass `--from-monorepo <PATH>` pointing at a chelis monorepo. \
+                     URL/release fallbacks are not implemented yet."
+                    .into());
+            };
+            let mut requested: Vec<(String, Option<String>)> = Vec::new();
+            for spec in packages {
+                let (name, version) = match spec.split_once('=') {
+                    Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                    None => (spec.clone(), None),
+                };
+                if name.is_empty() {
+                    return Err(format!("invalid package selector `{spec}`").into());
+                }
+                requested.push((name, version));
+            }
+            let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
+            for artifact in &installed {
+                println!(
+                    "Installed {} {}",
+                    artifact.package.name, artifact.package.version
+                );
+                println!("Shell: {}", artifact.shell_path.display());
+                println!("Archive: {}", artifact.archive_path.display());
+            }
+            if installed.is_empty() {
+                println!("No packages installed.");
+            }
         }
     }
     Ok(())

@@ -492,6 +492,225 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
     Ok(artifacts)
 }
 
+/// One package successfully copied into the local registry by
+/// [`install_from_monorepo`].
+#[derive(Debug, Clone)]
+pub struct InstalledArtifact {
+    pub package: PackageId,
+    pub shell_path: PathBuf,
+    pub archive_path: PathBuf,
+    pub shell_sha256: String,
+    pub archive_sha256: String,
+}
+
+/// Install one or more prebuilt packages from a chelis monorepo's
+/// `packages/<name>/dist/` into the local Reef registry, updating
+/// `index.json` accordingly.
+///
+/// `monorepo_root` should point at a directory containing a `packages/`
+/// subdirectory whose entries are valid Reef packages with prebuilt
+/// `dist/<name>-<version>.{chb,tar.zst}` artifacts.
+///
+/// `requested` is a list of `(name, optional_version)` pairs. If a
+/// version is `None`, the version advertised by that package's
+/// `reef.toml` is used. If `requested` is empty, every package found
+/// under `packages/` is installed at its advertised version.
+///
+/// Errors out (without partial commits beyond what already wrote) if
+/// the monorepo has no `packages/` dir, a requested package is
+/// missing, or its dist artifacts are absent.
+pub fn install_from_monorepo(
+    monorepo_root: &Path,
+    requested: &[(String, Option<String>)],
+) -> Result<Vec<InstalledArtifact>, String> {
+    let monorepo_root = monorepo_root.canonicalize().map_err(|e| {
+        format!(
+            "failed to resolve monorepo path {}: {e}",
+            monorepo_root.display()
+        )
+    })?;
+    let packages_dir = monorepo_root.join("packages");
+    if !packages_dir.is_dir() {
+        return Err(format!(
+            "{} does not contain a `packages/` directory — \
+             expected a chelis monorepo layout",
+            monorepo_root.display()
+        ));
+    }
+
+    // Build the list of (name, version) pairs to install. Each entry
+    // is validated against the monorepo's actual package manifest.
+    let resolved: Vec<(String, String, PathBuf)> = if requested.is_empty() {
+        let mut out = Vec::new();
+        let mut entries: Vec<_> = fs::read_dir(&packages_dir)
+            .map_err(|e| format!("failed to read {}: {e}", packages_dir.display()))?
+            .filter_map(|entry| entry.ok())
+            .collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let pkg_root = entry.path();
+            if !pkg_root.is_dir() {
+                continue;
+            }
+            let manifest_path = pkg_root.join("reef.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            out.push((manifest.package.name, manifest.package.version, pkg_root));
+        }
+        if out.is_empty() {
+            return Err(format!(
+                "no packages with reef.toml found under {}",
+                packages_dir.display()
+            ));
+        }
+        out
+    } else {
+        let mut out = Vec::new();
+        for (name, version) in requested {
+            let pkg_root = packages_dir.join(name);
+            if !pkg_root.is_dir() {
+                return Err(format!(
+                    "package `{name}` not found under {} (looked for {})",
+                    packages_dir.display(),
+                    pkg_root.display()
+                ));
+            }
+            let manifest_path = pkg_root.join("reef.toml");
+            if !manifest_path.exists() {
+                return Err(format!(
+                    "package `{name}` is missing {}",
+                    manifest_path.display()
+                ));
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            if manifest.package.name != *name {
+                return Err(format!(
+                    "package directory `{}` advertises name `{}` in reef.toml, \
+                     not the requested `{name}`",
+                    pkg_root.display(),
+                    manifest.package.name
+                ));
+            }
+            let chosen_version = match version {
+                Some(v) => {
+                    if *v != manifest.package.version {
+                        return Err(format!(
+                            "package `{name}` requested at version `{v}`, but the \
+                             monorepo carries version `{}`",
+                            manifest.package.version
+                        ));
+                    }
+                    v.clone()
+                }
+                None => manifest.package.version.clone(),
+            };
+            out.push((name.clone(), chosen_version, pkg_root));
+        }
+        out
+    };
+
+    let registry_root = registry_root()?;
+    fs::create_dir_all(&registry_root).map_err(|e| e.to_string())?;
+    let index_path = registry_root.join("index.json");
+    let mut index = if index_path.exists() {
+        serde_json::from_str::<LocalRegistryIndex>(
+            &fs::read_to_string(&index_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        LocalRegistryIndex::default()
+    };
+
+    let mut installed = Vec::new();
+    for (name, version, pkg_root) in &resolved {
+        let dist_dir = pkg_root.join("dist");
+        if !dist_dir.is_dir() {
+            return Err(format!(
+                "package `{name}` has no dist/ directory at {} — \
+                 run `chelis reef build` in the monorepo first",
+                dist_dir.display()
+            ));
+        }
+        let archive_src = dist_dir.join(format!("{name}-{version}.tar.zst"));
+        let shell_src = dist_dir.join(format!("{name}-{version}.chb"));
+        if !archive_src.exists() {
+            return Err(format!(
+                "missing prebuilt archive {} — \
+                 run `chelis reef build` in the monorepo first",
+                archive_src.display()
+            ));
+        }
+        if !shell_src.exists() {
+            return Err(format!(
+                "missing prebuilt shell {} — \
+                 run `chelis reef build` in the monorepo first",
+                shell_src.display()
+            ));
+        }
+
+        // Sanity-check that the prebuilt shell agrees with the prebuilt
+        // archive. This catches stale dist/ trees where one half was
+        // rebuilt and the other was not.
+        let archive_sha256 = sha256_file(&archive_src)?;
+        let shell_sha256 = sha256_file(&shell_src)?;
+        let shell = read_shell(&shell_src).map_err(|e| e.to_string())?;
+        if shell.archive_sha256 != archive_sha256 {
+            return Err(format!(
+                "prebuilt shell {} disagrees with archive {} on archive_sha256 — \
+                 the dist/ tree is stale; run `chelis reef build` in the monorepo",
+                shell_src.display(),
+                archive_src.display()
+            ));
+        }
+        if shell.package.name != *name || shell.package.version != *version {
+            return Err(format!(
+                "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
+                shell_src.display(),
+                shell.package.name,
+                shell.package.version
+            ));
+        }
+
+        let target_dir = registry_root.join("packages").join(name).join(version);
+        fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+        let archive_dst = target_dir.join(format!("{name}-{version}.tar.zst"));
+        let shell_dst = target_dir.join(format!("{name}-{version}.chb"));
+        fs::copy(&archive_src, &archive_dst).map_err(|e| e.to_string())?;
+        fs::copy(&shell_src, &shell_dst).map_err(|e| e.to_string())?;
+
+        let versions = index.packages.entry(name.clone()).or_default();
+        versions.retain(|entry| entry.version != *version);
+        versions.push(RegistryVersion {
+            version: version.clone(),
+            compiler: shell.compiler.clone(),
+            archive_sha256: archive_sha256.clone(),
+            shell_sha256: shell_sha256.clone(),
+        });
+        versions.sort_by(|a, b| a.version.cmp(&b.version));
+
+        installed.push(InstalledArtifact {
+            package: PackageId {
+                name: name.clone(),
+                version: version.clone(),
+            },
+            shell_path: shell_dst,
+            archive_path: archive_dst,
+            shell_sha256,
+            archive_sha256,
+        });
+    }
+
+    fs::write(
+        &index_path,
+        serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(installed)
+}
+
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
     let root = root
         .canonicalize()
