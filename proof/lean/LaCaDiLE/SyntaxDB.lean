@@ -960,6 +960,106 @@ theorem mem_locRefsDB_substDBAux
       simp [substDBAux, locRefsDB] at hmem
       exact Or.inl (by simp [locRefsDB, hmem])
 
+theorem mem_activeLocRefsDB_substDBAux
+    (j : Nat) (v e : TermDB) (ell : Loc)
+    (hmem : ell ∈ activeLocRefsDB (substDBAux j v e)) :
+    ell ∈ activeLocRefsDB e ∨ ell ∈ activeLocRefsDB v := by
+  match e with
+  | TermDB.var i =>
+      by_cases hij : i = j
+      · simp [substDBAux, activeLocRefsDB, hij] at hmem ⊢
+        exact hmem
+      · by_cases hlt : i < j
+        · simp [substDBAux, activeLocRefsDB, hij, hlt] at hmem
+        · simp [substDBAux, activeLocRefsDB, hij, hlt] at hmem
+  | TermDB.abs t body =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
+  | TermDB.app e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.letBind e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
+  | TermDB.copy e =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.letpair e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 2) (lift (lift v)) e2 ell hmem)
+          (fun h => Or.inl (Or.inr h))
+          (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
+  | TermDB.pair e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.fst e =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.snd e =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.unit =>
+      simp [substDBAux, activeLocRefsDB] at hmem
+  | TermDB.const c ds =>
+      simp [substDBAux, activeLocRefsDB] at hmem
+  | TermDB.add e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.mul e1 e2 =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      rcases hmem with hmem | hmem
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e1 ell hmem)
+          (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
+      · exact Or.elim (mem_activeLocRefsDB_substDBAux j v e2 ell hmem)
+          (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
+  | TermDB.sum e i =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.expand e i k =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.uniformLike e lo hi =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.grad t tOut body =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
+  | TermDB.vmap t body =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact Or.elim (mem_activeLocRefsDB_substDBAux (j + 1) (lift v) body ell hmem)
+        Or.inl (fun h => Or.inr (by simpa [activeLocRefsDB_lift] using h))
+  | TermDB.handle epsH body clauses =>
+      simp [substDBAux, activeLocRefsDB, activeLocRefsClausesDB] at hmem ⊢
+      exact Or.elim (mem_activeLocRefsDB_substDBAux j v body ell hmem)
+        Or.inl (fun h => Or.inr h)
+  | TermDB.perform op e =>
+      simp [substDBAux, activeLocRefsDB] at hmem ⊢
+      exact mem_activeLocRefsDB_substDBAux j v e ell hmem
+  | TermDB.loc ell' =>
+      simp [substDBAux, activeLocRefsDB] at hmem
+      exact Or.inl (by simp [activeLocRefsDB, hmem])
+
 theorem mem_locRefsClausesDB_substClausesDBAux
     (j : Nat) (v : TermDB) (clauses : List (EffectLabel × TermDB)) (ell : Loc)
     (hmem : ell ∈ locRefsClausesDB (substClausesDBAux j v clauses)) :
