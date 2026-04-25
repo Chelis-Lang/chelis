@@ -2686,6 +2686,58 @@ private theorem clausesDeepActiveRuntimeLinearDB_subst_dead_same_ctx_absurd
   exfalso
   exact insertAt_some_ne_insertAt_none hj_in hj_out (hin.symm.trans hout)
 
+/-- Motive bundle for the consuming deep-active runtime-linearity theorem.
+The distinguished slot is live on input and dead on output. The theorem
+tracks full `locRefsDB` separation for recursive subterms while the root
+active footprint is rebuilt with the `ActiveRuntimeLinearDB` helpers. -/
+@[reducible] def DeepActiveRuntimeLinearSubstDeadMotive1 :
+    (Δ' : CapCtx) → (S' : StoreTyp) → (Γ1 : LinearCtxDB) →
+    (e : TermDB) → (t : Typ) → (eps : EffectRow) → (Γ2 : LinearCtxDB) →
+    HasTypeDB Δ' S' Γ1 e t eps Γ2 → Prop :=
+  fun Δ' S' Γ1 e _t _eps Γ2 _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB) (rhsRefs : List Loc),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j none →
+      HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      DeepActiveRuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) (locRefsDB e) →
+      LocRefsSeparated (locRefsDB e) (locRefsDB v) →
+      LocRefsSeparated (locRefsDB v) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB v) →
+      DeepActiveRuntimeLinearDB e →
+      LocRefsSeparated (locRefsDB e) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB e) →
+      DeepActiveRuntimeLinearDB (substDBAux j v e) ∧
+        LocRefsSeparated (locRefsDB (substDBAux j v e)) rhsRefs ∧
+        LocRefsSeparated rhsRefs (locRefsDB (substDBAux j v e))
+
+@[reducible] def DeepActiveRuntimeLinearSubstDeadMotive2 :
+    (Δ' : CapCtx) → (S' : StoreTyp) → (Γ1 Γ2 : LinearCtxDB) →
+    (t : Typ) → (epsR : EffectRow) → (cls : List (EffectLabel × TermDB)) →
+    ClausesTypedDB Δ' S' Γ1 Γ2 t epsR cls → Prop :=
+  fun Δ' S' Γ1 Γ2 _t _epsR cls _ =>
+    ∀ (v : TermDB) (t_v : Typ) (j : Nat)
+      (Γ_in Γ_out : LinearCtxDB) (rhsRefs : List Loc),
+      j ≤ Γ_in.length →
+      j ≤ Γ_out.length →
+      Γ1 = Γ_in.insertAt j (some t_v) →
+      Γ2 = Γ_out.insertAt j none →
+      HasTypeDB Δ' S' Γ_in v t_v [] Γ_in →
+      DeepActiveRuntimeLinearDB v →
+      LocRefsSeparated (locRefsDB v) (locRefsClausesDB cls) →
+      LocRefsSeparated (locRefsClausesDB cls) (locRefsDB v) →
+      LocRefsSeparated (locRefsDB v) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsDB v) →
+      DeepActiveRuntimeLinearClausesDB cls →
+      LocRefsSeparated (locRefsClausesDB cls) rhsRefs →
+      LocRefsSeparated rhsRefs (locRefsClausesDB cls) →
+      DeepActiveRuntimeLinearClausesDB (substClausesDBAux j v cls) ∧
+        LocRefsSeparated (locRefsClausesDB (substClausesDBAux j v cls)) rhsRefs ∧
+        LocRefsSeparated rhsRefs (locRefsClausesDB (substClausesDBAux j v cls))
+
 /-- Motive bundle for the consuming runtime-linearity theorem.
 The distinguished slot is live on input and dead on output, so only
 one recursive branch may actually inject `v`'s runtime locations;
@@ -5622,6 +5674,16 @@ private theorem deepActiveRuntimeLinearDB_active
     first
     | exact h.1
     | exact h
+
+private theorem deepActiveRuntimeLinearDB_handle_of
+    {epsH : EffectRow} {body : TermDB} {clauses : List (EffectLabel × TermDB)}
+    (hbody : DeepActiveRuntimeLinearDB body)
+    (hclauses : DeepActiveRuntimeLinearClausesDB clauses) :
+    DeepActiveRuntimeLinearDB (TermDB.handle epsH body clauses) := by
+  simpa [DeepActiveRuntimeLinearDB] using
+    And.intro
+      (activeRuntimeLinearDB_handle_of (deepActiveRuntimeLinearDB_active hbody))
+      (And.intro hbody hclauses)
 
 @[reducible] def DeepActiveSubstNoneMotive1 : (Δ' : CapCtx) → (S' : StoreTyp) →
     (Γ1 : LinearCtxDB) → (e : TermDB) → (t : Typ) →
