@@ -549,6 +549,45 @@ pub fn eval_many_in_context(
         .collect()
 }
 
+/// Opaque handle over `new_source` compiled against a `CompiledContext`.
+/// Mirrors the [`PreparedEval`] handle but for the in-context path: any
+/// number of `eval_root` calls share the single Surf→Deep→DAG compile of
+/// the new source on top of the context's library snapshot.
+///
+/// Used by `chelis test`'s per-file worker: one compile per file (not per
+/// test), with each test isolated through the worker-side per-test
+/// timeout wrapper.
+#[derive(Clone)]
+pub struct PreparedEvalInContext {
+    compiled: std::sync::Arc<CompiledSource>,
+}
+
+impl PreparedEvalInContext {
+    /// Evaluate exactly one selected root against the prepared compile.
+    pub fn eval_root(
+        &self,
+        bindings: BTreeMap<String, crate::schema::TensorValue>,
+        root: &str,
+    ) -> Result<EvalResult> {
+        let roots = [root.to_string()];
+        eval_compiled(&self.compiled, bindings, Some(&roots))
+    }
+}
+
+/// Compile `new_source` once against `context` and return a handle so
+/// downstream callers can cheaply evaluate specific roots against it many
+/// times. The composed library + new-source pipeline runs once; each
+/// per-root eval reuses the result.
+pub fn prepare_eval_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+) -> Result<PreparedEvalInContext> {
+    let compiled = compile_new_source_in_context(context, new_source)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
 fn eval_compiled(
     compiled: &CompiledSource,
     bindings: BTreeMap<String, crate::schema::TensorValue>,

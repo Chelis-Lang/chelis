@@ -346,6 +346,23 @@ impl CompiledContext {
             .join("compiled")
             .join(format!("{safe_name}-{safe_version}-{prefix_hex}.ctx"))
     }
+
+    /// Read-only borrow of the underlying [`PreparedReefGraph`]. Phase H
+    /// `chelis test` workers use this to drive the legacy
+    /// `compile_with_reef_graph` + `prepare_eval` evaluation path
+    /// without paying for a per-worker `prepare_reef_graph` walk: the
+    /// parent has already linked the library decls + lockfile state
+    /// once and serialized them into the context, and decoded workers
+    /// share the same in-memory snapshot.
+    ///
+    /// Until the in-context Phase G/G' evaluator (host-runtime + linearity)
+    /// reaches feature parity with the monolithic evaluator on the
+    /// chelis-std test corpus, this accessor is the safe correctness
+    /// path for `chelis test`. The performance win still comes from
+    /// skipping the per-worker reef walk.
+    pub fn reef_state(&self) -> &PreparedReefGraph {
+        &self.reef_state
+    }
 }
 
 /// Magic header bytes for the Phase I disk-cache file format.
