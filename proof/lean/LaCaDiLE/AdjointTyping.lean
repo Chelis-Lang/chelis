@@ -534,11 +534,24 @@ private theorem adjoint_typed_aux
         (EffectRow.union [EffectLabel.accum] epsSeed)
         hAddRaw
         (subEff_letpair_add epsSeed)
+  | Term.sum e1 d =>
+      simp only [adjointFrom]
+      have hSeedExpand :
+          HasType Delta Sigma Gamma_s
+            (Term.expand gSeed d)
+            (Typ.tensor (ins dsE d))
+            epsSeed
+            Gamma_s' := by
+        exact HasType.texpand Delta Sigma Gamma_s Gamma_s' gSeed dsE d epsSeed h_seed
+      exact adjoint_typed_aux Delta Sigma
+        Gamma_s Gamma_s'
+        (ins dsE d) epsSeed x n e1 (Term.expand gSeed d)
+        hSeedExpand h_fresh_s h_fresh_s'
   | Term.handle _ body clauses =>
       simpa [adjointFrom] using
         (adjointClauses_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed
           x n clauses body gSeed h_seed h_fresh_s h_fresh_s')
-  -- `mul`, `sum`, and `expand` remain under the catch-all.
+  -- `mul` and `expand` remain under the catch-all.
   --
   -- Wave 5 Track B: `AdjointTransform` reshaped the `mul` case so
   -- `copy gSeed` is the outermost letpair (before any operand tape
@@ -577,7 +590,11 @@ private theorem adjoint_typed_aux
   -- `mul` work needs a stronger theorem-level invariant for rebasing
   -- operand tape typings and their effect rows.
   --
-  -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work.
+  -- `expand` remains on the Phase 1 T9 tape-extent work: the current
+  -- seed-polymorphic helper is too strong there, because `sum gSeed d`
+  -- only types when `d ∈ dsE`. Public callers derive exactly that
+  -- premise from the source typing judgment, but the private helper
+  -- currently quantifies over arbitrary `dsE`.
   -- `handle` is now typed for the repaired seed-threading shape; the
   -- transform still eagerly sequences every clause adjoint, but that is
   -- a known Phase 1 semantic caveat in `AdjointTransform`, not a typing
