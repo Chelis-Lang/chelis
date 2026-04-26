@@ -1566,6 +1566,57 @@ theorem weakening_tail
   simpa using
     (weakening_tail_slot Delta Sigma Gamma Gamma' y (some t') t eps e h h_fresh h_fresh_term)
 
+private theorem freshInTerm_of_closed_notBound
+    {v : Term} {y : String}
+    (hClosed : Closed v)
+    (hBound : y ∉ boundVars v) :
+    freshInTerm y v := by
+  refine ⟨?_, hBound⟩
+  unfold Closed at hClosed
+  intro hy
+  rw [hClosed] at hy
+  simp at hy
+
+private theorem closed_typed_suffix_weaken
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma : LinearCtx} {v : Term} {t : Typ} {suffix : LinearCtx}
+    (h : HasType Delta Sigma Gamma v t [] Gamma)
+    (hClosed : Closed v)
+    (hnd : NoDupNames (Gamma ++ suffix))
+    (hBoundFresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v) :
+    HasType Delta Sigma (Gamma ++ suffix) v t [] (Gamma ++ suffix) := by
+  induction suffix generalizing Gamma with
+  | nil =>
+      simpa using h
+  | cons hd rest ih =>
+      rcases hd with ⟨y, slot_y⟩
+      have hndFull : NoDupNames (Gamma ++ [(y, slot_y)] ++ rest) := by
+        simpa [List.append_assoc] using hnd
+      have hndFresh :
+          NoDupNames (Gamma ++ [(y, some Typ.unit)] ++ rest) := by
+        simpa [NoDupNames, linearCtxDom] using hndFull
+      have hyGamma : y ∉ linearCtxDom Gamma :=
+        noDupNames_middle_fresh_prefix (GammaPre := Gamma) (GammaPost := rest)
+          (x := y) (t := Typ.unit) hndFresh
+      have hyBound : y ∉ boundVars v := by
+        exact hBoundFresh y (by simp [linearCtxDom])
+      have hFresh : freshInTerm y v :=
+        freshInTerm_of_closed_notBound hClosed hyBound
+      have hWeak0 := weakening_beforeSuffix Delta Sigma y slot_y h 0 (by simp) hyGamma hFresh
+      have hWeak :
+          HasType Delta Sigma (Gamma ++ [(y, slot_y)]) v t [] (Gamma ++ [(y, slot_y)]) := by
+        simpa using hWeak0
+      have hndRest : NoDupNames ((Gamma ++ [(y, slot_y)]) ++ rest) := by
+        simpa [List.append_assoc] using hnd
+      have hBoundRest :
+          ∀ z, z ∈ linearCtxDom rest → z ∉ boundVars v := by
+        intro z hz
+        have hzRest : ∃ slot, (z, slot) ∈ rest := by
+          simpa [linearCtxDom] using hz
+        exact hBoundFresh z (by simp [linearCtxDom, hzRest])
+      simpa [List.append_assoc] using
+        (ih (Gamma := Gamma ++ [(y, slot_y)]) hWeak hndRest hBoundRest)
+
 -- NOTE: `exchange_tail` removed entirely. Its original statement
 -- (rigid output context across an adjacent swap) is provably false
 -- in this type system: `var` consumes the tail binding and the two
