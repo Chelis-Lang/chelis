@@ -1112,6 +1112,53 @@ theorem list_append_eq_split {α} :
         · exact Or.inl ⟨m, by simp [hac, hCm], hBm⟩
         · exact Or.inr ⟨m, by simp [hac, hAm], hDm⟩
 
+/-- If a singleton slot `(y, slotY)` appears somewhere in
+    `GammaPre ++ [(x, slotX)] ++ suffix` with `y ≠ x`, then removing the
+    distinguished middle `x` slot still leaves `(y, slotY)` somewhere in
+    `GammaPre ++ suffix`. This is the non-target `var` case for the
+    context-fresh substitution theorem. -/
+private theorem split_remove_middle_singleton
+    {GammaPre suffix Gamma1 Gamma2 : LinearCtx}
+    {x y : String} {slotX slotY : Option Typ}
+    (hEq : Gamma1 ++ [(y, slotY)] ++ Gamma2 = GammaPre ++ [(x, slotX)] ++ suffix)
+    (hxy : y ≠ x) :
+    ∃ pre' post' : LinearCtx,
+      GammaPre ++ suffix = pre' ++ [(y, slotY)] ++ post' := by
+  rcases list_append_eq_split Gamma1 ([(y, slotY)] ++ Gamma2)
+      GammaPre ([(x, slotX)] ++ suffix)
+      (by simpa [List.append_assoc] using hEq) with
+    ⟨m, hPre, hRest⟩ | ⟨m, hPre, hRest⟩
+  · cases m with
+    | nil =>
+        have hRest' : (y, slotY) :: Gamma2 = (x, slotX) :: suffix := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead _hTail
+        cases hHead
+        exact False.elim (hxy rfl)
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (y, slotY) :: Gamma2 = (z, slotZ) :: (tl ++ [(x, slotX)] ++ suffix) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead htl
+        cases hHead
+        refine ⟨Gamma1, tl ++ suffix, ?_⟩
+        simp [hPre, htl, List.append_assoc]
+  · cases m with
+    | nil =>
+        have hRest' : (x, slotX) :: suffix = (y, slotY) :: Gamma2 := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead _hTail
+        cases hHead
+        exact False.elim (hxy rfl.symm)
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (x, slotX) :: suffix = (z, slotZ) :: (tl ++ [(y, slotY)] ++ Gamma2) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead htl
+        cases hHead
+        refine ⟨GammaPre ++ tl, Gamma2, ?_⟩
+        simp [htl, List.append_assoc]
+
 private theorem slotSub_names_eq
     {out inp : LinearCtx}
     (h : SlotSub out inp) :
