@@ -176,6 +176,21 @@ impl PreparedReefGraph {
         });
         Ok(digests)
     }
+
+    /// Returns the (name, version) pair of the *root* package backing this
+    /// graph. Used by the Phase I disk cache to derive a stable, human-
+    /// readable filename component (`<name>-<version>-<hash_prefix>.ctx`).
+    /// Panics only if the graph was constructed with a missing root —
+    /// `prepare_reef_graph` enforces this invariant on construction, so
+    /// callers can treat this as infallible.
+    pub fn root_package_id(&self) -> (&str, &str) {
+        let pkg = self
+            .graph
+            .packages
+            .get(&self.graph.root_package)
+            .expect("PreparedReefGraph invariant: root_package present in packages");
+        (pkg.id.name.as_str(), pkg.id.version.as_str())
+    }
 }
 
 /// Per-source-file content digest produced by [`PreparedReefGraph::source_digests`].

@@ -28,7 +28,10 @@ use chelis_types::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::fmt;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
 use crate::schema::Diagnostic;
@@ -104,6 +107,393 @@ impl CompiledContext {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| format!("decode CompiledContext: {e}"))
     }
+
+    /// Phase I — atomically persist this context to `path`.
+    ///
+    /// The on-disk format is a bincode-serialized [`CacheEnvelope`]
+    /// (see below) which embeds:
+    /// - a magic byte string for format identification,
+    /// - the format version (`CACHE_FORMAT_VERSION`),
+    /// - a copy of `source_hash` outside the inner payload (cheap freshness
+    ///   check before paying the bincode-decode cost),
+    /// - a SHA-256 of the inner payload bytes (catches torn writes that
+    ///   happen to bincode-decode anyway), and
+    /// - the inner payload (bincode-encoded [`CompiledContext`]).
+    ///
+    /// **Atomic write:** the bytes are written to `<path>.tmp.<pid>` in
+    /// the same directory, then `fs::rename`'d into place. POSIX `rename`
+    /// is atomic within a single filesystem, so a crashed writer can leave
+    /// a `.tmp.<pid>` orphan but never a half-written final file. Parent
+    /// directories are created lazily.
+    pub fn save(&self, path: &Path) -> Result<(), CacheError> {
+        let payload =
+            bincode::serialize(self).map_err(|e| CacheError::Encode(format!("payload: {e}")))?;
+        let payload_sha256: [u8; 32] = Sha256::digest(&payload).into();
+        let envelope = CacheEnvelope {
+            version: CACHE_FORMAT_VERSION,
+            source_hash: self.source_hash,
+            payload_sha256,
+            payload,
+        };
+        let envelope_bytes = bincode::serialize(&envelope)
+            .map_err(|e| CacheError::Encode(format!("envelope: {e}")))?;
+        // On-disk layout: raw magic prefix (so torn writes that don't even
+        // get past the first sector are visibly non-cache files), then the
+        // bincode-encoded envelope.
+        let mut bytes = Vec::with_capacity(CACHE_MAGIC.len() + envelope_bytes.len());
+        bytes.extend_from_slice(CACHE_MAGIC);
+        bytes.extend_from_slice(&envelope_bytes);
+
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|e| CacheError::Io {
+                op: "create_dir_all",
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+            // Best-effort 0700 on Unix — we don't fail save() if the
+            // chmod is rejected (NFS, exotic FS), but we always try.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        // Same-directory temp file → atomic rename.
+        let tmp_name = format!(
+            ".{}.tmp.{}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("ctx_cache"),
+            std::process::id()
+        );
+        let tmp_path = path
+            .parent()
+            .map(|p| p.join(&tmp_name))
+            .unwrap_or_else(|| PathBuf::from(&tmp_name));
+
+        // Open + write + sync + close; a crash before sync is fine because
+        // we never touch the canonical path until rename.
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| CacheError::Io {
+                    op: "open_tmp",
+                    path: tmp_path.clone(),
+                    source: e,
+                })?;
+            f.write_all(&bytes).map_err(|e| CacheError::Io {
+                op: "write_tmp",
+                path: tmp_path.clone(),
+                source: e,
+            })?;
+            f.sync_all().map_err(|e| CacheError::Io {
+                op: "sync_tmp",
+                path: tmp_path.clone(),
+                source: e,
+            })?;
+        }
+
+        fs::rename(&tmp_path, path).map_err(|e| {
+            // Best-effort cleanup of the orphan; ignore errors here.
+            let _ = fs::remove_file(&tmp_path);
+            CacheError::Io {
+                op: "rename",
+                path: path.to_path_buf(),
+                source: e,
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Phase I — load `path` if its stored `source_hash` matches the hash
+    /// freshly recomputed from `package_dir`. Returns:
+    ///
+    /// - `Ok(Some(ctx))` on a valid, fresh cache hit;
+    /// - `Ok(None)` on a clean miss: the file does not exist, OR the
+    ///   stored `source_hash` no longer matches the recomputed one;
+    /// - `Err(CacheError::Corrupt | HashMismatch | UnsupportedVersion |
+    ///   Decode | Io | Reef)` on any condition where silently using the
+    ///   bytes would be wrong.
+    ///
+    /// **Important:** if the stored hash matches the recomputed hash, the
+    /// envelope's `payload_sha256` is verified against the inner payload
+    /// bytes BEFORE bincode-decoding the payload. A torn write that
+    /// happens to deserialize as a valid envelope but whose payload was
+    /// truncated (so the inner sha256 disagrees) is rejected as
+    /// [`CacheError::Corrupt`], NOT silently accepted.
+    ///
+    /// `_reef_home` is currently unused; reserved for future invalidation
+    /// signals (e.g., compiler-version pinning) that depend on reef-home
+    /// state rather than just `package_dir`.
+    pub fn load_if_fresh(
+        path: &Path,
+        _reef_home: &Path,
+        package_dir: &Path,
+    ) -> Result<Option<Self>, CacheError> {
+        // Read the entire file into memory before any decode work — no
+        // streaming-decode windows where a half-written tail looks like
+        // a full envelope.
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(CacheError::Io {
+                    op: "read",
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
+        };
+
+        // Reject empty / truncated-before-magic files as Corrupt — never None,
+        // because Ok(None) means "valid cache miss" and a torn write must NOT
+        // silently fall through to the recompile path without flagging.
+        if bytes.is_empty() {
+            return Err(CacheError::Corrupt("empty cache file".to_string()));
+        }
+        if bytes.len() < CACHE_MAGIC.len() || &bytes[..CACHE_MAGIC.len()] != CACHE_MAGIC {
+            return Err(CacheError::Corrupt(
+                "missing or wrong magic header".to_string(),
+            ));
+        }
+
+        // Strip the raw magic prefix; the rest is the bincode envelope.
+        let envelope_bytes = &bytes[CACHE_MAGIC.len()..];
+        let envelope: CacheEnvelope = match bincode::deserialize(envelope_bytes) {
+            Ok(env) => env,
+            Err(e) => return Err(CacheError::Corrupt(format!("envelope decode: {e}"))),
+        };
+
+        if envelope.version != CACHE_FORMAT_VERSION {
+            return Err(CacheError::UnsupportedVersion {
+                stored: envelope.version,
+                expected: CACHE_FORMAT_VERSION,
+            });
+        }
+
+        // Recompute the source hash from the live package_dir. If the file
+        // was named with a hash prefix that collides with a different
+        // package, the recomputed hash will not match → cache miss.
+        let live_graph = prepare_reef_graph(package_dir).map_err(CacheError::Reef)?;
+        let live_digests = live_graph.source_digests().map_err(CacheError::Reef)?;
+        let live_hash = ContextHash::from_digests(&live_digests);
+        if envelope.source_hash != live_hash {
+            return Ok(None);
+        }
+
+        // Verify the payload SHA-256 matches before paying bincode-decode
+        // cost on the inner CompiledContext. A torn write whose envelope
+        // happens to bincode-decode but whose payload was truncated is
+        // caught here.
+        let actual_payload_sha: [u8; 32] = Sha256::digest(&envelope.payload).into();
+        if actual_payload_sha != envelope.payload_sha256 {
+            return Err(CacheError::Corrupt(
+                "payload sha256 does not match envelope".to_string(),
+            ));
+        }
+
+        // Decode the inner CompiledContext.
+        let ctx: CompiledContext = match bincode::deserialize(&envelope.payload) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(CacheError::Decode(format!(
+                    "CompiledContext decode (envelope/version match but inner shape changed): {e}"
+                )));
+            }
+        };
+
+        // Belt-and-braces: the inner CompiledContext must agree with the
+        // outer envelope on `source_hash`. If it doesn't, something
+        // mutated the bytes between encode/decode → treat as corrupt.
+        if ctx.source_hash != envelope.source_hash {
+            return Err(CacheError::HashMismatch {
+                envelope: envelope.source_hash,
+                inner: ctx.source_hash,
+            });
+        }
+
+        Ok(Some(ctx))
+    }
+
+    /// Convenience for callers that only have a `reef_home` + `package_dir`
+    /// and want the canonical cache location. Phase H wires `cmd_eval` and
+    /// `cmd_check` through this helper; the disk-cache key is
+    /// `<reef_home>/.cache/compiled/<pkg_name>-<pkg_version>-<hash16>.ctx`.
+    ///
+    /// The hash prefix is 16 hex chars (8 bytes of the full hash). Full-hash
+    /// verification still happens inside `load_if_fresh`, so a prefix
+    /// collision on the path is recoverable (returns `Ok(None)`, not silent
+    /// hit).
+    pub fn cache_path_for(
+        reef_home: &Path,
+        package_id: (&str, &str),
+        source_hash: ContextHash,
+    ) -> PathBuf {
+        let (name, version) = package_id;
+        let prefix_hex = hex_prefix(&source_hash.0, 8);
+        // Sanitize to keep the filename POSIX-friendly across odd package
+        // names (reef enforces a stricter rule, but we don't trust it here).
+        let safe_name = sanitize_path_component(name);
+        let safe_version = sanitize_path_component(version);
+        reef_home
+            .join(".cache")
+            .join("compiled")
+            .join(format!("{safe_name}-{safe_version}-{prefix_hex}.ctx"))
+    }
+}
+
+/// Magic header bytes for the Phase I disk-cache file format.
+/// Trailing newline guards against accidental concatenation with another
+/// file (e.g., a misuse that piped two cache files together).
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V1\n";
+
+/// On-disk format version for the cache envelope. Bumping this tells
+/// `load_if_fresh` to reject older cache files with
+/// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
+/// wrong" decode.
+const CACHE_FORMAT_VERSION: u32 = 1;
+
+/// On-disk envelope for the Phase I cache. The full file layout is:
+///
+/// ```text
+/// [CACHE_MAGIC bytes][bincode-encoded CacheEnvelope]
+/// ```
+///
+/// The raw magic prefix (sitting BEFORE the bincode region) makes the
+/// "is this even a cache file" check robust against bincode's leading
+/// length prefix on fields like `Vec<u8>`. The envelope itself carries
+/// the format version, an outer copy of `source_hash` (cheap stale-
+/// check), and a SHA-256 of the inner payload bytes (torn-write
+/// detection).
+#[derive(Serialize, Deserialize)]
+struct CacheEnvelope {
+    /// On-disk format version. Future schema changes bump this to force
+    /// `load_if_fresh` to reject the file with `UnsupportedVersion`
+    /// instead of risking a "decoded but wrong" payload.
+    version: u32,
+    /// A copy of the inner `CompiledContext::source_hash`. Held outside
+    /// the inner payload so a fresh-check can be done without paying the
+    /// bincode-decode cost on the full `CompiledContext`.
+    source_hash: ContextHash,
+    /// SHA-256 of the inner payload bytes. Catches torn writes whose
+    /// truncated payload still bincode-decodes successfully.
+    payload_sha256: [u8; 32],
+    /// Bincode-encoded `CompiledContext` body.
+    payload: Vec<u8>,
+}
+
+/// Errors from the Phase I disk cache. Distinct from [`CompilerError`]
+/// because the cache layer's failure modes (corrupt files, version
+/// skew, IO errors) are categorically different from compile failures
+/// and benefit from separate match arms in callers.
+#[derive(Debug)]
+pub enum CacheError {
+    /// I/O failure while reading or writing a cache file.
+    Io {
+        op: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+    /// `bincode` failure on the *encode* side. Should be impossible in
+    /// practice for well-formed `CompiledContext` values, but surfaced
+    /// for completeness.
+    Encode(String),
+    /// `bincode` failure on the *decode* side after the envelope and
+    /// version checks passed. Indicates the inner `CompiledContext`
+    /// shape changed without a version bump — treat as a bug + miss.
+    Decode(String),
+    /// File contents are not a valid cache envelope: missing magic,
+    /// bincode error during envelope decode, or payload SHA-256
+    /// mismatch (torn write). Caller MUST NOT silently accept the bytes.
+    Corrupt(String),
+    /// Envelope decoded but the on-disk format version is not the one
+    /// the running binary supports.
+    UnsupportedVersion { stored: u32, expected: u32 },
+    /// Outer envelope's `source_hash` and the inner `CompiledContext`'s
+    /// `source_hash` disagree — bytes were tampered with between encode
+    /// and decode.
+    HashMismatch {
+        envelope: ContextHash,
+        inner: ContextHash,
+    },
+    /// `prepare_reef_graph` or `source_digests` failed while
+    /// recomputing the live source hash for invalidation. The string
+    /// is whatever `chelis_reef` returned.
+    Reef(String),
+}
+
+impl fmt::Display for CacheError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CacheError::Io { op, path, source } => {
+                write!(
+                    f,
+                    "cache I/O error during {op} on {}: {source}",
+                    path.display()
+                )
+            }
+            CacheError::Encode(msg) => write!(f, "cache encode error: {msg}"),
+            CacheError::Decode(msg) => write!(f, "cache decode error: {msg}"),
+            CacheError::Corrupt(msg) => write!(f, "cache file is corrupt: {msg}"),
+            CacheError::UnsupportedVersion { stored, expected } => write!(
+                f,
+                "cache file format version {stored} not supported by this binary (expects {expected})"
+            ),
+            CacheError::HashMismatch { envelope, inner } => write!(
+                f,
+                "cache hash mismatch: envelope={} inner={}",
+                hex_prefix(&envelope.0, 32),
+                hex_prefix(&inner.0, 32)
+            ),
+            CacheError::Reef(msg) => write!(f, "cache invalidation reef error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CacheError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Lower-case hex of the first `n` bytes of `data`. Local impl to avoid
+/// pulling in the `hex` crate for one call site.
+fn hex_prefix(data: &[u8], n: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let n = n.min(data.len());
+    let mut out = String::with_capacity(n * 2);
+    for &b in &data[..n] {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+/// Replace anything outside `[A-Za-z0-9._-]` with `_` so a hostile or
+/// surprising package name cannot escape the cache directory or hit
+/// reserved characters on Windows-style filesystems.
+fn sanitize_path_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
 }
 
 /// Build a `CompiledContext` from a reef package directory.
