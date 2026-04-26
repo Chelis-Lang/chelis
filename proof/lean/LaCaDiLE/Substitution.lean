@@ -1508,6 +1508,29 @@ private theorem slotSub_append_pair_cases
   · refine ⟨outPre, slotX, some ty, ?_, hPre, hSlotX, Or.inr rfl⟩
     simpa [hPostCases, List.append_assoc] using hout
 
+private theorem not_mem_linearCtxDom_of_slotSub
+    {out inp : LinearCtx} {x : String}
+    (hSub : SlotSub out inp)
+    (hx : x ∉ linearCtxDom inp) :
+    x ∉ linearCtxDom out := by
+  intro hxOut
+  have hxIn : x ∈ linearCtxDom inp := by
+    simpa [slotSub_names_eq hSub] using hxOut
+  exact hx hxIn
+
+private theorem append_pair_inj
+    {α : Type} {xs ys : List α} {a1 a2 b1 b2 : α}
+    (h : xs ++ [a1, a2] = ys ++ [b1, b2]) :
+    xs = ys ∧ a1 = b1 ∧ a2 = b2 := by
+  have hLast :
+      xs ++ [a1] ++ [a2] = ys ++ [b1] ++ [b2] := by
+    simpa [List.append_assoc] using h
+  rcases append_singleton_inj (G1 := xs ++ [a1]) (G2 := ys ++ [b1]) (a := a2) (b := b2) hLast with
+    ⟨hInit, h2⟩
+  rcases append_singleton_inj (G1 := xs) (G2 := ys) (a := a1) (b := b1) hInit with
+    ⟨hBase, h1⟩
+  exact ⟨hBase, h1, h2⟩
+
 private theorem noDupNames_remove_middle
     {GammaPre suffix : LinearCtx} {x : String} {slot : Option Typ}
     (hnd : NoDupNames (GammaPre ++ [(x, slot)] ++ suffix)) :
@@ -2383,43 +2406,37 @@ private theorem subst_preserves_typing_ctx_fresh_var
     (h_live : SlotSub
       (GammaPre ++ [(x, slotX)] ++ suffix)
       (GammaPre ++ [(x, some t1)] ++ suffix))
-    (hnd : NoDupNames (GammaPre ++ [(x, slotX)] ++ suffix))
-    (h_v : HasType Delta Sigma [] v t1 [] [])
-    (hClosed : Closed v)
-    (hSuffixFresh : ∀ z, z ∈ linearCtxDom suffix → z ∉ boundVars v) :
+    (hxPre : x ∉ linearCtxDom GammaPre)
+    (hxSuf : x ∉ linearCtxDom suffix)
+    (h_v : HasType Delta Sigma [] v t1 [] []) :
     CtxFreshSubstResult Delta Sigma x t1
       GammaPre suffix (Gamma1 ++ [(y, none)] ++ Gamma2)
       (subst (Term.var y) v x) t [] := by
   by_cases hxy : y = x
   · subst y
     have ⟨hGamma1, hGamma2, hslotX⟩ :=
-      split_target_middle_singleton hEq hnd
+      split_target_middle_singleton_of_fresh hEq hxPre hxSuf
     subst Gamma1
     subst Gamma2
     subst slotX
     have hslotLive : some t = none ∨ some t = some t1 :=
-      slotSub_middle_cases
+      slotSub_middle_cases_of_fresh
         (GammaPre := GammaPre) (suffix := suffix)
         (x := x) (slotX := some t) (t1 := t1)
-        h_live hnd
+        h_live hxPre hxSuf
     rcases hslotLive with hslotDead | hslotLive
     · cases hslotDead
     · injection hslotLive with ht
       subst t
-      have hnd' : NoDupNames (GammaPre ++ suffix) :=
-        noDupNames_remove_middle hnd
       refine ⟨GammaPre, none, suffix, ?_, slotSub_refl GammaPre, Or.inl rfl,
         slotSub_refl suffix, ?_⟩
       · simp [List.append_assoc]
-      · simpa [subst] using
-          (closed_typed_prefix_suffix_weaken
-            (GammaPre := GammaPre) (suffix := suffix)
-            h_v hClosed hnd' hSuffixFresh)
+      · simpa [subst] using hasType_prefix_weaken h_v (GammaPre ++ suffix)
   · have hslotXLive : slotX = none ∨ slotX = some t1 :=
-      slotSub_middle_cases
+      slotSub_middle_cases_of_fresh
         (GammaPre := GammaPre) (suffix := suffix)
         (x := x) (slotX := slotX) (t1 := t1)
-        h_live hnd
+        h_live hxPre hxSuf
     rcases list_append_eq_split Gamma1 ([(y, some t)] ++ Gamma2)
         GammaPre ([(x, slotX)] ++ suffix)
         (by simpa [List.append_assoc] using hEq) with
@@ -2525,9 +2542,11 @@ private theorem subst_preserves_typing_ctx_fresh_aux
         HasType Delta Sigma Gamma e t2 eps GammaOut →
         ∀ {GammaPre suffix : LinearCtx} {slotX : Option Typ},
           (FreshName : String → Prop) →
+          FreshName x →
           Gamma = GammaPre ++ [(x, slotX)] ++ suffix →
           SlotSub Gamma (GammaPre ++ [(x, some t1)] ++ suffix) →
-          NoDupNames Gamma →
+          x ∉ linearCtxDom GammaPre →
+          x ∉ linearCtxDom suffix →
           (∀ y, FreshName y → y ∉ boundVars e) →
           (∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v) →
           (∀ y, y ∈ boundVars e → y ∉ boundVars v) →
@@ -2535,26 +2554,89 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             GammaPre suffix GammaOut (subst e v x) t2 eps := by
     intro Gamma e t2 eps GammaOut h
     induction h using HasType.rec
-        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+        (motive_2 := fun _ _ GammaIn GammaOut t epsR cls _ =>
+          ∀ {GammaPre suffix : LinearCtx} {slotX : Option Typ},
+            (FreshName : String → Prop) →
+            FreshName x →
+            GammaIn = GammaPre ++ [(x, slotX)] ++ suffix →
+            SlotSub GammaIn (GammaPre ++ [(x, some t1)] ++ suffix) →
+            x ∉ linearCtxDom GammaPre →
+            x ∉ linearCtxDom suffix →
+            (∀ y, FreshName y → y ∉ boundVarsClauses cls) →
+            (∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v) →
+            (∀ y, y ∈ boundVarsClauses cls → y ∉ boundVars v) →
+            CtxFreshSubstClausesResult Delta Sigma x t1
+              GammaPre suffix GammaOut (substClauses cls v x) t epsR) with
     | var Delta Sigma Gamma1 Gamma2 y t =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup _h_ctx_fresh h_suffix_fresh _h_bound_fresh
+        intro GammaPre suffix slotX FreshName _hFreshX hEq h_live hxPre hxSuf _h_ctx_fresh h_suffix_fresh _h_bound_fresh
         exact subst_preserves_typing_ctx_fresh_var
           Delta Sigma x t1 hEq
           (by simpa [hEq] using h_live)
-          (by simpa [hEq] using h_nodup)
-          h_v h_closed h_suffix_fresh
+          hxPre hxSuf h_v
     | unit Delta Sigma Gamma =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        intro GammaPre suffix slotX FreshName _hFreshX hEq h_live hxPre hxSuf _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
         subst Gamma
         refine ⟨GammaPre, slotX, suffix, ?_, slotSub_refl GammaPre, ?_, slotSub_refl suffix, ?_⟩
         · simp [List.append_assoc]
-        · exact slotSub_middle_cases h_live h_nodup
+        · exact slotSub_middle_cases_of_fresh h_live hxPre hxSuf
         · simpa [subst] using HasType.unit Delta Sigma (GammaPre ++ suffix)
     | abs Delta Sigma Gamma1 Gamma2 y tArg tRes epsBody body slot hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
+        have hxy : x ≠ y := by
+          intro hxy
+          subst hxy
+          exact h_ctx_fresh x hFreshX (by simp [boundVars])
+        have hCtxBody : ∀ z, FreshName z → z ∉ boundVars body := by
+          intro z hz hzb
+          exact h_ctx_fresh z hz (by simp [boundVars, hzb])
+        have hyFreshV : y ∉ boundVars v := by
+          exact h_bound_fresh y (by simp [boundVars])
+        have hSuffixFreshBody :
+            ∀ z, z ∈ linearCtxDom (suffix ++ [(y, some tArg)]) → z ∉ boundVars v :=
+          boundFresh_append_singleton h_suffix_fresh hyFreshV
+        have hBoundBody : ∀ z, z ∈ boundVars body → z ∉ boundVars v := by
+          intro z hz
+          exact h_bound_fresh z (by simp [boundVars, hz])
+        have hxSufBody : x ∉ linearCtxDom (suffix ++ [(y, some tArg)]) := by
+          exact not_mem_linearCtxDom_append_singleton hxSuf hxy
+        have hLiveBody :
+            SlotSub
+              (Gamma1 ++ [(y, some tArg)])
+              (GammaPre ++ [(x, some t1)] ++ (suffix ++ [(y, some tArg)])) := by
+          simpa [hEq, List.append_assoc] using
+            (slotSub_append h_live (slotSub_refl ([(y, some tArg)] : LinearCtx)))
+        have hBodySubst :=
+          ih h_e h_v FreshName hFreshX
+            (by simpa [hEq, List.append_assoc])
+            hLiveBody hxPre hxSufBody
+            hCtxBody hSuffixFreshBody hBoundBody
+        rcases hBodySubst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTyBody⟩
+        rcases slotSub_append_singleton_cases (x := y) (t := tArg) hPostSub with
+          ⟨outPostPre, slotY, hOutPost, hPostSub', hSlotY⟩
+        have hOut' :
+            Gamma2 ++ [(y, slot)] =
+              (outPre ++ [(x, slotOut)] ++ outPostPre) ++ [(y, slotY)] := by
+          rw [hOutPost] at hOut
+          simpa [List.append_assoc] using hOut
+        rcases append_singleton_inj
+            (G1 := Gamma2) (G2 := outPre ++ [(x, slotOut)] ++ outPostPre)
+            (a := (y, slot)) (b := (y, slotY)) hOut' with
+          ⟨hGamma2, hSlotEq⟩
+        cases hSlotEq
+        refine ⟨outPre, slotOut, outPostPre, hGamma2, hPreSub, hSlotOut, hPostSub', ?_⟩
+        have hTyBody' :
+            HasType Delta Sigma
+              ((GammaPre ++ suffix) ++ [(y, some tArg)])
+              (subst body v x) tRes epsBody
+              ((outPre ++ outPostPre) ++ [(y, slot)]) := by
+          simpa [hOutPost, List.append_assoc] using hTyBody
+        simpa [subst, hxy, List.append_assoc] using
+          (HasType.abs Delta Sigma
+            (GammaPre ++ suffix) (outPre ++ outPostPre)
+            y tArg tRes epsBody (subst body v x) slot hTyBody')
     | app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tArg tRes epsInner eps1 eps2 h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtx1 : ∀ y, FreshName y → y ∉ boundVars e1 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
@@ -2562,7 +2644,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
         have h1Subst :=
-          ih1 h_e h_v FreshName hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+          ih1 h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtx1 h_suffix_fresh hBound1
         rcases h1Subst with
           ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
         have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
@@ -2570,19 +2652,20 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           exact slotSub_live_middle
             (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
             hMidSlot
-        have hNodup2 : NoDupNames Gamma2 := by
-          unfold NoDupNames at h_nodup ⊢
-          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
         have hCtx2 : ∀ y, FreshName y → y ∉ boundVars e2 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
         have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
           boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hxMidPre : x ∉ linearCtxDom midPre :=
+          not_mem_linearCtxDom_of_slotSub hMidPreSub hxPre
+        have hxMidPost : x ∉ linearCtxDom midPost :=
+          not_mem_linearCtxDom_of_slotSub hMidPostSub hxSuf
         have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
         have h2Subst :=
-          ih2 h_e h_v FreshName hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+          ih2 h_e h_v FreshName hFreshX hMidOut hLive2 hxMidPre hxMidPost hCtx2 hSuffixFresh2 hBound2
         rcases h2Subst with
           ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
         refine ⟨outPre, slotOut, outPost, hOut,
@@ -2594,10 +2677,10 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             (subst e1 v x) (subst e2 v x) tArg tRes epsInner eps1 eps2
             hTy1 hTy2)
     | letBind Delta Sigma Gamma1 Gamma2 Gamma3 y e1 e2 tArg tRes eps1 eps2 slot h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         sorry
     | copy Delta Sigma Gamma1 Gamma2 body ds eps hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2605,7 +2688,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2613,10 +2696,10 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.copy Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) ds eps hTy)
     | letpair Delta Sigma Gamma1 Gamma2 Gamma3 y z e1 e2 tArg tRes t eps1 eps2 slotY slotZ h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         sorry
     | tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tLeft tRight eps1 eps2 h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtx1 : ∀ y, FreshName y → y ∉ boundVars e1 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
@@ -2624,7 +2707,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
         have h1Subst :=
-          ih1 h_e h_v FreshName hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+          ih1 h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtx1 h_suffix_fresh hBound1
         rcases h1Subst with
           ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
         have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
@@ -2632,19 +2715,20 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           exact slotSub_live_middle
             (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
             hMidSlot
-        have hNodup2 : NoDupNames Gamma2 := by
-          unfold NoDupNames at h_nodup ⊢
-          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
         have hCtx2 : ∀ y, FreshName y → y ∉ boundVars e2 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
         have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
           boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hxMidPre : x ∉ linearCtxDom midPre :=
+          not_mem_linearCtxDom_of_slotSub hMidPreSub hxPre
+        have hxMidPost : x ∉ linearCtxDom midPost :=
+          not_mem_linearCtxDom_of_slotSub hMidPostSub hxSuf
         have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
         have h2Subst :=
-          ih2 h_e h_v FreshName hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+          ih2 h_e h_v FreshName hFreshX hMidOut hLive2 hxMidPre hxMidPost hCtx2 hSuffixFresh2 hBound2
         rcases h2Subst with
           ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
         refine ⟨outPre, slotOut, outPost, hOut,
@@ -2656,7 +2740,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             (subst e1 v x) (subst e2 v x) tLeft tRight eps1 eps2
             hTy1 hTy2)
     | fst Delta Sigma Gamma1 Gamma2 body tLeft tRight eps hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2664,7 +2748,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2672,7 +2756,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.fst Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) tLeft tRight eps hTy)
     | snd Delta Sigma Gamma1 Gamma2 body tLeft tRight eps hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2680,7 +2764,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2688,14 +2772,14 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.snd Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) tLeft tRight eps hTy)
     | const Delta Sigma Gamma c ds =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        intro GammaPre suffix slotX FreshName _hFreshX hEq h_live hxPre hxSuf _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
         subst Gamma
         refine ⟨GammaPre, slotX, suffix, ?_, slotSub_refl GammaPre, ?_, slotSub_refl suffix, ?_⟩
         · simp [List.append_assoc]
-        · exact slotSub_middle_cases h_live h_nodup
+        · exact slotSub_middle_cases_of_fresh h_live hxPre hxSuf
         · simpa [subst] using HasType.const Delta Sigma (GammaPre ++ suffix) c ds
     | tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtx1 : ∀ y, FreshName y → y ∉ boundVars e1 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
@@ -2703,7 +2787,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
         have h1Subst :=
-          ih1 h_e h_v FreshName hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+          ih1 h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtx1 h_suffix_fresh hBound1
         rcases h1Subst with
           ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
         have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
@@ -2711,19 +2795,20 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           exact slotSub_live_middle
             (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
             hMidSlot
-        have hNodup2 : NoDupNames Gamma2 := by
-          unfold NoDupNames at h_nodup ⊢
-          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
         have hCtx2 : ∀ y, FreshName y → y ∉ boundVars e2 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
         have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
           boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hxMidPre : x ∉ linearCtxDom midPre :=
+          not_mem_linearCtxDom_of_slotSub hMidPreSub hxPre
+        have hxMidPost : x ∉ linearCtxDom midPost :=
+          not_mem_linearCtxDom_of_slotSub hMidPostSub hxSuf
         have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
         have h2Subst :=
-          ih2 h_e h_v FreshName hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+          ih2 h_e h_v FreshName hFreshX hMidOut hLive2 hxMidPre hxMidPost hCtx2 hSuffixFresh2 hBound2
         rcases h2Subst with
           ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
         refine ⟨outPre, slotOut, outPost, hOut,
@@ -2735,7 +2820,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             (subst e1 v x) (subst e2 v x) ds eps1 eps2
             hTy1 hTy2)
     | tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtx1 : ∀ y, FreshName y → y ∉ boundVars e1 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
@@ -2743,7 +2828,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
         have h1Subst :=
-          ih1 h_e h_v FreshName hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+          ih1 h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtx1 h_suffix_fresh hBound1
         rcases h1Subst with
           ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
         have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
@@ -2751,19 +2836,20 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           exact slotSub_live_middle
             (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
             hMidSlot
-        have hNodup2 : NoDupNames Gamma2 := by
-          unfold NoDupNames at h_nodup ⊢
-          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
         have hCtx2 : ∀ y, FreshName y → y ∉ boundVars e2 := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
         have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
           boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hxMidPre : x ∉ linearCtxDom midPre :=
+          not_mem_linearCtxDom_of_slotSub hMidPreSub hxPre
+        have hxMidPost : x ∉ linearCtxDom midPost :=
+          not_mem_linearCtxDom_of_slotSub hMidPostSub hxSuf
         have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
           intro y hy
           exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
         have h2Subst :=
-          ih2 h_e h_v FreshName hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+          ih2 h_e h_v FreshName hFreshX hMidOut hLive2 hxMidPre hxMidPost hCtx2 hSuffixFresh2 hBound2
         rcases h2Subst with
           ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
         refine ⟨outPre, slotOut, outPost, hOut,
@@ -2775,7 +2861,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             (subst e1 v x) (subst e2 v x) ds eps1 eps2
             hTy1 hTy2)
     | tsum Delta Sigma Gamma1 Gamma2 body ds d eps hBody hmem ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2783,7 +2869,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2791,7 +2877,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.tsum Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) ds d eps hTy hmem)
     | texpand Delta Sigma Gamma1 Gamma2 body ds d eps hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2799,7 +2885,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2807,7 +2893,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.texpand Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) ds d eps hTy)
     | uniformLike Delta Sigma Gamma1 Gamma2 body ds lo hi eps hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2815,7 +2901,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2823,7 +2909,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           (HasType.uniformLike Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
             (subst body v x) ds lo hi eps hTy)
     | perform Delta Sigma Gamma1 Gamma2 op body tArg tRet eps hBody hsig ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, FreshName y → y ∉ boundVars body := by
           intro y hy hyb
           exact h_ctx_fresh y hy (by simpa [boundVars] using hyb)
@@ -2831,7 +2917,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
           intro y hy
           simpa [boundVars] using h_bound_fresh y hy
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup hCtxBody h_suffix_fresh hBoundBody
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf hCtxBody h_suffix_fresh hBoundBody
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
@@ -2840,38 +2926,163 @@ private theorem subst_preserves_typing_ctx_fresh_aux
             op (subst body v x) tArg tRet eps hTy hsig)
     | handle Delta Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
         hBody hOpsIn hClsIn hCover hClauses ihBody ihClauses =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         sorry
     | tgrad Delta Sigma Gamma y ds dsOut body eps slot hBody hsub ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
+        have hxy : x ≠ y := by
+          intro hxy
+          subst hxy
+          exact h_ctx_fresh x hFreshX (by simp [boundVars])
+        have hCtxBody : ∀ z, FreshName z → z ∉ boundVars body := by
+          intro z hz hzb
+          exact h_ctx_fresh z hz (by simp [boundVars, hzb])
+        have hyFreshV : y ∉ boundVars v := by
+          exact h_bound_fresh y (by simp [boundVars])
+        have hSuffixFreshBody :
+            ∀ z, z ∈ linearCtxDom (suffix ++ [(y, some (Typ.tensor ds))]) → z ∉ boundVars v :=
+          boundFresh_append_singleton h_suffix_fresh hyFreshV
+        have hBoundBody : ∀ z, z ∈ boundVars body → z ∉ boundVars v := by
+          intro z hz
+          exact h_bound_fresh z (by simp [boundVars, hz])
+        have hxSufBody : x ∉ linearCtxDom (suffix ++ [(y, some (Typ.tensor ds))]) := by
+          exact not_mem_linearCtxDom_append_singleton hxSuf hxy
+        have hLiveBody :
+            SlotSub
+              (Gamma ++ [(y, some (Typ.tensor ds))])
+              (GammaPre ++ [(x, some t1)] ++ (suffix ++ [(y, some (Typ.tensor ds))])) := by
+          simpa [hEq, List.append_assoc] using
+            (slotSub_append h_live
+              (slotSub_refl ([(y, some (Typ.tensor ds))] : LinearCtx)))
+        have hBodySubst :=
+          ih h_e h_v FreshName hFreshX
+            (by simpa [hEq, List.append_assoc])
+            hLiveBody hxPre hxSufBody
+            hCtxBody hSuffixFreshBody hBoundBody
+        rcases hBodySubst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTyBody⟩
+        rcases slotSub_append_singleton_cases (x := y) (t := Typ.tensor ds) hPostSub with
+          ⟨outPostPre, slotY, hOutPost, hPostSub', hSlotY⟩
+        have hOut' :
+            Gamma ++ [(y, slot)] =
+              (outPre ++ [(x, slotOut)] ++ outPostPre) ++ [(y, slotY)] := by
+          rw [hOutPost] at hOut
+          simpa [List.append_assoc] using hOut
+        rcases append_singleton_inj
+            (G1 := Gamma) (G2 := outPre ++ [(x, slotOut)] ++ outPostPre)
+            (a := (y, slot)) (b := (y, slotY)) hOut' with
+          ⟨hGammaOut, hSlotEq⟩
+        cases hSlotEq
+        refine ⟨outPre, slotOut, outPostPre, hGammaOut, hPreSub, hSlotOut, hPostSub', ?_⟩
+        have hTyBody' :
+            HasType (Capability.diff :: Delta) Sigma
+              ((GammaPre ++ suffix) ++ [(y, some (Typ.tensor ds))])
+              (subst body v x) (Typ.tensor dsOut) eps
+              ((outPre ++ outPostPre) ++ [(y, slot)]) := by
+          simpa [hOutPost, List.append_assoc] using hTyBody
+        simpa [subst, hxy, List.append_assoc] using
+          (HasType.tgrad Delta Sigma
+            (GammaPre ++ suffix)
+            y ds dsOut (subst body v x) eps slot hTyBody' hsub)
     | tvmap Delta Sigma Gamma y tArg tRes body eps d slot hBody ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
+        have hxy : x ≠ y := by
+          intro hxy
+          subst hxy
+          exact h_ctx_fresh x hFreshX (by simp [boundVars])
+        have hCtxBody : ∀ z, FreshName z → z ∉ boundVars body := by
+          intro z hz hzb
+          exact h_ctx_fresh z hz (by simp [boundVars, hzb])
+        have hyFreshV : y ∉ boundVars v := by
+          exact h_bound_fresh y (by simp [boundVars])
+        have hSuffixFreshBody :
+            ∀ z, z ∈ linearCtxDom (suffix ++ [(y, some tArg)]) → z ∉ boundVars v :=
+          boundFresh_append_singleton h_suffix_fresh hyFreshV
+        have hBoundBody : ∀ z, z ∈ boundVars body → z ∉ boundVars v := by
+          intro z hz
+          exact h_bound_fresh z (by simp [boundVars, hz])
+        have hxSufBody : x ∉ linearCtxDom (suffix ++ [(y, some tArg)]) := by
+          exact not_mem_linearCtxDom_append_singleton hxSuf hxy
+        have hLiveBody :
+            SlotSub
+              (Gamma ++ [(y, some tArg)])
+              (GammaPre ++ [(x, some t1)] ++ (suffix ++ [(y, some tArg)])) := by
+          simpa [hEq, List.append_assoc] using
+            (slotSub_append h_live
+              (slotSub_refl ([(y, some tArg)] : LinearCtx)))
+        have hBodySubst :=
+          ih h_e h_v FreshName hFreshX
+            (by simpa [hEq, List.append_assoc])
+            hLiveBody hxPre hxSufBody
+            hCtxBody hSuffixFreshBody hBoundBody
+        rcases hBodySubst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTyBody⟩
+        rcases slotSub_append_singleton_cases (x := y) (t := tArg) hPostSub with
+          ⟨outPostPre, slotY, hOutPost, hPostSub', hSlotY⟩
+        have hOut' :
+            Gamma ++ [(y, slot)] =
+              (outPre ++ [(x, slotOut)] ++ outPostPre) ++ [(y, slotY)] := by
+          rw [hOutPost] at hOut
+          simpa [List.append_assoc] using hOut
+        rcases append_singleton_inj
+            (G1 := Gamma) (G2 := outPre ++ [(x, slotOut)] ++ outPostPre)
+            (a := (y, slot)) (b := (y, slotY)) hOut' with
+          ⟨hGammaOut, hSlotEq⟩
+        cases hSlotEq
+        refine ⟨outPre, slotOut, outPostPre, hGammaOut, hPreSub, hSlotOut, hPostSub', ?_⟩
+        have hTyBody' :
+            HasType Delta Sigma
+              ((GammaPre ++ suffix) ++ [(y, some tArg)])
+              (subst body v x) tRes eps
+              ((outPre ++ outPostPre) ++ [(y, slot)]) := by
+          simpa [hOutPost, List.append_assoc] using hTyBody
+        simpa [subst, hxy, List.append_assoc] using
+          (HasType.tvmap Delta Sigma
+            (GammaPre ++ suffix)
+            y tArg tRes (subst body v x) eps d slot hTyBody')
     | loc Delta Sigma Gamma ell t hlook =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        intro GammaPre suffix slotX FreshName _hFreshX hEq h_live hxPre hxSuf _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
         subst Gamma
         refine ⟨GammaPre, slotX, suffix, ?_, slotSub_refl GammaPre, ?_, slotSub_refl suffix, ?_⟩
         · simp [List.append_assoc]
-        · exact slotSub_middle_cases h_live h_nodup
+        · exact slotSub_middle_cases_of_fresh h_live hxPre hxSuf
         · simpa [subst] using HasType.loc Delta Sigma (GammaPre ++ suffix) ell t hlook
     | subEff Delta Sigma Gamma Gamma' body t eps eps' hBody hsub ih =>
-        intro GammaPre suffix slotX FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hBodySubst :=
-          ih h_e h_v FreshName hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+          ih h_e h_v FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         rcases hBodySubst with
           ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, hTy⟩
         refine ⟨outPre, slotOut, outPost, hOut, hPre, hSlot, hPost, ?_⟩
         exact HasType.subEff Delta Sigma (GammaPre ++ suffix) (outPre ++ outPost)
           (subst body v x) t eps eps' hTy hsub
     | nil Delta Sigma Gamma2 t epsR =>
-        trivial
+        rename_i GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
+        subst Gamma2
+        refine ⟨GammaPre, slotX, suffix, ?_, slotSub_refl GammaPre, ?_, slotSub_refl suffix, ?_⟩
+        · simp [List.append_assoc]
+        · exact slotSub_middle_cases_of_fresh h_live hxPre hxSuf
+        · simpa [substClauses] using
+            (ClausesTyped.nil Delta Sigma (GammaPre ++ suffix) t epsR)
     | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
         hMatch hBody hRest ihBody ihRest =>
-      trivial
+        rename_i GammaPre suffix slotMid FreshName hFreshMid hEq hLive hxPre hxSuf hCtxFresh hSuffixFresh hBoundFresh
+        sorry
   exact hmain h_e
     (fun y => y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix))
-    rfl h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+    (by simp [linearCtxDom])
+    rfl h_live
+    (by
+      have hndSome : NoDupNames (GammaPre ++ [(x, some Typ.unit)] ++ suffix) := by
+        simpa [NoDupNames, linearCtxDom] using h_nodup
+      exact noDupNames_middle_fresh_prefix (GammaPre := GammaPre) (GammaPost := suffix)
+        (x := x) (t := Typ.unit) hndSome)
+    (by
+      have hndSome : NoDupNames (GammaPre ++ [(x, some Typ.unit)] ++ suffix) := by
+        simpa [NoDupNames, linearCtxDom] using h_nodup
+      exact noDupNames_middle_fresh_suffix (GammaPre := GammaPre) (GammaPost := suffix)
+        (x := x) (t := Typ.unit) hndSome)
+    h_ctx_fresh h_suffix_fresh h_bound_fresh
 
 /-- Honest named substitution theorem for the non-captured context-fresh
     case.
