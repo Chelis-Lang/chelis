@@ -1275,6 +1275,26 @@ theorem wellScoped_handle_clause_body_disjoint
   intro z hz hbz
   exact h.2.2 z hbz z (mem_boundVarsClauses_body hmem hz) rfl
 
+theorem wellScoped_handle_rest
+    {epsH : EffectRow} {body : Term}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (h : WellScoped (Term.handle epsH body ((op, x, k, hb) :: rest))) :
+    WellScoped (Term.handle epsH body rest) := by
+  unfold WellScoped at h ⊢
+  have hsubRest :
+      List.Sublist (boundVarsClauses rest)
+        (x :: k :: (boundVars hb ++ boundVarsClauses rest)) := by
+    simpa [List.append_assoc] using
+      (List.sublist_append_right
+        (x :: k :: boundVars hb) (boundVarsClauses rest))
+  have hsub :
+      List.Sublist (boundVars body ++ boundVarsClauses rest)
+        (boundVars body ++ boundVarsClauses ((op, x, k, hb) :: rest)) := by
+    simpa [boundVars, boundVarsClauses, List.append_assoc] using
+      (List.append_sublist_append_left (boundVars body)).2 hsubRest
+  exact hsub.nodup h
+
 /-! ## Values -/
 
 /-- Value predicate on `Term`. A term is a value iff it is a location, a
@@ -1808,6 +1828,24 @@ theorem lexical_handle_clause
           exact hclause.2.1
         · subst z
           exact hclause.2.2.1)
+
+theorem lexical_handle_rest
+    {Gamma : LinearCtx} {epsH : EffectRow} {body : Term}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (h : LexicallyScoped Gamma (Term.handle epsH body ((op, x, k, hb) :: rest))) :
+    LexicallyScoped Gamma (Term.handle epsH body rest) := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, wellScoped_handle_rest hws⟩
+  intro z hz
+  have hnot := hdom z hz
+  intro hzb
+  have hzb' : z ∈ boundVars (Term.handle epsH body ((op, x, k, hb) :: rest)) := by
+    rcases List.mem_append.mp hzb with hzBody | hzRest
+    · exact List.mem_append.mpr (Or.inl hzBody)
+    · refine List.mem_append.mpr ?_
+      exact Or.inr (by simp [boundVarsClauses, hzRest])
+  exact hnot hzb'
 
 /-- Disjointness of two linear contexts' domains. Phase 2 scaffolding. -/
 def linearCtxDisjoint (G1 G2 : LinearCtx) : Prop :=
