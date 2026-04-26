@@ -16,7 +16,7 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `Substitution.lean` is closed under the honest lexical-scoped theorem shape.
 - `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
 - `AdjointTyping.lean`'s repaired `handle` branch is now typed.
-- `AdjointTyping.lean` now also contains a concrete typed counterexample showing the old seed-polymorphic `expand` helper statement is false.
+- `AdjointTyping.lean` now also contains a concrete typed counterexample showing the current admitted `expand` theorem surface is false under the Phase 1 structural recursion.
 - The branch still contains 1 executable `sorry` on the main proof path:
   - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `expand` adjoint cases
 
@@ -45,7 +45,7 @@ The current theorem-shape boundary is now explicit in Lean:
   - why unconditional runtime preservation is false
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
-- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the file contains a closed Lean witness that the old private seed-polymorphic helper is false.
+- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the file contains a closed Lean witness that the current admitted public surface is too strong under the Phase 1 structural `letBind` / `letpair` recursion.
 
 ## Remaining Critical Path
 

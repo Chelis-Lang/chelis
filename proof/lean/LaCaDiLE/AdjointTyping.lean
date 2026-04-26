@@ -228,8 +228,13 @@ mutual
 /-- Seed-polymorphic helper for adjoint typing. The proof depends on
     the seed's typing, the structural shape of `e`, and the freshness
     of adjoint counter-indexed names at counters ≥ `n`. The closed
-    structural cases recurse syntactically; the hard `mul` / `sum` /
-    `expand` cases are still parked under the catch-all below. -/
+    structural cases recurse syntactically; the hard `mul` / `expand`
+    cases are still parked below. The in-file
+    `adjointExpandGapCounterexample` shows that the remaining `expand`
+    issue is theorem shape, not proof search: once the Phase 1
+    structural `letBind` skeleton recurses into a subterm at the outer
+    seed type, the current public theorem surface is already too
+    strong. -/
 private theorem adjoint_typed_aux
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
     (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
@@ -551,7 +556,7 @@ private theorem adjoint_typed_aux
       simpa [adjointFrom] using
         (adjointClauses_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed
           x n clauses body gSeed h_seed h_fresh_s h_fresh_s')
-  -- `mul` and `expand` remain under the catch-all.
+  -- `mul` and `expand` remain under the explicit admitted branches.
   --
   -- Wave 5 Track B: `AdjointTransform` reshaped the `mul` case so
   -- `copy gSeed` is the outermost letpair (before any operand tape
@@ -590,11 +595,14 @@ private theorem adjoint_typed_aux
   -- `mul` work needs a stronger theorem-level invariant for rebasing
   -- operand tape typings and their effect rows.
   --
-  -- `expand` remains on the Phase 1 T9 tape-extent work: the current
-  -- seed-polymorphic helper is too strong there, because `sum gSeed d`
-  -- only types when `d ∈ dsE`. Public callers derive exactly that
-  -- premise from the source typing judgment, but the private helper
-  -- currently quantifies over arbitrary `dsE`.
+  -- `expand` is no longer a “missing local lemma” issue. The concrete
+  -- `adjointExpandGapCounterexample` below shows that, under the
+  -- current Phase 1 structural `letBind` / `letpair` skeletons,
+  -- the admitted public theorem surface itself is too strong: a
+  -- well-typed source body can recurse into an `expand` subterm at an
+  -- outer seed shape where `sum gSeed d` is untypable. Closing this
+  -- branch therefore requires a theorem-surface or transform change,
+  -- not another seed-polymorphic helper.
   -- `handle` is now typed for the repaired seed-threading shape; the
   -- transform still eagerly sequences every clause adjoint, but that is
   -- a known Phase 1 semantic caveat in `AdjointTransform`, not a typing
@@ -971,7 +979,16 @@ private theorem adjointExpandGapCounterexample :
 
     The freshness premise requires that no counter-indexed adjoint
     name (`freshName base m` for `m ≥ n` and `base ∈ adjointBases`)
-    collides with a name already in `Γ ++ [(x, _), (gs, _)]`. -/
+    collides with a name already in `Γ ++ [(x, _), (gs, _)]`.
+
+    Current branch note: this statement is still admitted, and the
+    local `adjointExpandGapCounterexample` above shows why the present
+    theorem surface cannot be closed as-is under the Phase 1
+    structural `letBind` / `letpair` skeleton. The remaining proof debt
+    is therefore not “finish the existing induction,” but “replace this
+    theorem surface with one that tracks the source-side shape relation
+    the `expand` path actually needs,” while separately resolving the
+    `mul` tape/effect rebasing problem. -/
 theorem adjointFrom_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
