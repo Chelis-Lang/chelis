@@ -1376,6 +1376,29 @@ private theorem noDupNames_remove_middle
         simpa [List.append_assoc] using List.Sublist.cons₂ hd ih
   exact noDupNames_of_sublist hsub hnd
 
+private theorem hasType_output_singleton_cases
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma GammaOut : LinearCtx} {x : String} {tx t : Typ}
+    {e : Term} {eps : EffectRow}
+    (h : HasType Delta Sigma (Gamma ++ [(x, some tx)]) e t eps GammaOut) :
+    ∃ GammaOutPre slot,
+      GammaOut = GammaOutPre ++ [(x, slot)] ∧
+      SlotSub GammaOutPre Gamma ∧
+      (slot = none ∨ slot = some tx) := by
+  exact slotSub_append_singleton_cases (has_type_slotSub h)
+
+private theorem hasType_output_pair_cases
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma GammaOut : LinearCtx} {x y : String}
+    {tx ty t : Typ} {e : Term} {eps : EffectRow}
+    (h : HasType Delta Sigma (Gamma ++ [(x, some tx), (y, some ty)]) e t eps GammaOut) :
+    ∃ GammaOutPre slotX slotY,
+      GammaOut = GammaOutPre ++ [(x, slotX), (y, slotY)] ∧
+      SlotSub GammaOutPre Gamma ∧
+      (slotX = none ∨ slotX = some tx) ∧
+      (slotY = none ∨ slotY = some ty) := by
+  exact slotSub_append_pair_cases (has_type_slotSub h)
+
 private theorem not_mem_linearCtxDom_append_singleton
     {y x : String} {Gamma : LinearCtx} {slot : Option Typ}
     (h : y ∉ linearCtxDom Gamma)
