@@ -1210,6 +1210,52 @@ private theorem split_target_middle_singleton
           ((noDupNames_middle_fresh_suffix (GammaPre := GammaPre) (GammaPost := suffix)
               (x := x) (t := t) hndSome) hxSuf)
 
+private theorem split_target_middle_singleton_of_fresh
+    {GammaPre suffix Gamma1 Gamma2 : LinearCtx}
+    {x : String} {slotX : Option Typ} {t : Typ}
+    (hEq : Gamma1 ++ [(x, some t)] ++ Gamma2 = GammaPre ++ [(x, slotX)] ++ suffix)
+    (hxPre : x ∉ linearCtxDom GammaPre)
+    (hxSuf : x ∉ linearCtxDom suffix) :
+    Gamma1 = GammaPre ∧ Gamma2 = suffix ∧ slotX = some t := by
+  rcases list_append_eq_split Gamma1 ([(x, some t)] ++ Gamma2)
+      GammaPre ([(x, slotX)] ++ suffix)
+      (by simpa [List.append_assoc] using hEq) with
+    ⟨m, hPre, hRest⟩ | ⟨m, hPre, hRest⟩
+  · cases m with
+    | nil =>
+        have hRest' : (x, some t) :: Gamma2 = (x, slotX) :: suffix := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        exact ⟨by simpa using hPre.symm, hTail, rfl⟩
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (x, some t) :: Gamma2 = (z, slotZ) :: (tl ++ [(x, slotX)] ++ suffix) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead _hTail
+        cases hHead
+        have hxPre' : x ∈ linearCtxDom GammaPre := by
+          rw [hPre]
+          simp [linearCtxDom, List.append_assoc]
+        exact False.elim (hxPre hxPre')
+  · cases m with
+    | nil =>
+        have hRest' : (x, slotX) :: suffix = (x, some t) :: Gamma2 := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        exact ⟨by simpa using hPre, hTail.symm, rfl⟩
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (x, slotX) :: suffix = (z, slotZ) :: (tl ++ [(x, some t)] ++ Gamma2) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        have hxSuf' : x ∈ linearCtxDom suffix := by
+          rw [hTail]
+          simp [linearCtxDom, List.append_assoc]
+        exact False.elim (hxSuf hxSuf')
+
 private theorem split_middle_singleton
     {GammaPre suffix Gamma1 Gamma2 : LinearCtx}
     {x : String} {slot1 slot2 : Option Typ}
@@ -1260,6 +1306,52 @@ private theorem split_middle_singleton
         exact False.elim
           ((noDupNames_middle_fresh_suffix (GammaPre := GammaPre) (GammaPost := suffix)
               (x := x) (t := Typ.unit) hndAny) hxSuf)
+
+private theorem split_middle_singleton_of_fresh
+    {GammaPre suffix Gamma1 Gamma2 : LinearCtx}
+    {x : String} {slot1 slot2 : Option Typ}
+    (hEq : Gamma1 ++ [(x, slot1)] ++ Gamma2 = GammaPre ++ [(x, slot2)] ++ suffix)
+    (hxPre : x ∉ linearCtxDom GammaPre)
+    (hxSuf : x ∉ linearCtxDom suffix) :
+    Gamma1 = GammaPre ∧ Gamma2 = suffix ∧ slot1 = slot2 := by
+  rcases list_append_eq_split Gamma1 ([(x, slot1)] ++ Gamma2)
+      GammaPre ([(x, slot2)] ++ suffix)
+      (by simpa [List.append_assoc] using hEq) with
+    ⟨m, hPre, hRest⟩ | ⟨m, hPre, hRest⟩
+  · cases m with
+    | nil =>
+        have hRest' : (x, slot1) :: Gamma2 = (x, slot2) :: suffix := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        exact ⟨by simpa using hPre.symm, hTail, rfl⟩
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (x, slot1) :: Gamma2 = (z, slotZ) :: (tl ++ [(x, slot2)] ++ suffix) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead _hTail
+        cases hHead
+        have hxPre' : x ∈ linearCtxDom GammaPre := by
+          rw [hPre]
+          simp [linearCtxDom, List.append_assoc]
+        exact False.elim (hxPre hxPre')
+  · cases m with
+    | nil =>
+        have hRest' : (x, slot2) :: suffix = (x, slot1) :: Gamma2 := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        exact ⟨by simpa using hPre, hTail.symm, rfl⟩
+    | cons hd tl =>
+        rcases hd with ⟨z, slotZ⟩
+        have hRest' : (x, slot2) :: suffix = (z, slotZ) :: (tl ++ [(x, slot1)] ++ Gamma2) := by
+          simpa [List.append_assoc] using hRest
+        injection hRest' with hHead hTail
+        cases hHead
+        have hxSuf' : x ∈ linearCtxDom suffix := by
+          rw [hTail]
+          simp [linearCtxDom, List.append_assoc]
+        exact False.elim (hxSuf hxSuf')
 
 private theorem slotSub_names_eq
     {out inp : LinearCtx}
@@ -1347,6 +1439,29 @@ private theorem slotSub_middle_cases
       (Gamma1 := outPre) (Gamma2 := outPost)
       (x := x) (slot1 := slotOut) (slot2 := slotX)
       hout.symm hnd
+  subst outPre
+  subst outPost
+  subst slotOut
+  exact hslotOut
+
+private theorem slotSub_middle_cases_of_fresh
+    {GammaPre suffix : LinearCtx} {x : String}
+    {slotX : Option Typ} {t1 : Typ}
+    (hslot :
+      SlotSub (GammaPre ++ [(x, slotX)] ++ suffix)
+        (GammaPre ++ [(x, some t1)] ++ suffix))
+    (hxPre : x ∉ linearCtxDom GammaPre)
+    (hxSuf : x ∉ linearCtxDom suffix) :
+    slotX = none ∨ slotX = some t1 := by
+  rcases slotSub_split_target
+      (GammaPre := GammaPre) (GammaPost := suffix) (x := x) (t := t1) hslot with
+    ⟨outPre, slotOut, outPost, hout, _hPreSub, hslotOut, _hPostSub⟩
+  have ⟨hPreEq, hPostEq, hslotEq⟩ :=
+    split_middle_singleton_of_fresh
+      (GammaPre := GammaPre) (suffix := suffix)
+      (Gamma1 := outPre) (Gamma2 := outPost)
+      (x := x) (slot1 := slotOut) (slot2 := slotX)
+      hout.symm hxPre hxSuf
   subst outPre
   subst outPost
   subst slotOut
@@ -2226,6 +2341,20 @@ private def CtxFreshSubstResult
     SlotSub GammaOutPost suffix ∧
     HasType Delta Sigma (GammaPre ++ suffix) eSub t2 eps
       (GammaOutPre ++ GammaOutPost)
+
+private def CtxFreshSubstClausesResult
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    (x : String) (t1 : Typ)
+    (GammaPre suffix GammaOut : LinearCtx)
+    (clausesSub : List (EffectLabel × String × String × Term))
+    (t : Typ) (epsR : EffectRow) : Prop :=
+  ∃ GammaOutPre slotOut GammaOutPost,
+    GammaOut = GammaOutPre ++ [(x, slotOut)] ++ GammaOutPost ∧
+    SlotSub GammaOutPre GammaPre ∧
+    (slotOut = none ∨ slotOut = some t1) ∧
+    SlotSub GammaOutPost suffix ∧
+    ClausesTyped Delta Sigma (GammaPre ++ suffix) (GammaOutPre ++ GammaOutPost)
+      t epsR clausesSub
 
 private theorem ctxFreshSubstResult_map
     (Delta : CapCtx) (Sigma : StoreTyp)
