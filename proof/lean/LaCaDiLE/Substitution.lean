@@ -663,6 +663,83 @@ theorem insertBeforeSuffix_eq_split
   unfold insertBeforeSuffix
   simp [List.reverse_append, List.append_assoc]
 
+theorem insertBeforeSuffix_var_right
+    (GammaPre GammaPost : LinearCtx) (j : Nat)
+    (entry : String × Option Typ)
+    (x : String) (slot : Option Typ)
+    (hj : j ≤ GammaPost.length) :
+    insertBeforeSuffix (GammaPre ++ [(x, slot)] ++ GammaPost) j entry =
+      GammaPre ++ [(x, slot)] ++ insertBeforeSuffix GammaPost j entry := by
+  let postPre := GammaPost.take (GammaPost.length - j)
+  let postSuf := GammaPost.drop (GammaPost.length - j)
+  have hsplit : GammaPost = postPre ++ postSuf := by
+    simp [postPre, postSuf, List.take_append_drop]
+  have hlen : postSuf.length = j := by
+    simp [postSuf]
+    omega
+  calc
+    insertBeforeSuffix (GammaPre ++ [(x, slot)] ++ GammaPost) j entry
+        = insertBeforeSuffix ((GammaPre ++ [(x, slot)] ++ postPre) ++ postSuf) postSuf.length entry := by
+            simp [hsplit, hlen, List.append_assoc]
+    _ = (GammaPre ++ [(x, slot)] ++ postPre) ++ [entry] ++ postSuf := by
+          simpa using insertBeforeSuffix_eq_split
+            (GammaPre ++ [(x, slot)] ++ postPre) postSuf entry
+    _ = GammaPre ++ [(x, slot)] ++ insertBeforeSuffix GammaPost j entry := by
+          have htail : insertBeforeSuffix GammaPost j entry =
+              postPre ++ [entry] ++ postSuf := by
+            simpa [hsplit, hlen] using insertBeforeSuffix_eq_split postPre postSuf entry
+          simp [htail, List.append_assoc]
+
+theorem insertBeforeSuffix_var_left
+    (GammaPre GammaPost : LinearCtx) (j : Nat)
+    (entry : String × Option Typ)
+    (x : String) (slot : Option Typ)
+    (hj : GammaPost.length < j)
+    (hjt : j ≤ (GammaPre ++ [(x, slot)] ++ GammaPost).length) :
+    let k := j - (GammaPost.length + 1)
+    insertBeforeSuffix (GammaPre ++ [(x, slot)] ++ GammaPost) j entry =
+      insertBeforeSuffix GammaPre k entry ++ [(x, slot)] ++ GammaPost := by
+  let k := j - (GammaPost.length + 1)
+  let prePre := GammaPre.take (GammaPre.length - k)
+  let preSuf := GammaPre.drop (GammaPre.length - k)
+  have hsplit : GammaPre = prePre ++ preSuf := by
+    simp [prePre, preSuf, List.take_append_drop]
+  have hj' : GammaPost.length + 1 ≤ j := by
+    omega
+  have hk : k ≤ GammaPre.length := by
+    simp [k] at hjt
+    omega
+  have hprelen : preSuf.length = k := by
+    simp [preSuf, Nat.sub_sub_self hk]
+  have hidx : preSuf.length + (GammaPost.length + 1) = j := by
+    calc
+      preSuf.length + (GammaPost.length + 1)
+          = k + (GammaPost.length + 1) := by simp [hprelen]
+      _ = j := by
+          dsimp [k]
+          simpa [Nat.add_assoc, Nat.add_left_comm, Nat.add_comm] using
+            (Nat.add_sub_cancel' hj' : (GammaPost.length + 1) + (j - (GammaPost.length + 1)) = j)
+  have hlen : (preSuf ++ [(x, slot)] ++ GammaPost).length = j := by
+    calc
+      (preSuf ++ [(x, slot)] ++ GammaPost).length
+          = preSuf.length + (GammaPost.length + 1) := by
+              simp [List.length_append, Nat.add_assoc, Nat.add_left_comm, Nat.add_comm]
+      _ = j := hidx
+  calc
+    insertBeforeSuffix (GammaPre ++ [(x, slot)] ++ GammaPost) j entry
+        = insertBeforeSuffix (prePre ++ (preSuf ++ [(x, slot)] ++ GammaPost))
+            (preSuf ++ [(x, slot)] ++ GammaPost).length entry := by
+            rw [hsplit, ← hlen]
+            simp [List.append_assoc]
+    _ = prePre ++ [entry] ++ (preSuf ++ [(x, slot)] ++ GammaPost) := by
+          simpa [List.append_assoc] using
+            insertBeforeSuffix_eq_split prePre (preSuf ++ [(x, slot)] ++ GammaPost) entry
+    _ = insertBeforeSuffix GammaPre k entry ++ [(x, slot)] ++ GammaPost := by
+          have htail : insertBeforeSuffix GammaPre k entry =
+              prePre ++ [entry] ++ preSuf := by
+            simpa [hsplit, hprelen] using insertBeforeSuffix_eq_split prePre preSuf entry
+          simp [htail, List.append_assoc]
+
 /-! ### Freshness extraction helpers
 
 Position-indexed weakening (`weakening_insert` below) is the single
