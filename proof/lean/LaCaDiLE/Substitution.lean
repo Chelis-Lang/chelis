@@ -2092,7 +2092,46 @@ private theorem subst_preserves_typing_ctx_fresh_aux
         sorry
     | app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tArg tRes epsInner eps1 eps2 h1 h2 ih1 ih2 =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        have hCtx1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e1 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
+        have hBound1 : ∀ y, y ∈ boundVars e1 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
+        have h1Subst :=
+          ih1 h_e h_v hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+        rcases h1Subst with
+          ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
+        have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
+          rw [hMidOut]
+          exact slotSub_live_middle
+            (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
+            hMidSlot
+        have hNodup2 : NoDupNames Gamma2 := by
+          unfold NoDupNames at h_nodup ⊢
+          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
+        have hCtx2OnGamma1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e2 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
+        have hCtx2 : ∀ y, y ∈ linearCtxDom Gamma2 → y ∉ boundVars e2 :=
+          boundFresh_of_slotSub (has_type_slotSub h1) hCtx2OnGamma1
+        have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
+          boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
+        have h2Subst :=
+          ih2 h_e h_v hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+        rcases h2Subst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
+        refine ⟨outPre, slotOut, outPost, hOut,
+          slotSub_trans hPreSub hMidPreSub, hSlotOut,
+          slotSub_trans hPostSub hMidPostSub, ?_⟩
+        simpa [subst] using
+          (HasType.app Delta Sigma
+            (GammaPre ++ suffix) (midPre ++ midPost) (outPre ++ outPost)
+            (subst e1 v x) (subst e2 v x) tArg tRes epsInner eps1 eps2
+            hTy1 hTy2)
     | letBind Delta Sigma Gamma1 Gamma2 Gamma3 y e1 e2 tArg tRes eps1 eps2 slot h1 h2 ih1 ih2 =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
         sorry
@@ -2117,7 +2156,46 @@ private theorem subst_preserves_typing_ctx_fresh_aux
         sorry
     | tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tLeft tRight eps1 eps2 h1 h2 ih1 ih2 =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        have hCtx1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e1 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
+        have hBound1 : ∀ y, y ∈ boundVars e1 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
+        have h1Subst :=
+          ih1 h_e h_v hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+        rcases h1Subst with
+          ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
+        have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
+          rw [hMidOut]
+          exact slotSub_live_middle
+            (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
+            hMidSlot
+        have hNodup2 : NoDupNames Gamma2 := by
+          unfold NoDupNames at h_nodup ⊢
+          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
+        have hCtx2OnGamma1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e2 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
+        have hCtx2 : ∀ y, y ∈ linearCtxDom Gamma2 → y ∉ boundVars e2 :=
+          boundFresh_of_slotSub (has_type_slotSub h1) hCtx2OnGamma1
+        have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
+          boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
+        have h2Subst :=
+          ih2 h_e h_v hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+        rcases h2Subst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
+        refine ⟨outPre, slotOut, outPost, hOut,
+          slotSub_trans hPreSub hMidPreSub, hSlotOut,
+          slotSub_trans hPostSub hMidPostSub, ?_⟩
+        simpa [subst] using
+          (HasType.tpair Delta Sigma
+            (GammaPre ++ suffix) (midPre ++ midPost) (outPre ++ outPost)
+            (subst e1 v x) (subst e2 v x) tLeft tRight eps1 eps2
+            hTy1 hTy2)
     | fst Delta Sigma Gamma1 Gamma2 body tLeft tRight eps hBody ih =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars body := by
@@ -2159,10 +2237,88 @@ private theorem subst_preserves_typing_ctx_fresh_aux
         · simpa [subst] using HasType.const Delta Sigma (GammaPre ++ suffix) c ds
     | tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        have hCtx1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e1 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
+        have hBound1 : ∀ y, y ∈ boundVars e1 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
+        have h1Subst :=
+          ih1 h_e h_v hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+        rcases h1Subst with
+          ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
+        have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
+          rw [hMidOut]
+          exact slotSub_live_middle
+            (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
+            hMidSlot
+        have hNodup2 : NoDupNames Gamma2 := by
+          unfold NoDupNames at h_nodup ⊢
+          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
+        have hCtx2OnGamma1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e2 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
+        have hCtx2 : ∀ y, y ∈ linearCtxDom Gamma2 → y ∉ boundVars e2 :=
+          boundFresh_of_slotSub (has_type_slotSub h1) hCtx2OnGamma1
+        have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
+          boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
+        have h2Subst :=
+          ih2 h_e h_v hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+        rcases h2Subst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
+        refine ⟨outPre, slotOut, outPost, hOut,
+          slotSub_trans hPreSub hMidPreSub, hSlotOut,
+          slotSub_trans hPostSub hMidPostSub, ?_⟩
+        simpa [subst] using
+          (HasType.tadd Delta Sigma
+            (GammaPre ++ suffix) (midPre ++ midPost) (outPre ++ outPost)
+            (subst e1 v x) (subst e2 v x) ds eps1 eps2
+            hTy1 hTy2)
     | tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
-        sorry
+        have hCtx1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e1 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inl hyb)
+        have hBound1 : ∀ y, y ∈ boundVars e1 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inl hy)
+        have h1Subst :=
+          ih1 h_e h_v hEq h_live h_nodup hCtx1 h_suffix_fresh hBound1
+        rcases h1Subst with
+          ⟨midPre, midSlot, midPost, hMidOut, hMidPreSub, hMidSlot, hMidPostSub, hTy1⟩
+        have hLive2 : SlotSub Gamma2 (midPre ++ [(x, some t1)] ++ midPost) := by
+          rw [hMidOut]
+          exact slotSub_live_middle
+            (GammaPre := midPre) (suffix := midPost) (x := x) (slotX := midSlot) (t1 := t1)
+            hMidSlot
+        have hNodup2 : NoDupNames Gamma2 := by
+          unfold NoDupNames at h_nodup ⊢
+          simpa [slotSub_names_eq (has_type_slotSub h1)] using h_nodup
+        have hCtx2OnGamma1 : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars e2 := by
+          intro y hy hyb
+          exact h_ctx_fresh y hy (by simpa [boundVars] using Or.inr hyb)
+        have hCtx2 : ∀ y, y ∈ linearCtxDom Gamma2 → y ∉ boundVars e2 :=
+          boundFresh_of_slotSub (has_type_slotSub h1) hCtx2OnGamma1
+        have hSuffixFresh2 : ∀ y, y ∈ linearCtxDom midPost → y ∉ boundVars v :=
+          boundFresh_of_slotSub hMidPostSub h_suffix_fresh
+        have hBound2 : ∀ y, y ∈ boundVars e2 → y ∉ boundVars v := by
+          intro y hy
+          exact h_bound_fresh y (by simpa [boundVars] using Or.inr hy)
+        have h2Subst :=
+          ih2 h_e h_v hMidOut hLive2 hNodup2 hCtx2 hSuffixFresh2 hBound2
+        rcases h2Subst with
+          ⟨outPre, slotOut, outPost, hOut, hPreSub, hSlotOut, hPostSub, hTy2⟩
+        refine ⟨outPre, slotOut, outPost, hOut,
+          slotSub_trans hPreSub hMidPreSub, hSlotOut,
+          slotSub_trans hPostSub hMidPostSub, ?_⟩
+        simpa [subst] using
+          (HasType.tmul Delta Sigma
+            (GammaPre ++ suffix) (midPre ++ midPost) (outPre ++ outPost)
+            (subst e1 v x) (subst e2 v x) ds eps1 eps2
+            hTy1 hTy2)
     | tsum Delta Sigma Gamma1 Gamma2 body ds d eps hBody hmem ih =>
         intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hCtxBody : ∀ y, y ∈ linearCtxDom Gamma1 → y ∉ boundVars body := by
