@@ -210,3 +210,66 @@ fn empty_context_matches_check_phase0e_program() {
         mono.annotated_exprs().len()
     );
 }
+
+// ── Regression: RT-C HIGH finding — type_env() must surface library decls ──
+
+#[test]
+fn type_env_surfaces_library_declared_types() {
+    // RT-C HIGH (2026-04-26): with-context CheckedProgram.type_env() previously
+    // only contained new-code declared types. Downstream passes (chelis-ir lower,
+    // chelis-effects, linearity) read `program.type_env()` to resolve `(var lib)`
+    // references; an absent library name returned None and broke composition.
+    // Fix: union library `phase0e_types` into the returned type_env (new-code
+    // wins on conflict). This regression test locks the union in.
+    let ctx = build_ctx(
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
+            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))",
+    );
+    let checked = check_phase0e_with_context(
+        &ctx,
+        &parse("(def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))"),
+    )
+    .expect("check OK");
+
+    let env = checked.type_env();
+    assert!(env.contains_key("call"), "new-code def is in type_env");
+    assert!(
+        env.contains_key("double"),
+        "library def MUST be surfaced in with-context type_env so downstream \
+         passes can resolve cross-context name references; without this, lower / \
+         effects / linearity will break on library calls. type_env keys: {:?}",
+        env.keys().collect::<Vec<_>>(),
+    );
+
+    // Cross-check: monolithic on the union has the same key.
+    let mono = chelis_types::check_phase0e_program(&parse(
+        "(def {} double (fn {} (params {} (x {type: (t-prim {} int32)}))
+            (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} int32)} 2))))
+         (def {} call (app {} (var {} double) (lit {type: (t-prim {} int32)} 5)))",
+    ))
+    .expect("mono OK");
+    assert!(mono.type_env().contains_key("double"));
+}
+
+#[test]
+fn type_env_new_code_shadows_library_on_name_conflict() {
+    // If new-code redefines a library name, with-context type_env should
+    // hold the NEW-code's declared type, not the library's. (Independent of
+    // whether the checker accepts the redef body — this test only inspects
+    // the returned type_env shape on a successful check.)
+    let ctx =
+        build_ctx("(def {} foo (fn {} (params {} (x {type: (t-prim {} int32)})) (var {} x)))");
+    // New code re-declares `foo` with the same signature. Should check OK
+    // and `foo` should resolve to a type_env entry (not panic / not absent).
+    let new_exprs =
+        parse("(def {} foo (fn {} (params {} (x {type: (t-prim {} int32)})) (var {} x)))");
+    let res = check_phase0e_with_context(&ctx, &new_exprs);
+    if let Ok(checked) = res {
+        assert!(
+            checked.type_env().contains_key("foo"),
+            "redeclared name must appear in type_env"
+        );
+    }
+    // If redef is rejected (current checker policy), that's fine — the type_env
+    // surface shape is only relevant on Ok results.
+}

@@ -172,12 +172,30 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     // with check_phase0e_with_context.
     let _ = result.errors.drain(..);
 
+    // Build a richer `phase0e_types` by annotating library exprs against
+    // the now-populated state and re-extracting type metadata. The raw
+    // `library_phase0e` (built from un-annotated source) only catches defs
+    // with explicit type annotations; for downstream callers that read
+    // `CheckedProgram::type_env()` to resolve cross-context name refs
+    // (Phase D effects, Phase E linearity, Phase F lower) we need every
+    // library def's inferred function type, not just the explicitly-typed
+    // ones. Mirrors the monolithic `check_phase0e_program` flow which
+    // calls `annotate_phase0e_program` then `build_phase0e_type_env` on
+    // the annotated result.
+    let library_annotated: Vec<deep::Expr> = library_exprs
+        .iter()
+        .map(|e| {
+            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+        })
+        .collect();
+    let library_phase0e_annotated = build_phase0e_type_env(&library_annotated);
+
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
         var_gen: state.var_gen,
         subst: state.subst,
         adt_reg: state.adt_reg,
-        phase0e_types: library_phase0e,
+        phase0e_types: library_phase0e_annotated,
         library_def_names,
     }))
 }
@@ -190,6 +208,21 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 ///
 /// The `context` is `Arc`-shared and never mutated — repeated calls
 /// against the same context see the same outer scope.
+///
+/// ## Downstream-caller contract
+///
+/// The returned `CheckedProgram` is asymmetric on purpose:
+/// - `type_env()` is **unioned** — it carries library + new-code declared
+///   types so callers like `chelis_ir::lower_program` and
+///   `chelis_effects::check_program` can resolve `(var libname)` references
+///   from new-code bodies. New-code types win on shadow.
+/// - `annotated_exprs()` is **new-code only** — library bodies are NOT
+///   present. Phase D / E / F (effects, linearity, lowering) callers MUST
+///   use the corresponding `_with_context` variants, not the monolithic
+///   `check_program` / `check_linearity` / `lower_program`. The monolithic
+///   APIs need to walk library bodies and will silently mis-handle
+///   library-effect propagation, library tensor consumption, and library
+///   IR roots if fed only the new-code annotated decls.
 pub fn check_phase0e_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
@@ -232,7 +265,16 @@ pub fn check_phase0e_with_context(
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
     let annotated_exprs = annotate_phase0e_program_with_context(context, new_exprs);
-    let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
+    // Surface library declared types in the returned type_env so downstream
+    // passes (lower, effects, linearity) can resolve `(var libname)` calls
+    // from new-code without a separate library lookup. New-code types take
+    // precedence on shadow.
+    let mut annotated_type_env = build_phase0e_type_env(&annotated_exprs);
+    for (name, ty) in &context.inner().phase0e_types {
+        annotated_type_env
+            .entry(name.clone())
+            .or_insert_with(|| ty.clone());
+    }
     Ok(CheckedProgram::from_parts(
         annotated_exprs,
         annotated_type_env,
