@@ -1123,6 +1123,23 @@ theorem wellScoped_pair_right
   simp [WellScoped, boundVars, List.nodup_append] at h
   exact h.2.1
 
+theorem wellScoped_pair_parts
+    {e1 e2 : Term}
+    (h : WellScoped (Term.pair e1 e2)) :
+    WellScoped e1 ∧ WellScoped e2 ∧
+      (∀ z, z ∈ boundVars e1 → z ∉ boundVars e2) ∧
+      (∀ z, z ∈ boundVars e2 → z ∉ boundVars e1) := by
+  have hNodup : (boundVars e1 ++ boundVars e2).Nodup := by
+    simpa only [WellScoped, boundVars] using h
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact ⟨h.1, h.2.1, nodup_append_left_not_mem hNodup, nodup_append_right_not_mem hNodup⟩
+
+theorem wellScoped_perform_body
+    {op : EffectLabel} {e : Term}
+    (h : WellScoped (Term.perform op e)) :
+    WellScoped e := by
+  simpa [WellScoped, boundVars] using h
+
 theorem wellScoped_letpair_body
     {x y : String} {e1 e2 : Term}
     (h : WellScoped (Term.letpair x y e1 e2)) :
@@ -1246,6 +1263,17 @@ theorem wellScoped_handle_clause_not_in_body
     exact h.2.2 x hx _ (mem_boundVarsClauses_arg hmem) rfl
   · intro hk
     exact h.2.2 k hk _ (mem_boundVarsClauses_cont hmem) rfl
+
+theorem wellScoped_handle_clause_body_disjoint
+    {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (h : WellScoped (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    ∀ z, z ∈ boundVars hb → z ∉ boundVars body := by
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  intro z hz hbz
+  exact h.2.2 z hbz z (mem_boundVarsClauses_body hmem hz) rfl
 
 /-! ## Values -/
 
