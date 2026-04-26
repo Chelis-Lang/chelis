@@ -4055,7 +4055,7 @@ theorem preservation_handleOpDirect_via_db
     (hmem : (op, x, k, hb) ∈ clauses)
     (h_scope : WellScoped (Term.handle epsH (Term.perform op v) clauses)) :
     HasType [] Sigma []
-      (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k)
+      (subst (subst hb v x) (directIdCont epsH op v clauses tRet) k)
       t eps [] := by
   rcases HasType.handle_inv_strong_bridge h_typ with
     ⟨GammaBody, epsB, hPerform, _hOpsIn, _hClsIn, _hCover, hClauses, hSub⟩
@@ -4077,54 +4077,56 @@ theorem preservation_handleOpDirect_via_db
     HasType.value_eff_polymorphic_bridge hV hv []
   rcases wellScoped_handle_clause h_scope hmem with
     ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+  let y : String := directIdContName epsH op v clauses
+  let idCont : Term := directIdCont epsH op v clauses tRet
   have hIdBody0 :
       HasType [] Sigma
-        ([(x, some tArgV)] ++ [("y", some tRet)])
-        (Term.var "y") tRet []
-        ([(x, some tArgV)] ++ [("y", none)]) := by
-    simpa using (HasType.var [] Sigma [(x, some tArgV)] [] "y" tRet)
+        ([(x, some tArgV)] ++ [(y, some tRet)])
+        (Term.var y) tRet []
+        ([(x, some tArgV)] ++ [(y, none)]) := by
+    simpa [y] using (HasType.var [] Sigma [(x, some tArgV)] [] y tRet)
   have hIdBody :
       HasType [] Sigma
-        ([(x, some tArgV)] ++ [("y", some tRet)])
-        (Term.var "y") tRet (EffectRow.removeOps epsB epsH)
-        ([(x, some tArgV)] ++ [("y", none)]) := by
+        ([(x, some tArgV)] ++ [(y, some tRet)])
+        (Term.var y) tRet (EffectRow.removeOps epsB epsH)
+        ([(x, some tArgV)] ++ [(y, none)]) := by
     exact HasType.subEff [] Sigma
-      ([(x, some tArgV)] ++ [("y", some tRet)])
-      ([(x, some tArgV)] ++ [("y", none)])
-      (Term.var "y") tRet [] (EffectRow.removeOps epsB epsH)
+      ([(x, some tArgV)] ++ [(y, some tRet)])
+      ([(x, some tArgV)] ++ [(y, none)])
+      (Term.var y) tRet [] (EffectRow.removeOps epsB epsH)
       hIdBody0
       (by
         intro op hop
         cases hop)
   have hIdAbs :
       HasType [] Sigma [(x, some tArgV)]
-        (Term.abs "y" tRet (Term.var "y"))
+        idCont
         (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) []
         [(x, some tArgV)] := by
     exact HasType.abs [] Sigma
       [(x, some tArgV)] [(x, some tArgV)]
-      "y" tRet tRet (EffectRow.removeOps epsB epsH)
-      (Term.var "y") none hIdBody
-  have hIdClosed : Closed (Term.abs "y" tRet (Term.var "y")) := by
-    simp [Closed, freeVars]
+      y tRet tRet (EffectRow.removeOps epsB epsH)
+      (Term.var y) none hIdBody
+  have hIdClosed : Closed idCont := by
+    simpa [idCont] using (directIdCont_closed (epsH := epsH) (op := op) (v := v) (clauses := clauses) (tRet := tRet))
   rcases subst_preserves_typing [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
       k (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) tRet
       (EffectRow.removeOps epsB epsH) hb
-      (Term.abs "y" tRet (Term.var "y")) hBody hIdAbs hIdClosed with
+      idCont hBody hIdAbs hIdClosed with
     ⟨GammaAfterK, hAfterK⟩
   rcases subst_preserves_typing [] Sigma [] GammaAfterK
       x tArgV tRet (EffectRow.removeOps epsB epsH)
-      (subst hb (Term.abs "y" tRet (Term.var "y")) k) v
+      (subst hb idCont k) v
       hAfterK hVNil hClosedV with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
   have hswap :
-      subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k =
-        subst (subst hb (Term.abs "y" tRet (Term.var "y")) k) v x := by
-    exact subst_commute_closed hb v (Term.abs "y" tRet (Term.var "y")) x k
+      subst (subst hb v x) idCont k =
+        subst (subst hb idCont k) v x := by
+    exact subst_commute_closed hb v idCont x k
       hxk hClosedV hIdClosed
-  simpa [hswap] using
-    (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub)
+  rw [hswap]
+  exact HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub
 
 end LaCaDiLE

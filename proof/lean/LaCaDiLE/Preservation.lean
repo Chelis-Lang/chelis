@@ -4542,11 +4542,11 @@ private theorem runtimeLinear_handleOpDirect_via_db
     (hScope : WellScoped (Term.handle epsH (Term.perform op v) clauses))
     (hLinear : RuntimeLinear (Term.handle epsH (Term.perform op v) clauses))
     (hsep : LocRefsSeparated locs (locRefs (Term.handle epsH (Term.perform op v) clauses))) :
-    RuntimeLinear (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) ∧
+    RuntimeLinear (subst (subst hb v x) (directIdCont epsH op v clauses tRet) k) ∧
       LocRefsSeparated
-        (locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k)) locs ∧
+        (locRefs (subst (subst hb v x) (directIdCont epsH op v clauses tRet) k)) locs ∧
       LocRefsSeparated locs
-        (locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k)) := by
+        (locRefs (subst (subst hb v x) (directIdCont epsH op v clauses tRet) k)) := by
   rcases HasType.handle_inv_strong_bridge hTyp with
     ⟨GammaBody, epsB, hPerform, _hOpsIn, _hClsIn, _hCover, hClauses, hSub⟩
   have hGammaBody : GammaBody = [] := has_type_closed_output_of_closed_input hPerform
@@ -4563,6 +4563,8 @@ private theorem runtimeLinear_handleOpDirect_via_db
   subst tRetClause
   subst t
   let tK : Typ := Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)
+  let y : String := directIdContName epsH op v clauses
+  let idCont : Term := directIdCont epsH op v clauses tRet
   have hScopePerform : WellScoped (Term.perform op v) := wellScoped_handle_body hScope
   have hScopeV : WellScoped v := by
     simpa [WellScoped, boundVars] using hScopePerform
@@ -4711,35 +4713,42 @@ private theorem runtimeLinear_handleOpDirect_via_db
           1 (by simp) (by simp) (by simpa [hslotX] using hBodyShape)
           hlinHbDB hsepHbLocsDB hsepLocsHbDB
   have hIdBody0 :
-      HasType [] Sigma [("y", some tRet)] (Term.var "y") tRet [] [("y", none)] := by
-    simpa using (HasType.var [] Sigma [] [] "y" tRet)
+      HasType [] Sigma [(y, some tRet)] (Term.var y) tRet [] [(y, none)] := by
+    simpa [y] using (HasType.var [] Sigma [] [] y tRet)
   have hIdBody :
-      HasType [] Sigma [("y", some tRet)] (Term.var "y") tRet
-        (EffectRow.removeOps epsB epsH) [("y", none)] := by
+      HasType [] Sigma [(y, some tRet)] (Term.var y) tRet
+        (EffectRow.removeOps epsB epsH) [(y, none)] := by
     exact HasType.subEff [] Sigma
-      [("y", some tRet)] [("y", none)]
-      (Term.var "y") tRet [] (EffectRow.removeOps epsB epsH)
+      [(y, some tRet)] [(y, none)]
+      (Term.var y) tRet [] (EffectRow.removeOps epsB epsH)
       hIdBody0 (by intro op hop; cases hop)
   have hIdAbs :
       HasType [] Sigma []
-        (Term.abs "y" tRet (Term.var "y"))
+        idCont
         tK [] [] := by
     exact HasType.abs [] Sigma [] []
-      "y" tRet tRet (EffectRow.removeOps epsB epsH)
-      (Term.var "y") none hIdBody
-  have hIdScope : WellScoped (Term.abs "y" tRet (Term.var "y")) := by
-    simp [WellScoped, boundVars]
+      y tRet tRet (EffectRow.removeOps epsB epsH)
+      (Term.var y) none hIdBody
+  have hIdScope : WellScoped idCont := by
+    simpa [idCont] using
+      (directIdCont_wellScoped (epsH := epsH) (op := op) (v := v) (clauses := clauses) (tRet := tRet))
   rcases transport_typing_lexical hIdAbs (lexical_nil hIdScope) with
     ⟨idDB, hEraseId, hIdDB⟩
+  have hIdLocs : locRefs idCont = [] := by
+    simp [idCont, directIdCont, directIdContName, locRefs]
   have hIdLocsDB : locRefsDB idDB = [] := by
-    simpa [locRefs] using eraseTerm_locRefs hEraseId
+    simpa [hIdLocs] using (eraseTerm_locRefs hEraseId).symm
+  have hIdLinear : RuntimeLinear idCont := by
+    simp [RuntimeLinear, hIdLocs]
+  have hIdLinearDB : RuntimeLinearDB idDB := by
+    exact (eraseTerm_runtimeLinear_iff hEraseId).1 hIdLinear
   have hkAfterX : k ∉ boundVars (subst hb v x) := by
     exact subst_notBound hb v x k hkHb hkV
   have hEraseFinal :
-      eraseTerm [] (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) =
+      eraseTerm [] (subst (subst hb v x) idCont k) =
         some (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) := by
     simpa using
-      eraseTerm_subst_head (ρ := []) (v := Term.abs "y" tRet (Term.var "y")) (x := k)
+      eraseTerm_subst_head (ρ := []) (v := idCont) (x := k)
         hEraseId hEraseAfterX hkAfterX
   have hFinalRes :
       RuntimeLinearDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) ∧
@@ -4750,8 +4759,7 @@ private theorem runtimeLinear_handleOpDirect_via_db
         exact runtimeLinearDB_subst_dead_separated
           (Γ := []) (rhsRefs := locs)
           0 (by simp) (by simpa [hslotK] using hFirstTyping) hIdDB
-          (by simpa [hIdLocsDB, RuntimeLinearDB] using (show RuntimeLinear (Term.abs "y" tRet (Term.var "y")) by
-            simp [RuntimeLinear, locRefs]))
+          hIdLinearDB
           (by simpa [hIdLocsDB, LocRefsSeparated])
           (by simpa [hIdLocsDB, LocRefsSeparated])
           (by simpa [hIdLocsDB, LocRefsSeparated])
@@ -4771,13 +4779,15 @@ private theorem runtimeLinear_handleOpDirect_via_db
           0 (by simp) (by simp) (by simpa [hslotK] using hFirstTyping)
           hFirstRes.1 hFirstRes.2.1 hFirstRes.2.2
   have hlocsFinal :
-      locRefs (subst (subst hb v x) (Term.abs "y" tRet (Term.var "y")) k) =
+      locRefs (subst (subst hb v x) idCont k) =
         locRefsDB (substDBAux 0 idDB (substDBAux 1 vDB hbDB)) := by
     simpa using eraseTerm_locRefs hEraseFinal
   refine ⟨?_, ?_, ?_⟩
   · exact (eraseTerm_runtimeLinear_iff hEraseFinal).2 hFinalRes.1
-  · simpa [hlocsFinal] using hFinalRes.2.1
-  · simpa [hlocsFinal] using hFinalRes.2.2
+  · rw [hlocsFinal]
+    exact hFinalRes.2.1
+  · rw [hlocsFinal]
+    exact hFinalRes.2.2
 
 /-- Step-indexed preservation with the runtime-linearity and frame-local
     store-agreement invariants made explicit. `locs` tracks the

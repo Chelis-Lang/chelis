@@ -1090,6 +1090,36 @@ theorem capturedContName_freshInTerm
   · intro hmem
     exact freshNameAvoiding_not_mem _ (List.mem_append.mpr (Or.inr hmem))
 
+/-- Binder name used by the direct handled-operation rule's identity
+    continuation. It reuses the same freshness policy as the captured
+    continuation binder, specialized to the `E = hole` handled term. -/
+def directIdContName
+    (epsH : EffectRow) (op : EffectLabel) (v : Term)
+    (clauses : List (EffectLabel × String × String × Term)) : String :=
+  capturedContName (Term.handle epsH (Term.perform op v) clauses)
+
+/-- Identity continuation reified for the direct handled-operation
+    rule. Using a fresh binder keeps the named substitution side
+    conditions satisfiable. -/
+def directIdCont
+    (epsH : EffectRow) (op : EffectLabel) (v : Term)
+    (clauses : List (EffectLabel × String × String × Term))
+    (tRet : Typ) : Term :=
+  Term.abs (directIdContName epsH op v clauses) tRet
+    (Term.var (directIdContName epsH op v clauses))
+
+theorem directIdCont_closed
+    {epsH : EffectRow} {op : EffectLabel} {v : Term}
+    {clauses : List (EffectLabel × String × String × Term)} {tRet : Typ} :
+    Closed (directIdCont epsH op v clauses tRet) := by
+  simp [directIdCont, directIdContName, Closed, freeVars]
+
+theorem directIdCont_wellScoped
+    {epsH : EffectRow} {op : EffectLabel} {v : Term}
+    {clauses : List (EffectLabel × String × String × Term)} {tRet : Typ} :
+    WellScoped (directIdCont epsH op v clauses tRet) := by
+  simp [directIdCont, directIdContName, WellScoped, boundVars]
+
 /-- Seed binder minted for `grad` operational steps. It must avoid the
     differentiated parameter name and be fresh for the body so the
     inserted seed variable cannot be captured or accidentally shadow the
@@ -1277,7 +1307,7 @@ inductive Step : Config → Config → Prop
             Term.handle epsH (Term.perform op v) clauses⟩
            ⟨sigma,
             subst (subst handlerBody v x)
-                  (Term.abs "y" tRet (Term.var "y")) k⟩
+                  (directIdCont epsH op v clauses tRet) k⟩
 
   -- E-Handle-Op (paper-accurate, captured-context form). When the
   -- handle body has the shape `plug E (perform op v)` with `E` an
