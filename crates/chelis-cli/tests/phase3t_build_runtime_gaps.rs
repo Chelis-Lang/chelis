@@ -189,13 +189,31 @@ y = forward(x, w, b)
     );
 
     let stdout = build_and_run(&reef_home, &app_pkg);
-    // The compiled binary prints each top-level binding. The exact format
-    // we rely on is the rendered tensor body; assert presence of the two
-    // expected element values to keep the test stable across formatter
-    // tweaks.
+    // y = forward(x, w, b) = matmul(x, w) + expand(b, 0, 1)
+    //                     = [[3, 5]] + [[10, 100]] = [[13, 105]].
+    // Parse the rendered data field rather than substring-matching "13" or
+    // "105", which would also match "130", "1305", "-13", etc.
     assert!(
-        stdout.contains("13") && stdout.contains("105"),
-        "expected matmul+bias output to contain 13 and 105; got:\n{stdout}"
+        stdout.contains("y = tensor(shape=[1, 2],"),
+        "expected y shape header `[1, 2]`; got:\n{stdout}"
+    );
+    let elements = parse_tensor_data_for(&stdout, "y")
+        .unwrap_or_else(|| panic!("failed to parse y tensor data from:\n{stdout}"));
+    assert_eq!(
+        elements.len(),
+        2,
+        "expected 2 elements; got {} ({elements:?})\n{stdout}",
+        elements.len()
+    );
+    assert!(
+        (elements[0] - 13.0).abs() < 1e-3,
+        "y[0] expected 13.0, got {} (full data: {elements:?})\n{stdout}",
+        elements[0]
+    );
+    assert!(
+        (elements[1] - 105.0).abs() < 1e-3,
+        "y[1] expected 105.0, got {} (full data: {elements:?})\n{stdout}",
+        elements[1]
     );
 }
 
@@ -239,11 +257,53 @@ attn = scaled_dot_product_attention(q, k, v, scale)
     );
 
     let stdout = build_and_run(&reef_home, &app_pkg);
-    // Every output element ≈ 2.5. Match the leading three significant digits.
+    // Every output element ≈ 2.5. RT-exp/softmax MEDIUM finding: a prior
+    // `stdout.contains("2.5")` would also have matched "12.5", "0.25",
+    // "-2.5" and similar. The eval-side cross-check at
+    // `packages/chelis-std/tests/runtime/attention_eval_cross.ch` does an
+    // exact 16-element assert_close_tensor, so the build side should match
+    // that rigor. Parse the rendered tensor: assert the declared shape is
+    // [4, 4] and that every element printed by the compiled binary equals
+    // 2.5 within tolerance.
+    //
+    // Note: the renderer truncates the `data=[...]` field to the first 10
+    // elements (`crates/chelis-cli/src/main.rs` tensor display path) so we
+    // don't see all 16 here — but every visible element must be exactly
+    // 2.5 within tolerance, and the shape header proves there are 16.
     assert!(
-        stdout.contains("2.5"),
-        "expected attention output to contain 2.5 (uniform-mean of v); got:\n{stdout}"
+        stdout.contains("attn = tensor(shape=[4, 4],"),
+        "expected attn shape header `[4, 4]`; got:\n{stdout}"
     );
+    let elements = parse_tensor_data_for(&stdout, "attn")
+        .unwrap_or_else(|| panic!("failed to parse attn tensor data from:\n{stdout}"));
+    assert!(
+        !elements.is_empty(),
+        "expected at least one printed element; got empty data field"
+    );
+    for (i, &v) in elements.iter().enumerate() {
+        assert!(
+            (v - 2.5).abs() < 1e-3,
+            "element {i} expected 2.5, got {v} (full data: {elements:?})\nstdout=\n{stdout}"
+        );
+    }
+}
+
+/// Parse the `data=[...]` slice of a top-level `<name> = tensor(...)`
+/// rendering produced by the compiled binary's stdout. Returns the list of
+/// f32 elements, or `None` if the binding line or data field can't be
+/// located. The format the runtime emits is, e.g.,
+/// `attn = tensor(shape=[4, 4], data=[2.5, 2.5, ..., 2.5])`.
+fn parse_tensor_data_for(stdout: &str, binding: &str) -> Option<Vec<f32>> {
+    let prefix = format!("{binding} = tensor(");
+    let line = stdout.lines().find(|l| l.contains(&prefix))?;
+    let after_data = line.split("data=[").nth(1)?;
+    let inside = after_data.split(']').next()?;
+    inside
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f32>().ok())
+        .collect()
 }
 
 #[test]
@@ -277,10 +337,22 @@ nll = loss(logits, labels)
     );
 
     let stdout = build_and_run(&reef_home, &app_pkg);
-    // Expected 0.3132. Match the leading three significant digits.
+    // Expected 0.3132 (single-element tensor[1, f32]). Parse the data field
+    // and compare to the closed-form value within tolerance, instead of
+    // substring-matching "0.313" which would also match "1.3130", "0.3135"
+    // and similar near-but-wrong outputs.
+    let elements = parse_tensor_data_for(&stdout, "nll")
+        .unwrap_or_else(|| panic!("failed to parse nll tensor data from:\n{stdout}"));
+    assert_eq!(
+        elements.len(),
+        1,
+        "expected 1-element loss tensor; got {} ({elements:?})\n{stdout}",
+        elements.len()
+    );
     assert!(
-        stdout.contains("0.313"),
-        "expected cross-entropy loss to contain 0.313; got:\n{stdout}"
+        (elements[0] - 0.3132617).abs() < 1e-3,
+        "nll expected ≈ 0.3132617, got {} (full data: {elements:?})\n{stdout}",
+        elements[0]
     );
 }
 
@@ -311,10 +383,25 @@ y = forward(x, gain, cast(0.0001, f32))
     );
 
     let stdout = build_and_run(&reef_home, &app_pkg);
-    // Expected ≈ [0.8485, 1.1314]. Match the leading three significant
-    // digits so the assert survives float-printing variations across libcs.
+    // Expected y ≈ [0.8485, 1.1314]. Parse and compare per-element with
+    // tolerance instead of substring-matching, so we don't accept e.g.
+    // 0.84850001 vs 0.84890000 indistinguishably.
+    let elements = parse_tensor_data_for(&stdout, "y")
+        .unwrap_or_else(|| panic!("failed to parse y tensor data from:\n{stdout}"));
+    assert_eq!(
+        elements.len(),
+        2,
+        "expected 2 elements; got {} ({elements:?})\n{stdout}",
+        elements.len()
+    );
     assert!(
-        stdout.contains("0.848") && stdout.contains("1.131"),
-        "expected rmsnorm output to contain 0.848 and 1.131; got:\n{stdout}"
+        (elements[0] - 0.84852).abs() < 1e-3,
+        "y[0] expected ≈ 0.84852, got {} (full data: {elements:?})\n{stdout}",
+        elements[0]
+    );
+    assert!(
+        (elements[1] - 1.13137).abs() < 1e-3,
+        "y[1] expected ≈ 1.13137, got {} (full data: {elements:?})\n{stdout}",
+        elements[1]
     );
 }
