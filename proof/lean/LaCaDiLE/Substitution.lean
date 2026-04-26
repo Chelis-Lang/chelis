@@ -1555,9 +1555,9 @@ theorem subst_preserves_typing
     (_h_closed : Closed v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
-  sorry -- BLOCKED on weakening_insert rework under tombstone semantics.
-        -- The output shape is no longer a simple filter; it depends on
-        -- how x's slot was consumed inside the derivation. Will be
-        -- reworked in the de Bruijn substitution wave.
+  sorry -- Remaining blocker is theorem shape, not weakening.
+        -- The old unrestricted named statement is false under shadowing,
+        -- and the honest proof needs an explicit lexical/binder-freshness
+        -- invariant tying `e`'s binders to the substituted value `v`.
 
 end LaCaDiLE

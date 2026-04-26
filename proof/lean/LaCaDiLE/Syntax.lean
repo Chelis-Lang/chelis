@@ -1042,6 +1042,35 @@ theorem wellScoped_vmap_body
     x ∉ boundVars body ∧ WellScoped body := by
   exact (wellScoped_vmap_iff x t d body).mp h
 
+private theorem nodup_append_left_not_mem
+    {α : Type} [DecidableEq α]
+    {xs ys : List α}
+    (h : (xs ++ ys).Nodup) :
+    ∀ z, z ∈ xs → z ∉ ys := by
+  simp [List.nodup_append] at h
+  intro z hz hy
+  exact h.2.2 z hz z hy rfl
+
+private theorem nodup_append_right_not_mem
+    {α : Type} [DecidableEq α]
+    {xs ys : List α}
+    (h : (xs ++ ys).Nodup) :
+    ∀ z, z ∈ ys → z ∉ xs := by
+  simp [List.nodup_append] at h
+  intro z hz hx
+  exact h.2.2 z hx z hz rfl
+
+theorem wellScoped_app_parts
+    {e1 e2 : Term}
+    (h : WellScoped (Term.app e1 e2)) :
+    WellScoped e1 ∧ WellScoped e2 ∧
+      (∀ z, z ∈ boundVars e1 → z ∉ boundVars e2) ∧
+      (∀ z, z ∈ boundVars e2 → z ∉ boundVars e1) := by
+  have hNodup : (boundVars e1 ++ boundVars e2).Nodup := by
+    simpa only [WellScoped, boundVars] using h
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  exact ⟨h.1, h.2.1, nodup_append_left_not_mem hNodup, nodup_append_right_not_mem hNodup⟩
+
 theorem wellScoped_letpair_names_ne
     {x y : String} {e1 e2 : Term}
     (h : WellScoped (Term.letpair x y e1 e2)) :
@@ -1064,6 +1093,22 @@ theorem wellScoped_letBind_body
   simp [WellScoped, boundVars, List.nodup_append] at h
   exact ⟨h.2.1, h.1.2, h.2.2.1⟩
 
+theorem wellScoped_letBind_parts
+    {x : String} {e1 e2 : Term}
+    (h : WellScoped (Term.letBind x e1 e2)) :
+    WellScoped e1 ∧ x ∉ boundVars e1 ∧ x ∉ boundVars e2 ∧ WellScoped e2 ∧
+      (∀ z, z ∈ boundVars e1 → z ∉ boundVars e2) ∧
+      (∀ z, z ∈ boundVars e2 → z ∉ boundVars e1) := by
+  have hNodup : (x :: (boundVars e1 ++ boundVars e2)).Nodup := by
+    simpa only [WellScoped, boundVars] using h
+  have hxRest : x ∉ boundVars e1 ++ boundVars e2 := (List.nodup_cons.mp hNodup).1
+  have hRest : (boundVars e1 ++ boundVars e2).Nodup := (List.nodup_cons.mp hNodup).2
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  refine ⟨h.2.1, ?_, h.1.2, h.2.2.1,
+    nodup_append_left_not_mem hRest, nodup_append_right_not_mem hRest⟩
+  intro hx
+  exact hxRest (by simp [List.mem_append, hx])
+
 theorem wellScoped_pair_left
     {e1 e2 : Term}
     (h : WellScoped (Term.pair e1 e2)) :
@@ -1084,6 +1129,31 @@ theorem wellScoped_letpair_body
     WellScoped e1 ∧ x ≠ y ∧ x ∉ boundVars e2 ∧ y ∉ boundVars e2 ∧ WellScoped e2 := by
   simp [WellScoped, boundVars, List.nodup_append] at h
   exact ⟨h.2.2.1, h.1.1, h.1.2.2, h.2.1.2, h.2.2.2.1⟩
+
+theorem wellScoped_letpair_parts
+    {x y : String} {e1 e2 : Term}
+    (h : WellScoped (Term.letpair x y e1 e2)) :
+    WellScoped e1 ∧ x ≠ y ∧ x ∉ boundVars e1 ∧ x ∉ boundVars e2 ∧
+      y ∉ boundVars e1 ∧ y ∉ boundVars e2 ∧ WellScoped e2 ∧
+      (∀ z, z ∈ boundVars e1 → z ∉ boundVars e2) ∧
+      (∀ z, z ∈ boundVars e2 → z ∉ boundVars e1) := by
+  have hNodup : (x :: y :: (boundVars e1 ++ boundVars e2)).Nodup := by
+    simpa only [WellScoped, boundVars] using h
+  have hxRest : x ∉ y :: (boundVars e1 ++ boundVars e2) := (List.nodup_cons.mp hNodup).1
+  have hTail : (y :: (boundVars e1 ++ boundVars e2)).Nodup := (List.nodup_cons.mp hNodup).2
+  have hyRest : y ∉ boundVars e1 ++ boundVars e2 := (List.nodup_cons.mp hTail).1
+  have hRest : (boundVars e1 ++ boundVars e2).Nodup := (List.nodup_cons.mp hTail).2
+  simp [WellScoped, boundVars, List.nodup_append] at h
+  refine ⟨h.2.2.1, h.1.1, ?_, h.1.2.2, ?_, h.2.1.2, h.2.2.2.1,
+    nodup_append_left_not_mem hRest, nodup_append_right_not_mem hRest⟩
+  · intro hx
+    have hx' : x ∈ y :: (boundVars e1 ++ boundVars e2) := by
+      simp [List.mem_append, hx]
+    exact hxRest hx'
+  · intro hy
+    have hy' : y ∈ boundVars e1 ++ boundVars e2 := by
+      simp [List.mem_append, hy]
+    exact hyRest hy'
 
 theorem boundVarsClauses_mem_scoped
     {clauses : List (EffectLabel × String × String × Term)}
