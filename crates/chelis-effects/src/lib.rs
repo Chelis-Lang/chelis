@@ -42,6 +42,74 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     }
 }
 
+/// Check effects on `new_program` against an outer-scope library context.
+///
+/// This is the Phase D context-extension counterpart to [`check_program`].
+/// `library_program` must already have been validated by [`check_program`];
+/// its effect rows are treated as authoritative and are NOT re-validated.
+///
+/// The new-code effect rows are inferred against the union of the library's
+/// effect map and the new-code's own iterative fixed-point pass. When new
+/// code calls a library function, the library's effect row is inherited.
+///
+/// Validation passes (handler arity, unhandled-random roots, declared-vs-
+/// inferred) run ONLY on the new code's annotated expressions. Library
+/// validation already happened during the original [`check_program`] call.
+///
+/// The library's effect map is computed inside this function from
+/// `library_program.annotated_exprs()`. It is NOT persisted across calls;
+/// the function takes `&CheckedProgram` (not `&mut`) so subsequent calls
+/// against the same `library_program` see a fresh effect map untouched by
+/// any prior new-code inference.
+///
+/// ## Returned program
+///
+/// The returned [`CheckedProgram`] contains ONLY the new-code's annotated
+/// expressions, with effect metadata composed against the library. The
+/// `type_env()` is preserved verbatim from `new_program`.
+pub fn check_effects_with_context(
+    library_program: &CheckedProgram,
+    new_program: &CheckedProgram,
+) -> Result<CheckedProgram, Vec<EffectError>> {
+    // Pre-compute library effect map from library bodies. Library was
+    // already validated by check_program; we only re-infer to surface
+    // effect rows that new code can inherit when it references library
+    // callables. We do NOT re-run validation on the library.
+    let (library_effects, library_callables) =
+        infer_program_effects(library_program.annotated_exprs());
+
+    // Iterative fixed-point inference for new-code defs, seeded with
+    // library effects. Library callables stay reachable as call targets;
+    // new-code defs of the same name shadow on the inner pass.
+    let (effects_by_def, top_level_callables) = infer_program_effects_with_context(
+        new_program.annotated_exprs(),
+        &library_effects,
+        &library_callables,
+    );
+
+    // Annotate ONLY new-code exprs, but with effect/callable maps that
+    // include library entries so cross-context calls resolve.
+    let annotated_exprs: Vec<Expr> = new_program
+        .annotated_exprs()
+        .iter()
+        .map(|expr| annotate_effects(expr, &effects_by_def, &top_level_callables, &HashMap::new()))
+        .collect();
+
+    let mut errors = Vec::new();
+    validate_handlers(&annotated_exprs, &mut errors);
+    validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
+    validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
+
+    if errors.is_empty() {
+        Ok(CheckedProgram::from_parts(
+            annotated_exprs,
+            new_program.type_env().clone(),
+        ))
+    } else {
+        Err(errors)
+    }
+}
+
 pub fn validate_build_target(
     program: &CheckedProgram,
     target: &str,
@@ -58,10 +126,41 @@ pub fn validate_build_target(
 }
 
 fn infer_program_effects(exprs: &[Expr]) -> (HashMap<String, EffectSet>, HashSet<String>) {
-    let bodies = top_level_def_bodies(exprs);
-    let top_level_callables = top_level_callable_names(&bodies);
-    let mut effects = HashMap::<String, EffectSet>::new();
+    infer_program_effects_with_context(exprs, &HashMap::new(), &HashSet::new())
+}
 
+/// Iterative-fixed-point effect inference that lets new-code defs see an
+/// outer library scope. The library's `effects_by_def` and callable-name
+/// set are merged into the seed maps so `(var libname)` references in new
+/// code resolve to the library's effect row.
+///
+/// New-code defs shadow library defs of the same name on the inner pass.
+/// The function does NOT mutate the library inputs; merging is local.
+fn infer_program_effects_with_context(
+    new_exprs: &[Expr],
+    library_effects: &HashMap<String, EffectSet>,
+    library_callables: &HashSet<String>,
+) -> (HashMap<String, EffectSet>, HashSet<String>) {
+    let bodies = top_level_def_bodies(new_exprs);
+    let new_callables = top_level_callable_names(&bodies);
+
+    // Union of library + new callables. New-code names are present
+    // because they are added below; both must be visible during inference.
+    let mut top_level_callables: HashSet<String> = library_callables.clone();
+    top_level_callables.extend(new_callables.iter().cloned());
+
+    // Seed the effects map with the library's already-validated effect
+    // rows. New-code defs are *not* in this map yet — the loop below will
+    // populate them, shadowing library entries for any name the new code
+    // re-defines.
+    let mut effects: HashMap<String, EffectSet> = library_effects.clone();
+
+    // Track which names are owned by the new code so we don't accidentally
+    // overwrite a library entry that has the same name as a new-code def
+    // until the new-code's own inference has produced a value. Library
+    // shadow happens naturally: as soon as the new-code def's first pass
+    // produces an EffectSet, the .insert() below overwrites the library
+    // entry for that name.
     for _ in 0..=bodies.len() {
         let mut changed = false;
         for (name, body) in &bodies {
