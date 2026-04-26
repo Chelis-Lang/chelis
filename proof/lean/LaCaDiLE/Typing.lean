@@ -503,6 +503,256 @@ theorem has_type_sublist
   simpa [linearCtxDom, hasType_names_preserved h] using
     (List.Sublist.refl (linearCtxDom Gamma))
 
+/-- Slotwise output/input relation for tombstone-preserving named
+    contexts: each output binding keeps the same name, and each slot is
+    either unchanged or tombstoned to `none`. -/
+def SlotSub : LinearCtx → LinearCtx → Prop
+  | [], [] => True
+  | (xOut, out) :: outs, (xIn, inp) :: ins =>
+      xOut = xIn ∧ (out = none ∨ out = inp) ∧ SlotSub outs ins
+  | _, _ => False
+
+theorem slotSub_refl :
+    ∀ Gamma : LinearCtx, SlotSub Gamma Gamma
+  | [] => by simp [SlotSub]
+  | (x, slot) :: rest => by
+      simp [SlotSub, slotSub_refl rest]
+
+theorem slotSub_tail
+    {out inp : String × Option Typ} {outs inps : LinearCtx}
+    (h : SlotSub (out :: outs) (inp :: inps)) :
+    SlotSub outs inps :=
+  h.2.2
+
+theorem slotSub_append_singleton_inv
+    {outs inps : LinearCtx} {xOut xIn : String} {out inp : Option Typ}
+    (h : SlotSub (outs ++ [(xOut, out)]) (inps ++ [(xIn, inp)])) :
+    xOut = xIn ∧ (out = none ∨ out = inp) ∧ SlotSub outs inps := by
+  induction outs generalizing inps with
+  | nil =>
+      cases inps with
+      | nil =>
+          simpa [SlotSub] using h
+      | cons inpHd inpTl =>
+          cases inpTl <;> simp [SlotSub] at h
+  | cons outHd outTl ih =>
+      cases inps with
+      | nil =>
+          cases outTl <;> simp [SlotSub] at h
+      | cons inpHd inpTl =>
+          simp [SlotSub] at h
+          rcases h with ⟨hname, hslot, htail⟩
+          rcases ih (inps := inpTl) htail with ⟨hx, hlast, hrest⟩
+          exact ⟨hx, hlast, ⟨hname, hslot, hrest⟩⟩
+
+theorem slotSub_append_pair_inv
+    {outs inps : LinearCtx}
+    {xOut xIn yOut yIn : String}
+    {outX inpX outY inpY : Option Typ}
+    (h : SlotSub
+      (outs ++ [(xOut, outX), (yOut, outY)])
+      (inps ++ [(xIn, inpX), (yIn, inpY)])) :
+    xOut = xIn ∧ (outX = none ∨ outX = inpX) ∧
+      yOut = yIn ∧ (outY = none ∨ outY = inpY) ∧
+      SlotSub outs inps := by
+  have h1 :
+      yOut = yIn ∧ (outY = none ∨ outY = inpY) ∧
+      SlotSub (outs ++ [(xOut, outX)]) (inps ++ [(xIn, inpX)]) := by
+    have h' :
+        SlotSub
+          ((outs ++ [(xOut, outX)]) ++ [(yOut, outY)])
+          ((inps ++ [(xIn, inpX)]) ++ [(yIn, inpY)]) := by
+      simpa [List.append_assoc] using h
+    simpa [List.append_assoc] using
+      (slotSub_append_singleton_inv
+        (outs := outs ++ [(xOut, outX)])
+        (inps := inps ++ [(xIn, inpX)])
+        (xOut := yOut) (xIn := yIn) (out := outY) (inp := inpY)
+        h')
+  rcases h1 with ⟨hy, hslotY, hrest⟩
+  have h2 :
+      xOut = xIn ∧ (outX = none ∨ outX = inpX) ∧ SlotSub outs inps := by
+    simpa [List.append_assoc] using
+      (slotSub_append_singleton_inv
+        (outs := outs) (inps := inps)
+        (xOut := xOut) (xIn := xIn) (out := outX) (inp := inpX)
+        hrest)
+  rcases h2 with ⟨hx, hslotX, hcore⟩
+  exact ⟨hx, hslotX, hy, hslotY, hcore⟩
+
+theorem slotSub_append
+    {out1 out2 inp1 inp2 : LinearCtx}
+    (h1 : SlotSub out1 inp1)
+    (h2 : SlotSub out2 inp2) :
+    SlotSub (out1 ++ out2) (inp1 ++ inp2) := by
+  revert out2 inp2 h2
+  induction out1 generalizing inp1 with
+  | nil =>
+      intro out2 inp2 h2
+      cases inp1 with
+      | nil =>
+          simpa [SlotSub] using h2
+      | cons i is =>
+          cases h1
+  | cons o os ih =>
+      intro out2 inp2 h2
+      cases inp1 with
+      | nil =>
+          cases h1
+      | cons i is =>
+          rcases h1 with ⟨hname, hslot, htail⟩
+          exact ⟨hname, hslot, ih htail h2⟩
+
+theorem slotSub_trans
+    {out mid inp : LinearCtx}
+    (h1 : SlotSub out mid)
+    (h2 : SlotSub mid inp) :
+    SlotSub out inp := by
+  induction out generalizing mid inp with
+  | nil =>
+      cases mid <;> cases inp <;> simp [SlotSub] at h1 h2 ⊢
+  | cons o os ih =>
+      cases mid with
+      | nil =>
+          cases h1
+      | cons m ms =>
+          cases inp with
+          | nil =>
+              cases h2
+          | cons i is =>
+              rcases h1 with ⟨h1name, h1slot, h1tail⟩
+              rcases h2 with ⟨h2name, h2slot, h2tail⟩
+              refine ⟨h1name.trans h2name, ?_, ih h1tail h2tail⟩
+              rcases h1slot with h1slot | h1slot
+              · exact Or.inl h1slot
+              · rw [h1slot]
+                exact h2slot
+
+theorem has_type_slotSub
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    SlotSub Gamma' Gamma := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ GammaIn GammaOut _ _ _ _ => SlotSub GammaOut GammaIn) with
+  | var _ _ GammaPre GammaPost x tx =>
+      have hpost : SlotSub GammaPost GammaPost := slotSub_refl _
+      have hmid : SlotSub [(x, none)] [(x, some tx)] := by
+        simp [SlotSub]
+      have hpre : SlotSub GammaPre GammaPre := slotSub_refl _
+      simpa [SlotSub] using slotSub_append hpre (slotSub_append hmid hpost)
+  | unit _ _ Gamma =>
+      simpa using slotSub_refl Gamma
+  | abs _ _ Gamma1 Gamma2 x t1 _ _ _ slot _ ih =>
+      have hbody :
+          SlotSub (Gamma2 ++ [(x, slot)]) (Gamma1 ++ [(x, some t1)]) := by
+        simpa [SlotSub] using ih
+      exact (slotSub_append_singleton_inv hbody).2.2
+  | app _ _ _ Gamma2 _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSub_trans ih2 ih1
+  | letBind _ _ _ Gamma2 Gamma3 x _ _ t1 _ _ _ slot _ _ ih1 ih2 =>
+      have hbody :
+          SlotSub (Gamma3 ++ [(x, slot)]) (Gamma2 ++ [(x, some t1)]) := by
+        simpa [SlotSub] using ih2
+      exact slotSub_trans (slotSub_append_singleton_inv hbody).2.2 ih1
+  | copy _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | letpair _ _ _ Gamma2 Gamma3 x y _ _ t1 t2 _ _ _ slotX slotY _ _ ih1 ih2 =>
+      have hbody :
+          SlotSub (Gamma3 ++ [(x, slotX), (y, slotY)])
+            (Gamma2 ++ [(x, some t1), (y, some t2)]) := by
+        simpa [SlotSub] using ih2
+      exact slotSub_trans (slotSub_append_pair_inv hbody).2.2.2.2 ih1
+  | tpair _ _ _ Gamma2 _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSub_trans ih2 ih1
+  | fst _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | snd _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | const _ _ Gamma _ _ =>
+      simpa using slotSub_refl Gamma
+  | tadd _ _ _ Gamma2 _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSub_trans ih2 ih1
+  | tmul _ _ _ Gamma2 _ _ _ _ _ _ _ _ ih1 ih2 =>
+      exact slotSub_trans ih2 ih1
+  | tsum _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | texpand _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | uniformLike _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | perform _ _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | handle _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihBody ihClauses =>
+      exact slotSub_trans ihClauses ihBody
+  | tgrad =>
+      simpa using slotSub_refl _
+  | tvmap =>
+      simpa using slotSub_refl _
+  | loc _ _ Gamma _ _ _ =>
+      simpa using slotSub_refl Gamma
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih
+  | nil _ _ Gamma _ _ =>
+      simpa using slotSub_refl Gamma
+  | cons _ _ Gamma2 Gamma3 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ihRest =>
+      exact ihRest
+
+theorem slotSub_singleton_cases
+    {out : LinearCtx} {x : String} {t : Typ}
+    (h : SlotSub out [(x, some t)]) :
+    out = [(x, none)] ∨ out = [(x, some t)] := by
+  cases out with
+  | nil =>
+      cases h
+  | cons hd rest =>
+      cases rest with
+      | nil =>
+          rcases hd with ⟨xOut, slotOut⟩
+          rcases h with ⟨hname, hslot, hnil⟩
+          cases hnil
+          subst hname
+          rcases hslot with hslot | hslot
+          · exact Or.inl (by cases hslot; rfl)
+          · exact Or.inr (by cases hslot; rfl)
+      | cons hd2 rest2 =>
+          cases h.2.2
+
+theorem slotSub_pair_cases
+    {out : LinearCtx} {x y : String} {tx ty : Typ}
+    (h : SlotSub out [(x, some tx), (y, some ty)]) :
+    out = [(x, none), (y, none)] ∨
+      out = [(x, none), (y, some ty)] ∨
+      out = [(x, some tx), (y, none)] ∨
+      out = [(x, some tx), (y, some ty)] := by
+  cases out with
+  | nil =>
+      cases h
+  | cons hd1 rest =>
+      cases rest with
+      | nil =>
+          cases h.2.2
+      | cons hd2 rest' =>
+          cases rest' with
+          | nil =>
+              rcases hd1 with ⟨xOut, slotOut1⟩
+              rcases hd2 with ⟨yOut, slotOut2⟩
+              rcases h with ⟨hx, hslot1, htail⟩
+              rcases htail with ⟨hy, hslot2, hnil⟩
+              cases hnil
+              subst hx
+              subst hy
+              rcases hslot1 with hslot1 | hslot1 <;>
+                rcases hslot2 with hslot2 | hslot2
+              · exact Or.inl (by cases hslot1; cases hslot2; rfl)
+              · exact Or.inr (Or.inl (by cases hslot1; cases hslot2; rfl))
+              · exact Or.inr (Or.inr (Or.inl (by cases hslot1; cases hslot2; rfl)))
+              · exact Or.inr (Or.inr (Or.inr (by cases hslot1; cases hslot2; rfl)))
+          | cons hd3 rest'' =>
+              rcases h with ⟨_hx, _hslot1, htail⟩
+              rcases htail with ⟨_hy, _hslot2, hrest⟩
+              cases hrest
+
 private theorem mem_dom_of_mem_append_singleton_ne
     {Gamma : LinearCtx} {z x : String} {t : Typ}
     (hz : z ∈ linearCtxDom (Gamma ++ ([(x, some t)] : LinearCtx)))
