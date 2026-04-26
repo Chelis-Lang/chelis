@@ -21,5 +21,8 @@ pub mod vmap;
 
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use host::CompiledProgram;
-pub use lower::{lower_program, lower_subexpr_program, tensor_type_from_deep};
+pub use lower::{
+    LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
+    lower_subexpr_program, tensor_type_from_deep,
+};
 pub use pipeline::grad_then_fuse;

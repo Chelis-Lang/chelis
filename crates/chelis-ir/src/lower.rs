@@ -64,6 +64,45 @@ use crate::vmap;
 
 /// Lower a checked Phase 0e Deep program into a RISC DAG.
 pub fn lower_program(program: &CheckedProgram) -> Dag {
+    lower_program_to_library(program).dag
+}
+
+/// Phase F carrier: a lowered library DAG plus the metadata needed to
+/// compose against new code via [`lower_program_with_context`].
+///
+/// Fields are exposed so the compiled-artifact cache can persist the
+/// library state out-of-band, but consumers should treat them as opaque —
+/// the contract is that the carrier was produced by
+/// [`lower_program_to_library`] on a checked library, and that
+/// [`lower_program_with_context`] is the only blessed way to consume it.
+#[derive(Debug, Clone)]
+pub struct LoweredLibrary {
+    /// The library DAG, post-DCE. Node IDs in this DAG are the canonical
+    /// library IDs that new-code lowering will reference (after a clone).
+    pub dag: Dag,
+    /// Map from a library top-level def's name (e.g. `lib_const`,
+    /// `lib_double.0`) to the NodeId in `dag` that holds its value. New
+    /// code that references the name resolves through this table rather
+    /// than emitting a fresh `Load`.
+    pub symbol_table: HashMap<String, NodeId>,
+    /// Library top-level def bodies, keyed by name. New-code lowering needs
+    /// these to inline calls to library functions (matching the monolithic
+    /// behaviour of `lower_program(library + new)`).
+    pub program_defs: HashMap<String, Expr>,
+    /// Library declared types, keyed by name. Used to resolve unbound
+    /// `(var libname)` Load types when the new-code expression's metadata
+    /// is `default_type`.
+    pub program_types: HashMap<String, TensorType>,
+    /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
+    /// be re-applied if needed.
+    pub linearity: LinearityInfo,
+}
+
+/// Lower a checked program to the [`LoweredLibrary`] carrier. The bare
+/// `dag` field of the result is identical to `lower_program(program)` —
+/// the only difference is that `symbol_table`, `program_defs`,
+/// `program_types`, and `linearity` are also exposed.
+pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     let program_type_env = program.type_env();
     let lowered_names = top_level_lowering_map(program.exprs(), program_type_env);
     for_each_top_level_item(program.exprs(), &mut |expr| {
@@ -72,13 +111,17 @@ pub fn lower_program(program: &CheckedProgram) -> Dag {
             assert_phase0e_typed(expr);
         }
     });
-    let program_types = program
+    let program_types: HashMap<String, TensorType> = program
         .type_env()
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
     let program_defs = collect_top_level_defs(program.exprs());
-    let mut ctx = LowerCtx::new(program_types, program_defs, program.linearity().clone());
+    let mut ctx = LowerCtx::new(
+        program_types.clone(),
+        program_defs.clone(),
+        program.linearity().clone(),
+    );
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
@@ -87,7 +130,116 @@ pub fn lower_program(program: &CheckedProgram) -> Dag {
             ctx.lower_top_level(expr);
         }
     });
-    crate::optimize::dead_code_eliminate(&ctx.dag)
+
+    // Collect the pre-DCE name -> NodeId mapping from the lowering ctx's
+    // top-level bindings. We flatten tuple-decomposed defs into dotted
+    // names mirroring the `Store { name: "foo.0" }` convention used
+    // elsewhere; that lets new code reference both `foo` (as a tuple
+    // identity) and `foo.N` (as the specific element).
+    let mut pre_dce_table: HashMap<String, NodeId> = HashMap::new();
+    for (name, value) in ctx.bindings.iter() {
+        flatten_binding_into(name, value, &mut pre_dce_table);
+    }
+
+    let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+
+    // Renumber the symbol table through DCE's remap. Names whose nodes
+    // were eliminated drop out of the table.
+    let symbol_table: HashMap<String, NodeId> = pre_dce_table
+        .into_iter()
+        .filter_map(|(name, old)| remap.get(&old).map(|new| (name, *new)))
+        .collect();
+
+    LoweredLibrary {
+        dag: dce_dag,
+        symbol_table,
+        program_defs,
+        program_types,
+        linearity: program.linearity().clone(),
+    }
+}
+
+/// Compose a library's lowered DAG with a new-code [`CheckedProgram`].
+/// The library was already lowered via [`lower_program_to_library`]
+/// (which is what `lower_program(library)` runs internally); the returned
+/// DAG holds the library DAG verbatim plus new-code nodes whose IDs are
+/// strictly above the library's max ID.
+///
+/// `&library` is never mutated; the function is pure and the input
+/// library carrier is safe to reuse across many `new_program` snippets.
+///
+/// New code's `(var libname)` references resolve directly to the library
+/// DAG's existing NodeId (no duplicate node), and new code's calls to
+/// library functions inline using the library's `program_defs` —
+/// matching the monolithic `lower_program(library + new)` behaviour
+/// byte-for-byte (modulo any irrelevant extra defs that DCE pruned).
+pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
+    let new_type_env = new_program.type_env();
+    let lowered_names = top_level_lowering_map(new_program.exprs(), new_type_env);
+    for_each_top_level_item(new_program.exprs(), &mut |expr| {
+        if top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env) {
+            assert_phase0e_lowerable(expr);
+            assert_phase0e_typed(expr);
+        }
+    });
+
+    // Combined types: library's own program_types layered with new-code's
+    // type_env (which Phase C already unioned with library types).
+    // New-code wins on shadow, since the new annotated types are derived
+    // from new-code source.
+    let mut program_types = library.program_types.clone();
+    for (name, ty_expr) in new_program.type_env() {
+        program_types.insert(name.clone(), LowerCtx::type_from_type_expr(ty_expr));
+    }
+
+    // Combined defs: library defs + new-code defs. Same shadow rule —
+    // new-code wins, mirroring monolithic lowering of `library + new`.
+    let mut program_defs = library.program_defs.clone();
+    for (name, body) in collect_top_level_defs(new_program.exprs()) {
+        program_defs.insert(name, body);
+    }
+
+    let mut ctx = LowerCtx::new(program_types, program_defs, new_program.linearity().clone());
+
+    // Seed the lowering ctx with the cloned library DAG and the library's
+    // name -> NodeId bindings. Cloning preserves NodeIds verbatim (the
+    // Dag is a flat Vec, so push-only growth keeps existing IDs stable),
+    // satisfying the disjointness invariant: any new node added by
+    // new-code lowering takes id == library.dag.len() + k.
+    ctx.dag = library.dag.clone();
+    for (name, node_id) in &library.symbol_table {
+        ctx.bindings
+            .insert(name.clone(), LoweredValue::Node(*node_id));
+    }
+
+    for_each_top_level_item(new_program.exprs(), &mut |expr| {
+        if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
+            || (top_level_expr_name(expr).is_none()
+                && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env))
+        {
+            ctx.lower_top_level(expr);
+        }
+    });
+
+    // Skip DCE on the composed DAG: the library DAG was already DCE'd by
+    // `lower_program_to_library`, and re-DCE'ing here could prune
+    // library roots that are not referenced by the current `new_program`
+    // but are part of the library's contractual surface (per spec:
+    // "the returned Dag contains the library DAG + new-code roots").
+    ctx.dag
+}
+
+fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<String, NodeId>) {
+    match value {
+        LoweredValue::Node(id) => {
+            out.insert(prefix.to_string(), *id);
+        }
+        LoweredValue::Tuple(items) => {
+            for (index, item) in items.iter().enumerate() {
+                flatten_binding_into(&format!("{prefix}.{index}"), item, out);
+            }
+        }
+    }
 }
 
 pub fn tensor_type_from_deep(expr: &Expr) -> TensorType {

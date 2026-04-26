@@ -67,9 +67,16 @@ pub fn constant_fold(dag: &mut Dag) {
 /// backward through inputs, then rebuilds the DAG with only live nodes
 /// and remapped NodeIds.
 pub fn dead_code_eliminate(dag: &Dag) -> Dag {
+    dead_code_eliminate_with_remap(dag).0
+}
+
+/// Same as [`dead_code_eliminate`] but also returns the `old_id -> new_id`
+/// remapping. Phase F (`lower_program_with_context`) needs the remap to
+/// rewrite the library's name → NodeId symbol table after DCE renumbering.
+pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
-        return Dag::new();
+        return (Dag::new(), HashMap::new());
     }
 
     // Mark live nodes: DAG roots + all Store nodes.
@@ -126,7 +133,11 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
         }
     }
 
-    new_dag
+    let node_remap: HashMap<NodeId, NodeId> = id_map
+        .into_iter()
+        .map(|(old, new)| (NodeId(old), new))
+        .collect();
+    (new_dag, node_remap)
 }
 
 /// Common subexpression elimination: build a new DAG, merging nodes
