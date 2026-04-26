@@ -32,6 +32,7 @@ import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.AdjointTransform
 import LaCaDiLE.StringHelpers
+import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
 
@@ -221,6 +222,254 @@ def AdjointMulTyped (Delta : CapCtx) (Sigma : StoreTyp) (dsE : DimList) :
   | Term.vmap _ _ _ body   => AdjointMulTyped Delta Sigma dsE body
   | Term.handle _ body _ => AdjointMulTyped Delta Sigma dsE body
   | Term.perform _ e     => AdjointMulTyped Delta Sigma dsE e
+
+/-- `Term.unit` cannot change the linear context, even after trailing
+    `subEff` widening. -/
+private theorem hasType_unit_preserves_context
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma Term.unit t eps Gamma') :
+    t = Typ.unit ∧ Gamma' = Gamma := by
+  generalize heq : Term.unit = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | unit =>
+      cases heq
+      exact ⟨rfl, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ => (try cases heq) <;>
+         first | exact True.intro | (exfalso; contradiction)
+
+private def adjointHandleCounterClauseBody : Term :=
+  Term.const 0 DimList.empty
+
+private def adjointHandleCounterBody : Term :=
+  Term.letBind "u"
+    (Term.perform EffectLabel.resource Term.unit)
+    (Term.const 0 DimList.empty)
+
+private def adjointHandleCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.resource, "u", "k", adjointHandleCounterClauseBody)]
+
+private def adjointHandleCounterSource : Term :=
+  Term.handle [EffectLabel.resource]
+    adjointHandleCounterBody
+    adjointHandleCounterClauses
+
+/-- Concrete typed source witness showing the current handler adjoint
+    transform is not merely hard to type: it reuses the single seed
+    binder `gs` for both the handled body and the clause-body adjoint. -/
+private theorem adjointHandleCounterSource_typed :
+    HasType [Capability.diff] []
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      adjointHandleCounterSource
+      (Typ.tensor DimList.empty)
+      []
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+  have hUnit :
+      HasType [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        Term.unit Typ.unit []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    exact HasType.unit _ _ _
+  have hResSig : OpSigMatch EffectLabel.resource Typ.unit Typ.unit := by
+    simp [OpSigMatch, opArgType, opRetType]
+  have hPerform :
+      HasType [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.perform EffectLabel.resource Term.unit)
+        Typ.unit
+        [EffectLabel.resource]
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    simpa [EffectRow.union] using
+      (HasType.perform [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        EffectLabel.resource Term.unit Typ.unit Typ.unit []
+        hUnit hResSig)
+  have hConstBody :
+      HasType [Capability.diff] []
+        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit)])
+        (Term.const 0 DimList.empty)
+        (Typ.tensor DimList.empty)
+        []
+        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit)]) := by
+    simpa [List.append_assoc] using
+      (HasType.const [Capability.diff] []
+        ((([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit)]))
+        0 DimList.empty)
+  have hBody :
+      HasType [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        adjointHandleCounterBody
+        (Typ.tensor DimList.empty)
+        [EffectLabel.resource]
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    simpa [adjointHandleCounterBody, EffectRow.union, List.append_assoc] using
+      (HasType.letBind [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        "u"
+        (Term.perform EffectLabel.resource Term.unit)
+        (Term.const 0 DimList.empty)
+        Typ.unit (Typ.tensor DimList.empty)
+        [EffectLabel.resource] []
+        (some Typ.unit)
+        hPerform hConstBody)
+  have hClauseBody :
+      HasType [Capability.diff] []
+        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit),
+           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))])
+        adjointHandleCounterClauseBody
+        (Typ.tensor DimList.empty)
+        []
+        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit),
+           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))]) := by
+    simpa [adjointHandleCounterClauseBody, List.append_assoc] using
+      (HasType.const [Capability.diff] []
+        ((([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
+          [("u", some Typ.unit),
+           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))])
+        )
+        0 DimList.empty)
+  have hClauses :
+      ClausesTyped [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Typ.tensor DimList.empty)
+        []
+        adjointHandleCounterClauses := by
+    refine ClausesTyped.cons [Capability.diff] []
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      (Typ.tensor DimList.empty)
+      Typ.unit Typ.unit []
+      EffectLabel.resource "u" "k"
+      adjointHandleCounterClauseBody []
+      (some Typ.unit)
+      (some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))
+      ?_ hClauseBody ?_
+    · simp [OpSigMatch, opArgType, opRetType]
+    · exact ClausesTyped.nil [Capability.diff] []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Typ.tensor DimList.empty) []
+  simpa [adjointHandleCounterSource] using
+    (HasType.handle [Capability.diff] []
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      adjointHandleCounterBody
+      adjointHandleCounterClauses
+      (Typ.tensor DimList.empty)
+      [EffectLabel.resource]
+      [EffectLabel.resource]
+      hBody
+      (by
+        intro op hop
+        simp at hop
+        rcases hop with rfl
+        simp)
+      (by
+        intro cl hcl
+        simp [adjointHandleCounterClauses] at hcl
+        rcases hcl with rfl
+        simp)
+      (by
+        intro op hop
+        simp at hop
+        rcases hop with rfl
+        exact ⟨(EffectLabel.resource, "u", "k", adjointHandleCounterClauseBody), by
+          simp [adjointHandleCounterClauses], rfl⟩)
+      hClauses)
+
+/-- The current `handle` branch of `adjointFrom` is genuinely
+    untypable: with any non-empty clause list it sequences the clause
+    adjoint and the handled-body adjoint against the same seed `gs`,
+    so the second `adjointLeaf` would need to type `var "gs"` after the
+    first one has already consumed it. -/
+private theorem adjointHandleCounterSource_adjoint_untypable :
+    ¬ ∃ eps,
+      HasType [] []
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (adjointFrom adjointHandleCounterSource "x" (Term.var "gs") 0)
+        Typ.unit
+        eps
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", none)] : LinearCtx) := by
+  intro h
+  rcases h with ⟨eps, hTy⟩
+  have hMain :
+      HasType [] []
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.letBind (freshName "adjHb" 0)
+          (Term.letBind (freshName "adjA" 1)
+            (Term.var "gs")
+            (Term.perform EffectLabel.accum Term.unit))
+          (Term.letBind (freshName "adjA" 0)
+            (Term.var "gs")
+            (Term.perform EffectLabel.accum Term.unit)))
+        Typ.unit
+        eps
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", none)] : LinearCtx) := by
+    simpa [adjointHandleCounterSource, adjointHandleCounterBody,
+      adjointHandleCounterClauseBody, adjointHandleCounterClauses,
+      adjointFrom, adjointClausesFrom, adjointLeaf]
+      using hTy
+  rcases HasType.letBind_inv_bridge hMain with
+    ⟨Γmid1, Γout1, tAdjHb, eps1, eps2, slotAdjHb, hFirst, hSecond, hOut1⟩
+  subst hOut1
+  rcases HasType.letBind_inv_bridge hFirst with
+    ⟨Γseed, ΓmidBody, tSeed1, epsSeed1, epsBody1, slotAdjA1,
+      hVar1, hPerform1, hOutFirst⟩
+  have hndGs :
+      NoDupNames
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    simp [NoDupNames, linearCtxDom]
+  have hΓseed :
+      Γseed =
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", none)] : LinearCtx) := by
+    simpa [consumeNameCtx, hndGs] using
+      (HasType.var_output_consume_of_noDup hVar1 hndGs)
+  rcases HasType.perform_inv_bridge hPerform1 with
+    ⟨tArg1, epsArg1, hArg1, hMatch1, _hSub1⟩
+  have htArg1 : tArg1 = Typ.unit := by
+    simpa [OpSigMatch, opArgType, opRetType] using hMatch1.1
+  have hArg1Ctx : ΓmidBody ++ [(freshName "adjA" 1, slotAdjA1)] =
+      Γseed ++ [(freshName "adjA" 1, some tSeed1)] := by
+    have hUnitCtx := hasType_unit_preserves_context (t := tArg1) hArg1
+    rcases hUnitCtx with ⟨htUnit, hCtx⟩
+    subst htArg1
+    simpa [htUnit] using hCtx
+  have hΓmidBody : ΓmidBody = Γseed := by
+    exact List.append_inj_left' hArg1Ctx (by simp)
+  have hΓmid1 : Γmid1 = Γseed := by
+    exact hOutFirst.trans hΓmidBody
+  subst hΓseed
+  subst hΓmid1
+  rcases HasType.letBind_inv_bridge hSecond with
+    ⟨Γmid2, Γout2, tSeed2, epsSeed2, epsBody2, slotAdjA0,
+      hVar2, _hPerform2, _hOut2⟩
+  have hgsSome : ("gs", some tSeed2) ∈
+      (([("x", some (Typ.tensor DimList.empty)),
+          ("gs", none)] : LinearCtx) ++
+        [(freshName "adjHb" 0, some tAdjHb)]) := by
+    exact HasType.var_mem_of_typing hVar2
+  have hgsFresh : "gs" ≠ freshName "adjHb" 0 := by
+    decide
+  simp [hgsFresh] at hgsSome
 
 /-- Seed-polymorphic helper for adjoint typing. The proof depends on
     the seed's typing, the structural shape of `e`, and the freshness
@@ -567,13 +816,17 @@ private theorem adjoint_typed_aux
   --      too strong for realistic user programs that use `copy` /
   --      `perform` on operands.
   --
-  -- A sound path forward is the `weakening_insert` lemma in
-  -- `Substitution.lean` (currently sorry-blocked), together with a
-  -- real theorem-level invariant for the `mul` case.
+  -- Named substitution is no longer the blocker here. The remaining
+  -- `mul` work needs a stronger theorem-level invariant for rebasing
+  -- operand tape typings and their effect rows.
   --
-  -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work;
-  -- `handle` remains on ClausesTypedDB. All four cases park under
-  -- this catch-all.
+  -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work.
+  -- `handle` is now known to be a transform-design bug, not just a
+  -- missing proof: `adjointHandleCounterSource_adjoint_untypable`
+  -- shows the current `AdjointTransform.handle` branch linearly
+  -- reuses the same seed `gs` across the clause adjoints and the body
+  -- adjoint, making the resulting term untypable even for a concrete
+  -- well-typed source term.
   | _ => sorry
 termination_by sizeOf e
 
