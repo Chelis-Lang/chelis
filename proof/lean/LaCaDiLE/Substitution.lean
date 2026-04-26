@@ -1323,6 +1323,47 @@ private theorem slotSub_middle_cases
   subst slotOut
   exact hslotOut
 
+private theorem slotSub_append_singleton_cases
+    {out Gamma : LinearCtx} {x : String} {t : Typ}
+    (h : SlotSub out (Gamma ++ [(x, some t)])) :
+    ∃ outPre slot,
+      out = outPre ++ [(x, slot)] ∧
+      SlotSub outPre Gamma ∧
+      (slot = none ∨ slot = some t) := by
+  have h' : SlotSub out (Gamma ++ [(x, some t)] ++ ([] : LinearCtx)) := by
+    simpa using h
+  rcases
+      slotSub_split_target
+        (GammaPre := Gamma) (GammaPost := ([] : LinearCtx))
+        (x := x) (t := t) h' with
+    ⟨outPre, slot, outPost, hout, hPre, hSlot, hPost⟩
+  cases outPost with
+  | nil =>
+      exact ⟨outPre, slot, by simpa using hout, hPre, hSlot⟩
+  | cons hd tl =>
+      cases hPost
+
+private theorem slotSub_append_pair_cases
+    {out Gamma : LinearCtx} {x y : String} {tx ty : Typ}
+    (h : SlotSub out (Gamma ++ [(x, some tx), (y, some ty)])) :
+    ∃ outPre slotX slotY,
+      out = outPre ++ [(x, slotX), (y, slotY)] ∧
+      SlotSub outPre Gamma ∧
+      (slotX = none ∨ slotX = some tx) ∧
+      (slotY = none ∨ slotY = some ty) := by
+  have h' : SlotSub out (Gamma ++ [(x, some tx)] ++ ([(y, some ty)] : LinearCtx)) := by
+    simpa [List.append_assoc] using h
+  rcases
+      slotSub_split_target
+        (GammaPre := Gamma) (GammaPost := ([(y, some ty)] : LinearCtx))
+        (x := x) (t := tx) h' with
+    ⟨outPre, slotX, outPost, hout, hPre, hSlotX, hPost⟩
+  rcases slotSub_singleton_cases (x := y) (t := ty) hPost with hPostCases | hPostCases
+  · refine ⟨outPre, slotX, none, ?_, hPre, hSlotX, Or.inl rfl⟩
+    simpa [hPostCases, List.append_assoc] using hout
+  · refine ⟨outPre, slotX, some ty, ?_, hPre, hSlotX, Or.inr rfl⟩
+    simpa [hPostCases, List.append_assoc] using hout
+
 private theorem noDupNames_remove_middle
     {GammaPre suffix : LinearCtx} {x : String} {slot : Option Typ}
     (hnd : NoDupNames (GammaPre ++ [(x, slot)] ++ suffix)) :
