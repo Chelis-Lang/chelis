@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, and closing the executable `handle` typing branch in `AdjointTyping.lean`.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, and adding a concrete `expand` counterexample for the remaining adjoint theorem shape.
 
 ## Acceptance Oracle
 
@@ -16,8 +16,9 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `Substitution.lean` is closed under the honest lexical-scoped theorem shape.
 - `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
 - `AdjointTyping.lean`'s repaired `handle` branch is now typed.
+- `AdjointTyping.lean` now also contains a concrete typed counterexample showing the old seed-polymorphic `expand` helper statement is false.
 - The branch still contains 1 executable `sorry` on the main proof path:
-  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `sum` / `expand` adjoint cases
+  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `expand` adjoint cases
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -44,6 +45,7 @@ The current theorem-shape boundary is now explicit in Lean:
   - why unconditional runtime preservation is false
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
+- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the file contains a closed Lean witness that the old private seed-polymorphic helper is false.
 
 ## Remaining Critical Path
 
@@ -57,4 +59,4 @@ The current theorem-shape boundary is now explicit in Lean:
 
 1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
-3. Finish the remaining admitted `mul` / `sum` / `expand` adjoint cases and then return to the AD-correctness wave.
+3. Replace the false seed-polymorphic `expand` helper shape with the source-typing/dimension relation it actually needs, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.

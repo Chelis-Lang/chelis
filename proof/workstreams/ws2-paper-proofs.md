@@ -15,7 +15,7 @@ Standard but requires care with linear contexts and the capability context. If `
 
 ## WS2.2 — Adjoint typing lemma
 
-The linchpin of the entire metatheory — prove as a standalone lemma before anything else in WS2. If `Δ, Diff; Γ ⊢ e : τ ! ε ⊣ Γ'` and `e` uses its free variables linearly, then `Δ; Γ_adj ⊢ adjoint(e) : τ_adj ! ε, Accum ⊣ Γ_adj'`. Requires defining the adjoint transformation formally for each of the six primitives and showing each case preserves typing.
+The linchpin of the entire metatheory — prove as a standalone lemma before anything else in WS2. If `Δ, Diff; Γ ⊢ e : τ ! ε ⊣ Γ'` and `e` uses its free variables linearly, then `Δ; Γ_adj ⊢ adjoint(e) : τ_adj ! ε, Accum ⊣ Γ_adj'`. Requires defining the adjoint transformation formally for each of the six primitives and showing each case preserves typing. The current Lean branch has already ruled out one over-strong theorem shape here: a seed-polymorphic helper for `expand` is false without an explicit source-typing/dimension premise tying the seed dimensions to the expanded axis.
 
 The critical subtlety: the tape. The adjoint of `mul(a, b)` produces `(g*b, g*a)`, which references `b` in `a`'s adjoint and `a` in `b`'s adjoint. But `a` and `b` were consumed by `mul` in the forward pass and are no longer in the linear context. The adjoint transformation must be defined as: (1) evaluate the forward pass, borrowing all intermediate values into a tape before consuming them, (2) evaluate the backward pass using tape borrows + output gradient. Formally, the adjoint transformation produces a term where every consumed intermediate has a corresponding borrow in scope. The tape borrows are `&` references — they don't consume from `Γ`, so the linear context accounting works.
 

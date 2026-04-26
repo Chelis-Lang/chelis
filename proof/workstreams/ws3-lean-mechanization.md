@@ -35,7 +35,7 @@ The substitution lemma with linear context splitting. Always the most painful pa
 
 ## WS3.7 — `AdjointTyping.lean`
 
-The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is the crux — must show that taped borrows from the forward pass are in scope for the backward pass and that the borrow/consume interaction with the linear context is sound. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
+The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. Separately, Lean now contains a concrete typed counterexample showing that the old seed-polymorphic private helper was too strong for `expand`: typing `sum gSeed d` requires a source-typing/dimension relation that the helper did not quantify. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
 
 ## WS3.8 — `AddDim.lean`
 

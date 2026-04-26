@@ -71,7 +71,7 @@ Reduction rules including heap store. Figures. The interesting rules:
 
 All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant, and the runtime-linearity invariant needed to iterate preservation. Full proofs in supplementary appendix.
 
-The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. The section should therefore:
+The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now precise: `sum` is mechanized, while `mul` and the false seed-polymorphic `expand` helper remain. The section should therefore:
 
 1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
 2. explain the captured-handler counterexample against plain `RuntimeLinear`

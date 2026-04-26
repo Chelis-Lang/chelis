@@ -6,7 +6,7 @@
 - Proof build oracle: `cd proof/lean && lake build`
 - Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, `Substitution.lean` is closed under its honest lexical-scoped theorem shape, and the only remaining executable admit is the consolidated catch-all in `AdjointTyping.lean`
 - `Preservation.lean` is now admit-free on the executable branch, including `tgrad` and `tvmap`. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
-- `AdjointTyping.lean`'s repaired `handle` branch is now closed; the remaining admitted AD cases are localized to `mul`, `sum`, and `expand`
+- `AdjointTyping.lean`'s repaired `handle` branch is now closed; the remaining admitted AD gap is localized to `mul` and the false seed-polymorphic `expand` theorem shape
 - `AddDim.lean` is closed, the earlier `tvmap` dimension-choice mismatch was repaired by making the batch dimension explicit in the term syntax, and the remaining `tvmap` preservation proof is now closed
 - Immediate critical path:
   1. settle the stronger cross-boundary handler-aware runtime invariant
@@ -41,7 +41,7 @@ WS1 → WS2 + WS3 (parallel per-theorem) → WS4 §3–§5 → WS5 + WS6
 
 The critical path runs through WS3, specifically:
 
-- **WS3.7 (`AdjointTyping.lean`):** the remaining executable admit is now the consolidated `mul` / `sum` / `expand` catch-all after closing the repaired `handle` branch.
+- **WS3.7 (`AdjointTyping.lean`):** the remaining executable admit is now the consolidated `mul` / `expand` catch-all after closing the repaired `handle` branch; `sum` is closed, and Lean now contains a concrete counterexample showing the old seed-polymorphic `expand` helper statement was too strong.
 - **WS3.10 (`Preservation.lean`):** the substitution-dependent and context cases are now closed, but the runtime-side invariant is still not in its final form.
 - **WS3.14 (`ADCorrectness.lean`):** the hardest individual file. Requires denotational semantics layer.
 
