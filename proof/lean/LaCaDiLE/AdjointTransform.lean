@@ -177,27 +177,38 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       adjointFrom e x gSeed n
   | Term.perform _ e => adjointFrom e x gSeed n
   | Term.handle _ body clauses =>
-      adjointClausesFrom clauses x gSeed (adjointFrom body x gSeed n) n
+      adjointClausesFrom clauses x body gSeed n
+termination_by (sizeOf body, 1)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
 
 /-- Companion to `adjointFrom`: walks a handler-clause list, recursing
-    on each clause body. Takes an accumulator `acc` (the
-    `adjointFrom body` result) so the final term threads the body's
-    adjoint with each clause's adjoint. For Phase 1 skeleton, each
-    clause's adjoint emits a vestigial `perform accum` via
-    `adjointFrom` on the clause body. One fresh binder per clause;
-    the tail call uses `n + 1`. -/
+    on each clause body and threading the residual seed all the way to
+    the handled body. Each clause splits the incoming seed with `copy`,
+    feeds one branch to the current clause body, and passes the
+    residual branch to the tail; the base case runs the handled body's
+    adjoint on the final residual seed. Three fresh names are
+    introduced per clause (`gA`, `gB`, `adjHb`), so the tail call uses
+    `n + 3`. -/
 def adjointClausesFrom
     (clauses : List (EffectLabel × String × String × Term))
-    (x : String) (gSeed : Term) (acc : Term) (n : Nat) : Term :=
+    (x : String) (body : Term) (gSeed : Term) (n : Nat) : Term :=
   match clauses with
-  | [] => acc
+  | [] => adjointFrom body x gSeed n
   | (_op, _xv, _kv, hb) :: rest =>
-      -- Recurse on hb then on the tail. For Phase 1 skeleton, the
-      -- produced term just chains the sub-adjoints; Phase 2 T9 will
-      -- restructure to match the handler's semantic reduction.
-      Term.letBind (freshName "adjHb" n)
-                   (adjointFrom hb x gSeed (n + 1))
-                   (adjointClausesFrom rest x gSeed acc (n + 1))
+      -- Recurse on `hb` with one seed branch, then pass the residual
+      -- branch to the tail, which eventually feeds the handled body.
+      Term.letpair (freshName "gA" n) (freshName "gB" n) (Term.copy gSeed)
+        (Term.letBind (freshName "adjHb" n)
+          (adjointFrom hb x (Term.var (freshName "gA" n)) (n + 3))
+          (adjointClausesFrom rest x body (Term.var (freshName "gB" n)) (n + 3)))
+termination_by (sizeOf clauses + sizeOf body + 1, 0)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
 
 end
 
@@ -210,7 +221,7 @@ def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
 
 /-- Compatibility shim for `adjointClausesFrom`. -/
 def adjointClauses (clauses : List (EffectLabel × String × String × Term))
-                   (x : String) (gSeed : Term) (acc : Term) : Term :=
-  adjointClausesFrom clauses x gSeed acc 0
+                   (x : String) (body : Term) (gSeed : Term) : Term :=
+  adjointClausesFrom clauses x body gSeed 0
 
 end LaCaDiLE

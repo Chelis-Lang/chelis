@@ -223,260 +223,13 @@ def AdjointMulTyped (Delta : CapCtx) (Sigma : StoreTyp) (dsE : DimList) :
   | Term.handle _ body _ => AdjointMulTyped Delta Sigma dsE body
   | Term.perform _ e     => AdjointMulTyped Delta Sigma dsE e
 
-/-- `Term.unit` cannot change the linear context, even after trailing
-    `subEff` widening. -/
-private theorem hasType_unit_preserves_context
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
-    {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma Term.unit t eps Gamma') :
-    t = Typ.unit ∧ Gamma' = Gamma := by
-  generalize heq : Term.unit = e_in at h
-  induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | unit =>
-      cases heq
-      exact ⟨rfl, rfl⟩
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih heq
-  | _ => (try cases heq) <;>
-         first | exact True.intro | (exfalso; contradiction)
-
-private def adjointHandleCounterClauseBody : Term :=
-  Term.const 0 DimList.empty
-
-private def adjointHandleCounterBody : Term :=
-  Term.letBind "u"
-    (Term.perform EffectLabel.resource Term.unit)
-    (Term.const 0 DimList.empty)
-
-private def adjointHandleCounterClauses :
-    List (EffectLabel × String × String × Term) :=
-  [(EffectLabel.resource, "u", "k", adjointHandleCounterClauseBody)]
-
-private def adjointHandleCounterSource : Term :=
-  Term.handle [EffectLabel.resource]
-    adjointHandleCounterBody
-    adjointHandleCounterClauses
-
-/-- Concrete typed source witness showing the current handler adjoint
-    transform is not merely hard to type: it reuses the single seed
-    binder `gs` for both the handled body and the clause-body adjoint. -/
-private theorem adjointHandleCounterSource_typed :
-    HasType [Capability.diff] []
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      adjointHandleCounterSource
-      (Typ.tensor DimList.empty)
-      []
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
-  have hUnit :
-      HasType [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        Term.unit Typ.unit []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
-    exact HasType.unit _ _ _
-  have hResSig : OpSigMatch EffectLabel.resource Typ.unit Typ.unit := by
-    simp [OpSigMatch, opArgType, opRetType]
-  have hPerform :
-      HasType [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Term.perform EffectLabel.resource Term.unit)
-        Typ.unit
-        [EffectLabel.resource]
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
-    simpa [EffectRow.union] using
-      (HasType.perform [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        EffectLabel.resource Term.unit Typ.unit Typ.unit []
-        hUnit hResSig)
-  have hConstBody :
-      HasType [Capability.diff] []
-        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit)])
-        (Term.const 0 DimList.empty)
-        (Typ.tensor DimList.empty)
-        []
-        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit)]) := by
-    simpa [List.append_assoc] using
-      (HasType.const [Capability.diff] []
-        ((([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit)]))
-        0 DimList.empty)
-  have hBody :
-      HasType [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        adjointHandleCounterBody
-        (Typ.tensor DimList.empty)
-        [EffectLabel.resource]
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
-    simpa [adjointHandleCounterBody, EffectRow.union, List.append_assoc] using
-      (HasType.letBind [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        "u"
-        (Term.perform EffectLabel.resource Term.unit)
-        (Term.const 0 DimList.empty)
-        Typ.unit (Typ.tensor DimList.empty)
-        [EffectLabel.resource] []
-        (some Typ.unit)
-        hPerform hConstBody)
-  have hClauseBody :
-      HasType [Capability.diff] []
-        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit),
-           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))])
-        adjointHandleCounterClauseBody
-        (Typ.tensor DimList.empty)
-        []
-        (([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit),
-           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))]) := by
-    simpa [adjointHandleCounterClauseBody, List.append_assoc] using
-      (HasType.const [Capability.diff] []
-        ((([("x", some (Typ.tensor DimList.empty))] : LinearCtx) ++
-          [("u", some Typ.unit),
-           ("k", some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))])
-        )
-        0 DimList.empty)
-  have hClauses :
-      ClausesTyped [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Typ.tensor DimList.empty)
-        []
-        adjointHandleCounterClauses := by
-    refine ClausesTyped.cons [Capability.diff] []
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      (Typ.tensor DimList.empty)
-      Typ.unit Typ.unit []
-      EffectLabel.resource "u" "k"
-      adjointHandleCounterClauseBody []
-      (some Typ.unit)
-      (some (Typ.arrow Typ.unit (Typ.tensor DimList.empty) []))
-      ?_ hClauseBody ?_
-    · simp [OpSigMatch, opArgType, opRetType]
-    · exact ClausesTyped.nil [Capability.diff] []
-        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Typ.tensor DimList.empty) []
-  simpa [adjointHandleCounterSource] using
-    (HasType.handle [Capability.diff] []
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
-      adjointHandleCounterBody
-      adjointHandleCounterClauses
-      (Typ.tensor DimList.empty)
-      [EffectLabel.resource]
-      [EffectLabel.resource]
-      hBody
-      (by
-        intro op hop
-        simp at hop
-        rcases hop with rfl
-        simp)
-      (by
-        intro cl hcl
-        simp [adjointHandleCounterClauses] at hcl
-        rcases hcl with rfl
-        simp)
-      (by
-        intro op hop
-        simp at hop
-        rcases hop with rfl
-        exact ⟨(EffectLabel.resource, "u", "k", adjointHandleCounterClauseBody), by
-          simp [adjointHandleCounterClauses], rfl⟩)
-      hClauses)
-
-/-- The current `handle` branch of `adjointFrom` is genuinely
-    untypable: with any non-empty clause list it sequences the clause
-    adjoint and the handled-body adjoint against the same seed `gs`,
-    so the second `adjointLeaf` would need to type `var "gs"` after the
-    first one has already consumed it. -/
-private theorem adjointHandleCounterSource_adjoint_untypable :
-    ¬ ∃ eps,
-      HasType [] []
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (adjointFrom adjointHandleCounterSource "x" (Term.var "gs") 0)
-        Typ.unit
-        eps
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", none)] : LinearCtx) := by
-  intro h
-  rcases h with ⟨eps, hTy⟩
-  have hMain :
-      HasType [] []
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Term.letBind (freshName "adjHb" 0)
-          (Term.letBind (freshName "adjA" 1)
-            (Term.var "gs")
-            (Term.perform EffectLabel.accum Term.unit))
-          (Term.letBind (freshName "adjA" 0)
-            (Term.var "gs")
-            (Term.perform EffectLabel.accum Term.unit)))
-        Typ.unit
-        eps
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", none)] : LinearCtx) := by
-    simpa [adjointHandleCounterSource, adjointHandleCounterBody,
-      adjointHandleCounterClauseBody, adjointHandleCounterClauses,
-      adjointFrom, adjointClausesFrom, adjointLeaf]
-      using hTy
-  rcases HasType.letBind_inv_bridge hMain with
-    ⟨Γmid1, Γout1, tAdjHb, eps1, eps2, slotAdjHb, hFirst, hSecond, hOut1⟩
-  subst hOut1
-  rcases HasType.letBind_inv_bridge hFirst with
-    ⟨Γseed, ΓmidBody, tSeed1, epsSeed1, epsBody1, slotAdjA1,
-      hVar1, hPerform1, hOutFirst⟩
-  have hndGs :
-      NoDupNames
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx) := by
-    simp [NoDupNames, linearCtxDom]
-  have hΓseed :
-      Γseed =
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", none)] : LinearCtx) := by
-    simpa [consumeNameCtx, hndGs] using
-      (HasType.var_output_consume_of_noDup hVar1 hndGs)
-  rcases HasType.perform_inv_bridge hPerform1 with
-    ⟨tArg1, epsArg1, hArg1, hMatch1, _hSub1⟩
-  have htArg1 : tArg1 = Typ.unit := by
-    simpa [OpSigMatch, opArgType, opRetType] using hMatch1.1
-  have hArg1Ctx : ΓmidBody ++ [(freshName "adjA" 1, slotAdjA1)] =
-      Γseed ++ [(freshName "adjA" 1, some tSeed1)] := by
-    have hUnitCtx := hasType_unit_preserves_context (t := tArg1) hArg1
-    rcases hUnitCtx with ⟨htUnit, hCtx⟩
-    subst htArg1
-    simpa [htUnit] using hCtx
-  have hΓmidBody : ΓmidBody = Γseed := by
-    exact List.append_inj_left' hArg1Ctx (by simp)
-  have hΓmid1 : Γmid1 = Γseed := by
-    exact hOutFirst.trans hΓmidBody
-  subst hΓseed
-  subst hΓmid1
-  rcases HasType.letBind_inv_bridge hSecond with
-    ⟨Γmid2, Γout2, tSeed2, epsSeed2, epsBody2, slotAdjA0,
-      hVar2, _hPerform2, _hOut2⟩
-  have hgsSome : ("gs", some tSeed2) ∈
-      (([("x", some (Typ.tensor DimList.empty)),
-          ("gs", none)] : LinearCtx) ++
-        [(freshName "adjHb" 0, some tAdjHb)]) := by
-    exact HasType.var_mem_of_typing hVar2
-  have hgsFresh : "gs" ≠ freshName "adjHb" 0 := by
-    decide
-  simp [hgsFresh] at hgsSome
+mutual
 
 /-- Seed-polymorphic helper for adjoint typing. The proof depends on
     the seed's typing, the structural shape of `e`, and the freshness
     of adjoint counter-indexed names at counters ≥ `n`. The closed
     structural cases recurse syntactically; the hard `mul` / `sum` /
-    `expand` / `handle` cases are still parked under the catch-all
-    below. -/
+    `expand` cases are still parked under the catch-all below. -/
 private theorem adjoint_typed_aux
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
     (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
@@ -781,7 +534,11 @@ private theorem adjoint_typed_aux
         (EffectRow.union [EffectLabel.accum] epsSeed)
         hAddRaw
         (subEff_letpair_add epsSeed)
-  -- `mul`, `sum`, `expand`, and `handle` remain under the catch-all.
+  | Term.handle _ body clauses =>
+      simpa [adjointFrom] using
+        (adjointClauses_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed
+          x n clauses body gSeed h_seed h_fresh_s h_fresh_s')
+  -- `mul`, `sum`, and `expand` remain under the catch-all.
   --
   -- Wave 5 Track B: `AdjointTransform` reshaped the `mul` case so
   -- `copy gSeed` is the outermost letpair (before any operand tape
@@ -821,14 +578,215 @@ private theorem adjoint_typed_aux
   -- operand tape typings and their effect rows.
   --
   -- `sum` and `expand` remain on the Phase 1 T9 tape-extent work.
-  -- `handle` is now known to be a transform-design bug, not just a
-  -- missing proof: `adjointHandleCounterSource_adjoint_untypable`
-  -- shows the current `AdjointTransform.handle` branch linearly
-  -- reuses the same seed `gs` across the clause adjoints and the body
-  -- adjoint, making the resulting term untypable even for a concrete
-  -- well-typed source term.
+  -- `handle` is now typed for the repaired seed-threading shape; the
+  -- transform still eagerly sequences every clause adjoint, but that is
+  -- a known Phase 1 semantic caveat in `AdjointTransform`, not a typing
+  -- blocker local to this file.
   | _ => sorry
-termination_by sizeOf e
+termination_by (sizeOf e, 1)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
+private theorem adjointClauses_typed_aux
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
+    (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
+    (clauses : List (EffectLabel × String × String × Term))
+    (body : Term) (gSeed : Term)
+    (h_seed : HasType Delta Sigma Gamma_s gSeed (Typ.tensor dsE) epsSeed Gamma_s')
+    (h_fresh_s : AdjointNamesFresh n Gamma_s)
+    (h_fresh_s' : AdjointNamesFresh n Gamma_s') :
+    HasType Delta Sigma Gamma_s (adjointClausesFrom clauses x body gSeed n) Typ.unit
+            (EffectRow.union [EffectLabel.accum] epsSeed) Gamma_s' := by
+  match clauses with
+  | [] =>
+      simpa [adjointClausesFrom] using
+        (adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n body gSeed
+          h_seed h_fresh_s h_fresh_s')
+  | (_op, _xv, _kv, hb) :: rest =>
+      let gA : String := freshName "gA" n
+      let gB : String := freshName "gB" n
+      let adjHb : String := freshName "adjHb" n
+      have hFreshBase : AdjointNamesFresh (n + 3) Gamma_s' :=
+        h_fresh_s'.mono (Nat.le_add_right n 3)
+      have hkFresh : n < n + 3 := Nat.lt_add_of_pos_right (by decide : 0 < 3)
+      have hFreshPairIn :
+          AdjointNamesFresh (n + 3)
+            (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))]) := by
+        have h1 :=
+          AdjointNamesFresh.cons_freshName
+            (h := hFreshBase) (b := "gA") (t := some (Typ.tensor dsE))
+            (by simp [adjointBases]) hkFresh
+        simpa [gA, gB, List.append_assoc] using
+          (AdjointNamesFresh.cons_freshName
+            (h := h1) (b := "gB") (t := some (Typ.tensor dsE))
+            (by simp [adjointBases]) hkFresh)
+      have hFreshPairOut :
+          AdjointNamesFresh (n + 3)
+            (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE))]) := by
+        have h1 :=
+          AdjointNamesFresh.cons_freshName
+            (h := hFreshBase) (b := "gA") (t := none)
+            (by simp [adjointBases]) hkFresh
+        simpa [gA, gB, List.append_assoc] using
+          (AdjointNamesFresh.cons_freshName
+            (h := h1) (b := "gB") (t := some (Typ.tensor dsE))
+            (by simp [adjointBases]) hkFresh)
+      have hFreshLetIn :
+          AdjointNamesFresh (n + 3)
+            (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE)), (adjHb, some Typ.unit)]) := by
+        have h1 :=
+          AdjointNamesFresh.cons_freshName
+            (h := hFreshBase) (b := "gA") (t := none)
+            (by simp [adjointBases]) hkFresh
+        have h2 :=
+          AdjointNamesFresh.cons_freshName
+            (h := h1) (b := "gB") (t := some (Typ.tensor dsE))
+            (by simp [adjointBases]) hkFresh
+        simpa [gA, gB, adjHb, List.append_assoc] using
+          (AdjointNamesFresh.cons_freshName
+            (h := h2) (b := "adjHb") (t := some Typ.unit)
+            (by simp [adjointBases]) hkFresh)
+      have hFreshLetOut :
+          AdjointNamesFresh (n + 3)
+            (Gamma_s' ++ [(gA, none), (gB, none), (adjHb, some Typ.unit)]) := by
+        have h1 :=
+          AdjointNamesFresh.cons_freshName
+            (h := hFreshBase) (b := "gA") (t := none)
+            (by simp [adjointBases]) hkFresh
+        have h2 :=
+          AdjointNamesFresh.cons_freshName
+            (h := h1) (b := "gB") (t := none)
+            (by simp [adjointBases]) hkFresh
+        simpa [gA, gB, adjHb, List.append_assoc] using
+          (AdjointNamesFresh.cons_freshName
+            (h := h2) (b := "adjHb") (t := some Typ.unit)
+            (by simp [adjointBases]) hkFresh)
+      have hSeedCopy :
+          HasType Delta Sigma Gamma_s (Term.copy gSeed)
+            (Typ.pair (Typ.tensor dsE) (Typ.tensor dsE)) epsSeed Gamma_s' := by
+        exact HasType.copy Delta Sigma Gamma_s Gamma_s' gSeed dsE epsSeed h_seed
+      have hSeedA :
+          HasType Delta Sigma
+            (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))])
+            (Term.var gA) (Typ.tensor dsE) []
+            (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE))]) := by
+        simpa [gA, gB, List.append_assoc] using
+          (HasType.var Delta Sigma Gamma_s'
+            ([(gB, some (Typ.tensor dsE))] : LinearCtx) gA (Typ.tensor dsE))
+      have hAdjHb :
+          HasType Delta Sigma
+            (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))])
+            (adjointFrom hb x (Term.var gA) (n + 3))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE))]) := by
+        exact adjoint_typed_aux Delta Sigma
+          (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))])
+          (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE))])
+          dsE [] x (n + 3) hb (Term.var gA)
+          hSeedA hFreshPairIn hFreshPairOut
+      have hSeedB :
+          HasType Delta Sigma
+            (((Gamma_s' ++ [(gA, none)]) ++ [(gB, some (Typ.tensor dsE))]) ++ [(adjHb, some Typ.unit)])
+            (Term.var gB) (Typ.tensor dsE) []
+            (((Gamma_s' ++ [(gA, none)]) ++ [(gB, none)]) ++ [(adjHb, some Typ.unit)]) := by
+        have hRaw :
+            HasType Delta Sigma
+              (((Gamma_s' ++ [(gA, none)]) ++ [(gB, some (Typ.tensor dsE))]) ++ [(adjHb, some Typ.unit)])
+              (Term.var gB) (Typ.tensor dsE) []
+              (((Gamma_s' ++ [(gA, none)]) ++ [(gB, none)]) ++ [(adjHb, some Typ.unit)]) :=
+          HasType.var Delta Sigma
+            (Gamma_s' ++ [(gA, none)])
+            ([(adjHb, some Typ.unit)] : LinearCtx) gB (Typ.tensor dsE)
+        simpa [gA, gB, adjHb, List.append_assoc] using hRaw
+      have hAdjRest :
+          HasType Delta Sigma
+            (((Gamma_s' ++ [(gA, none)]) ++ [(gB, some (Typ.tensor dsE))]) ++ [(adjHb, some Typ.unit)])
+            (adjointClausesFrom rest x body (Term.var gB) (n + 3))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ [(gA, none)]) ++ [(gB, none)]) ++ [(adjHb, some Typ.unit)]) := by
+        exact adjointClauses_typed_aux Delta Sigma
+          ((((Gamma_s' ++ [(gA, none)]) ++ [(gB, some (Typ.tensor dsE))]) ++ [(adjHb, some Typ.unit)]))
+          ((((Gamma_s' ++ [(gA, none)]) ++ [(gB, none)]) ++ [(adjHb, some Typ.unit)]))
+          dsE [] x (n + 3) rest body (Term.var gB)
+          hSeedB
+          (by simpa [List.append_assoc] using hFreshLetIn)
+          (by simpa [List.append_assoc] using hFreshLetOut)
+      have hBody :
+          HasType Delta Sigma
+            (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))])
+            (Term.letBind adjHb
+              (adjointFrom hb x (Term.var gA) (n + 3))
+              (adjointClausesFrom rest x body (Term.var gB) (n + 3)))
+            Typ.unit
+            (EffectRow.union
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+            (Gamma_s' ++ [(gA, none), (gB, none)]) := by
+        simpa [gA, gB, adjHb, List.append_assoc] using
+          (HasType.letBind Delta Sigma
+            (Gamma_s' ++ [(gA, some (Typ.tensor dsE)), (gB, some (Typ.tensor dsE))])
+            (Gamma_s' ++ [(gA, none), (gB, some (Typ.tensor dsE))])
+            (Gamma_s' ++ [(gA, none), (gB, none)])
+            adjHb
+            (adjointFrom hb x (Term.var gA) (n + 3))
+            (adjointClausesFrom rest x body (Term.var gB) (n + 3))
+            Typ.unit Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (some Typ.unit)
+            hAdjHb
+            (by simpa [List.append_assoc] using hAdjRest))
+      have hRaw :
+          HasType Delta Sigma Gamma_s
+            (Term.letpair gA gB (Term.copy gSeed)
+              (Term.letBind adjHb
+                (adjointFrom hb x (Term.var gA) (n + 3))
+                (adjointClausesFrom rest x body (Term.var gB) (n + 3))))
+            Typ.unit
+            (EffectRow.union epsSeed
+              (EffectRow.union
+                (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+                (EffectRow.union [EffectLabel.accum] ([] : EffectRow))))
+            Gamma_s' := by
+        simpa [gA, gB, adjHb, List.append_assoc] using
+          (HasType.letpair Delta Sigma Gamma_s Gamma_s' Gamma_s'
+            gA gB
+            (Term.copy gSeed)
+            (Term.letBind adjHb
+              (adjointFrom hb x (Term.var gA) (n + 3))
+              (adjointClausesFrom rest x body (Term.var gB) (n + 3)))
+            (Typ.tensor dsE) (Typ.tensor dsE) Typ.unit
+            epsSeed
+            (EffectRow.union
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+            none none
+            hSeedCopy hBody)
+      simpa [adjointClausesFrom, gA, gB, adjHb] using
+        (HasType.subEff Delta Sigma Gamma_s Gamma_s'
+          (Term.letpair gA gB (Term.copy gSeed)
+            (Term.letBind adjHb
+              (adjointFrom hb x (Term.var gA) (n + 3))
+              (adjointClausesFrom rest x body (Term.var gB) (n + 3))))
+          Typ.unit
+          (EffectRow.union epsSeed
+            (EffectRow.union
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))))
+          (EffectRow.union [EffectLabel.accum] epsSeed)
+          hRaw
+          (subEff_letpair_add epsSeed))
+termination_by (sizeOf clauses + sizeOf body + 1, 0)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
+end
 
 /-- Counter-threaded public typing theorem for `adjointFrom`. This is
     the theorem preservation should use when the operational rule picks

@@ -4,14 +4,14 @@
 
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
-- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, and the remaining executable admits are concentrated in `Substitution.lean` and `AdjointTyping.lean`
+- Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, `Substitution.lean` is closed under its honest lexical-scoped theorem shape, and the only remaining executable admit is the consolidated catch-all in `AdjointTyping.lean`
 - `Preservation.lean` is now admit-free on the executable branch, including `tgrad` and `tvmap`. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
-- `Substitution.lean`'s current named substitution theorem shape is now also known to be false on arbitrary named derivations without a lexical or derivation-guided restriction
+- `AdjointTyping.lean`'s repaired `handle` branch is now closed; the remaining admitted AD cases are localized to `mul`, `sum`, and `expand`
 - `AddDim.lean` is closed, the earlier `tvmap` dimension-choice mismatch was repaired by making the batch dimension explicit in the term syntax, and the remaining `tvmap` preservation proof is now closed
 - Immediate critical path:
   1. settle the stronger cross-boundary handler-aware runtime invariant
-  2. close named substitution (`weakening_insert`, `subst_preserves_typing`)
-  3. finish the remaining admitted adjoint cases in `AdjointTyping.lean`, then return to the AD-correctness wave
+  2. finish the remaining admitted adjoint cases in `AdjointTyping.lean`
+  3. return to the AD-correctness wave once the runtime invariant and adjoint catch-all are both reduced further
 
 This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
 
@@ -41,7 +41,7 @@ WS1 → WS2 + WS3 (parallel per-theorem) → WS4 §3–§5 → WS5 + WS6
 
 The critical path runs through WS3, specifically:
 
-- **WS3.6 (`Substitution.lean`):** always the most painful mechanized PL proof. Linear context splitting makes it worse.
+- **WS3.7 (`AdjointTyping.lean`):** the remaining executable admit is now the consolidated `mul` / `sum` / `expand` catch-all after closing the repaired `handle` branch.
 - **WS3.10 (`Preservation.lean`):** the substitution-dependent and context cases are now closed, but the runtime-side invariant is still not in its final form.
 - **WS3.14 (`ADCorrectness.lean`):** the hardest individual file. Requires denotational semantics layer.
 
