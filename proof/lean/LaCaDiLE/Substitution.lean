@@ -1540,6 +1540,29 @@ theorem weakening_tail
 
 /-! ## Main theorem -/
 
+/-- Honest named substitution theorem for the direct lexical case.
+
+    This is the theorem shape the singleton/pair/direct-handler
+    wrappers actually need on their first substitution step: the source
+    derivation is lexical with respect to the input context, and every
+    binder already present in `e` is absent from the substituted value's
+    bound-name surface. The remaining hard cases are the second-stage
+    substitutions on already-substituted terms, especially captured
+    continuations that carry dormant clause binders. -/
+theorem subst_preserves_typing_lexical
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
+    (x : String) (t1 t2 : Typ) (eps : EffectRow)
+    (e v : Term)
+    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
+    (_h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
+    (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
+    (_h_closed : Closed v)
+    (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
+    ∃ Gamma2' : LinearCtx,
+      HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
+  sorry -- Remaining blocker is the theorem's recursive second-stage
+        -- substitution shape, not the direct lexical base route.
+
 /-- Substitution preserves typing (tombstone semantics).
 
     Under the tombstone refactor, the input context carries

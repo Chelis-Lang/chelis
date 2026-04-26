@@ -3930,11 +3930,21 @@ theorem preservation_beta_via_db
   subst tRet'
   subst epsBody'
   subst GammaBody
+  rcases wellScoped_app_parts h_scope with
+    ⟨hScopeAbs, _hScopeV, hAbsV, _hVAbs⟩
+  rcases wellScoped_abs_body hScopeAbs with ⟨hxBody, hScopeBody⟩
+  have hLexBody : LexicallyScoped [(x, some tArg)] body :=
+    lexical_singleton hxBody hScopeBody
   have hClosed : Closed v := has_type_closed_term_of_closed_input hArg
   have hArgNil : HasType [] Sigma [] v tArg [] [] :=
     HasType.value_eff_polymorphic_bridge hArg hv []
-  rcases subst_preserves_typing [] Sigma [] [(x, slot)]
-      x tArg tRet epsBody body v hBody hArgNil hClosed with
+  have hFreshBody : ∀ y, y ∈ boundVars body → y ∉ boundVars v := by
+    intro y hy
+    have hyAbs : y ∈ boundVars (Term.abs x tArg body) := by
+      simp [boundVars, hy]
+    exact hAbsV y hyAbs
+  rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
+      x tArg tRet epsBody body v hBody hLexBody hArgNil hClosed hFreshBody with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -3959,11 +3969,15 @@ theorem preservation_letBind_via_db
   have hMid : GammaMid = [] := has_type_closed_output_of_closed_input hVal
   subst hMid
   subst GammaBody
+  rcases wellScoped_letBind_parts h_scope with
+    ⟨_hScopeVal, _hxVal, hxBody, hScopeBody, _hValBody, hBodyVal⟩
+  have hLexBody : LexicallyScoped [(x, some t1)] body :=
+    lexical_singleton hxBody hScopeBody
   have hClosed : Closed v := has_type_closed_term_of_closed_input hVal
   have hValNil : HasType [] Sigma [] v t1 [] [] :=
     HasType.value_eff_polymorphic_bridge hVal hv []
-  rcases subst_preserves_typing [] Sigma [] [(x, slot)]
-      x t1 t epsBody body v hBody hValNil hClosed with
+  rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
+      x t1 t epsBody body v hBody hLexBody hValNil hClosed hBodyVal with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -4020,8 +4034,15 @@ theorem preservation_letpair_via_db
     ⟨GammaPre, GammaPost, hSplit, hV2Weak⟩
   simp at hSplit
   rcases hSplit with ⟨rfl, rfl⟩
-  rcases subst_preserves_typing [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
-      y t2 t epsBody body v2 hBody hV2Weak hV2Closed with
+  rcases wellScoped_letpair_parts h_scope with
+    ⟨_hPairScope, hxy, _hxPair, hxBody, _hyPair, hyBody, hBodyScope, _hPairBody, hBodyPair⟩
+  have hLexBody : LexicallyScoped [(x, some t1), (y, some t2)] body :=
+    lexical_pair hxy hxBody hyBody hBodyScope
+  have hFreshBodyV2 : ∀ z, z ∈ boundVars body → z ∉ boundVars v2 := by
+    intro z hz hzV2
+    exact hBodyPair z hz (by simp [boundVars, hzV2])
+  rcases subst_preserves_typing_lexical [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
+      y t2 t epsBody body v2 hBody hLexBody hV2Weak hV2Closed hFreshBodyV2 with
     ⟨GammaAfterY, hAfterY⟩
   rcases subst_preserves_typing [] Sigma [] GammaAfterY
       x t1 t epsBody (subst body v2 y) v1 hAfterY hV1Nil hV1Closed with
@@ -4109,10 +4130,30 @@ theorem preservation_handleOpDirect_via_db
       (Term.var y) none hIdBody
   have hIdClosed : Closed idCont := by
     simpa [idCont] using (directIdCont_closed (epsH := epsH) (op := op) (v := v) (clauses := clauses) (tRet := tRet))
-  rcases subst_preserves_typing [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
+  have hLexBody : LexicallyScoped
+      ([(x, some tArgV)] ++ [(k, some (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)))]) hb :=
+    lexical_handle_clause
+      (tx := tArgV)
+      (tk := Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH))
+      (lexical_nil h_scope) hmem
+  have hFreshClause :
+      freshInTerm (directIdContName epsH op v clauses) hb :=
+    (capturedContName_fresh_selected_clause
+      (epsH := epsH)
+      (body := Term.perform op v)
+      (clauses := clauses)
+      (op := op) (x := x) (k := k) (hb := hb)
+      hmem).2.2
+  have hFreshBodyId : ∀ z, z ∈ boundVars hb → z ∉ boundVars idCont := by
+    intro z hz hzId
+    have hyNotHb : directIdContName epsH op v clauses ∉ boundVars hb := hFreshClause.2
+    have hzEq : z = directIdContName epsH op v clauses := by
+      simpa [idCont, y, directIdCont, directIdContName, boundVars] using hzId
+    exact hyNotHb (hzEq ▸ hz)
+  rcases subst_preserves_typing_lexical [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
       k (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) tRet
       (EffectRow.removeOps epsB epsH) hb
-      idCont hBody hIdAbs hIdClosed with
+      idCont hBody hLexBody hIdAbs hIdClosed hFreshBodyId with
     ⟨GammaAfterK, hAfterK⟩
   rcases subst_preserves_typing [] Sigma [] GammaAfterK
       x tArgV tRet (EffectRow.removeOps epsB epsH)
