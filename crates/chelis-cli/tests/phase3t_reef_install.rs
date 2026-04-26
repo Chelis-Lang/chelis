@@ -134,7 +134,7 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
         r#"[package]
 name = "downstream"
 version = "0.1.0"
-compiler = "=0.2.6"
+compiler = "=0.2.7"
 module_prefix = "Demo"
 
 [dependencies]
