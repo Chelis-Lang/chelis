@@ -1289,6 +1289,35 @@ private theorem boundFresh_of_slotSub
     simpa [slotSub_names_eq hsub] using hy
   exact hFresh y hy'
 
+private theorem boundFresh_append_singleton
+    {suffix : LinearCtx} {x : String} {tx : Typ} {v : Term}
+    (hFresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v)
+    (hxFresh : x ∉ boundVars v) :
+    ∀ y, y ∈ linearCtxDom (suffix ++ [(x, some tx)]) → y ∉ boundVars v := by
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with hy | hy
+  · exact hFresh y (by simpa [linearCtxDom] using hy)
+  · subst y
+    exact hxFresh
+
+private theorem boundFresh_append_pair
+    {suffix : LinearCtx} {x y : String} {tx ty : Typ} {v : Term}
+    (hFresh : ∀ z, z ∈ linearCtxDom suffix → z ∉ boundVars v)
+    (hxFresh : x ∉ boundVars v)
+    (hyFresh : y ∉ boundVars v) :
+    ∀ z, z ∈ linearCtxDom (suffix ++ [(x, some tx), (y, some ty)]) →
+      z ∉ boundVars v := by
+  intro z hz
+  simp [linearCtxDom] at hz
+  rcases hz with hz | hz
+  · exact hFresh z (by simpa [linearCtxDom] using hz)
+  · rcases hz with hz | hz
+    · subst z
+      exact hxFresh
+    · subst z
+      exact hyFresh
+
 private theorem slotSub_live_middle
     {GammaPre suffix : LinearCtx} {x : String}
     {slotX : Option Typ} {t1 : Typ}
@@ -1641,6 +1670,23 @@ private theorem ctxFresh_handle_clause_setup
       simpa [boundVars] using hzb'
     exact hCtx z hz hzb
   exact ctxFresh_append_pair hNodup hCtxBody hxGamma hkGamma hxk hxBody hkBody
+
+private theorem ctxFresh_handle_rest
+    {Gamma : LinearCtx} {epsH : EffectRow} {body : Term}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (hCtx :
+      ∀ z, z ∈ linearCtxDom Gamma →
+        z ∉ boundVars (Term.handle epsH body ((op, x, k, hb) :: rest))) :
+    ∀ z, z ∈ linearCtxDom Gamma →
+      z ∉ boundVars (Term.handle epsH body rest) := by
+  intro z hz hzb
+  have hzb' : z ∈ boundVars (Term.handle epsH body ((op, x, k, hb) :: rest)) := by
+    rcases List.mem_append.mp hzb with hzBody | hzRest
+    · exact List.mem_append.mpr (Or.inl hzBody)
+    · refine List.mem_append.mpr ?_
+      exact Or.inr (by simp [boundVarsClauses, hzRest])
+  exact hCtx z hz hzb'
 
 mutual
 
