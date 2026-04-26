@@ -9,6 +9,7 @@ use chelis_deep::ast as deep;
 use crate::types::*;
 
 /// Information about a single variant of an ADT.
+#[derive(Debug, Clone)]
 pub struct VariantInfo {
     pub name: String,
     /// (field_name, field_type) -- name is None for positional args.
@@ -16,6 +17,7 @@ pub struct VariantInfo {
 }
 
 /// An ADT definition extracted from a `deftype` node.
+#[derive(Debug, Clone)]
 pub struct AdtDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -23,6 +25,7 @@ pub struct AdtDef {
 }
 
 /// A type alias definition extracted from a `typealias` node.
+#[derive(Debug, Clone)]
 pub struct TypeAliasDef {
     pub params: Vec<String>,
     pub param_vars: Vec<TypeVar>,
@@ -30,6 +33,7 @@ pub struct TypeAliasDef {
 }
 
 /// Registry of all ADT definitions and type aliases.
+#[derive(Debug, Clone)]
 pub struct AdtRegistry {
     pub defs: HashMap<String, AdtDef>,
     pub aliases: HashMap<String, TypeAliasDef>,

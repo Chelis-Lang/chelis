@@ -9,6 +9,7 @@ use chelis_deep::ast as deep;
 
 use crate::adt::AdtRegistry;
 use crate::builtins;
+use crate::context::{TypeEnv, TypeEnvInner};
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
@@ -118,21 +119,124 @@ pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
 }
 
 pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
-    let type_env = build_phase0e_type_env(exprs);
-    let mut result = infer_phase0e_program_with_env(exprs, &type_env);
-    validate_phase0e_program(exprs, &type_env, &mut result.errors);
-    validate_tensor_precisions_in_program(exprs, &mut result.errors);
-    suppress_unbound_for_cycle_members(exprs, &mut result.errors);
-    if result.errors.is_empty() {
-        let annotated_exprs = annotate_phase0e_program(exprs);
-        let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
-        Ok(CheckedProgram::from_parts(
-            annotated_exprs,
-            annotated_type_env,
-        ))
-    } else {
-        Err(result)
+    // Compose: empty outer scope, then check exprs as new code against it.
+    // This keeps a single source of truth for the Phase 0e check pipeline.
+    check_phase0e_with_context(&TypeEnv::empty(), exprs)
+}
+
+/// Build a stacked outer-scope context from a library decl list. The
+/// library is run through the full Phase 0e pipeline; if any errors are
+/// found they are returned to the caller (the context cannot be built
+/// from an unchecked library).
+///
+/// Once built, the returned [`TypeEnv`] can be re-used to type-check
+/// many separate "new code" snippets via
+/// [`check_phase0e_with_context`]. The library state is `Arc`-shared and
+/// never mutated, so concurrent reads are cheap.
+pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+    // Start from the empty (builtins + prelude ADTs) state.
+    let empty = TypeEnv::empty();
+    let mut state = empty.inner().clone();
+
+    // Library Phase 0e declared-type lookup.
+    let library_phase0e = build_phase0e_type_env(library_exprs);
+
+    let mut result = infer_phase0e_program_with_state(
+        library_exprs,
+        &library_phase0e,
+        &mut state,
+        /* combined_phase0e_for_validate = */ &library_phase0e,
+        /* run_validate_passes_on = */ None,
+    );
+    validate_phase0e_program(library_exprs, &library_phase0e, &mut result.errors);
+    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
     }
+
+    // Capture library def names — needed by new-code cycle / unbound
+    // suppression to distinguish library refs from new-code refs.
+    let mut library_def_names = std::collections::HashSet::new();
+    for expr in top_level_decl_items(library_exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            library_def_names.insert(name.to_string());
+        }
+    }
+
+    // Drain accumulated errors back into the state's storage; they were
+    // empty above so this is a no-op, but the call site is symmetric
+    // with check_phase0e_with_context.
+    let _ = result.errors.drain(..);
+
+    Ok(TypeEnv::from_inner(TypeEnvInner {
+        env: state.env,
+        var_gen: state.var_gen,
+        subst: state.subst,
+        adt_reg: state.adt_reg,
+        phase0e_types: library_phase0e,
+        library_def_names,
+    }))
+}
+
+/// Type-check `new_exprs` against an outer-scope `context`. New-code
+/// bindings shadow but do not consume library bindings; library ADT
+/// constructor sets remain visible to new-code `match` exhaustivity
+/// checks. The returned [`CheckedProgram`] contains ONLY the new-code's
+/// checked decls; library decls are not duplicated.
+///
+/// The `context` is `Arc`-shared and never mutated — repeated calls
+/// against the same context see the same outer scope.
+pub fn check_phase0e_with_context(
+    context: &TypeEnv,
+    new_exprs: &[deep::Expr],
+) -> Result<CheckedProgram, InferResult> {
+    let mut state = context.inner().clone();
+
+    // New-code declared types (Phase 0e) layered on top of library's.
+    let new_phase0e = build_phase0e_type_env(new_exprs);
+    let combined_phase0e: HashMap<String, deep::Expr> = state
+        .phase0e_types
+        .iter()
+        .chain(new_phase0e.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Library is already validated; only run validate / inference on
+    // new exprs. The Phase 0e env passed to inference is the new-code's
+    // own declared types (library schemes are already in state.env).
+    let mut result = infer_phase0e_program_with_state(
+        new_exprs,
+        &new_phase0e,
+        &mut state,
+        &combined_phase0e,
+        /* run_validate_passes_on = */ None,
+    );
+    // Run cycle / shape / precision validators on new_exprs only. The
+    // combined Phase 0e env is supplied so `(var libfoo)` references
+    // resolve to the library's declared type during shape validation.
+    validate_phase0e_program(new_exprs, &combined_phase0e, &mut result.errors);
+    validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members_against_context(
+        new_exprs,
+        &context.inner().library_def_names,
+        &mut result.errors,
+    );
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
+
+    // Annotate ONLY the new-code exprs, starting from the library
+    // snapshot state so library names resolve during annotation.
+    let annotated_exprs = annotate_phase0e_program_with_context(context, new_exprs);
+    let annotated_type_env = build_phase0e_type_env(&annotated_exprs);
+    Ok(CheckedProgram::from_parts(
+        annotated_exprs,
+        annotated_type_env,
+    ))
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
@@ -190,11 +294,68 @@ fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut Vec<Che
     });
 }
 
+/// Stacked-context variant of `suppress_unbound_for_cycle_members`.
+///
+/// Drops `UnboundVariable` errors whose name matches either a new-code
+/// def OR a library def — the latter is needed because a library def
+/// referenced from the new code might temporarily look unbound during
+/// inference if the inferred error path runs before the env scheme
+/// lookup, but the name IS in the library context.
+fn suppress_unbound_for_cycle_members_against_context(
+    new_exprs: &[deep::Expr],
+    library_def_names: &HashSet<String>,
+    errors: &mut Vec<CheckError>,
+) {
+    let mut def_names: HashSet<String> = library_def_names.clone();
+    for expr in top_level_decl_items(new_exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            def_names.insert(name.to_string());
+        }
+    }
+    errors.retain(|err| {
+        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
+            return true;
+        }
+        let name_start = match err.message.find("unbound variable: ") {
+            Some(start) => start + "unbound variable: ".len(),
+            None => return true,
+        };
+        let name = err.message[name_start..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        !def_names.contains(name)
+    });
+}
+
 fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEnv) -> InferResult {
-    let (mut env, mut vg) = builtins::builtin_env();
-    let mut subst = Subst::new();
-    let mut adt_reg = AdtRegistry::new();
-    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
+    // Backwards-compat wrapper. Callers (like `infer_phase0e_program` and
+    // `check_typed_program` callers) run `validate_phase0e_program`
+    // separately, so we pass `None` here to skip the embedded validate.
+    let empty_inner = crate::context::TypeEnv::empty();
+    let mut state = empty_inner.inner().clone();
+    infer_phase0e_program_with_state(
+        exprs, type_env, &mut state, type_env, /* run_validate_passes_on = */ None,
+    )
+}
+
+/// Run the inference / Phase 0e binding / shape-validation passes against
+/// `state`, mutating it as it goes. Library state should be supplied by
+/// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
+/// path. `new_phase0e_types` are bound into `state.env` here; the
+/// `combined_phase0e` is what `validate_phase0e_program` consults so
+/// new-code shape validation can look up declared types of library
+/// references.
+fn infer_phase0e_program_with_state(
+    exprs: &[deep::Expr],
+    new_phase0e_types: &Phase0eTypeEnv,
+    state: &mut TypeEnvInner,
+    combined_phase0e: &Phase0eTypeEnv,
+    run_validate_passes_on: Option<&[deep::Expr]>,
+) -> InferResult {
     let mut errors = Vec::new();
     let mut typed_nodes = 0;
     let mut total_nodes = 0;
@@ -205,27 +366,32 @@ fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEn
     for expr in top_level_decl_items(exprs) {
         collect_declarations(
             expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &mut adt_reg,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &mut state.adt_reg,
             &mut errors,
         );
     }
 
-    for (name, ty_expr) in type_env {
-        let ty = deep_type_to_resolved_type(ty_expr, &mut vg, &adt_reg, &mut HashMap::new());
-        let scheme = env.generalize(&ty, &subst);
-        env.bind(name.clone(), scheme);
+    for (name, ty_expr) in new_phase0e_types {
+        let ty = deep_type_to_resolved_type(
+            ty_expr,
+            &mut state.var_gen,
+            &state.adt_reg,
+            &mut HashMap::new(),
+        );
+        let scheme = state.env.generalize(&ty, &state.subst);
+        state.env.bind(name.clone(), scheme);
     }
 
     for expr in top_level_decl_items(exprs) {
         infer_top_level(
             expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &state.adt_reg,
             &mut errors,
             &mut typed_nodes,
             &mut total_nodes,
@@ -241,6 +407,10 @@ fn infer_phase0e_program_with_env(exprs: &[deep::Expr], type_env: &Phase0eTypeEn
             warning.message,
             vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
         ));
+    }
+
+    if let Some(target_exprs) = run_validate_passes_on {
+        validate_phase0e_program(target_exprs, combined_phase0e, &mut errors);
     }
 
     InferResult {
@@ -1746,6 +1916,15 @@ fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, me
 }
 
 fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    // Preserve historical behavior: build a fresh annotation state from
+    // `builtin_env()` + an EMPTY ADT registry (no prelude registration).
+    // This is asymmetric with `infer_phase0e_program_with_env` (which DOES
+    // register prelude ADTs), but downstream tooling — the host pipeline's
+    // `expr_type` reader, eval-result root expansion via
+    // `extend_root_names_from_value` — depends on this asymmetric type
+    // metadata shape. Phase C does NOT touch this; the
+    // `_with_context` variant accepts a non-empty context and uses
+    // library state as-is.
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
@@ -1779,6 +1958,64 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         );
 
         annotated.push(annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg));
+    }
+
+    annotated
+}
+
+/// Annotate `exprs` with inferred types, using `context` as the outer
+/// scope. Library schemes are visible during inference; only the
+/// new-code exprs are returned in the annotated result.
+///
+/// When the context is empty (`library_def_count() == 0`) this falls
+/// back to [`annotate_phase0e_program`] to preserve the legacy
+/// "no-prelude" annotation shape that downstream tooling depends on.
+/// Once a non-empty library context is supplied, the library's prelude
+/// ADTs and decls are visible during annotation.
+fn annotate_phase0e_program_with_context(
+    context: &TypeEnv,
+    exprs: &[deep::Expr],
+) -> Vec<deep::Expr> {
+    if context.library_def_count() == 0 {
+        return annotate_phase0e_program(exprs);
+    }
+    let mut state = context.inner().clone();
+    let mut declaration_errors = Vec::new();
+
+    for expr in exprs {
+        collect_declarations(
+            expr,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &mut state.adt_reg,
+            &mut declaration_errors,
+        );
+    }
+
+    let mut annotated = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        let mut step_errors = Vec::new();
+        let mut typed_nodes = 0;
+        let mut total_nodes = 0;
+        infer_top_level(
+            expr,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &state.adt_reg,
+            &mut step_errors,
+            &mut typed_nodes,
+            &mut total_nodes,
+        );
+
+        annotated.push(annotate_expr_with_scope(
+            expr,
+            &state.env,
+            &state.var_gen,
+            &state.subst,
+            &state.adt_reg,
+        ));
     }
 
     annotated
