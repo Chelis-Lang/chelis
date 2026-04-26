@@ -551,6 +551,31 @@ theorem substClauses_notBound
   intro h
   exact (mem_boundVars_substClauses clauses v x z h).elim hcls hv
 
+/-- Binder-freshness transport through substitution. If every binder
+    in `e` and every binder in the substituted payload `v` is fresh for
+    `rhs`, then every binder in `subst e v x` is fresh for `rhs`. -/
+theorem subst_bound_fresh
+    (e v rhs : Term) (x : String)
+    (he : ∀ z, z ∈ boundVars e → z ∉ boundVars rhs)
+    (hv : ∀ z, z ∈ boundVars v → z ∉ boundVars rhs) :
+    ∀ z, z ∈ boundVars (subst e v x) → z ∉ boundVars rhs := by
+  intro z hz
+  rcases mem_boundVars_subst e v x z hz with hzE | hzV
+  · exact he z hzE
+  · exact hv z hzV
+
+/-- Context-name freshness transport through substitution. If every
+    context name in `Γ` is absent from the binders of both `e` and `v`,
+    then it is also absent from the binders of `subst e v x`. -/
+theorem subst_ctx_bound_fresh
+    {Gamma : LinearCtx}
+    (e v : Term) (x : String)
+    (he : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars e)
+    (hv : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars v) :
+    ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (subst e v x) := by
+  intro z hz
+  exact subst_notBound e v x z (he z hz) (hv z hz)
+
 /-- Substitution on a closed term is a no-op: a closed term has no
     free variables, so `subst e v x` equals `e` regardless of `v`/`x`. -/
 theorem subst_closed
