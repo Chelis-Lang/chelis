@@ -4934,7 +4934,7 @@ private theorem preservation_aux
         have hVNil : HasType [] Sigma [] v tArgV [] [] := by
           exact HasType.value_eff_polymorphic hV hv []
         rcases wellScoped_handle_clause h_scope hmem with
-          ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+          ⟨hxk, _hxNotHb, hkHb, _hHbScope⟩
         let y := capturedContName (Term.handle epsH (plug E (Term.perform op v)) clauses)
         have hPlugVar :
             HasType [] Sigma [(y, some tRet)]
@@ -4978,37 +4978,94 @@ private theorem preservation_aux
               (Term.abs y tRet
                 (Term.handle epsH (plug E (Term.var y)) clauses)) :=
           has_type_closed_term_of_closed_input hK0
-        rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
-            kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
-            (EffectRow.removeOps epsB epsH) hb
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses))
-            hBody hK0 hKClosed with
-          ⟨GammaAfterK, hAfterK⟩
-        rcases subst_preserves_typing [] Sigma [] GammaAfterK
-            xVar tArgV t (EffectRow.removeOps epsB epsH)
-            (subst hb
+        have hLexBody :
+            LexicallyScoped
+              ([(xVar, some tArgV)] ++
+                [(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))]) hb :=
+          lexical_handle_clause
+            (tx := tArgV)
+            (tk := Typ.arrow tRet t (EffectRow.removeOps epsB epsH))
+            (lexical_nil h_scope) hmem
+        have hSuffixFreshV :
+            ∀ z,
+              z ∈ linearCtxDom
+                    ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) →
+                z ∉ freeVars v := by
+          intro z hz
+          have hfreeV : freeVars v = [] := by
+            simpa [Closed] using hClosedV
+          simp [linearCtxDom, hfreeV] at hz ⊢
+        rcases
+            subst_preserves_typing_lexical_suffix
+              [] Sigma
+              []
+              ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx)
+              [(xVar, slotX), (kVar, slotK)]
+              xVar tArgV t (EffectRow.removeOps epsB epsH)
+              hb v
+              hBody hLexBody hVNil hClosedV hSuffixFreshV with
+          ⟨GammaAfterXPre, slotAfterX, GammaAfterXPost,
+            hAfterXOut, hAfterXPreSub, _hAfterXSlot, _hAfterXPostSub, hAfterX⟩
+        have hAfterXPreNil : GammaAfterXPre = [] := by
+          cases GammaAfterXPre with
+          | nil =>
+              rfl
+          | cons hd tl =>
+              cases hAfterXPreSub
+        subst hAfterXPreNil
+        have hAfterXPostEq : GammaAfterXPost = [(kVar, slotK)] := by
+          have hOutCons :
+              [(xVar, slotX), (kVar, slotK)] =
+                (xVar, slotAfterX) :: GammaAfterXPost := by
+            simpa using hAfterXOut
+          have hTail : [(kVar, slotK)] = GammaAfterXPost := by
+            simpa using congrArg List.tail hOutCons
+          exact hTail.symm
+        subst hAfterXPostEq
+        have hkNotV : kVar ∉ boundVars v := by
+          intro hkV
+          have hkPerform : kVar ∈ boundVars (Term.perform op v) := by
+            simpa [boundVars] using hkV
+          have hkBody :
+              kVar ∈ boundVars (plug E (Term.perform op v)) :=
+            mem_boundVars_plug hkPerform
+          exact (wellScoped_handle_clause_not_in_body h_scope hmem).2 hkBody
+        have hAfterKNodup :
+            NoDupNames
+              ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) := by
+          simp [NoDupNames, linearCtxDom]
+        have hAfterKCtxFresh :
+            ∀ z,
+              z ∈ linearCtxDom
+                    ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) →
+                z ∉ boundVars (subst hb v xVar) := by
+          refine
+            subst_ctx_bound_fresh
+              (Gamma := [(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))])
+              hb v xVar ?_ ?_
+          · intro z hz
+            simp [linearCtxDom] at hz
+            rcases hz with rfl
+            exact hkHb
+          · intro z hz
+            simp [linearCtxDom] at hz
+            rcases hz with rfl
+            exact hkNotV
+        rcases
+            subst_preserves_typing_ctx_fresh
+              [] Sigma
+              []
+              [(kVar, slotK)]
+              kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+              (EffectRow.removeOps epsB epsH)
+              (subst hb v xVar)
               (Term.abs y tRet
-                (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
-            v
-            hAfterK hVNil hClosedV with
+                (Term.handle epsH (plug E (Term.var y)) clauses))
+              hAfterX hAfterKNodup hAfterKCtxFresh hK0 hKClosed with
           ⟨GammaFinal, hFinal⟩
         have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
         subst hGammaFinal
-        have hswap :
-            subst (subst hb v xVar)
-                (Term.abs y tRet
-                  (Term.handle epsH (plug E (Term.var y)) clauses)) kVar =
-              subst
-                (subst hb
-                  (Term.abs y tRet
-                    (Term.handle epsH (plug E (Term.var y)) clauses)) kVar)
-                v xVar := by
-          exact subst_commute_closed hb v
-            (Term.abs y tRet
-              (Term.handle epsH (plug E (Term.var y)) clauses))
-            xVar kVar hxk hClosedV hKClosed
-        simpa [y, hswap] using
+        simpa [y] using
           (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub),
         h_wf, fun _ _ _ hlook => hlook⟩
   | handleOpCtxs s op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
@@ -5032,7 +5089,7 @@ private theorem preservation_aux
         have hVNil : HasType [] Sigma [] v tArgV [] [] := by
           exact HasType.value_eff_polymorphic hV hv []
         rcases wellScoped_handle_clause h_scope hmem with
-          ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+          ⟨hxk, _hxNotHb, hkHb, _hHbScope⟩
         let y := capturedContName (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)
         have hPlugVar :
             HasType [] Sigma [(y, some tRet)]
@@ -5076,37 +5133,94 @@ private theorem preservation_aux
               (Term.abs y tRet
                 (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) :=
           has_type_closed_term_of_closed_input hK0
-        rcases subst_preserves_typing [] Sigma [(xVar, some tArgV)] [(xVar, slotX), (kVar, slotK)]
-            kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
-            (EffectRow.removeOps epsB epsH) hb
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-            hBody hK0 hKClosed with
-          ⟨GammaAfterK, hAfterK⟩
-        rcases subst_preserves_typing [] Sigma [] GammaAfterK
-            xVar tArgV t (EffectRow.removeOps epsB epsH)
-            (subst hb
+        have hLexBody :
+            LexicallyScoped
+              ([(xVar, some tArgV)] ++
+                [(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))]) hb :=
+          lexical_handle_clause
+            (tx := tArgV)
+            (tk := Typ.arrow tRet t (EffectRow.removeOps epsB epsH))
+            (lexical_nil h_scope) hmem
+        have hSuffixFreshV :
+            ∀ z,
+              z ∈ linearCtxDom
+                    ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) →
+                z ∉ freeVars v := by
+          intro z hz
+          have hfreeV : freeVars v = [] := by
+            simpa [Closed] using hClosedV
+          simp [linearCtxDom, hfreeV] at hz ⊢
+        rcases
+            subst_preserves_typing_lexical_suffix
+              [] Sigma
+              []
+              ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx)
+              [(xVar, slotX), (kVar, slotK)]
+              xVar tArgV t (EffectRow.removeOps epsB epsH)
+              hb v
+              hBody hLexBody hVNil hClosedV hSuffixFreshV with
+          ⟨GammaAfterXPre, slotAfterX, GammaAfterXPost,
+            hAfterXOut, hAfterXPreSub, _hAfterXSlot, _hAfterXPostSub, hAfterX⟩
+        have hAfterXPreNil : GammaAfterXPre = [] := by
+          cases GammaAfterXPre with
+          | nil =>
+              rfl
+          | cons hd tl =>
+              cases hAfterXPreSub
+        subst hAfterXPreNil
+        have hAfterXPostEq : GammaAfterXPost = [(kVar, slotK)] := by
+          have hOutCons :
+              [(xVar, slotX), (kVar, slotK)] =
+                (xVar, slotAfterX) :: GammaAfterXPost := by
+            simpa using hAfterXOut
+          have hTail : [(kVar, slotK)] = GammaAfterXPost := by
+            simpa using congrArg List.tail hOutCons
+          exact hTail.symm
+        subst hAfterXPostEq
+        have hkNotV : kVar ∉ boundVars v := by
+          intro hkV
+          have hkPerform : kVar ∈ boundVars (Term.perform op v) := by
+            simpa [boundVars] using hkV
+          have hkBody :
+              kVar ∈ boundVars (multiPlug Es (Term.perform op v)) :=
+            mem_boundVars_multiPlug hkPerform
+          exact (wellScoped_handle_clause_not_in_body h_scope hmem).2 hkBody
+        have hAfterKNodup :
+            NoDupNames
+              ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) := by
+          simp [NoDupNames, linearCtxDom]
+        have hAfterKCtxFresh :
+            ∀ z,
+              z ∈ linearCtxDom
+                    ([(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))] : LinearCtx) →
+                z ∉ boundVars (subst hb v xVar) := by
+          refine
+            subst_ctx_bound_fresh
+              (Gamma := [(kVar, some (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)))])
+              hb v xVar ?_ ?_
+          · intro z hz
+            simp [linearCtxDom] at hz
+            rcases hz with rfl
+            exact hkHb
+          · intro z hz
+            simp [linearCtxDom] at hz
+            rcases hz with rfl
+            exact hkNotV
+        rcases
+            subst_preserves_typing_ctx_fresh
+              [] Sigma
+              []
+              [(kVar, slotK)]
+              kVar (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) t
+              (EffectRow.removeOps epsB epsH)
+              (subst hb v xVar)
               (Term.abs y tRet
-                (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
-            v
-            hAfterK hVNil hClosedV with
+                (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
+              hAfterX hAfterKNodup hAfterKCtxFresh hK0 hKClosed with
           ⟨GammaFinal, hFinal⟩
         have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
         subst hGammaFinal
-        have hswap :
-            subst (subst hb v xVar)
-                (Term.abs y tRet
-                  (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar =
-              subst
-                (subst hb
-                  (Term.abs y tRet
-                    (Term.handle epsH (multiPlug Es (Term.var y)) clauses)) kVar)
-                v xVar := by
-          exact subst_commute_closed hb v
-            (Term.abs y tRet
-              (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-            xVar kVar hxk hClosedV hKClosed
-        simpa [y, hswap] using
+        simpa [y] using
           (HasType.subEff [] Sigma [] [] _ _ (EffectRow.removeOps epsB epsH) eps hFinal hSub),
         h_wf, fun _ _ _ hlook => hlook⟩
   | tgrad s x tv tOut body =>

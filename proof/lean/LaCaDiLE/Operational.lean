@@ -251,6 +251,23 @@ def multiPlug : EvalCtxChain → Term → Term
   | [],      e => e
   | E :: Es, e => plug E (multiPlug Es e)
 
+theorem mem_boundVars_plug
+    {E : EvalCtx} {e : Term} {z : String}
+    (hz : z ∈ boundVars e) :
+    z ∈ boundVars (plug E e) := by
+  cases E <;> simp [plug, boundVars, hz, List.mem_append]
+
+theorem mem_boundVars_multiPlug
+    {Es : EvalCtxChain} {e : Term} {z : String}
+    (hz : z ∈ boundVars e) :
+    z ∈ boundVars (multiPlug Es e) := by
+  induction Es generalizing e with
+  | nil =>
+      simpa [multiPlug] using hz
+  | cons E Es ih =>
+      simp [multiPlug]
+      exact mem_boundVars_plug (ih hz)
+
 /-- Runtime locations mentioned by the outer frames of an evaluation
     context chain, excluding the hole term itself. -/
 def chainLocRefs : EvalCtxChain → List Loc

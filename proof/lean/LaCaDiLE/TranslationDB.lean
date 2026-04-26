@@ -3880,7 +3880,7 @@ theorem preservation_beta_via_db
       simp [boundVars, hy]
     exact hAbsV y hyAbs
   rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
-      x tArg tRet epsBody body v hBody hLexBody hArgNil hClosed hFreshBody with
+      x tArg tRet epsBody body v hBody hLexBody hArgNil hClosed with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -3913,7 +3913,7 @@ theorem preservation_letBind_via_db
   have hValNil : HasType [] Sigma [] v t1 [] [] :=
     HasType.value_eff_polymorphic_bridge hVal hv []
   rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
-      x t1 t epsBody body v hBody hLexBody hValNil hClosed hBodyVal with
+      x t1 t epsBody body v hBody hLexBody hValNil hClosed with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -3995,11 +3995,11 @@ theorem preservation_letpair_via_db
       ∀ z, z ∈ boundVars (subst body v2 y) → z ∉ boundVars v1 :=
     subst_bound_fresh body v2 v1 y hFreshBodyV1 hV2FreshV1
   rcases subst_preserves_typing_lexical [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
-      y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Closed hFreshBodyV2 with
+      y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Closed with
     ⟨GammaAfterY, hAfterY⟩
   rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterY
       x t1 t epsBody (subst body v2 y) v1
-      hAfterY hAfterYNodup hAfterYCtxFresh hV1Nil hV1Closed hAfterYFreshV1 with
+      hAfterY hAfterYNodup hAfterYCtxFresh hV1Nil hV1Closed with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
@@ -4151,12 +4151,12 @@ theorem preservation_handleOpDirect_via_db
   rcases subst_preserves_typing_lexical [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
       k (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) tRet
       (EffectRow.removeOps epsB epsH) hb
-      idCont hBody hLexBody hIdAbs hIdClosed hFreshBodyId with
+      idCont hBody hLexBody hIdAbs hIdClosed with
     ⟨GammaAfterK, hAfterK⟩
   rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterK
       x tArgV tRet (EffectRow.removeOps epsB epsH)
       (subst hb idCont k) v
-      hAfterK hAfterKNodup hAfterKCtxFresh hVNil hClosedV hAfterKFreshV with
+      hAfterK hAfterKNodup hAfterKCtxFresh hVNil hClosedV with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
