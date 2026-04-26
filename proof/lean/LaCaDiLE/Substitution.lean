@@ -1140,6 +1140,18 @@ private theorem boundFresh_of_slotSub
     simpa [slotSub_names_eq hsub] using hy
   exact hFresh y hy'
 
+private theorem slotSub_live_middle
+    {GammaPre suffix : LinearCtx} {x : String}
+    {slotX : Option Typ} {t1 : Typ}
+    (hslot : slotX = none ∨ slotX = some t1) :
+    SlotSub (GammaPre ++ [(x, slotX)] ++ suffix)
+      (GammaPre ++ [(x, some t1)] ++ suffix) := by
+  have hmid : SlotSub ([(x, slotX)] : LinearCtx) ([(x, some t1)] : LinearCtx) := by
+    simpa [SlotSub] using hslot
+  simpa [List.append_assoc] using
+    slotSub_append (slotSub_refl GammaPre)
+      (slotSub_append hmid (slotSub_refl suffix))
+
 private theorem noDupNames_remove_middle
     {GammaPre suffix : LinearCtx} {x : String} {slot : Option Typ}
     (hnd : NoDupNames (GammaPre ++ [(x, slot)] ++ suffix)) :
@@ -1701,34 +1713,73 @@ private theorem closed_typed_prefix_suffix_weaken
 -- relies on `exchange_tail`; substitution is closed via
 -- `weakening_insert` directly.
 
+/-- Honest named substitution core for the non-captured context-fresh
+    case.
+
+    The real recursive shape is not just "tail binding plus closed
+    payload". Binder cases must recurse under an arbitrary suffix after
+    the distinguished name, and the current middle slot must stay on the
+    canonical `none | some t1` trajectory so recursive second premises
+    can split it with `slotSub_split_target`. The public
+    `subst_preserves_typing_ctx_fresh` theorem below is the `suffix = []`
+    specialization of this core statement. -/
+private theorem subst_preserves_typing_ctx_fresh_aux
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    (x : String) (t1 : Typ)
+    {GammaPre suffix GammaOut : LinearCtx} {slotX : Option Typ}
+    {e v : Term} {t2 : Typ} {eps : EffectRow}
+    (_h_e : HasType Delta Sigma
+      (GammaPre ++ [(x, slotX)] ++ suffix) e t2 eps GammaOut)
+    (_h_live : SlotSub
+      (GammaPre ++ [(x, slotX)] ++ suffix)
+      (GammaPre ++ [(x, some t1)] ++ suffix))
+    (_h_nodup : NoDupNames (GammaPre ++ [(x, slotX)] ++ suffix))
+    (_h_ctx_fresh : ∀ y, y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix) → y ∉ boundVars e)
+    (_h_v : HasType Delta Sigma [] v t1 [] [])
+    (_h_closed : Closed v)
+    (_h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v)
+    (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
+    ∃ GammaOut' : LinearCtx,
+      HasType Delta Sigma (GammaPre ++ suffix) (subst e v x) t2 eps GammaOut' := by
+  sorry -- Remaining blocker is the theorem's recursive binder-body
+        -- shape: the proof must recurse under suffixes and track the
+        -- live/dead middle slot with SlotSub.
+
 /-- Honest named substitution theorem for the non-captured context-fresh
     case.
 
-    This is the stable core shape: the target binding sits at the tail
-    of the input context, the input names are pairwise distinct, and no
-    context name is shadowed by a binder already present in `e`. The
-    substituted payload is the closed runtime term, so its typing witness
-    is the closed-input form `HasType ... [] v ... []`.
-
-    The remaining blocker is not weakening anymore; it is the recursive
-    proof shape for already-substituted terms. The captured-continuation
-    cases in preservation fall outside this theorem because the inserted
-    continuation term intentionally carries dormant clause binders from
-    the surrounding handler. -/
+    This is the stable public specialization used by the non-captured
+    TranslationDB wrappers: the target binding sits at the tail of the
+    input context, the input names are pairwise distinct, and no context
+    name is shadowed by a binder already present in `e`. The substituted
+    payload is the closed runtime term, so its typing witness is the
+    closed-input form `HasType ... [] v ... []`. -/
 theorem subst_preserves_typing_ctx_fresh
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
-    (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
-    (_h_nodup : NoDupNames (Gamma1 ++ [(x, some t1)]))
-    (_h_ctx_fresh : ∀ y, y ∈ linearCtxDom (Gamma1 ++ [(x, some t1)]) → y ∉ boundVars e)
-    (_h_v : HasType Delta Sigma [] v t1 [] [])
-    (_h_closed : Closed v)
-    (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
+    (h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
+    (h_nodup : NoDupNames (Gamma1 ++ [(x, some t1)]))
+    (h_ctx_fresh : ∀ y, y ∈ linearCtxDom (Gamma1 ++ [(x, some t1)]) → y ∉ boundVars e)
+    (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_closed : Closed v)
+    (h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
-  sorry -- Remaining blocker is the theorem's recursive second-stage
-        -- substitution shape, not the direct lexical base route.
+  simpa using
+    (subst_preserves_typing_ctx_fresh_aux
+      Delta Sigma x t1
+      (GammaPre := Gamma1) (suffix := ([] : LinearCtx)) (GammaOut := Gamma2)
+      (slotX := some t1) (e := e) (v := v) (t2 := t2) (eps := eps)
+      (by simpa using h_e)
+      (slotSub_refl (Gamma1 ++ [(x, some t1)] ++ ([] : LinearCtx)))
+      (by simpa using h_nodup)
+      (by simpa using h_ctx_fresh)
+      h_v h_closed
+      (by
+        intro y hy
+        simp [linearCtxDom] at hy)
+      h_bound_fresh)
 
 /-! ## Main theorem -/
 
