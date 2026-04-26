@@ -147,27 +147,66 @@ impl CompiledContext {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|e| CacheError::Io {
-                op: "create_dir_all",
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-            // Best-effort 0700 on Unix — we don't fail save() if the
-            // chmod is rejected (NFS, exotic FS), but we always try.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            // RT-I4 fix: only create the directory if it's missing, and
+            // do NOT silently rewrite permissions on every save call.
+            // The previous unconditional `set_permissions(parent, 0o700)`
+            // overwrote any user-chosen mode (e.g., a shared 0o755 cache
+            // group dir) on every cache write, which is operationally
+            // surprising. If the directory exists, we honor whatever
+            // mode the user chose. If we have to create it, we create
+            // it with private 0o700 mode via DirBuilder.
+            if !parent.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(parent)
+                        .map_err(|e| CacheError::Io {
+                            op: "create_dir_all",
+                            path: parent.to_path_buf(),
+                            source: e,
+                        })?;
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::create_dir_all(parent).map_err(|e| CacheError::Io {
+                        op: "create_dir_all",
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
+                }
             }
         }
 
         // Same-directory temp file → atomic rename.
+        // RT-I1 fix: include thread id and a fresh nanosecond timestamp
+        // in the tempfile name. The previous `.<file>.tmp.<pid>` pattern
+        // collided when multiple threads in the same process called
+        // `save()` for the same canonical path — one thread's `rename`
+        // consumed the tempfile while another's was still writing,
+        // surfacing as ENOENT or torn writes. Worker pools, async
+        // runtimes, and Phase H's concurrent test workers would all
+        // hit this. Adding tid + nanos makes the temp name unique
+        // per-call.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let tid = format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
         let tmp_name = format!(
-            ".{}.tmp.{}",
+            ".{}.tmp.{}.{}.{}",
             path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("ctx_cache"),
-            std::process::id()
+            std::process::id(),
+            tid,
+            nanos,
         );
         let tmp_path = path
             .parent()

@@ -249,17 +249,23 @@ fn worker_errors_when_compiled_context_bytes_are_corrupt() {
 fn parent_removes_compiled_context_tempfile_on_normal_exit() {
     let (_dir, pkg) = make_minimal_reef_with_test("phase-h-bridge-cleanup");
 
-    let tmpdir = std::env::temp_dir();
-    let snapshot_before = list_tempfile_candidates(&tmpdir);
+    // RT-H fix: snapshot a PRIVATE tmpdir so concurrent test binaries
+    // don't race-leak `chelis-compiled-context-*` files into our view.
+    // The parent honors `CHELIS_TEST_COMPILED_CONTEXT_TMPDIR` and writes
+    // the tempfile into the private dir we own, so the snapshot diff
+    // attributes only this parent's files.
+    let private_tmpdir = tempfile::tempdir().expect("tempdir");
+    let snapshot_before = list_tempfile_candidates(private_tmpdir.path());
 
     let _ = Command::cargo_bin("chelis")
         .expect("binary")
         .current_dir(&pkg)
+        .env("CHELIS_TEST_COMPILED_CONTEXT_TMPDIR", private_tmpdir.path())
         .args(["test", "tests/"])
         .assert()
         .success();
 
-    let snapshot_after = list_tempfile_candidates(&tmpdir);
+    let snapshot_after = list_tempfile_candidates(private_tmpdir.path());
 
     // Net-new entries: in `after` but not `before`. The cleaned-up
     // happy path leaves no leak.
@@ -269,7 +275,7 @@ fn parent_removes_compiled_context_tempfile_on_normal_exit() {
         .collect();
     assert!(
         leaked.is_empty(),
-        "parent leaked {} chelis-compiled-context-*.bin tempfile(s): {:?}",
+        "parent leaked {} chelis-compiled-context-*.bin tempfile(s) in private tmpdir: {:?}",
         leaked.len(),
         leaked
     );
