@@ -1701,25 +1701,27 @@ private theorem closed_typed_prefix_suffix_weaken
 -- relies on `exchange_tail`; substitution is closed via
 -- `weakening_insert` directly.
 
-/-! ## Main theorem -/
+/-- Honest named substitution theorem for the non-captured context-fresh
+    case.
 
-/-- Honest named substitution theorem for the direct lexical case.
+    This is the stable core shape: the target binding sits at the tail
+    of the input context, the input names are pairwise distinct, and no
+    context name is shadowed by a binder already present in `e`. The
+    substituted payload is the closed runtime term, so its typing witness
+    is the closed-input form `HasType ... [] v ... []`.
 
-    This is the theorem shape the singleton/pair/direct-handler
-    wrappers actually need on their first substitution step: the source
-    derivation is lexical with respect to the input context, and every
-    binder already present in `e` is absent from the substituted term's
-    bound-name surface. The substituted term itself is the closed
-    runtime payload, so its typing witness is the closed-input form
-    `HasType ... [] v ... []`. The remaining hard cases are the
-    second-stage substitutions on already-substituted terms, especially
-    captured continuations that carry dormant clause binders. -/
-theorem subst_preserves_typing_lexical
+    The remaining blocker is not weakening anymore; it is the recursive
+    proof shape for already-substituted terms. The captured-continuation
+    cases in preservation fall outside this theorem because the inserted
+    continuation term intentionally carries dormant clause binders from
+    the surrounding handler. -/
+theorem subst_preserves_typing_ctx_fresh
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
     (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
-    (_h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
+    (_h_nodup : NoDupNames (Gamma1 ++ [(x, some t1)]))
+    (_h_ctx_fresh : ∀ y, y ∈ linearCtxDom (Gamma1 ++ [(x, some t1)]) → y ∉ boundVars e)
     (_h_v : HasType Delta Sigma [] v t1 [] [])
     (_h_closed : Closed v)
     (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
@@ -1727,6 +1729,30 @@ theorem subst_preserves_typing_lexical
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
   sorry -- Remaining blocker is the theorem's recursive second-stage
         -- substitution shape, not the direct lexical base route.
+
+/-! ## Main theorem -/
+
+/-- Lexical wrapper around `subst_preserves_typing_ctx_fresh`.
+
+    The first substitution step in the beta/let/direct-handler wrappers
+    naturally arrives with a `LexicallyScoped` premise; this theorem
+    simply projects the `NoDupNames` and context-binder freshness facts
+    needed by the core context-fresh theorem. -/
+theorem subst_preserves_typing_lexical
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
+    (x : String) (t1 t2 : Typ) (eps : EffectRow)
+    (e v : Term)
+    (h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
+    (h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
+    (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_closed : Closed v)
+    (h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
+    ∃ Gamma2' : LinearCtx,
+      HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
+  rcases h_lex with ⟨h_nodup, h_ctx_fresh, _hws⟩
+  exact subst_preserves_typing_ctx_fresh
+    Delta Sigma Gamma1 Gamma2 x t1 t2 eps e v
+    h_e h_nodup h_ctx_fresh h_v h_closed h_bound_fresh
 
 /-- Substitution preserves typing (tombstone semantics).
 
@@ -1736,7 +1762,13 @@ theorem subst_preserves_typing_lexical
     the substituted term is the closed runtime payload, so the honest
     theorem uses the closed-input typing witness `HasType ... [] v ...
     []`. The `Closed v` premise makes the naive capture-unaware `subst`
-    sound. -/
+    sound.
+
+    Remaining blocker: this more permissive statement is only still
+    needed by the captured-continuation preservation cases, where the
+    inserted continuation term carries dormant handler-clause binders
+    from the surrounding context. The context-fresh theorem above is the
+    honest route for the non-captured cases. -/
 theorem subst_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)

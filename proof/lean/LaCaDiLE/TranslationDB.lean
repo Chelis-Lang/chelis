@@ -3966,17 +3966,40 @@ theorem preservation_letpair_via_db
     rw [hV2Closed] at hx
     simp at hx
   rcases wellScoped_letpair_parts h_scope with
-    ⟨_hPairScope, hxy, _hxPair, hxBody, _hyPair, hyBody, hBodyScope, _hPairBody, hBodyPair⟩
+    ⟨hPairScope, hxy, _hxPair, hxBody, _hyPair, hyBody, hBodyScope, _hPairBody, hBodyPair⟩
+  rcases wellScoped_pair_parts hPairScope with
+    ⟨_hV1Scope, _hV2Scope, _hV1FreshV2, hV2FreshV1⟩
   have hLexBody : LexicallyScoped [(x, some t1), (y, some t2)] body :=
     lexical_pair hxy hxBody hyBody hBodyScope
   have hFreshBodyV2 : ∀ z, z ∈ boundVars body → z ∉ boundVars v2 := by
     intro z hz hzV2
     exact hBodyPair z hz (by simp [boundVars, hzV2])
+  have hAfterYNodup : NoDupNames ([(x, some t1)] : LinearCtx) := by
+    simp [NoDupNames, linearCtxDom]
+  have hAfterYCtxFresh :
+      ∀ z, z ∈ linearCtxDom ([(x, some t1)] : LinearCtx) →
+        z ∉ boundVars (subst body v2 y) := by
+    refine subst_ctx_bound_fresh (Gamma := [(x, some t1)]) body v2 y ?_ ?_
+    · intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with rfl
+      exact hxBody
+    · intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with rfl
+      exact hxNotV2
+  have hFreshBodyV1 : ∀ z, z ∈ boundVars body → z ∉ boundVars v1 := by
+    intro z hz hzV1
+    exact hBodyPair z hz (by simp [boundVars, hzV1])
+  have hAfterYFreshV1 :
+      ∀ z, z ∈ boundVars (subst body v2 y) → z ∉ boundVars v1 :=
+    subst_bound_fresh body v2 v1 y hFreshBodyV1 hV2FreshV1
   rcases subst_preserves_typing_lexical [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
       y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Closed hFreshBodyV2 with
     ⟨GammaAfterY, hAfterY⟩
-  rcases subst_preserves_typing [] Sigma [] GammaAfterY
-      x t1 t epsBody (subst body v2 y) v1 hAfterY hV1Nil hV1Closed with
+  rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterY
+      x t1 t epsBody (subst body v2 y) v1
+      hAfterY hAfterYNodup hAfterYCtxFresh hV1Nil hV1Closed hAfterYFreshV1 with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
@@ -4028,7 +4051,7 @@ theorem preservation_handleOpDirect_via_db
   have hVNil : HasType [] Sigma [] v tArgV [] [] :=
     HasType.value_eff_polymorphic_bridge hV hv []
   rcases wellScoped_handle_clause h_scope hmem with
-    ⟨hxk, _hxNotHb, _hkNotHb, _hHbScope⟩
+    ⟨hxk, hxHb, _hkNotHb, _hHbScope⟩
   let y : String := directIdContName epsH op v clauses
   let idCont : Term := directIdCont epsH op v clauses tRet
   have hIdBody0 :
@@ -4067,29 +4090,73 @@ theorem preservation_handleOpDirect_via_db
       (tx := tArgV)
       (tk := Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH))
       (lexical_nil h_scope) hmem
-  have hFreshClause :
+  have hFreshSelected :
+      directIdContName epsH op v clauses ≠ x ∧
+      directIdContName epsH op v clauses ≠ k ∧
       freshInTerm (directIdContName epsH op v clauses) hb :=
     (capturedContName_fresh_selected_clause
       (epsH := epsH)
       (body := Term.perform op v)
       (clauses := clauses)
       (op := op) (x := x) (k := k) (hb := hb)
-      hmem).2.2
+      hmem)
+  have hFreshClause :
+      freshInTerm (directIdContName epsH op v clauses) hb :=
+    hFreshSelected.2.2
   have hFreshBodyId : ∀ z, z ∈ boundVars hb → z ∉ boundVars idCont := by
     intro z hz hzId
     have hyNotHb : directIdContName epsH op v clauses ∉ boundVars hb := hFreshClause.2
     have hzEq : z = directIdContName epsH op v clauses := by
       simpa [idCont, y, directIdCont, directIdContName, boundVars] using hzId
     exact hyNotHb (hzEq ▸ hz)
+  have hAfterKNodup : NoDupNames ([(x, some tArgV)] : LinearCtx) := by
+    simp [NoDupNames, linearCtxDom]
+  have hxIdCont : x ∉ boundVars idCont := by
+    intro hx
+    have hxy : x = y := by
+      simpa [idCont, y, directIdCont, directIdContName, boundVars] using hx
+    exact hFreshSelected.1 hxy.symm
+  have hAfterKCtxFresh :
+      ∀ z, z ∈ linearCtxDom ([(x, some tArgV)] : LinearCtx) →
+        z ∉ boundVars (subst hb idCont k) := by
+    refine subst_ctx_bound_fresh (Gamma := [(x, some tArgV)]) hb idCont k ?_ ?_
+    · intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with rfl
+      exact hxHb
+    · intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with rfl
+      exact hxIdCont
+  have hFreshBodyV : ∀ z, z ∈ boundVars hb → z ∉ boundVars v := by
+    intro z hz
+    have hBodyFresh := wellScoped_handle_clause_body_disjoint h_scope hmem z hz
+    simpa [boundVars] using hBodyFresh
+  have hyNotV : y ∉ boundVars v := by
+    have hFreshHandle :
+        freshInTerm (capturedContName (Term.handle epsH (Term.perform op v) clauses))
+          (Term.handle epsH (Term.perform op v) clauses) :=
+      capturedContName_fresh_handle_body (epsH := epsH) (body := Term.perform op v) (clauses := clauses)
+    have hFreshPerform : freshInTerm y (Term.perform op v) :=
+      freshInTerm_handle_body hFreshHandle
+    exact (freshInTerm_perform hFreshPerform).2
+  have hIdContFreshV : ∀ z, z ∈ boundVars idCont → z ∉ boundVars v := by
+    intro z hz
+    have hzEq : z = y := by
+      simpa [idCont, y, directIdCont, directIdContName, boundVars] using hz
+    exact hzEq ▸ hyNotV
+  have hAfterKFreshV :
+      ∀ z, z ∈ boundVars (subst hb idCont k) → z ∉ boundVars v :=
+    subst_bound_fresh hb idCont v k hFreshBodyV hIdContFreshV
   rcases subst_preserves_typing_lexical [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
       k (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) tRet
       (EffectRow.removeOps epsB epsH) hb
       idCont hBody hLexBody hIdAbs hIdClosed hFreshBodyId with
     ⟨GammaAfterK, hAfterK⟩
-  rcases subst_preserves_typing [] Sigma [] GammaAfterK
+  rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterK
       x tArgV tRet (EffectRow.removeOps epsB epsH)
       (subst hb idCont k) v
-      hAfterK hVNil hClosedV with
+      hAfterK hAfterKNodup hAfterKCtxFresh hVNil hClosedV hAfterKFreshV with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
