@@ -1080,12 +1080,39 @@ theorem list_append_eq_split {α} :
     | nil =>
       simp at h
       exact Or.inr ⟨a :: A, by simp, by simp [h]⟩
-    | cons c C =>
+  | cons c C =>
       simp at h
       obtain ⟨hac, hrest⟩ := h
       rcases ih B C D hrest with ⟨m, hCm, hBm⟩ | ⟨m, hAm, hDm⟩
       · exact Or.inl ⟨m, by simp [hac, hCm], hBm⟩
       · exact Or.inr ⟨m, by simp [hac, hAm], hDm⟩
+
+private theorem slotSub_names_eq
+    {out inp : LinearCtx}
+    (h : SlotSub out inp) :
+    linearCtxDom out = linearCtxDom inp := by
+  induction out generalizing inp with
+  | nil =>
+      cases inp <;> simp [SlotSub] at h ⊢
+  | cons outHd outTl ih =>
+      cases inp with
+      | nil =>
+          cases h
+      | cons inpHd inpTl =>
+          rcases outHd with ⟨xOut, slotOut⟩
+          rcases inpHd with ⟨xIn, slotIn⟩
+          rcases h with ⟨hname, _hslot, htail⟩
+          simp [linearCtxDom, hname, ih htail]
+
+private theorem boundFresh_of_slotSub
+    {out inp : LinearCtx} {v : Term}
+    (hsub : SlotSub out inp)
+    (hFresh : ∀ y, y ∈ linearCtxDom inp → y ∉ boundVars v) :
+    ∀ y, y ∈ linearCtxDom out → y ∉ boundVars v := by
+  intro y hy
+  have hy' : y ∈ linearCtxDom inp := by
+    simpa [slotSub_names_eq hsub] using hy
+  exact hFresh y hy'
 
 private theorem not_mem_linearCtxDom_append_singleton
     {y x : String} {Gamma : LinearCtx} {slot : Option Typ}
