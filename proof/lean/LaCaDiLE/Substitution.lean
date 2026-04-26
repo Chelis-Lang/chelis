@@ -1454,6 +1454,56 @@ private theorem weakening_beforeSuffix_clauses
 
 end
 
+/-- Position-indexed weakening with an arbitrary inserted slot.
+    This is the tombstone-general form used internally by the honest
+    substitution proof. -/
+theorem weakening_insert_slot
+    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (slot_y : Option Typ)
+    {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    ∀ Gamma_pre Gamma_post,
+      Gamma = Gamma_pre ++ Gamma_post →
+      y ∉ linearCtxDom Gamma_pre → y ∉ linearCtxDom Gamma_post →
+      freshInTerm y e →
+      ∃ Gamma'_pre Gamma'_post,
+        Gamma' = Gamma'_pre ++ Gamma'_post ∧
+        HasType Delta Sigma (Gamma_pre ++ [(y, slot_y)] ++ Gamma_post) e t eps
+                (Gamma'_pre ++ [(y, slot_y)] ++ Gamma'_post) := by
+  intro Gamma_pre Gamma_post hsplit hfp hfq h_fresh_term
+  let entry : String × Option Typ := (y, slot_y)
+  let j := Gamma_post.length
+  have hj : j ≤ Gamma.length := by
+    rw [hsplit]
+    simp [j, List.length_append]
+  have hdom : y ∉ linearCtxDom Gamma := by
+    rw [hsplit]
+    intro hy
+    simp [linearCtxDom, List.map_append] at hy
+    exact hy.elim (fun h => hfp (by simpa [linearCtxDom] using h))
+      (fun h => hfq (by simpa [linearCtxDom] using h))
+  have hweak := weakening_beforeSuffix Delta Sigma y slot_y h j hj hdom h_fresh_term
+  have hin :
+      insertBeforeSuffix Gamma j entry = Gamma_pre ++ [entry] ++ Gamma_post := by
+    rw [hsplit]
+    simpa [entry, j] using insertBeforeSuffix_eq_split Gamma_pre Gamma_post entry
+  let Gamma'_pre := Gamma'.take (Gamma'.length - j)
+  let Gamma'_post := Gamma'.drop (Gamma'.length - j)
+  have hsplit' : Gamma' = Gamma'_pre ++ Gamma'_post := by
+    simp [Gamma'_pre, Gamma'_post, List.take_append_drop]
+  have hj' : j ≤ Gamma'.length := by
+    have hlen : Gamma.length = Gamma'.length := hasType_length_preserved h
+    rw [← hlen]
+    exact hj
+  have hpostlen : Gamma'_post.length = j := by
+    simp [Gamma'_post, Nat.sub_sub_self hj']
+  have hout :
+      insertBeforeSuffix Gamma' j entry = Gamma'_pre ++ [entry] ++ Gamma'_post := by
+    rw [hsplit']
+    simpa [entry, hpostlen] using insertBeforeSuffix_eq_split Gamma'_pre Gamma'_post entry
+  refine ⟨Gamma'_pre, Gamma'_post, hsplit', ?_⟩
+  rw [hin, hout] at hweak
+  simpa [entry] using hweak
+
 /-- Position-indexed weakening. For any split of the input context
     `Γ = Γ_pre ++ Γ_post`, inserting a fresh binding `(y, some t_y)`
     between the two halves yields a new derivation whose output context
@@ -1478,40 +1528,27 @@ theorem weakening_insert
         HasType Delta Sigma (Gamma_pre ++ [(y, some t_y)] ++ Gamma_post) e t eps
                 (Gamma'_pre ++ [(y, some t_y)] ++ Gamma'_post) := by
   intro Gamma_pre Gamma_post hsplit hfp hfq h_fresh_term
-  let entry : String × Option Typ := (y, some t_y)
-  let j := Gamma_post.length
-  have hj : j ≤ Gamma.length := by
-    rw [hsplit]
-    simp [j, List.length_append]
-  have hdom : y ∉ linearCtxDom Gamma := by
-    rw [hsplit]
-    intro hy
-    simp [linearCtxDom, List.map_append] at hy
-    exact hy.elim (fun h => hfp (by simpa [linearCtxDom] using h))
-      (fun h => hfq (by simpa [linearCtxDom] using h))
-  have hweak := weakening_beforeSuffix Delta Sigma y t_y h j hj hdom h_fresh_term
-  have hin :
-      insertBeforeSuffix Gamma j entry = Gamma_pre ++ [entry] ++ Gamma_post := by
-    rw [hsplit]
-    simpa [entry, j] using insertBeforeSuffix_eq_split Gamma_pre Gamma_post entry
-  let Gamma'_pre := Gamma'.take (Gamma'.length - j)
-  let Gamma'_post := Gamma'.drop (Gamma'.length - j)
-  have hsplit' : Gamma' = Gamma'_pre ++ Gamma'_post := by
-    simp [Gamma'_pre, Gamma'_post, List.take_append_drop]
-  have hj' : j ≤ Gamma'.length := by
-    have hlen : Gamma.length = Gamma'.length := hasType_length_preserved h
-    rw [← hlen]
-    exact hj
-  have hpostlen : Gamma'_post.length = j := by
-    simp [Gamma'_post, Nat.sub_sub_self hj']
-  have hout :
-      insertBeforeSuffix Gamma' j entry = Gamma'_pre ++ [entry] ++ Gamma'_post := by
-    rw [hsplit']
-    simpa [entry, hpostlen] using insertBeforeSuffix_eq_split Gamma'_pre Gamma'_post entry
-  refine ⟨Gamma'_pre, Gamma'_post, hsplit', ?_⟩
-  rw [hin, hout] at hweak
-  simpa [entry] using hweak
+  simpa using
+    (weakening_insert_slot Delta Sigma y (some t_y) h
+      Gamma_pre Gamma_post hsplit hfp hfq h_fresh_term)
 
+
+/-- Tail weakening with an arbitrary inserted slot. -/
+theorem weakening_tail_slot
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma Gamma' : LinearCtx)
+    (y : String) (slot_y : Option Typ) (t : Typ) (eps : EffectRow) (e : Term)
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (h_fresh : y ∉ linearCtxDom Gamma)
+    (h_fresh_term : freshInTerm y e) :
+    ∃ Gamma'_pre Gamma'_post : LinearCtx,
+      Gamma' = Gamma'_pre ++ Gamma'_post ∧
+      HasType Delta Sigma (Gamma ++ [(y, slot_y)]) e t eps
+              (Gamma'_pre ++ [(y, slot_y)] ++ Gamma'_post) := by
+  have hfp : y ∉ linearCtxDom ([] : LinearCtx) := by simp [linearCtxDom]
+  have hsplit : Gamma = Gamma ++ ([] : LinearCtx) := by simp
+  have hres :=
+    weakening_insert_slot Delta Sigma y slot_y h Gamma [] hsplit h_fresh hfp h_fresh_term
+  simpa using hres
 
 /-- Weakening: adding an unused binding at the tail of the linear
     context preserves typing. Derived as a corollary of
@@ -1526,10 +1563,8 @@ theorem weakening_tail
       Gamma' = Gamma'_pre ++ Gamma'_post ∧
       HasType Delta Sigma (Gamma ++ [(y, some t')]) e t eps
               (Gamma'_pre ++ [(y, some t')] ++ Gamma'_post) := by
-  have hfp : y ∉ linearCtxDom ([] : LinearCtx) := by simp [linearCtxDom]
-  have hsplit : Gamma = Gamma ++ ([] : LinearCtx) := by simp
-  have hres := weakening_insert Delta Sigma y t' h Gamma [] hsplit h_fresh hfp h_fresh_term
-  simpa using hres
+  simpa using
+    (weakening_tail_slot Delta Sigma Gamma Gamma' y (some t') t eps e h h_fresh h_fresh_term)
 
 -- NOTE: `exchange_tail` removed entirely. Its original statement
 -- (rigid output context across an adjacent swap) is provably false
