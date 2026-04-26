@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// A byte-offset range in source text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     /// Byte offset of the start of this span in the source.
     pub offset: usize,

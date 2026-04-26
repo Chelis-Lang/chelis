@@ -398,6 +398,7 @@ version = "0.2.7"
 dependencies = [
  "miette",
  "proptest",
+ "serde",
  "thiserror",
 ]
 
@@ -527,6 +528,7 @@ dependencies = [
  "chelis-deep",
  "miette",
  "proptest",
+ "serde",
  "thiserror",
 ]
 

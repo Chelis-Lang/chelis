@@ -98,7 +98,7 @@ pub struct PreparedProgram {
 /// All fields are intentionally `pub(crate)`; callers treat the value as an
 /// opaque handle other than `package_root`, which is exposed because
 /// `chelis test` uses it for file discovery.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparedReefGraph {
     pub package_root: PathBuf,
     pub(crate) graph: PackageGraph,
@@ -106,6 +106,22 @@ pub struct PreparedReefGraph {
     pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
+}
+
+impl PreparedReefGraph {
+    /// Encode the graph to bincode for cross-process sharing. The parent
+    /// `cmd_test` writes this once and passes the path to each worker via
+    /// the `CHELIS_TEST_PREBUILT_GRAPH` env var, so workers skip the
+    /// expensive parse + link + map-build pass for unchanged dependencies
+    /// (chelis-std, etc.). On a 32-file chelis-std corpus this is the
+    /// dominant per-worker cost.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("encode prepared graph: {e}"))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        bincode::deserialize(bytes).map_err(|e| format!("decode prepared graph: {e}"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +133,7 @@ pub struct PackageBuildArtifacts {
     pub archive_sha256: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct LoadedPackage {
     id: PackageId,
     manifest: ReefManifest,
@@ -126,14 +142,14 @@ struct LoadedPackage {
     shell: Option<ShellPackage>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum LoadedSourceKind {
     Root,
     Path { relative: String },
     LocalRegistry,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModuleSource {
     package_name: String,
     module_name: String,
@@ -143,13 +159,13 @@ struct ModuleSource {
     symbols: BTreeMap<String, SymbolKind>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct LinkedModule {
     decls: Vec<Decl>,
     entry: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PackageGraph {
     root_package: String,
     packages: BTreeMap<String, LoadedPackage>,
@@ -2916,6 +2932,35 @@ path = "./mylib"
         assert!(
             err.contains(dir.path().to_str().unwrap_or_default()),
             "error should mention the attempted directory; got: {err}"
+        );
+    }
+
+    /// Phase A foundation: PreparedReefGraph round-trips through bincode.
+    /// This is prerequisite for the Phase I disk cache (CompiledContext::save/
+    /// load_if_fresh will use the same bincode + content-hash pattern).
+    #[test]
+    fn prepared_reef_graph_round_trips_through_bincode() {
+        let (_dir, root) = shared_graph_fixture();
+        let original = prepare_reef_graph(&root).expect("prepare graph");
+        let bytes = original.encode().expect("encode graph");
+        let restored = PreparedReefGraph::decode(&bytes).expect("decode graph");
+
+        // Spot-check the fields that matter for downstream compilation:
+        // package_root + linked decl count + dep shell count + module
+        // prefix. Full PartialEq isn't derived (HashMap key-order would
+        // make it non-deterministic anyway), so check the load-bearing
+        // surface explicitly.
+        assert_eq!(original.package_root, restored.package_root);
+        assert_eq!(
+            original.linked_library_decls.len(),
+            restored.linked_library_decls.len(),
+        );
+        assert_eq!(original.dep_shells.len(), restored.dep_shells.len());
+        assert_eq!(original.eval_module_prefix, restored.eval_module_prefix);
+        assert_eq!(
+            original.internal_maps.len(),
+            restored.internal_maps.len(),
+            "internal maps survive round-trip"
         );
     }
 }

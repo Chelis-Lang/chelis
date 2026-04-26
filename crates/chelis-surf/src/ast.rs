@@ -1,8 +1,9 @@
 use chelis_deep::Span;
+use serde::{Deserialize, Serialize};
 
 // ===== Declarations =====
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Decl {
     Module {
         name: String,
@@ -63,27 +64,27 @@ pub enum Decl {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ImportKind {
     Qualified,
     All,
     Names(Vec<String>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VariantFields {
     Positional(Vec<TypeExpr>),
     Record(Vec<(String, TypeExpr)>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Variant {
     pub name: String,
     pub fields: VariantFields,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Param {
     pub name: String,
     pub ty: Option<TypeExpr>,
@@ -92,7 +93,7 @@ pub struct Param {
 
 // ===== Expressions =====
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Lit(Literal, Span),
     Var(String, Span),
@@ -123,21 +124,21 @@ pub enum Expr {
     Block(Vec<LetBinding>, Box<Expr>, Span), // { x = ...; expr }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LetBinding {
     pub pattern: LetPattern,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LetPattern {
     Var(String, Span),
     Wildcard(Span),
     Tuple(Vec<LetPattern>, Span),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
     Int(i64),
     Float(f64),
@@ -145,7 +146,7 @@ pub enum Literal {
     Bool(bool),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -162,13 +163,13 @@ pub enum BinOp {
     Or,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
@@ -176,7 +177,7 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Pattern {
     Wildcard(Span),
     Var(String, Span),
@@ -189,7 +190,7 @@ pub enum Pattern {
 
 // ===== Type Expressions =====
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Named(String, Span),                       // f32, bool, MyType
     Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
@@ -199,7 +200,7 @@ pub enum TypeExpr {
     Infer(Span),                               // _
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectExpr {
     Diff(Span),
     Random(Span),
