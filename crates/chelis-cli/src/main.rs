@@ -450,23 +450,160 @@ fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (source_kind, source, selected_roots) = match (file, expr) {
+    // Phase H, cmd_eval slice: when the user is evaluating a `--file` whose
+    // reef package is detectable (either the file lives inside a package or
+    // the current working directory does, matching the existing dispatch
+    // inside `chelis_reef::prepare_program_for_eval_file`), build a
+    // `CompiledContext` once and route the user's source through
+    // `eval_in_context`. The library decls (chelis-std + reef deps + the
+    // package's own modules) are already type-checked and lowered, so the
+    // per-eval cost drops to just the user's source. For the no-reef case
+    // (raw `--file foo.ch` outside any package), or for the `--expr` form,
+    // there is no library context to amortize against; keep the existing
+    // monolithic path. Output (formatted result, exit code, error messages)
+    // is byte-identical to pre-refactor on the same input — see
+    // `crates/chelis-cli/tests/phase_h_eval_in_context.rs` for the parity
+    // probes and the Phase G acceptance suite
+    // (`crates/chelis-compiler-api/tests/phase_g_compiled_context.rs`)
+    // for the underlying API parity guarantee.
+    match (file, expr) {
         (Some(path), _) => {
+            if let Some(package_root) = detect_eval_package_root(path)? {
+                let source = fs::read_to_string(path)?;
+                match run_eval_in_context(&package_root, &source) {
+                    Ok(()) => return Ok(()),
+                    Err(EvalInContextError::HashUnsupported) => {
+                        // The Phase G hash step does not yet cover
+                        // `LocalRegistry` packages (chelis-std published
+                        // via `chelis reef publish`). Phase I will
+                        // extend `LoadedPackage` to retain the
+                        // extracted cache root so `source_digests` can
+                        // hash them. Until then, fall through to the
+                        // legacy `prepare_eval` path so users on a
+                        // local-registry-backed chelis-std setup keep
+                        // the same eval behavior they had before the
+                        // Phase H refactor — byte-identical output to
+                        // pre-refactor on the same input.
+                    }
+                    Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
+                }
+            }
+            // Raw `--file foo.ch` outside any reef package, or a reef
+            // package whose graph the new context-builder can't yet
+            // hash: fall back to the legacy `prepare_eval` path.
             let (decls, entry_decls) = load_eval_decls(path)?;
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
-            (
-                SourceKind::Surf,
-                chelis_surf::format::format_program(&decls),
-                Some(root_names_from_decls(&entry_decls, checked.type_env())),
-            )
+            let source = chelis_surf::format::format_program(&decls);
+            let selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
+            run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
         }
-        (None, Some(e)) => (SourceKind::Surf, format!("__eval_result = {e}"), None),
-        (None, None) => {
-            return Err("provide --file or an expression".into());
+        (None, Some(e)) => {
+            // `--expr` is by construction a one-line snippet with no reef
+            // resolution — keep the legacy path.
+            let source = format!("__eval_result = {e}");
+            run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+        }
+        (None, None) => Err("provide --file or an expression".into()),
+    }
+}
+
+/// Detect whether `chelis eval --file <path>` should route through the
+/// Phase H `compile_reef_context + eval_in_context` fast path. Mirrors the
+/// dispatch baked into `chelis_reef::prepare_program_for_eval_file`:
+/// - if `<path>` parses as a single `module Foo` decl, the package root is
+///   discovered by walking up from `<path>` itself,
+/// - otherwise (a loose snippet file), the package root is discovered by
+///   walking up from the current working directory.
+///
+/// Returns `Ok(Some(root))` when a reef package applies (route through the
+/// new path), `Ok(None)` when no reef package is in scope (caller falls
+/// back to the legacy `prepare_eval` path), and `Err` only on
+/// canonicalize/IO errors that would have surfaced during the legacy path
+/// anyway.
+fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let source = fs::read_to_string(file)?;
+    // A parse failure here is non-fatal for routing: fall back to the
+    // legacy path so the user sees the same parse error they would have
+    // before the refactor.
+    let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
+        return Ok(None);
+    };
+    if matches!(decls.as_slice(), [Decl::Module { .. }]) {
+        chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)
+    } else {
+        let cwd = env::current_dir()?;
+        chelis_reef::find_package_root_for_dir(&cwd).map_err(boxed_string_error)
+    }
+}
+
+/// Outcomes from the Phase H new path. Distinct from a generic boxed
+/// error so the caller can fall back to the legacy `prepare_eval` path
+/// on a Phase-I-shaped hash gap (`LocalRegistry` packages aren't yet
+/// hashable) without swallowing real compile / eval failures.
+enum EvalInContextError {
+    /// `compile_reef_context` couldn't hash the package graph because
+    /// `source_digests` doesn't yet cover `LocalRegistry`. The CLI can
+    /// fall back to the legacy path here without losing correctness —
+    /// the legacy path doesn't compute that hash.
+    HashUnsupported,
+    /// Any other failure: type error, effect error, eval error, etc.
+    /// Propagate to the user with the same format the legacy path used.
+    Compile(String),
+}
+
+/// Build a `CompiledContext` for `package_root`, then evaluate `source`
+/// against it. `reef_home` is sourced from the `CHELIS_REEF_HOME` env var
+/// if present (matching how `chelis test` plumbs it to workers); the
+/// current `compile_reef_context` implementation does not consume it but
+/// Phase I will key the disk cache off it.
+fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInContextError> {
+    let reef_home = env::var_os("CHELIS_REEF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(""));
+    let context = match chelis_compiler_api::compile_reef_context(&reef_home, package_root) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            // The hash step is the one place `compile_reef_context`
+            // can fail today on a graph the legacy path handles fine
+            // (LocalRegistry source_digests TODO). Detect that
+            // specifically — anything else is a real error and must
+            // not be silently swallowed.
+            let is_hash_unsupported = err
+                .errors
+                .iter()
+                .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"));
+            if is_hash_unsupported {
+                return Err(EvalInContextError::HashUnsupported);
+            }
+            let msg = err
+                .errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(EvalInContextError::Compile(msg));
         }
     };
-    match try_eval(source_kind, &source, selected_roots.as_deref()) {
+    let result = chelis_compiler_api::eval_in_context(&context, source).map_err(|err| {
+        EvalInContextError::Compile(
+            err.errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })?;
+    let formatted = format_eval_result(&result);
+    if formatted.is_empty() {
+        return Ok(());
+    }
+    println!("{formatted}");
+    Ok(())
+}
+
+fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+    match outcome {
         Ok(result) => {
             if result.is_empty() {
                 return Ok(());
@@ -2217,12 +2354,22 @@ fn try_eval(
             .join("; ")
     })?;
 
-    let mut lines = result.transcript;
+    Ok(format_eval_result(&result))
+}
+
+/// Format an `EvalResult` into the shape `chelis eval --file` emits on
+/// stdout: the transcript lines first, then either a single value (when
+/// exactly one root) or `<name> = <value>` lines (when multiple). Shared
+/// between the legacy `try_eval` path and the Phase H
+/// `eval_in_context` path so the output is byte-identical for either
+/// dispatch.
+fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> String {
+    let mut lines = result.transcript.clone();
     if result.roots.len() == 1 {
         if let Some(root) = result.roots.first() {
             lines.push(format_execution_value(&root.value));
         }
-        return Ok(lines.join("\n"));
+        return lines.join("\n");
     }
 
     lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
@@ -2233,7 +2380,7 @@ fn try_eval(
             format_execution_value(&root.value)
         )
     }));
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
 fn format_execution_value(value: &ExecutionValue) -> String {
