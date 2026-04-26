@@ -45,34 +45,13 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
-use tempfile::tempdir;
 
-fn package_std() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/chelis-std")
-        .canonicalize()
-        .expect("chelis-std package must exist")
-}
+#[path = "common/mod.rs"]
+mod common;
 
-fn write_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write file");
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).expect("create dir");
-    for entry in fs::read_dir(src).expect("read dir") {
-        let entry = entry.expect("dir entry");
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &target);
-        } else {
-            fs::copy(&path, &target).expect("copy file");
-        }
-    }
-}
+use common::{make_app, write_file};
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
     let needs_blas = fs::read_to_string(out_dir.join(source))
@@ -93,36 +72,6 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("gcc should run")
-}
-
-fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let dir = tempdir().expect("tempdir");
-    let reef_home = dir.path().join("reef-home");
-    let std_pkg = dir.path().join("chelis-std");
-    let app_pkg = dir.path().join(dir_name);
-    copy_dir_recursive(&package_std(), &std_pkg);
-    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .args(["reef", "publish", std_pkg.to_str().unwrap()])
-        .assert()
-        .success();
-    write_file(
-        &app_pkg.join("reef.toml"),
-        &format!(
-            r#"[package]
-name = "{dir_name}"
-version = "0.1.0"
-compiler = "=0.2.7"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = {{ version = "0.1.0" }}
-"#
-        ),
-    );
-    (dir, reef_home, app_pkg)
 }
 
 /// Run `chelis build --target c`, compile with gcc, run the binary, and
