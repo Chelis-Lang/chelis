@@ -753,6 +753,99 @@ theorem slotSub_pair_cases
               rcases htail with ⟨_hy, _hslot2, hrest⟩
               cases hrest
 
+theorem slotSub_split_target
+    {out GammaPre GammaPost : LinearCtx} {x : String} {t : Typ}
+    (h : SlotSub out (GammaPre ++ [(x, some t)] ++ GammaPost)) :
+    ∃ outPre slot outPost,
+      out = outPre ++ [(x, slot)] ++ outPost ∧
+      SlotSub outPre GammaPre ∧
+      (slot = none ∨ slot = some t) ∧
+      SlotSub outPost GammaPost := by
+  induction GammaPre generalizing out with
+  | nil =>
+      cases out with
+      | nil =>
+          cases h
+      | cons hd tl =>
+          rcases hd with ⟨xOut, slotOut⟩
+          rcases h with ⟨hname, hslot, htail⟩
+          subst hname
+          exact ⟨[], slotOut, tl, by simp, slotSub_refl [], hslot, htail⟩
+  | cons hd rest ih =>
+      cases out with
+      | nil =>
+          cases h
+      | cons hdOut outTail =>
+          rcases h with ⟨hname, hslot, htail⟩
+          rcases ih htail with
+            ⟨outPre, slot, outPost, hout, hpre, hslotX, hpost⟩
+          exact ⟨hdOut :: outPre, slot, outPost, by simp [hout],
+            ⟨hname, hslot, hpre⟩, hslotX, hpost⟩
+
+theorem noDupNames_of_sublist
+    {Gamma' Gamma : LinearCtx}
+    (hsub : List.Sublist Gamma' Gamma)
+    (hnd : NoDupNames Gamma) :
+    NoDupNames Gamma' := by
+  unfold NoDupNames at hnd ⊢
+  simpa [linearCtxDom] using (hsub.map Prod.fst).nodup hnd
+
+theorem noDupNames_middle_fresh_suffix
+    {GammaPre GammaPost : LinearCtx} {x : String} {t : Typ}
+    (hnd : NoDupNames (GammaPre ++ [(x, some t)] ++ GammaPost)) :
+    x ∉ linearCtxDom GammaPost := by
+  intro hx
+  unfold NoDupNames at hnd
+  simp [linearCtxDom, List.nodup_append] at hnd
+  have hx' : ∃ ty, (x, ty) ∈ GammaPost := by
+    simpa [linearCtxDom] using hx
+  rcases hx' with ⟨ty, hmem⟩
+  exact hnd.2.1.1 ty hmem
+
+theorem noDupNames_middle_fresh_prefix
+    {GammaPre GammaPost : LinearCtx} {x : String} {t : Typ}
+    (hnd : NoDupNames (GammaPre ++ [(x, some t)] ++ GammaPost)) :
+    x ∉ linearCtxDom GammaPre := by
+  have hsub : List.Sublist (GammaPre ++ [(x, some t)])
+      (GammaPre ++ [(x, some t)] ++ GammaPost) := by
+    induction GammaPost with
+    | nil =>
+        simp
+    | cons p rest ih =>
+        simp [List.append_assoc]
+  have hnd' : NoDupNames (GammaPre ++ [(x, some t)]) :=
+    noDupNames_of_sublist hsub hnd
+  intro hx
+  have hnd'' := hnd'
+  unfold NoDupNames at hnd''
+  simp [linearCtxDom, List.nodup_append] at hnd''
+  have hx' : ∃ ty, (x, ty) ∈ GammaPre := by
+    simpa [linearCtxDom] using hx
+  rcases hx' with ⟨ty, hmem⟩
+  exact (hnd''.2 x ty hmem) rfl
+
+theorem lexical_of_names_eq
+    {Gamma Gamma' : LinearCtx} {e : Term}
+    (hEq : Gamma.map Prod.fst = Gamma'.map Prod.fst)
+    (hlex : LexicallyScoped Gamma e) :
+    LexicallyScoped Gamma' e := by
+  rcases hlex with ⟨hnd, hdom, hws⟩
+  refine ⟨?_, ?_, hws⟩
+  · unfold NoDupNames at hnd ⊢
+    simpa [linearCtxDom, hEq] using hnd
+  · intro x hx
+    have hx' : x ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom, hEq] using hx
+    exact hdom x hx'
+
+theorem lexical_output_of_typing
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' : LinearCtx} {e : Term} {e' : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (hlex : LexicallyScoped Gamma e') :
+    LexicallyScoped Gamma' e' :=
+  lexical_of_names_eq (hasType_names_preserved h) hlex
+
 private theorem mem_dom_of_mem_append_singleton_ne
     {Gamma : LinearCtx} {z x : String} {t : Typ}
     (hz : z ∈ linearCtxDom (Gamma ++ ([(x, some t)] : LinearCtx)))
