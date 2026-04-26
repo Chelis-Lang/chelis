@@ -616,6 +616,99 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
 }
 
 fn cmd_check(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Phase H: when a reef package is in scope, route the library
+    // compile through `compile_reef_context` so the heavy work is
+    // factored into the cacheable artifact Phase I's disk cache plugs
+    // into. The diagnostic JSON itself is still emitted by the legacy
+    // fitness path — byte-identical to pre-refactor on every reef-in-
+    // scope input by construction (same `decls`, same desugar +
+    // expand, same `check_phase0e_fitness`/`check_typed_program`/
+    // `check_program`/`check_linearity` callees). Phase I/J will
+    // replace the legacy second pass with a context-aware fitness
+    // emitter once `CompiledContext` carries a serialized fitness
+    // summary.
+    //
+    // For files outside any reef package the legacy path is the only
+    // honest path: there is no library context to amortize.
+    if let Some(package_dir) =
+        chelis_reef::find_package_root_for_input(file).map_err(boxed_string_error)?
+    {
+        return cmd_check_via_compiled_context(file, &package_dir);
+    }
+    cmd_check_legacy(file)
+}
+
+/// Phase H entry for reef-in-scope inputs. Build (or in Phase I, load)
+/// a [`CompiledContext`] for the package, then defer to the legacy
+/// fitness path for byte-identical diagnostic JSON. Reef-stage
+/// failures that pre-refactor cmd_check propagated as `Err` are
+/// short-circuited from the context build to avoid the duplicate
+/// reef-resolution work the legacy path would otherwise perform.
+fn cmd_check_via_compiled_context(
+    file: &Path,
+    package_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reef_home = chelis_reef_home_for_compiled_context();
+    match chelis_compiler_api::compile_reef_context(&reef_home, package_dir) {
+        // Library compiled cleanly. The package's source file is
+        // therefore type-, effect-, and linearity-clean — defer to the
+        // legacy fitness path for byte-identical JSON output.
+        Ok(_ctx) => cmd_check_legacy(file),
+        Err(err) => match err.stage.as_str() {
+            // Phase H ↔ Phase I boundary: `source_digests` does not yet
+            // support LocalRegistry packages. Treat as "context cache
+            // unavailable today" and fall through to legacy diagnostics.
+            // Phase I removes this branch when LoadedPackage retains
+            // its cache root.
+            stage if is_phase_i_pending_failure(stage, &err) => cmd_check_legacy(file),
+            // Type-/effect-/linearity-stage failures from the context
+            // build are equivalent to those the legacy fitness pipeline
+            // would surface — fall through so the JSON shape stays
+            // byte-identical (legacy is the diagnostic source of truth).
+            "check" | "effects" | "linearity" => cmd_check_legacy(file),
+            // Reef-/parse-/macro-stage failures: legacy cmd_check
+            // propagates these as `Err` (main exits non-zero, message
+            // on stderr). Short-circuit with the same wording instead
+            // of re-running `prepare_reef_graph` from the legacy path.
+            _ => Err(format_compiler_error(&err).into()),
+        },
+    }
+}
+
+fn chelis_reef_home_for_compiled_context() -> PathBuf {
+    env::var_os("CHELIS_REEF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Phase H ↔ Phase I boundary marker. `compile_reef_context` calls
+/// `PreparedReefGraph::source_digests`, which has a documented TODO
+/// rejecting LocalRegistry packages until Phase I retains their cache
+/// roots. Until that lands, treat such failures as "context cache
+/// unavailable" rather than as user-visible compile errors.
+fn is_phase_i_pending_failure(
+    stage: &str,
+    err: &chelis_compiler_api::compiler::CompilerError,
+) -> bool {
+    if stage != "compile_reef_context" {
+        return false;
+    }
+    err.errors.iter().any(|d| {
+        d.kind == "hash_error"
+            || d.message.contains("source_digests for LocalRegistry")
+            || d.message.contains("not yet implemented")
+    })
+}
+
+fn format_compiler_error(err: &chelis_compiler_api::compiler::CompilerError) -> String {
+    err.errors
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn cmd_check_legacy(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let (decls, _) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
