@@ -1080,12 +1080,12 @@ theorem list_append_eq_split {α} :
     | nil =>
       simp at h
       exact Or.inr ⟨a :: A, by simp, by simp [h]⟩
-  | cons c C =>
-      simp at h
-      obtain ⟨hac, hrest⟩ := h
-      rcases ih B C D hrest with ⟨m, hCm, hBm⟩ | ⟨m, hAm, hDm⟩
-      · exact Or.inl ⟨m, by simp [hac, hCm], hBm⟩
-      · exact Or.inr ⟨m, by simp [hac, hAm], hDm⟩
+    | cons c C =>
+        simp at h
+        obtain ⟨hac, hrest⟩ := h
+        rcases ih B C D hrest with ⟨m, hCm, hBm⟩ | ⟨m, hAm, hDm⟩
+        · exact Or.inl ⟨m, by simp [hac, hCm], hBm⟩
+        · exact Or.inr ⟨m, by simp [hac, hAm], hDm⟩
 
 private theorem slotSub_names_eq
     {out inp : LinearCtx}
@@ -1102,7 +1102,8 @@ private theorem slotSub_names_eq
           rcases outHd with ⟨xOut, slotOut⟩
           rcases inpHd with ⟨xIn, slotIn⟩
           rcases h with ⟨hname, _hslot, htail⟩
-          simp [linearCtxDom, hname, ih htail]
+          simp [linearCtxDom, hname]
+          simpa using ih htail
 
 private theorem boundFresh_of_slotSub
     {out inp : LinearCtx} {v : Term}
@@ -1113,6 +1114,18 @@ private theorem boundFresh_of_slotSub
   have hy' : y ∈ linearCtxDom inp := by
     simpa [slotSub_names_eq hsub] using hy
   exact hFresh y hy'
+
+private theorem noDupNames_remove_middle
+    {GammaPre suffix : LinearCtx} {x : String} {slot : Option Typ}
+    (hnd : NoDupNames (GammaPre ++ [(x, slot)] ++ suffix)) :
+    NoDupNames (GammaPre ++ suffix) := by
+  have hsub : List.Sublist (GammaPre ++ suffix) (GammaPre ++ [(x, slot)] ++ suffix) := by
+    induction GammaPre with
+    | nil =>
+        simp
+    | cons hd rest ih =>
+        simpa [List.append_assoc] using List.Sublist.cons₂ hd ih
+  exact noDupNames_of_sublist hsub hnd
 
 private theorem not_mem_linearCtxDom_append_singleton
     {y x : String} {Gamma : LinearCtx} {slot : Option Typ}
