@@ -1113,7 +1113,7 @@ mutual
     binding before the suffix of length `j` on both the input and output
     sides of a typing derivation. -/
 private theorem weakening_beforeSuffix
-    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (t_y : Typ)
+    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (slot_y : Option Typ)
     {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
     ∀ j,
@@ -1121,81 +1121,81 @@ private theorem weakening_beforeSuffix
       y ∉ linearCtxDom Gamma →
       freshInTerm y e →
       HasType Delta Sigma
-        (insertBeforeSuffix Gamma j (y, some t_y))
+        (insertBeforeSuffix Gamma j (y, slot_y))
         e t eps
-        (insertBeforeSuffix Gamma' j (y, some t_y)) := by
+        (insertBeforeSuffix Gamma' j (y, slot_y)) := by
   match h with
   | HasType.var Delta Sigma GammaPre GammaPost x tx =>
       intro j hj _hdom hfresh
       have hyx : y ≠ x := freshInTerm_var hfresh
       by_cases hpost : j ≤ GammaPost.length
       · have hin :
-            insertBeforeSuffix (GammaPre ++ [(x, some tx)] ++ GammaPost) j (y, some t_y) =
-              GammaPre ++ [(x, some tx)] ++ insertBeforeSuffix GammaPost j (y, some t_y) :=
-          insertBeforeSuffix_var_right GammaPre GammaPost j (y, some t_y) x (some tx) hpost
+            insertBeforeSuffix (GammaPre ++ [(x, some tx)] ++ GammaPost) j (y, slot_y) =
+              GammaPre ++ [(x, some tx)] ++ insertBeforeSuffix GammaPost j (y, slot_y) :=
+          insertBeforeSuffix_var_right GammaPre GammaPost j (y, slot_y) x (some tx) hpost
         have hout :
-            insertBeforeSuffix (GammaPre ++ [(x, none)] ++ GammaPost) j (y, some t_y) =
-              GammaPre ++ [(x, none)] ++ insertBeforeSuffix GammaPost j (y, some t_y) :=
-          insertBeforeSuffix_var_right GammaPre GammaPost j (y, some t_y) x none hpost
+            insertBeforeSuffix (GammaPre ++ [(x, none)] ++ GammaPost) j (y, slot_y) =
+              GammaPre ++ [(x, none)] ++ insertBeforeSuffix GammaPost j (y, slot_y) :=
+          insertBeforeSuffix_var_right GammaPre GammaPost j (y, slot_y) x none hpost
         rw [hin, hout]
-        exact HasType.var Delta Sigma GammaPre (insertBeforeSuffix GammaPost j (y, some t_y)) x tx
+        exact HasType.var Delta Sigma GammaPre (insertBeforeSuffix GammaPost j (y, slot_y)) x tx
       · have hpost_lt : GammaPost.length < j := Nat.lt_of_not_ge hpost
         have hin :
-            insertBeforeSuffix (GammaPre ++ [(x, some tx)] ++ GammaPost) j (y, some t_y) =
-              insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, some t_y) ++
+            insertBeforeSuffix (GammaPre ++ [(x, some tx)] ++ GammaPost) j (y, slot_y) =
+              insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, slot_y) ++
                 [(x, some tx)] ++ GammaPost :=
-          insertBeforeSuffix_var_left GammaPre GammaPost j (y, some t_y) x (some tx) hpost_lt hj
+          insertBeforeSuffix_var_left GammaPre GammaPost j (y, slot_y) x (some tx) hpost_lt hj
         have hout :
-            insertBeforeSuffix (GammaPre ++ [(x, none)] ++ GammaPost) j (y, some t_y) =
-              insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, some t_y) ++
+            insertBeforeSuffix (GammaPre ++ [(x, none)] ++ GammaPost) j (y, slot_y) =
+              insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, slot_y) ++
                 [(x, none)] ++ GammaPost :=
-          insertBeforeSuffix_var_left GammaPre GammaPost j (y, some t_y) x none hpost_lt (by
+          insertBeforeSuffix_var_left GammaPre GammaPost j (y, slot_y) x none hpost_lt (by
             simpa [List.length_append] using hj)
         rw [hin, hout]
         exact HasType.var Delta Sigma
-          (insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, some t_y))
+          (insertBeforeSuffix GammaPre (j - (GammaPost.length + 1)) (y, slot_y))
           GammaPost x tx
   | HasType.unit Delta Sigma Gamma =>
       intro j _hj _hdom _hfresh
-      exact HasType.unit Delta Sigma (insertBeforeSuffix Gamma j (y, some t_y))
+      exact HasType.unit Delta Sigma (insertBeforeSuffix Gamma j (y, slot_y))
   | HasType.abs Delta Sigma Gamma1 Gamma2 x t1 t2 epsBody body slot hBody =>
       intro j hj hdom hfresh
       rcases freshInTerm_abs hfresh with ⟨hyx, hfreshBody⟩
       have hdomBody :
           y ∉ linearCtxDom (Gamma1 ++ [(x, some t1)]) :=
         not_mem_linearCtxDom_append_singleton hdom hyx
-      have hBody' := weakening_beforeSuffix Delta Sigma y t_y hBody (j + 1) (by
+      have hBody' := weakening_beforeSuffix Delta Sigma y slot_y hBody (j + 1) (by
         simpa [List.length_append] using hj) hdomBody hfreshBody
       have hBody'' :
           HasType Delta Sigma
-            (insertBeforeSuffix Gamma1 j (y, some t_y) ++ [(x, some t1)])
+            (insertBeforeSuffix Gamma1 j (y, slot_y) ++ [(x, some t1)])
             body t2 epsBody
-            (insertBeforeSuffix Gamma2 j (y, some t_y) ++ [(x, slot)]) := by
+            (insertBeforeSuffix Gamma2 j (y, slot_y) ++ [(x, slot)]) := by
         simpa using hBody'
       simpa using
         (HasType.abs Delta Sigma
-          (insertBeforeSuffix Gamma1 j (y, some t_y))
-          (insertBeforeSuffix Gamma2 j (y, some t_y))
+          (insertBeforeSuffix Gamma1 j (y, slot_y))
+          (insertBeforeSuffix Gamma2 j (y, slot_y))
           x t1 t2 epsBody body slot hBody'')
   | HasType.app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 epsInner eps1 eps2 h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_app hfresh with ⟨hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
         intro hy2
         exact hdom (has_type_linear_shrinks h1 y hy2)
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 j hj2 hdom2 hfresh2
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 j hj2 hdom2 hfresh2
       exact HasType.app Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         e1 e2 t1 t2 epsInner eps1 eps2 h1' h2'
   | HasType.letBind Delta Sigma Gamma1 Gamma2 Gamma3 x e1 e2 t1 t2 eps1 eps2 slot h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_letBind hfresh with ⟨hyx, hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
@@ -1204,30 +1204,30 @@ private theorem weakening_beforeSuffix
       have hdomBody :
           y ∉ linearCtxDom (Gamma2 ++ [(x, some t1)]) :=
         not_mem_linearCtxDom_append_singleton hdom2 hyx
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 (j + 1) (by
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 (j + 1) (by
         simpa [List.length_append] using hj2) hdomBody hfresh2
       have h2'' :
           HasType Delta Sigma
-            (insertBeforeSuffix Gamma2 j (y, some t_y) ++ [(x, some t1)])
+            (insertBeforeSuffix Gamma2 j (y, slot_y) ++ [(x, some t1)])
             e2 t2 eps2
-            (insertBeforeSuffix Gamma3 j (y, some t_y) ++ [(x, slot)]) := by
+            (insertBeforeSuffix Gamma3 j (y, slot_y) ++ [(x, slot)]) := by
         simpa using h2'
       exact HasType.letBind Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         x e1 e2 t1 t2 eps1 eps2 slot h1' h2''
   | HasType.copy Delta Sigma Gamma1 Gamma2 e ds eps hBody =>
       intro j hj hdom hfresh
       exact HasType.copy Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e ds eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_copy hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_copy hfresh))
   | HasType.letpair Delta Sigma Gamma1 Gamma2 Gamma3 x z e1 e2 t1 t2 t eps1 eps2 slotX slotY h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_letpair hfresh with ⟨hyx, hyz, hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
@@ -1236,128 +1236,128 @@ private theorem weakening_beforeSuffix
       have hdomBody :
           y ∉ linearCtxDom (Gamma2 ++ [(x, some t1), (z, some t2)]) :=
         not_mem_linearCtxDom_append_pair hdom2 hyx hyz
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 (j + 2) (by
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 (j + 2) (by
         simpa [List.length_append] using hj2) hdomBody hfresh2
       have h2'' :
           HasType Delta Sigma
-            (insertBeforeSuffix Gamma2 j (y, some t_y) ++ [(x, some t1), (z, some t2)])
+            (insertBeforeSuffix Gamma2 j (y, slot_y) ++ [(x, some t1), (z, some t2)])
             e2 t eps2
-            (insertBeforeSuffix Gamma3 j (y, some t_y) ++ [(x, slotX), (z, slotY)]) := by
+            (insertBeforeSuffix Gamma3 j (y, slot_y) ++ [(x, slotX), (z, slotY)]) := by
         simpa using h2'
       exact HasType.letpair Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         x z e1 e2 t1 t2 t eps1 eps2 slotX slotY h1' h2''
   | HasType.tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 eps1 eps2 h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_pair hfresh with ⟨hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
         intro hy2
         exact hdom (has_type_linear_shrinks h1 y hy2)
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 j hj2 hdom2 hfresh2
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 j hj2 hdom2 hfresh2
       exact HasType.tpair Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         e1 e2 t1 t2 eps1 eps2 h1' h2'
   | HasType.fst Delta Sigma Gamma1 Gamma2 e t1 t2 eps hBody =>
       intro j hj hdom hfresh
       exact HasType.fst Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e t1 t2 eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_fst hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_fst hfresh))
   | HasType.snd Delta Sigma Gamma1 Gamma2 e t1 t2 eps hBody =>
       intro j hj hdom hfresh
       exact HasType.snd Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e t1 t2 eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_snd hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_snd hfresh))
   | HasType.const Delta Sigma Gamma v ds =>
       intro j _hj _hdom _hfresh
-      exact HasType.const Delta Sigma (insertBeforeSuffix Gamma j (y, some t_y)) v ds
+      exact HasType.const Delta Sigma (insertBeforeSuffix Gamma j (y, slot_y)) v ds
   | HasType.tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_add hfresh with ⟨hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
         intro hy2
         exact hdom (has_type_linear_shrinks h1 y hy2)
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 j hj2 hdom2 hfresh2
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 j hj2 hdom2 hfresh2
       exact HasType.tadd Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         e1 e2 ds eps1 eps2 h1' h2'
   | HasType.tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 =>
       intro j hj hdom hfresh
       rcases freshInTerm_mul hfresh with ⟨hfresh1, hfresh2⟩
-      have h1' := weakening_beforeSuffix Delta Sigma y t_y h1 j hj hdom hfresh1
+      have h1' := weakening_beforeSuffix Delta Sigma y slot_y h1 j hj hdom hfresh1
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved h1] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
         intro hy2
         exact hdom (has_type_linear_shrinks h1 y hy2)
-      have h2' := weakening_beforeSuffix Delta Sigma y t_y h2 j hj2 hdom2 hfresh2
+      have h2' := weakening_beforeSuffix Delta Sigma y slot_y h2 j hj2 hdom2 hfresh2
       exact HasType.tmul Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         e1 e2 ds eps1 eps2 h1' h2'
   | HasType.tsum Delta Sigma Gamma1 Gamma2 e ds d eps hBody hmem =>
       intro j hj hdom hfresh
       exact HasType.tsum Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e ds d eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_sum hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_sum hfresh))
         hmem
   | HasType.texpand Delta Sigma Gamma1 Gamma2 e ds d eps hBody =>
       intro j hj hdom hfresh
       exact HasType.texpand Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e ds d eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_expand hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_expand hfresh))
   | HasType.uniformLike Delta Sigma Gamma1 Gamma2 e ds lo hi eps hBody =>
       intro j hj hdom hfresh
       exact HasType.uniformLike Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         e ds lo hi eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_uniformLike hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_uniformLike hfresh))
   | HasType.perform Delta Sigma Gamma1 Gamma2 op e tArg tRet eps hBody hsig =>
       intro j hj hdom hfresh
       exact HasType.perform Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
         op e tArg tRet eps
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom (freshInTerm_perform hfresh))
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom (freshInTerm_perform hfresh))
         hsig
   | HasType.handle Delta Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
       hBody hOpsIn hClsIn hCover hClauses =>
       intro j hj hdom hfresh
       have hfreshBody : freshInTerm y body := freshInTerm_handle_body hfresh
-      have hBody' := weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom hfreshBody
+      have hBody' := weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom hfreshBody
       have hj2 : j ≤ Gamma2.length := by
         simpa [hasType_length_preserved hBody] using hj
       have hdom2 : y ∉ linearCtxDom Gamma2 := by
         intro hy2
         exact hdom (has_type_linear_shrinks hBody y hy2)
-      have hClauses' := weakening_beforeSuffix_clauses Delta Sigma y t_y hClauses j hj2 hdom2 (by
+      have hClauses' := weakening_beforeSuffix_clauses Delta Sigma y slot_y hClauses j hj2 hdom2 (by
         intro op x k hb hmem
         exact freshInTerm_handle_clause hfresh hmem)
       exact HasType.handle Delta Sigma
-        (insertBeforeSuffix Gamma1 j (y, some t_y))
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma1 j (y, slot_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         body clauses t epsH epsB hBody' hOpsIn hClsIn hCover hClauses'
   | HasType.tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub =>
       intro j hj hdom hfresh
@@ -1366,17 +1366,17 @@ private theorem weakening_beforeSuffix
       have hdomBody :
           y ∉ linearCtxDom (Gamma ++ [(x, some (Typ.tensor ds))]) :=
         not_mem_linearCtxDom_append_singleton hdom hyx
-      have hBody' := weakening_beforeSuffix (Capability.diff :: Delta) Sigma y t_y hBody (j + 1) (by
+      have hBody' := weakening_beforeSuffix (Capability.diff :: Delta) Sigma y slot_y hBody (j + 1) (by
         simpa [List.length_append] using hj) hdomBody hfreshBody
       have hBody'' :
           HasType (Capability.diff :: Delta) Sigma
-            (insertBeforeSuffix Gamma j (y, some t_y) ++ [(x, some (Typ.tensor ds))])
+            (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, some (Typ.tensor ds))])
             body (Typ.tensor dsOut) eps
-            (insertBeforeSuffix Gamma j (y, some t_y) ++ [(x, slot)]) := by
+            (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, slot)]) := by
         simpa using hBody'
       simpa using
         (HasType.tgrad Delta Sigma
-          (insertBeforeSuffix Gamma j (y, some t_y))
+          (insertBeforeSuffix Gamma j (y, slot_y))
           x ds dsOut body eps slot hBody'' hsub)
   | HasType.tvmap Delta Sigma Gamma x t1 t2 body eps d slot hBody =>
       intro j hj hdom hfresh
@@ -1385,32 +1385,32 @@ private theorem weakening_beforeSuffix
       have hdomBody :
           y ∉ linearCtxDom (Gamma ++ [(x, some t1)]) :=
         not_mem_linearCtxDom_append_singleton hdom hyx
-      have hBody' := weakening_beforeSuffix Delta Sigma y t_y hBody (j + 1) (by
+      have hBody' := weakening_beforeSuffix Delta Sigma y slot_y hBody (j + 1) (by
         simpa [List.length_append] using hj) hdomBody hfreshBody
       have hBody'' :
           HasType Delta Sigma
-            (insertBeforeSuffix Gamma j (y, some t_y) ++ [(x, some t1)])
+            (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, some t1)])
             body t2 eps
-            (insertBeforeSuffix Gamma j (y, some t_y) ++ [(x, slot)]) := by
+            (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, slot)]) := by
         simpa using hBody'
       simpa using
         (HasType.tvmap Delta Sigma
-          (insertBeforeSuffix Gamma j (y, some t_y))
+          (insertBeforeSuffix Gamma j (y, slot_y))
           x t1 t2 body eps d slot hBody'')
   | HasType.loc Delta Sigma Gamma ell t hlook =>
       intro j _hj _hdom _hfresh
-      exact HasType.loc Delta Sigma (insertBeforeSuffix Gamma j (y, some t_y)) ell t hlook
+      exact HasType.loc Delta Sigma (insertBeforeSuffix Gamma j (y, slot_y)) ell t hlook
   | HasType.subEff Delta Sigma Gamma Gamma' e t eps eps' hBody hsub =>
       intro j hj hdom hfresh
       exact HasType.subEff Delta Sigma
-        (insertBeforeSuffix Gamma j (y, some t_y))
-        (insertBeforeSuffix Gamma' j (y, some t_y))
+        (insertBeforeSuffix Gamma j (y, slot_y))
+        (insertBeforeSuffix Gamma' j (y, slot_y))
         e t eps eps'
-        (weakening_beforeSuffix Delta Sigma y t_y hBody j hj hdom hfresh)
+        (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom hfresh)
         hsub
 
 private theorem weakening_beforeSuffix_clauses
-    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (t_y : Typ)
+    (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (slot_y : Option Typ)
     {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
     {cls : List (EffectLabel × String × String × Term)}
     (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) :
@@ -1419,13 +1419,13 @@ private theorem weakening_beforeSuffix_clauses
       y ∉ linearCtxDom Gamma2 →
       (∀ op x k hb, (op, x, k, hb) ∈ cls → y ≠ x ∧ y ≠ k ∧ freshInTerm y hb) →
       ClausesTyped Delta Sigma
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         t epsR cls := by
   match h with
   | ClausesTyped.nil Delta Sigma Gamma2 t epsR =>
       intro j _hj _hdom _hfresh
-      exact ClausesTyped.nil Delta Sigma (insertBeforeSuffix Gamma2 j (y, some t_y)) t epsR
+      exact ClausesTyped.nil Delta Sigma (insertBeforeSuffix Gamma2 j (y, slot_y)) t epsR
   | ClausesTyped.cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
       hMatch hBody hRest =>
       intro j hj hdom hfresh
@@ -1435,21 +1435,21 @@ private theorem weakening_beforeSuffix_clauses
           y ∉ linearCtxDom
             (Gamma2 ++ [(x, some tArg), (k, some (Typ.arrow tRet t epsR))]) :=
         not_mem_linearCtxDom_append_pair hdom hyx hyk
-      have hBody' := weakening_beforeSuffix Delta Sigma y t_y hBody (j + 2) (by
+      have hBody' := weakening_beforeSuffix Delta Sigma y slot_y hBody (j + 2) (by
         simpa [List.length_append] using hj) hdomBody hfreshBody
       have hBody'' :
           HasType Delta Sigma
-            (insertBeforeSuffix Gamma2 j (y, some t_y) ++
+            (insertBeforeSuffix Gamma2 j (y, slot_y) ++
               [(x, some tArg), (k, some (Typ.arrow tRet t epsR))])
             hb t epsR
-            (insertBeforeSuffix Gamma3 j (y, some t_y) ++ [(x, slotX), (k, slotK)]) := by
+            (insertBeforeSuffix Gamma3 j (y, slot_y) ++ [(x, slotX), (k, slotK)]) := by
         simpa using hBody'
-      have hRest' := weakening_beforeSuffix_clauses Delta Sigma y t_y hRest j hj hdom (by
+      have hRest' := weakening_beforeSuffix_clauses Delta Sigma y slot_y hRest j hj hdom (by
         intro op' x' k' hb' hmem
         exact hfresh op' x' k' hb' (by simp [hmem]))
       exact ClausesTyped.cons Delta Sigma
-        (insertBeforeSuffix Gamma2 j (y, some t_y))
-        (insertBeforeSuffix Gamma3 j (y, some t_y))
+        (insertBeforeSuffix Gamma2 j (y, slot_y))
+        (insertBeforeSuffix Gamma3 j (y, slot_y))
         t tArg tRet epsR op x k hb rest slotX slotK hMatch hBody'' hRest'
 
 end
