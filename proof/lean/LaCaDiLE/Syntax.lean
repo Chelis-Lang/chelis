@@ -1207,6 +1207,21 @@ private theorem mem_boundVarsClauses_cont
         simp [boundVarsClauses]
       · simp [boundVarsClauses, ih htl]
 
+private theorem mem_boundVarsClauses_body
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k z : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hz : z ∈ boundVars hb) :
+    z ∈ boundVarsClauses clauses := by
+  induction clauses generalizing op x k hb z with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses, hz]
+      · simp [boundVarsClauses, ih htl hz]
+
 theorem wellScoped_handle_clause
     {epsH : EffectRow} {body : Term}
     {clauses : List (EffectLabel × String × String × Term)}
@@ -1318,6 +1333,453 @@ theorem noDupNames_pair_iff
     (x y : String) (tx ty : Typ) :
     NoDupNames ([(x, tx), (y, ty)] : LinearCtx) ↔ x ≠ y := by
   simp [NoDupNames, linearCtxDom]
+
+/-- Named scoping invariant that rules out binder/context shadowing and
+    keeps binder names globally distinct inside the term. This is the
+    honest boundary needed to align lexical named substitution with the
+    positional DB metatheory. -/
+def LexicallyScoped (Gamma : LinearCtx) (e : Term) : Prop :=
+  NoDupNames Gamma ∧
+    (∀ x, x ∈ linearCtxDom Gamma → x ∉ boundVars e) ∧
+    WellScoped e
+
+theorem lexical_nil
+    {e : Term}
+    (hws : WellScoped e) :
+    LexicallyScoped [] e := by
+  refine ⟨noDupNames_nil, ?_, hws⟩
+  intro x hx
+  simpa [linearCtxDom] using hx
+
+theorem lexical_singleton
+    {x : String} {tx : Typ} {e : Term}
+    (hx : x ∉ boundVars e)
+    (hws : WellScoped e) :
+    LexicallyScoped [(x, some tx)] e := by
+  refine ⟨noDupNames_singleton x tx, ?_, hws⟩
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with rfl
+  exact hx
+
+theorem lexical_pair
+    {x y : String} {tx ty : Typ} {e : Term}
+    (hxy : x ≠ y)
+    (hx : x ∉ boundVars e)
+    (hy : y ∉ boundVars e)
+    (hws : WellScoped e) :
+    LexicallyScoped [(x, some tx), (y, some ty)] e := by
+  refine ⟨(noDupNames_pair_iff x y tx ty).2 hxy, ?_, hws⟩
+  intro z hz
+  simp [linearCtxDom] at hz
+  rcases hz with rfl | rfl
+  · exact hx
+  · exact hy
+
+theorem noDupNames_append_singleton
+    {Gamma : LinearCtx} {x : String} {t : Typ}
+    (h : NoDupNames Gamma)
+    (hx : x ∉ linearCtxDom Gamma) :
+    NoDupNames (Gamma ++ [(x, some t)]) := by
+  unfold NoDupNames at h ⊢
+  simp [linearCtxDom, List.nodup_append]
+  refine ⟨h, ?_⟩
+  intro a ta hmem heq
+  subst heq
+  have hdommem : a ∈ linearCtxDom Gamma := by
+    unfold linearCtxDom
+    exact List.mem_map.mpr ⟨(a, ta), hmem, rfl⟩
+  exact hx hdommem
+
+theorem lexical_app_left
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.app e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.1
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.1
+
+theorem lexical_app_right
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.app e1 e2)) :
+    LexicallyScoped Gamma e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.2
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.2.1
+
+theorem lexical_copy_body
+    {Gamma : LinearCtx} {e : Term}
+    (h : LexicallyScoped Gamma (Term.copy e)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_pair_left
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.pair e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.1
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.1
+
+theorem lexical_pair_right
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.pair e1 e2)) :
+    LexicallyScoped Gamma e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.2
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.2.1
+
+theorem lexical_letBind_bound
+    {Gamma : LinearCtx} {x : String} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.letBind x e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hbody := wellScoped_letBind_body hws
+  refine ⟨hnd, ?_, ?_⟩
+  · intro y hy
+    have hnot := hdom y hy
+    simp [boundVars] at hnot
+    exact hnot.2.1
+  · exact hbody.1
+
+theorem lexical_letpair_bound
+    {Gamma : LinearCtx} {x y : String} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.letpair x y e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hbody := wellScoped_letpair_body hws
+  refine ⟨hnd, ?_, ?_⟩
+  · intro z hz
+    have hnot := hdom z hz
+    simp [boundVars] at hnot
+    exact hnot.2.2.1
+  · exact hbody.1
+
+theorem lexical_fst_body
+    {Gamma : LinearCtx} {e : Term}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.fst e)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_snd_body
+    {Gamma : LinearCtx} {e : Term}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.snd e)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_add_left
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.add e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.1
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.1
+
+theorem lexical_add_right
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.add e1 e2)) :
+    LexicallyScoped Gamma e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.2
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.2.1
+
+theorem lexical_mul_left
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.mul e1 e2)) :
+    LexicallyScoped Gamma e1 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.1
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.1
+
+theorem lexical_mul_right
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.mul e1 e2)) :
+    LexicallyScoped Gamma e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+    exact hnot.2
+  · simp [WellScoped, boundVars, List.nodup_append] at hws
+    exact hws.2.1
+
+theorem lexical_sum_body
+    {Gamma : LinearCtx} {e : Term} {d : Dim}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.sum e d)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_expand_body
+    {Gamma : LinearCtx} {e : Term} {d : Dim}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.expand e d)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_uniformLike_body
+    {Gamma : LinearCtx} {e : Term} {lo hi : Float}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.uniformLike e lo hi)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_perform_body
+    {Gamma : LinearCtx} {op : EffectLabel} {e : Term}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.perform op e)) :
+    LexicallyScoped Gamma e := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, ?_⟩
+  · intro x hx
+    simpa [boundVars] using hdom x hx
+  · simpa [WellScoped, boundVars] using hws
+
+theorem lexical_handle_body
+    {Gamma : LinearCtx} {epsH : EffectRow}
+    {body : Term} {clauses : List (EffectLabel × String × String × Term)}
+    (h : LexicallyScoped Gamma (Term.handle epsH body clauses)) :
+    LexicallyScoped Gamma body := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  refine ⟨hnd, ?_, wellScoped_handle_body hws⟩
+  intro x hx
+  have hnot := hdom x hx
+  simp [boundVars, List.mem_append, not_or] at hnot
+  exact hnot.1
+
+theorem lexical_abs_body
+    {Gamma : LinearCtx} {x : String} {tx t : Typ} {body : Term}
+    (h : LexicallyScoped Gamma (Term.abs x t body)) :
+    LexicallyScoped (Gamma ++ [(x, some tx)]) body := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+  have hbody := wellScoped_abs_body hws
+  refine ⟨noDupNames_append_singleton hnd hxGamma, ?_, hbody.2⟩
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with hy | hy
+  · have hy' : y ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom] using hy
+    have hnot := hdom y hy'
+    simp [boundVars] at hnot
+    exact hnot.2
+  · subst y
+    exact hbody.1
+
+theorem lexical_letBind_body
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.letBind x e1 e2)) :
+    LexicallyScoped (Gamma ++ [(x, some tx)]) e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+  have hbody := wellScoped_letBind_body hws
+  refine ⟨noDupNames_append_singleton hnd hxGamma, ?_, hbody.2.2⟩
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with hy | hy
+  · have hy' : y ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom] using hy
+    have hnot := hdom y hy'
+    simp [boundVars] at hnot
+    exact hnot.2.2
+  · subst y
+    exact hbody.2.1
+
+theorem lexical_letpair_body
+    {Gamma : LinearCtx} {x y : String} {tx ty : Typ} {e1 e2 : Term}
+    (h : LexicallyScoped Gamma (Term.letpair x y e1 e2)) :
+    LexicallyScoped (Gamma ++ [(x, some tx), (y, some ty)]) e2 := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+  have hyGamma : y ∉ linearCtxDom Gamma := by
+    intro hy
+    have hnot := hdom y hy
+    simp [boundVars] at hnot
+  have hbody := wellScoped_letpair_body hws
+  have hnd' : NoDupNames (Gamma ++ [(x, some tx)]) :=
+    noDupNames_append_singleton hnd hxGamma
+  have hyGamma' : y ∉ linearCtxDom (Gamma ++ [(x, some tx)]) := by
+    intro hy
+    simp [linearCtxDom] at hy
+    rcases hy with hy | hy
+    · exact hyGamma (by simpa [linearCtxDom] using hy)
+    · exact hbody.2.1 hy.symm
+  have hnd'' : NoDupNames (Gamma ++ [(x, some tx)] ++ [(y, some ty)]) :=
+    noDupNames_append_singleton hnd' hyGamma'
+  simpa [List.append_assoc] using
+    (show LexicallyScoped (Gamma ++ [(x, some tx)] ++ [(y, some ty)]) e2 from by
+      refine ⟨hnd'', ?_, hbody.2.2.2.2⟩
+      intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with hz | hz
+      · have hz' : z ∈ linearCtxDom Gamma := by
+          simpa [linearCtxDom] using hz
+        have hnot := hdom z hz'
+        simp [boundVars] at hnot
+        exact hnot.2.2.2
+      · rcases hz with hz | hz
+        · subst z
+          exact hbody.2.2.1
+        · subst z
+          exact hbody.2.2.2.1)
+
+theorem lexical_grad_body
+    {Gamma : LinearCtx} {x : String} {tx tOut : Typ} {body : Term}
+    (h : LexicallyScoped Gamma (Term.grad x tx tOut body)) :
+    LexicallyScoped (Gamma ++ [(x, some tx)]) body := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+  have hbody := wellScoped_grad_body hws
+  refine ⟨noDupNames_append_singleton hnd hxGamma, ?_, hbody.2⟩
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with hy | hy
+  · have hy' : y ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom] using hy
+    have hnot := hdom y hy'
+    simp [boundVars] at hnot
+    exact hnot.2
+  · subst y
+    exact hbody.1
+
+theorem lexical_vmap_body
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {d : Dim} {body : Term}
+    (h : LexicallyScoped Gamma (Term.vmap x tx d body)) :
+    LexicallyScoped (Gamma ++ [(x, some tx)]) body := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars] at hnot
+  have hbody := wellScoped_vmap_body hws
+  refine ⟨noDupNames_append_singleton hnd hxGamma, ?_, hbody.2⟩
+  intro y hy
+  simp [linearCtxDom] at hy
+  rcases hy with hy | hy
+  · have hy' : y ∈ linearCtxDom Gamma := by
+      simpa [linearCtxDom] using hy
+    have hnot := hdom y hy'
+    simp [boundVars] at hnot
+    exact hnot.2
+  · subst y
+    exact hbody.1
+
+theorem lexical_handle_clause
+    {Gamma : LinearCtx} {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    {tx tk : Typ}
+    (h : LexicallyScoped Gamma (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    LexicallyScoped (Gamma ++ [(x, some tx), (k, some tk)]) hb := by
+  rcases h with ⟨hnd, hdom, hws⟩
+  have hclause : x ≠ k ∧ x ∉ boundVars hb ∧ k ∉ boundVars hb ∧ WellScoped hb :=
+    wellScoped_handle_clause hws hmem
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hnot := hdom x hx
+    simp [boundVars, List.mem_append, not_or] at hnot
+    exact hnot.2 (mem_boundVarsClauses_arg hmem)
+  have hkGamma : k ∉ linearCtxDom Gamma := by
+    intro hk
+    have hnot := hdom k hk
+    simp [boundVars, List.mem_append, not_or] at hnot
+    exact hnot.2 (mem_boundVarsClauses_cont hmem)
+  have hnd' : NoDupNames (Gamma ++ [(x, some tx)]) :=
+    noDupNames_append_singleton hnd hxGamma
+  have hkGamma' : k ∉ linearCtxDom (Gamma ++ [(x, some tx)]) := by
+    intro hk
+    simp [linearCtxDom] at hk
+    rcases hk with hk | hk
+    · exact hkGamma (by simpa [linearCtxDom] using hk)
+    · exact hclause.1 hk.symm
+  have hnd'' : NoDupNames (Gamma ++ [(x, some tx)] ++ [(k, some tk)]) :=
+    noDupNames_append_singleton hnd' hkGamma'
+  simpa [List.append_assoc] using
+    (show LexicallyScoped (Gamma ++ [(x, some tx)] ++ [(k, some tk)]) hb from by
+      refine ⟨hnd'', ?_, hclause.2.2.2⟩
+      intro z hz
+      simp [linearCtxDom] at hz
+      rcases hz with hz | hz
+      · have hz' : z ∈ linearCtxDom Gamma := by
+          simpa [linearCtxDom] using hz
+        have hnot := hdom z hz'
+        simp [boundVars, List.mem_append, not_or] at hnot
+        intro hzb
+        exact hnot.2 (mem_boundVarsClauses_body hmem hzb)
+      · rcases hz with hz | hz
+        · subst z
+          exact hclause.2.1
+        · subst z
+          exact hclause.2.2.1)
 
 /-- Disjointness of two linear contexts' domains. Phase 2 scaffolding. -/
 def linearCtxDisjoint (G1 G2 : LinearCtx) : Prop :=
