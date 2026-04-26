@@ -49,6 +49,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
+use serde::{Deserialize, Serialize};
 
 use crate::adt::AdtRegistry;
 use crate::builtins;
@@ -61,12 +62,12 @@ use crate::unify::Subst;
 /// Cheap to clone — internally `Arc`-shared. Build from a library decl
 /// list with [`crate::build_type_env_from_library`], or create an
 /// empty one with [`TypeEnv::empty`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeEnv {
     inner: Arc<TypeEnvInner>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TypeEnvInner {
     /// Type-binding env: every name ever declared in the library, mapped
     /// to its (generalized) scheme. Includes builtins and prelude ADT

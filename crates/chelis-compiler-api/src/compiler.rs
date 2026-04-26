@@ -315,6 +315,240 @@ pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
     })
 }
 
+// ---- Phase G: in-context eval / check ----------------------------------
+//
+// `eval_in_context` / `check_in_context` / `eval_many_in_context` accept a
+// pre-built `CompiledContext` (the library — chelis-std + reef deps + the
+// package's own modules — already type-checked and lowered ONCE) plus the
+// new source for this specific eval. Only the new source runs through
+// parse/desugar/macro-expand + the C/D/E/F `_with_context` checker
+// variants + the composing lowerer.
+
+/// Strip `Decl::Module` wrappers — `compile_with_reef_graph` (and its
+/// Phase G sibling `rewrite_entry_decls_with_reef_graph`) expect a flat
+/// decl list. Mirrors the helper used by `chelis test`'s
+/// `cmd_internal_test_file`.
+fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
+    let mut out = Vec::new();
+    for decl in decls {
+        match decl {
+            Decl::Module { decls: inner, .. } => {
+                out.extend(flatten_module_decls(inner));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+fn compile_new_source_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+) -> Result<CompiledSource> {
+    // Phase G inputs are always Surf — `compile_reef_context` already
+    // resolved the package's library decls; the new source is whatever
+    // the user typed into a `chelis eval --file` / `chelis test` worker /
+    // `chelis check` call.
+    let raw_new_decls = parse_surf(new_source)?;
+    // Strip module wrappers and route through the reef name resolver so
+    // bare references like `add` get rewritten to their internal-name
+    // form (`mylib.math.add`) — matching what
+    // `compile_with_reef_graph` does for the monolithic eval path. This
+    // is what makes the new code's references resolve against the
+    // library state stored in the `CompiledContext`.
+    let flat_decls = flatten_module_decls(&raw_new_decls);
+    let rewritten =
+        chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
+            .map_err(|err| stage_error("reef", err, "reef_error"))?;
+    let new_deep = chelis_macros::expand_program(
+        &chelis_surf::desugar::desugar_program(&rewritten),
+        &chelis_macros::ExpansionOptions::default(),
+    )
+    .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
+    .into_exprs();
+
+    // Phase C: type-check new code against the library type env.
+    let new_checked = chelis_types::check_phase0e_with_context(&context.type_env, &new_deep)
+        .map_err(|report| CompilerError {
+            stage: "check".to_string(),
+            errors: report.errors.iter().map(check_error_diagnostic).collect(),
+        })?;
+
+    // Phase D: effects checker, library + new.
+    let new_checked =
+        chelis_effects::check_effects_with_context(&context.library_checked, &new_checked)
+            .map_err(|errors| CompilerError {
+                stage: "effects".to_string(),
+                errors: errors
+                    .iter()
+                    .map(|error| Diagnostic {
+                        kind: "effect_error".to_string(),
+                        message: error.message.clone(),
+                        severity: 0.8,
+                        expected: None,
+                        got: None,
+                        suggestions: vec![],
+                        span: None,
+                    })
+                    .collect(),
+            })?;
+
+    // Phase E: linearity checker, library + new.
+    let new_checked =
+        chelis_types::check_linearity_with_context(&context.library_checked, &new_checked)
+            .map_err(|errors| CompilerError {
+                stage: "linearity".to_string(),
+                errors: errors.iter().map(check_error_diagnostic).collect(),
+            })?;
+
+    // Phase F: lower against the cached library DAG.
+    let composed_dag =
+        chelis_ir::lower::lower_program_with_context(&context.library_dag, &new_checked);
+
+    // Build the same CompiledSource shape `compile_source` produces, but
+    // for the new code only — the library state lives in the composed
+    // Dag and the type-env is unioned so eval-time name resolution
+    // continues to find library symbols.
+    let all_root_names =
+        root_names_from_checked_exprs(new_checked.exprs(), new_checked.type_env(), false);
+    // For the lowered-only filter (which feeds the tensor evaluator's
+    // root list), use the context-aware lowering map so a new-code def
+    // referencing a library function inherits the library's
+    // lowered-vs-host classification — matching the monolithic
+    // `lower_program(library + new)` decision byte-for-byte.
+    let combined_lowered_names = chelis_ir::lower::top_level_lowering_map_with_context(
+        &context.library_dag,
+        new_checked.exprs(),
+        new_checked.type_env(),
+    );
+    let new_tensor_root_names = root_names_from_checked_exprs_with_lowered_map(
+        new_checked.exprs(),
+        new_checked.type_env(),
+        Some(&combined_lowered_names),
+    );
+
+    // The composed Dag's roots are [library_roots ..., new_roots ...].
+    // Slice to the new-code tail so `tensor_root_names` aligns 1:1 with
+    // the roots `eval_compiled` will iterate.
+    let library_root_count = context.library_dag.dag.roots().len();
+    let composed_roots = composed_dag.roots();
+    let new_root_slice_start = library_root_count.min(composed_roots.len());
+    let new_root_ids: Vec<NodeId> = composed_roots[new_root_slice_start..].to_vec();
+
+    if !new_tensor_root_names.is_empty() && new_root_ids.len() != new_tensor_root_names.len() {
+        return Err(stage_error(
+            "lower",
+            format!(
+                "lowered new-code root count mismatch: expected {} named roots, got {}",
+                new_tensor_root_names.len(),
+                new_root_ids.len()
+            ),
+            "lower_error",
+        ));
+    }
+
+    let named_roots = new_tensor_root_names
+        .iter()
+        .cloned()
+        .zip(new_root_ids.iter().copied())
+        .collect::<BTreeMap<_, _>>();
+
+    let mut forward_nodes_by_name = named_roots.clone();
+    for node in composed_dag.nodes() {
+        if let RiscOp::Load { name } = &node.op {
+            forward_nodes_by_name.entry(name.clone()).or_insert(node.id);
+        }
+    }
+
+    // Replace the composed Dag's roots vector with just the new-code
+    // roots so `eval_compiled`'s iteration over `dag.roots()` aligns with
+    // `tensor_root_names`. The composed Dag keeps every node (library +
+    // new) so dependency lookups during evaluation still resolve.
+    let mut dag_for_eval = composed_dag;
+    dag_for_eval.set_roots(new_root_ids);
+
+    Ok(CompiledSource {
+        checked: new_checked,
+        dag: dag_for_eval,
+        all_root_names,
+        tensor_root_names: new_tensor_root_names,
+        named_roots,
+        forward_nodes_by_name,
+    })
+}
+
+/// Evaluate `new_source` against an existing `CompiledContext`. Equivalent
+/// to `eval(EvalRequest { source: format(library + new_source), ... })`
+/// for the produced root values, but the library-side compile work has
+/// already been amortized across every prior `eval_in_context` call on
+/// the same context.
+pub fn eval_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+) -> Result<EvalResult> {
+    let compiled = compile_new_source_in_context(context, new_source)?;
+    eval_compiled(&compiled, BTreeMap::new(), None)
+}
+
+/// Type-/effects-/linearity-check `new_source` against an existing
+/// `CompiledContext`. Returns a `CheckResult` with the same shape as
+/// the existing `check` API. A successful result means the new code
+/// composes cleanly with the library; errors carry new-code spans.
+pub fn check_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+) -> Result<CheckResult> {
+    let compiled = compile_new_source_in_context(context, new_source)?;
+    // Mirror `check`'s shape: derive a fitness-style report from the
+    // composed checked program. The total/typed counts only cover
+    // new-code nodes — library nodes are checked once at context build
+    // time and counted there.
+    let total_nodes = compiled.checked.exprs().len();
+    Ok(CheckResult {
+        score: 1.0,
+        components: FitnessComponents {
+            parse: 1.0,
+            structure: 1.0,
+            names: 1.0,
+            types: 1.0,
+        },
+        typed_nodes: total_nodes,
+        untyped_nodes: 0,
+        total_nodes,
+        unresolved_names: vec![],
+        errors: vec![],
+    })
+}
+
+/// Compile `new_source` once against `context`, then evaluate it once per
+/// entry in `roots`. Mirrors the contract of `eval_many` but on the
+/// in-context API: the per-root iteration shares the new-source compile,
+/// and a failing root does not short-circuit the others.
+pub fn eval_many_in_context(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+    roots: &[String],
+) -> Vec<(String, Result<EvalResult>)> {
+    let compiled = match compile_new_source_in_context(context, new_source) {
+        Ok(compiled) => compiled,
+        Err(err) => {
+            return roots
+                .iter()
+                .map(|name| (name.clone(), Err(err.clone())))
+                .collect();
+        }
+    };
+
+    roots
+        .iter()
+        .map(|name| {
+            let roots_slice = std::slice::from_ref(name);
+            let outcome = eval_compiled(&compiled, BTreeMap::new(), Some(roots_slice));
+            (name.clone(), outcome)
+        })
+        .collect()
+}
+
 fn eval_compiled(
     compiled: &CompiledSource,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -692,6 +926,22 @@ fn root_names_from_checked_exprs(
     names
 }
 
+/// Phase G variant: same as [`root_names_from_checked_exprs`] but uses a
+/// pre-computed `lowered_names` map (typically from
+/// `top_level_lowering_map_with_context`) so library-context lowering
+/// decisions feed the new-code's root-name filter.
+fn root_names_from_checked_exprs_with_lowered_map(
+    exprs: &[DeepExpr],
+    type_env: &HashMap<String, DeepExpr>,
+    lowered_names: Option<&HashMap<String, bool>>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for expr in exprs {
+        collect_checked_decl_names(expr, type_env, lowered_names, &mut names);
+    }
+    names
+}
+
 fn collect_checked_decl_names(
     expr: &DeepExpr,
     type_env: &HashMap<String, DeepExpr>,
@@ -1051,7 +1301,7 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
     )
 }
 
-fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
+pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
     stage_error_with_span(stage, message, kind, None)
 }
 
@@ -1095,7 +1345,7 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> 
     Some(Span { offset, len: 0 })
 }
 
-fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
+pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
     Diagnostic {
         kind: format!("{:?}", error.kind),
         message: error.message.clone(),

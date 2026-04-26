@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::*;
 
 /// Type error produced during unification.
@@ -24,7 +26,7 @@ pub enum TypeErrorKind {
 }
 
 /// Substitution: maps type variables to types and dim variables to dims.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Subst {
     pub types: HashMap<TypeVar, Type>,
     pub dims: HashMap<DimVar, Dim>,

@@ -6,16 +6,18 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A unique identifier for a type variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u32);
 
 /// A unique identifier for a dimension variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
 
 /// Numeric precision types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Prim {
     F32,
     F64,
@@ -105,7 +107,7 @@ impl Prim {
 }
 
 /// A tensor dimension.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Dim {
     /// Concrete named dimension (e.g., batch, hidden).
     Name(String),
@@ -118,7 +120,7 @@ pub enum Dim {
 }
 
 /// Chelis type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
     /// Primitive type (f32, int32, bool, etc.).
     Prim(Prim),
@@ -138,7 +140,7 @@ pub enum Type {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Effect {
     Random,
     Accum,
@@ -163,7 +165,7 @@ impl fmt::Display for Effect {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectSet {
     effects: BTreeSet<Effect>,
 }
@@ -216,7 +218,7 @@ impl fmt::Display for EffectSet {
 }
 
 /// A polymorphic type scheme: ∀ tvars, dvars. body
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
     pub tvars: Vec<TypeVar>,
     pub dvars: Vec<DimVar>,
@@ -263,7 +265,7 @@ impl fmt::Display for Type {
 }
 
 /// Counter for generating fresh type and dimension variables.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct VarGen {
     next_tvar: u32,
     next_dvar: u32,

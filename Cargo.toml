@@ -49,5 +49,5 @@ chelis-cove = { path = "crates/chelis-cove" }
 
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 libc = "0.2"

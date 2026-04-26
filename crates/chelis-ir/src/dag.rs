@@ -7,13 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use chelis_types::types::Prim;
+use serde::{Deserialize, Serialize};
 
 /// Index into the DAG node array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 /// Tensor type carried on each DAG node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorType {
     pub dims: Vec<DimInfo>,
     pub precision: Prim,
@@ -30,7 +31,7 @@ impl TensorType {
 }
 
 /// Dimension descriptor for a tensor axis.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimInfo {
     /// A named dimension with an optional known size.
     Named(String, Option<usize>),
@@ -39,7 +40,7 @@ pub enum DimInfo {
 }
 
 /// Runtime-capable dimension expression.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DimExpr {
     Concrete(usize),
     Sym(String),
@@ -153,14 +154,14 @@ impl fmt::Display for DimExpr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolicDimOccurrence {
     pub name: String,
     pub input_label: String,
     pub axis: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolicDimBinding {
     pub name: String,
     pub canonical: SymbolicDimOccurrence,
@@ -168,7 +169,7 @@ pub struct SymbolicDimBinding {
 }
 
 /// One step in a fused elementwise chain.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FusedStep {
     pub op: FusedStepOp,
     /// Indices into the fused node's inputs: either an external input index
@@ -177,7 +178,7 @@ pub struct FusedStep {
 }
 
 /// The operation performed by a single fusion step.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedStepOp {
     Add,
     Mul,
@@ -197,7 +198,7 @@ pub enum FusedStepOp {
 }
 
 /// Input reference within a fused chain.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedInput {
     /// Index into the FusedElem node's `inputs` vec (external inputs from the DAG).
     External(usize),
@@ -206,7 +207,7 @@ pub enum FusedInput {
 }
 
 /// A RISC primitive operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
@@ -311,7 +312,7 @@ pub enum RiscOp {
 }
 
 /// A single node in the DAG.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagNode {
     pub id: NodeId,
     pub op: RiscOp,
@@ -321,7 +322,7 @@ pub struct DagNode {
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Dag {
     nodes: Vec<DagNode>,
     roots: Vec<NodeId>,

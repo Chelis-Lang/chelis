@@ -24,7 +24,7 @@ pub struct InferResult {
     pub total_nodes: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,

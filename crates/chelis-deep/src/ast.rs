@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 use crate::span::Span;
 
 /// A Deep expression — the core AST node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     /// An atomic value (symbol, number, string, keyword, bool).
     Atom(Atom, Span),
@@ -22,7 +24,7 @@ impl Expr {
 }
 
 /// An atomic (leaf) value in the AST.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
     Symbol(String),
     Int(i64),
@@ -34,7 +36,7 @@ pub enum Atom {
 }
 
 /// A parenthesized list of expressions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct List {
     /// All elements of the list. In canonical 3-tuple form:
     /// elements[0] is the tag, elements[1] is a Map (metadata),
@@ -43,14 +45,14 @@ pub struct List {
 }
 
 /// Inline metadata map: `{key: value, ...}` or `{}`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetaMap {
     /// Key-value pairs. Keys are bare identifiers.
     pub entries: Vec<(String, Expr)>,
 }
 
 /// Legacy metadata: `^{k1 v1 ...} expr` (prefix form).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetaExpr {
     /// Key-value pairs. Keys are keyword strings (without `:`).
     pub entries: Vec<(String, Expr)>,

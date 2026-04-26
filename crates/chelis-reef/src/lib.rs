@@ -102,7 +102,11 @@ pub struct PreparedProgram {
 pub struct PreparedReefGraph {
     pub package_root: PathBuf,
     pub(crate) graph: PackageGraph,
-    pub(crate) linked_library_decls: Vec<Decl>,
+    /// Library decls (chelis-std + deps + this package's own modules) after
+    /// linking and internal-name rewriting. Phase G's `compile_reef_context`
+    /// reads this directly to feed the type checker / lowerer once and cache
+    /// the result.
+    pub linked_library_decls: Vec<Decl>,
     pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
@@ -387,13 +391,16 @@ pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, Strin
     })
 }
 
-/// Compile an in-memory entry decl list against a previously prepared reef
-/// graph. This is the cheap per-file work: only the entry module is rewritten
-/// and appended to the cached library decls.
-pub fn compile_with_reef_graph(
+/// Rewrite an entry-decl list against a previously prepared reef graph,
+/// producing the same internal-name-rewritten and import/export-stripped
+/// decl list that `compile_with_reef_graph` produces — but WITHOUT
+/// prepending the library decls. Phase G's `eval_in_context` calls this
+/// to re-use the reef name resolver for new code while leaving the
+/// library decls in their pre-checked form inside the `CompiledContext`.
+pub fn rewrite_entry_decls_with_reef_graph(
     graph: &PreparedReefGraph,
     entry_decls: &[Decl],
-) -> Result<PreparedProgram, String> {
+) -> Result<Vec<Decl>, String> {
     let eval_module_name = if graph.eval_module_prefix.is_empty() {
         "__Eval".to_string()
     } else {
@@ -407,12 +414,22 @@ pub fn compile_with_reef_graph(
         exports: BTreeSet::new(),
         symbols: collect_symbol_kinds(entry_decls),
     };
-    let rewritten_entry_decls = rewrite_eval_module_decls(
+    rewrite_eval_module_decls(
         &eval_module,
         &graph.graph,
         &graph.internal_maps,
         &graph.dep_shells,
-    )?;
+    )
+}
+
+/// Compile an in-memory entry decl list against a previously prepared reef
+/// graph. This is the cheap per-file work: only the entry module is rewritten
+/// and appended to the cached library decls.
+pub fn compile_with_reef_graph(
+    graph: &PreparedReefGraph,
+    entry_decls: &[Decl],
+) -> Result<PreparedProgram, String> {
+    let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(graph, entry_decls)?;
 
     let mut decls = graph.linked_library_decls.clone();
     decls.extend(rewritten_entry_decls);

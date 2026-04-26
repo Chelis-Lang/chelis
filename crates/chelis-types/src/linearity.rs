@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
 use crate::errors::{CheckError, CheckErrorKind};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
     reusable_inputs_by_offset: HashMap<usize, usize>,
 }

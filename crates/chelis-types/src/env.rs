@@ -2,11 +2,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::*;
 use crate::unify::Subst;
 
 /// Type environment (Γ): maps names to polymorphic type schemes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
     bindings: HashMap<String, Scheme>,
 }

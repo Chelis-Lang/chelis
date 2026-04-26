@@ -75,7 +75,7 @@ pub fn lower_program(program: &CheckedProgram) -> Dag {
 /// the contract is that the carrier was produced by
 /// [`lower_program_to_library`] on a checked library, and that
 /// [`lower_program_with_context`] is the only blessed way to consume it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoweredLibrary {
     /// The library DAG, post-DCE. Node IDs in this DAG are the canonical
     /// library IDs that new-code lowering will reference (after a clone).
@@ -96,6 +96,13 @@ pub struct LoweredLibrary {
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
     pub linearity: LinearityInfo,
+    /// Per-library-def "is it lowered?" decision, mirroring the result
+    /// of `top_level_lowering_map(library_exprs, library_type_env)`. New-
+    /// code lowering decisions need this so a new-code def whose body
+    /// calls a library function gets the same lowered/host classification
+    /// as it would in monolithic mode (where the same library def lives
+    /// in `top_level_defs` and is consulted directly).
+    pub lowered_names: HashMap<String, bool>,
 }
 
 /// Lower a checked program to the [`LoweredLibrary`] carrier. The bare
@@ -156,6 +163,7 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
         program_defs,
         program_types,
         linearity: program.linearity().clone(),
+        lowered_names,
     }
 }
 
@@ -378,6 +386,98 @@ pub fn top_level_lowering_map(
         cache.insert(name.clone(), lowered);
     }
     cache
+}
+
+/// Phase G helper: compute `top_level_lowering_map` for new code with
+/// the library's pre-computed `lowered_names` seeded into the cache.
+/// This makes new-code defs that reference library functions inherit the
+/// same lowered-vs-host classification they'd get in monolithic mode
+/// (where library defs live alongside new ones in `top_level_defs`).
+///
+/// The returned map covers BOTH library + new-code names so callers can
+/// look up either; downstream filters slice to new-code-only as needed.
+pub fn top_level_lowering_map_with_context(
+    library: &LoweredLibrary,
+    new_exprs: &[Expr],
+    new_type_env: &HashMap<String, Expr>,
+) -> HashMap<String, bool> {
+    let mut top_level_defs = library.program_defs.clone();
+    for (name, body) in collect_top_level_defs(new_exprs) {
+        top_level_defs.insert(name, body);
+    }
+    let mut top_level_sigs = collect_top_level_sigs(new_exprs);
+    // Library declared types feed `lookup_declared_type_expr`; merge
+    // them in so a library def's signature is reachable when the new
+    // code's body references it.
+    for (name, ty_expr) in &library.program_types {
+        top_level_sigs
+            .entry(name.clone())
+            .or_insert_with(|| ty_expr_to_deep(ty_expr));
+    }
+    let mut cache = library.lowered_names.clone();
+    let mut visiting = HashSet::new();
+    for name in top_level_defs.keys() {
+        if cache.contains_key(name) {
+            continue;
+        }
+        let lowered = def_is_lowered(
+            name,
+            &top_level_defs,
+            &top_level_sigs,
+            new_type_env,
+            &mut cache,
+            &mut visiting,
+        );
+        cache.insert(name.clone(), lowered);
+    }
+    cache
+}
+
+/// Inverse of `LowerCtx::type_from_type_expr` — used by
+/// `top_level_lowering_map_with_context` to feed library types into the
+/// `top_level_sigs` map. Lossy on dim variables (we project to the
+/// scalar return type) since `def_is_lowered` only looks at
+/// `type_is_never_lowerable`, which inspects the t-fn return type.
+fn ty_expr_to_deep(ty: &TensorType) -> Expr {
+    use chelis_deep::Span;
+    use chelis_deep::ast::{Atom, List, MetaMap};
+    let span = Span::new(0, 0);
+    let prim = match ty.precision {
+        chelis_types::types::Prim::F32 => "f32",
+        chelis_types::types::Prim::F64 => "f64",
+        chelis_types::types::Prim::F16 => "f16",
+        chelis_types::types::Prim::Bf16 => "bf16",
+        chelis_types::types::Prim::F8e4m3 => "f8e4m3",
+        chelis_types::types::Prim::Int8 => "int8",
+        chelis_types::types::Prim::Int32 => "int32",
+        chelis_types::types::Prim::Int64 => "int64",
+        chelis_types::types::Prim::Bool => "bool",
+        chelis_types::types::Prim::String => "string",
+    };
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".into()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Symbol(prim.into()), span),
+            ],
+        },
+        span,
+    );
+    if ty.dims.is_empty() {
+        prim_node
+    } else {
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("t-tensor".into()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    prim_node,
+                ],
+            },
+            span,
+        )
+    }
 }
 
 pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {

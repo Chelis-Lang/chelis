@@ -1,25 +1,36 @@
-//! Phase B: skeleton for the chelis Compiled Artifact Caching push.
+//! Phase G: composed Compiled Artifact Cache.
 //!
 //! `CompiledContext` is the cacheable artifact a reef package compiles
-//! into once. New code (test files, eval inputs) will be checked /
-//! lowered against the context's pre-checked, pre-lowered library defs;
-//! the context's contents are referenced, not recompiled.
+//! into once. New code (test files, eval inputs) is checked and lowered
+//! against the context's pre-checked, pre-lowered library defs; the
+//! context's contents are referenced, not recompiled.
 //!
-//! Phase B (this file) ships the type skeleton + a stub
-//! `compile_reef_context` that internally calls `prepare_reef_graph`
-//! (the existing pre-pipeline work) and content-hashes every backed
-//! source file. Phases C/D/E/F/G fill in the real pipeline-splitting
-//! machinery so that `eval_in_context` only re-compiles the new source.
+//! The pipeline split is:
+//!
+//! - `compile_reef_context` (this file): runs the full library pipeline
+//!   ONCE. Parses + desugars + macro-expands the linked library decls,
+//!   builds a Phase 0e [`TypeEnv`], then runs the monolithic Phase 0e
+//!   checker, the effects checker, and the linearity checker on the
+//!   library, and lowers it to a [`LoweredLibrary`].
+//! - `eval_in_context` / `check_in_context` / `eval_many_in_context`
+//!   (in `compiler.rs`): take a `CompiledContext` plus new source. Only
+//!   the new source is re-compiled; the C/D/E/F `_with_context` variants
+//!   stack the new code on top of the cached library state.
 //!
 //! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
 //! for the full plan.
 
+use chelis_ir::lower::{LoweredLibrary, lower_program_to_library};
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph};
+use chelis_types::{
+    CheckedProgram, TypeEnv, build_type_env_from_library, check_linearity,
+    check_phase0e_with_context,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-use crate::compiler::CompilerError;
+use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
 use crate::schema::Diagnostic;
 
 /// 32-byte content hash of every source file that contributed to a
@@ -50,19 +61,36 @@ impl ContextHash {
 
 /// A reef package compiled once into a reusable artifact.
 ///
-/// Phase B has the skeleton: `source_hash` (for cache invalidation) and
-/// `reef_state` (the existing pre-pipeline graph). Phases C and F will
-/// add `library_checked` (pre-checked decls) and `library_dag` (pre-
-/// lowered IR); Phase G composes them into the new public APIs.
+/// Phase G composes the result of every pipeline stage:
+/// - `source_hash`: content hash for disk-cache invalidation (Phase I).
+/// - `reef_state`: linked library decls + reef metadata (Phase B).
+/// - `type_env`: Phase 0e type-checker snapshot (Phase C). Used by
+///   `check_phase0e_with_context` for new-code type checking.
+/// - `library_checked`: monolithic Phase 0e + effects + linearity result
+///   over the library decls (Phases C/D/E). Used by
+///   `check_effects_with_context` and `check_linearity_with_context`.
+/// - `library_dag`: lowered library DAG carrier (Phase F). Used by
+///   `lower_program_with_context`.
+///
+/// All five fields are populated once by `compile_reef_context` and
+/// thereafter treated as immutable. Cheap to clone (the heavy state is
+/// `Arc`-shared inside `TypeEnv`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledContext {
     /// Content hash of every backed source file. Stable across calls
     /// on unchanged sources; changes when ANY source byte changes.
     pub source_hash: ContextHash,
     /// The reef state (lockfile-backed package graph + linked library
-    /// decls + internal-name maps + dep shells). Phase G will keep
-    /// using `compile_with_reef_graph` against this.
+    /// decls + internal-name maps + dep shells).
     pub(crate) reef_state: PreparedReefGraph,
+    /// Phase 0e type-checker snapshot — the outer scope for new-code
+    /// type checking via `check_phase0e_with_context`.
+    pub(crate) type_env: TypeEnv,
+    /// Library Phase 0e + effects + linearity result. Feeds the
+    /// `_with_context` variants of effects and linearity.
+    pub(crate) library_checked: CheckedProgram,
+    /// Lowered library carrier. Feeds `lower_program_with_context`.
+    pub(crate) library_dag: LoweredLibrary,
 }
 
 impl CompiledContext {
@@ -80,10 +108,18 @@ impl CompiledContext {
 
 /// Build a `CompiledContext` from a reef package directory.
 ///
-/// Phase B stub: calls `prepare_reef_graph` + content-hashes every
-/// backed source file. Phases C/D/E/F will extend this to also produce
-/// the pre-checked / pre-lowered fields. The signature is the FINAL one
-/// — callers written against this API in parallel won't change.
+/// Pipeline:
+/// 1. `prepare_reef_graph` — resolve the package graph, link library
+///    decls, hash the source files.
+/// 2. Surf-desugar + macro-expand the linked library decls into Deep.
+/// 3. Build a Phase 0e [`TypeEnv`] over the library (Phase C).
+/// 4. Run the monolithic Phase 0e checker, the effects checker, and the
+///    linearity checker over the library to produce a
+///    [`CheckedProgram`] (Phases C/D/E feed into this composite library
+///    snapshot — the `_with_context` callers receive this as their
+///    "library context" argument).
+/// 5. Lower the library to a [`LoweredLibrary`] (Phase F).
+/// 6. Combine everything in a [`CompiledContext`].
 ///
 /// `_reef_home` is currently unused; reserved for the Phase I disk-cache
 /// key (the cache lives under `$CHELIS_REEF_HOME/.cache/compiled/...`).
@@ -94,9 +130,65 @@ pub fn compile_reef_context(
     let reef_state = prepare_reef_graph(package_dir).map_err(|e| reef_error(&e))?;
     let digests = reef_state.source_digests().map_err(|e| hash_error(&e))?;
     let source_hash = ContextHash::from_digests(&digests);
+
+    // Surf → Deep desugar + macro expand of the library decls.
+    // `linked_library_decls` is already linked + internal-name-rewritten
+    // by `prepare_reef_graph`.
+    let deep_library_decls = chelis_macros::expand_program(
+        &chelis_surf::desugar::desugar_program(&reef_state.linked_library_decls),
+        &chelis_macros::ExpansionOptions::default(),
+    )
+    .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
+    .into_exprs();
+
+    // Phase C: build the Phase 0e type-env snapshot from the library.
+    let type_env =
+        build_type_env_from_library(&deep_library_decls).map_err(|report| CompilerError {
+            stage: "check".to_string(),
+            errors: report.errors.iter().map(check_error_diagnostic).collect(),
+        })?;
+
+    // Run the monolithic library check via `check_phase0e_with_context`
+    // against an empty outer scope, then layer effects + linearity. This
+    // produces the `library_checked` snapshot that
+    // `check_effects_with_context` / `check_linearity_with_context`
+    // expect as their library argument.
+    let checked =
+        check_phase0e_with_context(&TypeEnv::empty(), &deep_library_decls).map_err(|report| {
+            CompilerError {
+                stage: "check".to_string(),
+                errors: report.errors.iter().map(check_error_diagnostic).collect(),
+            }
+        })?;
+    let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
+        stage: "effects".to_string(),
+        errors: errors
+            .iter()
+            .map(|error| Diagnostic {
+                kind: "effect_error".to_string(),
+                message: error.message.clone(),
+                severity: 0.8,
+                expected: None,
+                got: None,
+                suggestions: vec![],
+                span: None,
+            })
+            .collect(),
+    })?;
+    let library_checked = check_linearity(&checked).map_err(|errors| CompilerError {
+        stage: "linearity".to_string(),
+        errors: errors.iter().map(check_error_diagnostic).collect(),
+    })?;
+
+    // Phase F: lower the library to a `LoweredLibrary` carrier.
+    let library_dag = lower_program_to_library(&library_checked);
+
     Ok(CompiledContext {
         source_hash,
         reef_state,
+        type_env,
+        library_checked,
+        library_dag,
     })
 }
 
