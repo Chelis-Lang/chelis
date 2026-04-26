@@ -3965,11 +3965,6 @@ theorem preservation_letpair_via_db
     intro hx
     rw [hV2Closed] at hx
     simp at hx
-  rcases weakening_tail [] Sigma [] [] x t2 t1 [] v2 hV2Nil
-      (by simp [linearCtxDom]) hxFreshV2 with
-    ⟨GammaPre, GammaPost, hSplit, hV2Weak⟩
-  simp at hSplit
-  rcases hSplit with ⟨rfl, rfl⟩
   rcases wellScoped_letpair_parts h_scope with
     ⟨_hPairScope, hxy, _hxPair, hxBody, _hyPair, hyBody, hBodyScope, _hPairBody, hBodyPair⟩
   have hLexBody : LexicallyScoped [(x, some t1), (y, some t2)] body :=
@@ -3978,7 +3973,7 @@ theorem preservation_letpair_via_db
     intro z hz hzV2
     exact hBodyPair z hz (by simp [boundVars, hzV2])
   rcases subst_preserves_typing_lexical [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
-      y t2 t epsBody body v2 hBody hLexBody hV2Weak hV2Closed hFreshBodyV2 with
+      y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Closed hFreshBodyV2 with
     ⟨GammaAfterY, hAfterY⟩
   rcases subst_preserves_typing [] Sigma [] GammaAfterY
       x t1 t epsBody (subst body v2 y) v1 hAfterY hV1Nil hV1Closed with
@@ -4038,30 +4033,30 @@ theorem preservation_handleOpDirect_via_db
   let idCont : Term := directIdCont epsH op v clauses tRet
   have hIdBody0 :
       HasType [] Sigma
-        ([(x, some tArgV)] ++ [(y, some tRet)])
+        [(y, some tRet)]
         (Term.var y) tRet []
-        ([(x, some tArgV)] ++ [(y, none)]) := by
-    simpa [y] using (HasType.var [] Sigma [(x, some tArgV)] [] y tRet)
+        [(y, none)] := by
+    simpa [y] using (HasType.var [] Sigma [] [] y tRet)
   have hIdBody :
       HasType [] Sigma
-        ([(x, some tArgV)] ++ [(y, some tRet)])
+        [(y, some tRet)]
         (Term.var y) tRet (EffectRow.removeOps epsB epsH)
-        ([(x, some tArgV)] ++ [(y, none)]) := by
+        [(y, none)] := by
     exact HasType.subEff [] Sigma
-      ([(x, some tArgV)] ++ [(y, some tRet)])
-      ([(x, some tArgV)] ++ [(y, none)])
+      [(y, some tRet)]
+      [(y, none)]
       (Term.var y) tRet [] (EffectRow.removeOps epsB epsH)
       hIdBody0
       (by
         intro op hop
         cases hop)
   have hIdAbs :
-      HasType [] Sigma [(x, some tArgV)]
+      HasType [] Sigma []
         idCont
         (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) []
-        [(x, some tArgV)] := by
+        [] := by
     exact HasType.abs [] Sigma
-      [(x, some tArgV)] [(x, some tArgV)]
+      [] []
       y tRet tRet (EffectRow.removeOps epsB epsH)
       (Term.var y) none hIdBody
   have hIdClosed : Closed idCont := by

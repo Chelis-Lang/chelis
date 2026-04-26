@@ -4973,14 +4973,6 @@ private theorem preservation_aux
           exact HasType.abs [] Sigma [] []
             y tRet t (EffectRow.removeOps epsB epsH)
             (Term.handle epsH (plug E (Term.var y)) clauses) none hHandleY
-        have hK :
-            HasType [] Sigma [(xVar, some tArgV)]
-              (Term.abs y tRet
-                (Term.handle epsH (plug E (Term.var y)) clauses))
-              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
-              [(xVar, some tArgV)] := by
-          simpa [y] using
-            (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
         have hKClosed :
             Closed
               (Term.abs y tRet
@@ -4991,7 +4983,7 @@ private theorem preservation_aux
             (EffectRow.removeOps epsB epsH) hb
             (Term.abs y tRet
               (Term.handle epsH (plug E (Term.var y)) clauses))
-            hBody hK hKClosed with
+            hBody hK0 hKClosed with
           ⟨GammaAfterK, hAfterK⟩
         rcases subst_preserves_typing [] Sigma [] GammaAfterK
             xVar tArgV t (EffectRow.removeOps epsB epsH)
@@ -5079,14 +5071,6 @@ private theorem preservation_aux
           exact HasType.abs [] Sigma [] []
             y tRet t (EffectRow.removeOps epsB epsH)
             (Term.handle epsH (multiPlug Es (Term.var y)) clauses) none hHandleY
-        have hK :
-            HasType [] Sigma [(xVar, some tArgV)]
-              (Term.abs y tRet
-                (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-              (Typ.arrow tRet t (EffectRow.removeOps epsB epsH)) []
-              [(xVar, some tArgV)] := by
-          simpa [y] using
-            (hasType_prefix_weaken hK0 [(xVar, some tArgV)])
         have hKClosed :
             Closed
               (Term.abs y tRet
@@ -5097,7 +5081,7 @@ private theorem preservation_aux
             (EffectRow.removeOps epsB epsH) hb
             (Term.abs y tRet
               (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-            hBody hK hKClosed with
+            hBody hK0 hKClosed with
           ⟨GammaAfterK, hAfterK⟩
         rcases subst_preserves_typing [] Sigma [] GammaAfterK
             xVar tArgV t (EffectRow.removeOps epsB epsH)

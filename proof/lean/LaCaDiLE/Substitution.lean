@@ -1631,17 +1631,19 @@ private theorem closed_typed_suffix_weaken
     This is the theorem shape the singleton/pair/direct-handler
     wrappers actually need on their first substitution step: the source
     derivation is lexical with respect to the input context, and every
-    binder already present in `e` is absent from the substituted value's
-    bound-name surface. The remaining hard cases are the second-stage
-    substitutions on already-substituted terms, especially captured
-    continuations that carry dormant clause binders. -/
+    binder already present in `e` is absent from the substituted term's
+    bound-name surface. The substituted term itself is the closed
+    runtime payload, so its typing witness is the closed-input form
+    `HasType ... [] v ... []`. The remaining hard cases are the
+    second-stage substitutions on already-substituted terms, especially
+    captured continuations that carry dormant clause binders. -/
 theorem subst_preserves_typing_lexical
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
     (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
     (_h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
-    (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
+    (_h_v : HasType Delta Sigma [] v t1 [] [])
     (_h_closed : Closed v)
     (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
     ∃ Gamma2' : LinearCtx,
@@ -1653,14 +1655,17 @@ theorem subst_preserves_typing_lexical
 
     Under the tombstone refactor, the input context carries
     `(x, some t1)` and the output context is whatever HasType produces
-    (with `x`'s slot potentially tombstoned to `none`). The `Closed v`
-    premise makes the naive capture-unaware `subst` sound. -/
+    (with `x`'s slot potentially tombstoned to `none`). Operationally,
+    the substituted term is the closed runtime payload, so the honest
+    theorem uses the closed-input typing witness `HasType ... [] v ...
+    []`. The `Closed v` premise makes the naive capture-unaware `subst`
+    sound. -/
 theorem subst_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
     (x : String) (t1 t2 : Typ) (eps : EffectRow)
     (e v : Term)
     (_h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
-    (_h_v : HasType Delta Sigma Gamma1 v t1 [] Gamma1)
+    (_h_v : HasType Delta Sigma [] v t1 [] [])
     (_h_closed : Closed v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
