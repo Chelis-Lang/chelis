@@ -123,6 +123,105 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
     }
 }
 
+/// Phase E: check linearity of `new_program` against an outer-scope
+/// `library_program` whose linearity was already validated when its
+/// context was built.
+///
+/// Library bindings are treated as always-available references —
+/// library tensor parameters are scoped to their owning library `def`,
+/// not to new-code defs, and so MUST NOT be added to new-code's
+/// "consumed" set when called. To enforce that, this entry point walks
+/// ONLY `new_program.annotated_exprs()` for body checks; library
+/// bodies are never re-walked. Library def names are pre-declared in
+/// the top-level scope (with their unioned types from
+/// `new_program.type_env()`) so that `(var libname)` references in
+/// new code resolve correctly. Library defs all have function types,
+/// which the linearity checker treats as non-linear, so referencing
+/// one never triggers consumption of new-code free variables.
+///
+/// Per Phase E acceptance: for `(library, snippet)`, this function's
+/// Result on `snippet` must match `check_linearity(library + snippet)`'s
+/// Result on the snippet portion. The function is pure — repeated calls
+/// with the same `library_program` see no leaked state from prior new
+/// programs.
+///
+/// `library_program` is consumed only by reference; it is left
+/// unchanged.
+pub fn check_linearity_with_context(
+    library_program: &CheckedProgram,
+    new_program: &CheckedProgram,
+) -> Result<CheckedProgram, Vec<CheckError>> {
+    // Pre-compute library callable signatures: a name set keyed on each
+    // library `def`, used to ensure new-code call sites referring to a
+    // library def don't accidentally walk the library body. The set is
+    // currently informational — the checker never walks call targets, so
+    // simply not feeding library exprs to `check_top_level` is what
+    // enforces the "don't re-walk library bodies" invariant. The
+    // pre-computation here is the documented contract surface.
+    let _library_callables: HashSet<String> = library_program
+        .annotated_exprs()
+        .iter()
+        .filter_map(|expr| {
+            if let Expr::List(list, _) = expr
+                && get_tag(list) == Some("def")
+            {
+                children(list)
+                    .first()
+                    .and_then(symbol_name)
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Top-level types come from new_program.type_env(), which Phase C
+    // already unioned (library + new-code). New-code types win on shadow.
+    let mut checker = Checker {
+        errors: Vec::new(),
+        info: LinearityInfo::default(),
+        top_level_types: new_program.type_env().clone(),
+    };
+
+    let mut scope = LinearScope::default();
+
+    // Pre-declare library def names so `(var libname)` references in
+    // new code resolve to a Live binding with the library's function
+    // type. Function types are non-linear (no tensor content), so a
+    // pure reference never triggers consumption of new-code locals.
+    for expr in library_program.annotated_exprs() {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            scope.declare(name, new_program.type_env().get(name).cloned());
+        }
+    }
+
+    // Pre-declare new-code def names. New-code shadows library on
+    // collision (declare last → top of stack wins).
+    for expr in new_program.annotated_exprs() {
+        if let Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            scope.declare(name, new_program.type_env().get(name).cloned());
+        }
+    }
+
+    // Walk ONLY new-code bodies. Library bodies are never re-walked,
+    // so library tensor parameters never enter the new-code scope.
+    for expr in new_program.annotated_exprs() {
+        checker.check_top_level(expr, &mut scope);
+    }
+
+    if checker.errors.is_empty() {
+        Ok(new_program.clone().with_linearity(checker.info))
+    } else {
+        Err(checker.errors)
+    }
+}
+
 impl Checker {
     fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
         if let Expr::List(list, _) = expr

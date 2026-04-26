@@ -18,4 +18,4 @@ pub use infer::{
     CheckedProgram, InferResult, build_type_env_from_library, check_phase0e_program,
     check_phase0e_with_context, check_typed_program, infer_phase0e_program, infer_program,
 };
-pub use linearity::{LinearityInfo, check_linearity};
+pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
