@@ -13,9 +13,15 @@ chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-ir.workspace = true
 chelis-macros.workspace = true
+chelis-reef.workspace = true
 chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-validate.workspace = true
+bincode = "1"
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

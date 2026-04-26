@@ -365,18 +365,22 @@ dependencies = [
 name = "chelis-compiler-api"
 version = "0.2.7"
 dependencies = [
+ "bincode",
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
  "chelis-macros",
+ "chelis-reef",
  "chelis-surf",
  "chelis-types",
  "chelis-validate",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

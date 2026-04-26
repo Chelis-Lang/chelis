@@ -109,12 +109,8 @@ pub struct PreparedReefGraph {
 }
 
 impl PreparedReefGraph {
-    /// Encode the graph to bincode for cross-process sharing. The parent
-    /// `cmd_test` writes this once and passes the path to each worker via
-    /// the `CHELIS_TEST_PREBUILT_GRAPH` env var, so workers skip the
-    /// expensive parse + link + map-build pass for unchanged dependencies
-    /// (chelis-std, etc.). On a 32-file chelis-std corpus this is the
-    /// dominant per-worker cost.
+    /// Bincode round-trip. Used by Phase A foundation tests and (via
+    /// `CompiledContext` which embeds this graph) the Phase I disk cache.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         bincode::serialize(self).map_err(|e| format!("encode prepared graph: {e}"))
     }
@@ -122,6 +118,71 @@ impl PreparedReefGraph {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| format!("decode prepared graph: {e}"))
     }
+
+    /// Returns a content digest for every `.ch` source file backing this
+    /// graph, including path-dep packages. The result is the load-bearing
+    /// input to `chelis_compiler_api::ContextHash` and the Phase I disk
+    /// cache; deterministic ordering is guaranteed by sorting on
+    /// (package_name, package_version, module_name) before returning.
+    ///
+    /// `LocalRegistry` packages are not yet supported — Phase B fixtures
+    /// only use `Root` + `Path`. Phase I will extend `LoadedPackage` to
+    /// retain extracted-cache file paths so this method can hash them.
+    pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
+        let mut digests = Vec::new();
+        for (_, package) in self.graph.packages.iter() {
+            let source_root = match &package.source {
+                LoadedSourceKind::Root => self.package_root.clone(),
+                LoadedSourceKind::Path { relative } => self
+                    .package_root
+                    .join(relative)
+                    .canonicalize()
+                    .map_err(|e| {
+                        format!(
+                            "resolve path-dep `{}` at `{}`: {e}",
+                            package.id.name, relative
+                        )
+                    })?,
+                LoadedSourceKind::LocalRegistry => {
+                    return Err(format!(
+                        "source_digests for LocalRegistry package `{}` v{} not yet implemented \
+                         (TODO phase-I — needs LoadedPackage to retain cache root)",
+                        package.id.name, package.id.version
+                    ));
+                }
+            };
+            for module in package.modules.values() {
+                let abs = source_root.join("src").join(&module.file_rel);
+                let bytes = fs::read(&abs)
+                    .map_err(|e| format!("read source file `{}`: {e}", abs.display()))?;
+                let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+                digests.push(SourceDigest {
+                    package_name: package.id.name.clone(),
+                    package_version: package.id.version.clone(),
+                    module_name: module.module_name.clone(),
+                    sha256,
+                });
+            }
+        }
+        digests.sort_by(|a, b| {
+            a.package_name
+                .cmp(&b.package_name)
+                .then_with(|| a.package_version.cmp(&b.package_version))
+                .then_with(|| a.module_name.cmp(&b.module_name))
+        });
+        Ok(digests)
+    }
+}
+
+/// Per-source-file content digest produced by [`PreparedReefGraph::source_digests`].
+/// The load-bearing input to `chelis_compiler_api::ContextHash` and the Phase I
+/// disk cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDigest {
+    pub package_name: String,
+    pub package_version: String,
+    pub module_name: String,
+    pub sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
@@ -2933,6 +2994,47 @@ path = "./mylib"
             err.contains(dir.path().to_str().unwrap_or_default()),
             "error should mention the attempted directory; got: {err}"
         );
+    }
+
+    /// Phase B prerequisite: `source_digests` walks every backed source
+    /// file across the root + path-dep packages and returns one row per
+    /// `.ch` file. The path-dep fixture has 1 root module + 1 path-dep
+    /// module = 2 rows.
+    #[test]
+    fn source_digests_returns_one_row_per_source_file_for_path_dep_fixture() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let digests = graph.source_digests().expect("source_digests");
+        // Sort key invariant: digests are returned in (pkg, ver, mod)
+        // order. Validate the count and the load-bearing ordering for
+        // the fixture's two known modules.
+        assert_eq!(
+            digests.len(),
+            2,
+            "got {} digests: {:?}",
+            digests.len(),
+            digests
+        );
+        assert!(
+            digests
+                .windows(2)
+                .all(|w| (w[0].package_name.as_str(), w[0].module_name.as_str())
+                    <= (w[1].package_name.as_str(), w[1].module_name.as_str())),
+            "digests must be sorted by (package, module)"
+        );
+        // No two rows for the same module — the walker must not double-count.
+        let mut seen = std::collections::HashSet::new();
+        for d in &digests {
+            assert!(
+                seen.insert((d.package_name.clone(), d.module_name.clone())),
+                "duplicate digest for ({}, {})",
+                d.package_name,
+                d.module_name
+            );
+        }
+        // Every sha256 must be non-zero — empty file would hash to e3b0...,
+        // not zeros, so [0;32] is a clear "didn't actually hash" sentinel.
+        assert!(digests.iter().all(|d| d.sha256 != [0u8; 32]));
     }
 
     /// Phase A foundation: PreparedReefGraph round-trips through bincode.
