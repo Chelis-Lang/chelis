@@ -1617,6 +1617,18 @@ private theorem closed_typed_suffix_weaken
       simpa [List.append_assoc] using
         (ih (Gamma := Gamma ++ [(y, slot_y)]) hWeak hndRest hBoundRest)
 
+private theorem closed_typed_prefix_suffix_weaken
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {GammaPre suffix : LinearCtx} {v : Term} {t : Typ}
+    (h : HasType Delta Sigma [] v t [] [])
+    (hClosed : Closed v)
+    (hnd : NoDupNames (GammaPre ++ suffix))
+    (hBoundFresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v) :
+    HasType Delta Sigma (GammaPre ++ suffix) v t [] (GammaPre ++ suffix) := by
+  have hPrefix : HasType Delta Sigma GammaPre v t [] GammaPre := by
+    simpa using hasType_prefix_weaken h GammaPre
+  exact closed_typed_suffix_weaken hPrefix hClosed hnd hBoundFresh
+
 -- NOTE: `exchange_tail` removed entirely. Its original statement
 -- (rigid output context across an adjacent swap) is provably false
 -- in this type system: `var` consumes the tail binding and the two
