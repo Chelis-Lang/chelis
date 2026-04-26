@@ -2646,15 +2646,68 @@ fn tensor_softmax_host(
 
     for slice_linear in 0..reduced_numel {
         let mut base_indices = linear_to_indices(slice_linear, &reduced_shape);
-        // First pass: max over the axis.
+        // First pass: max over the axis. Track positive-Inf positions
+        // separately — `exp(+Inf - +Inf) = exp(NaN) = NaN` would otherwise
+        // silently corrupt mask-style attention usage where the ones-hot
+        // position is set to +Inf (red-team v0.2.6 HIGH).
         let mut max_val = f64::NEG_INFINITY;
+        let mut pos_inf_count = 0usize;
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
             let in_linear = indices_to_linear(&base_indices, &in_shape);
             let v = tensor.value.data[in_linear];
+            if v.is_nan() {
+                // NaN propagates: write NaN across the whole slice and
+                // continue. This matches IEEE behavior of every other
+                // numerical library (PyTorch / NumPy / JAX).
+                for kk in 0..axis_size {
+                    base_indices[axis_usize] = kk;
+                    let l = indices_to_linear(&base_indices, &in_shape);
+                    out[l] = f64::NAN;
+                }
+                // Restart the outer slice loop's bookkeeping cleanly.
+                max_val = f64::NAN;
+                break;
+            }
+            if v == f64::INFINITY {
+                pos_inf_count += 1;
+            }
             if v > max_val {
                 max_val = v;
             }
+        }
+        if max_val.is_nan() {
+            // NaN propagation handled above; nothing else to do for this slice.
+            continue;
+        }
+        if pos_inf_count > 0 {
+            // Standard formula yields exp(+Inf - +Inf) = NaN. Define the
+            // softmax of a slice containing K positive-Inf values as
+            // 1/K at each +Inf position and 0 elsewhere — the natural
+            // limit as the input approaches the multi-Inf configuration.
+            let share = 1.0_f64 / (pos_inf_count as f64);
+            for k in 0..axis_size {
+                base_indices[axis_usize] = k;
+                let in_linear = indices_to_linear(&base_indices, &in_shape);
+                out[in_linear] = if tensor.value.data[in_linear] == f64::INFINITY {
+                    share
+                } else {
+                    0.0
+                };
+            }
+            continue;
+        }
+        if max_val == f64::NEG_INFINITY {
+            // All entries were -Inf. The standard formula yields
+            // exp(-Inf - -Inf) = exp(NaN) = NaN; define this case as
+            // uniform 1/N over the slice (the natural limit).
+            let share = 1.0_f64 / (axis_size as f64);
+            for k in 0..axis_size {
+                base_indices[axis_usize] = k;
+                let in_linear = indices_to_linear(&base_indices, &in_shape);
+                out[in_linear] = share;
+            }
+            continue;
         }
         // Second pass: sum of exp(x - max).
         let mut sum_exp = 0.0_f64;
@@ -3857,6 +3910,71 @@ y = softmax(x, cast(0, int32))
                 "softmax([1000,1000]) should be uniform 0.5, got {value}"
             );
         }
+    }
+
+    #[test]
+    fn host_runtime_softmax_positive_infinity_promotes_to_one_hot() {
+        // Red-team v0.2.6 HIGH: `softmax([+Inf, 0, 0])` previously returned
+        // `[NaN, 0, 0]` because the standard max-shift formula computes
+        // `exp(+Inf - +Inf) = exp(NaN) = NaN`. Mask-style users (who set
+        // ones-hot positions to +Inf) silently corrupted to NaN downstream.
+        // The fix detects +Inf in the slice and emits 1/K at +Inf positions.
+        let inf = f64::INFINITY;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], vec![inf, 0.0, 0.0]),
+            precision: Prim::F32,
+        };
+        let out =
+            tensor_softmax_host(&tensor, 0).expect("+Inf softmax must not error in host runtime");
+        assert_eq!(out.value.data.len(), 3);
+        assert!(out.value.data.iter().all(|v| !v.is_nan()), "no NaN allowed");
+        assert!((out.value.data[0] - 1.0).abs() < 1e-9);
+        assert!(out.value.data[1].abs() < 1e-9);
+        assert!(out.value.data[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_runtime_softmax_two_positive_infinities_split_uniformly() {
+        let inf = f64::INFINITY;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], vec![inf, inf, 0.0]),
+            precision: Prim::F32,
+        };
+        let out = tensor_softmax_host(&tensor, 0).expect("two +Inf softmax must not error");
+        assert!((out.value.data[0] - 0.5).abs() < 1e-9);
+        assert!((out.value.data[1] - 0.5).abs() < 1e-9);
+        assert!(out.value.data[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_runtime_softmax_all_negative_infinity_yields_uniform() {
+        // All -Inf collapses to NaN under the standard formula too. Define
+        // the natural limit: uniform 1/N (same as if all values were equal).
+        let neg_inf = f64::NEG_INFINITY;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], vec![neg_inf, neg_inf, neg_inf]),
+            precision: Prim::F32,
+        };
+        let out = tensor_softmax_host(&tensor, 0).expect("all -Inf softmax must not error");
+        let third = 1.0 / 3.0;
+        assert!(out.value.data.iter().all(|v| (*v - third).abs() < 1e-9));
+    }
+
+    #[test]
+    fn host_runtime_softmax_nan_input_propagates_nan() {
+        // NaN is contagious by spec; matches PyTorch / NumPy / JAX behavior.
+        // We pin this so a future refactor doesn't accidentally mask it.
+        let nan = f64::NAN;
+        let tensor = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(vec![3], vec![nan, 0.0, 0.0]),
+            precision: Prim::F32,
+        };
+        let out = tensor_softmax_host(&tensor, 0).expect("NaN softmax does not error");
+        assert!(
+            out.value.data.iter().all(|v| v.is_nan()),
+            "NaN must propagate to every output element; got {:?}",
+            out.value.data
+        );
     }
 
     #[test]

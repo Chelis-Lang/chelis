@@ -257,28 +257,23 @@ attn = scaled_dot_product_attention(q, k, v, scale)
     );
 
     let stdout = build_and_run(&reef_home, &app_pkg);
-    // Every output element ≈ 2.5. RT-exp/softmax MEDIUM finding: a prior
-    // `stdout.contains("2.5")` would also have matched "12.5", "0.25",
-    // "-2.5" and similar. The eval-side cross-check at
+    // Every output element ≈ 2.5. The eval-side cross-check at
     // `packages/chelis-std/tests/runtime/attention_eval_cross.ch` does an
-    // exact 16-element assert_close_tensor, so the build side should match
-    // that rigor. Parse the rendered tensor: assert the declared shape is
-    // [4, 4] and that every element printed by the compiled binary equals
-    // 2.5 within tolerance.
-    //
-    // Note: the renderer truncates the `data=[...]` field to the first 10
-    // elements (`crates/chelis-cli/src/main.rs` tensor display path) so we
-    // don't see all 16 here — but every visible element must be exactly
-    // 2.5 within tolerance, and the shape header proves there are 16.
+    // exact 16-element assert_close_tensor; the build side now matches
+    // that rigor (red-team v0.2.6 MEDIUM raised the renderer cap from 10
+    // to 32 elements, so all 16 are now visible).
     assert!(
         stdout.contains("attn = tensor(shape=[4, 4],"),
         "expected attn shape header `[4, 4]`; got:\n{stdout}"
     );
     let elements = parse_tensor_data_for(&stdout, "attn")
         .unwrap_or_else(|| panic!("failed to parse attn tensor data from:\n{stdout}"));
-    assert!(
-        !elements.is_empty(),
-        "expected at least one printed element; got empty data field"
+    assert_eq!(
+        elements.len(),
+        16,
+        "expected all 16 elements (4x4) to be printed under the new 32-cap; \
+         got {} ({elements:?})\n{stdout}",
+        elements.len()
     );
     for (i, &v) in elements.iter().enumerate() {
         assert!(
@@ -301,7 +296,10 @@ fn parse_tensor_data_for(stdout: &str, binding: &str) -> Option<Vec<f32>> {
     inside
         .split(',')
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        // The renderer emits a trailing "..." token when the tensor has more
+        // elements than the print cap (currently 32). Skip it so the parser
+        // returns just the visible numeric prefix.
+        .filter(|s| !s.is_empty() && *s != "...")
         .map(|s| s.parse::<f32>().ok())
         .collect()
 }

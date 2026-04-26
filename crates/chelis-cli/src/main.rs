@@ -2238,11 +2238,24 @@ fn try_eval(
 
 fn format_execution_value(value: &ExecutionValue) -> String {
     match value {
-        ExecutionValue::Tensor { value } => format!(
-            "tensor(shape={:?}, data={:?})",
-            value.shape,
-            &value.data[..value.data.len().min(10)]
-        ),
+        ExecutionValue::Tensor { value } => {
+            // Limit raised from 10 to 32 to match the build-target renderer
+            // (red-team v0.2.6 MEDIUM: a 4x4 attention output rendered only
+            // 10 of 16 elements with no truncation marker). When the tensor
+            // exceeds the cap, append a trailing `...` so downstream parsers
+            // can distinguish a truncated prefix from a complete render.
+            const PRINT_LIMIT: usize = 32;
+            let visible = value.data.len().min(PRINT_LIMIT);
+            if visible < value.data.len() {
+                format!(
+                    "tensor(shape={:?}, data={:?} + ...)",
+                    value.shape,
+                    &value.data[..visible]
+                )
+            } else {
+                format!("tensor(shape={:?}, data={:?})", value.shape, value.data)
+            }
+        }
         ExecutionValue::Int64 { value } => value.to_string(),
         ExecutionValue::Float64 { value } => value.to_string(),
         ExecutionValue::Bool { value } => value.to_string(),

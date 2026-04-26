@@ -130,7 +130,12 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("        printf(\"%lld\", (long long)t->shape[d]);".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"], data=[\");".to_string());
-    out.push("    int64_t limit = t->size < 10 ? t->size : 10;".to_string());
+    // Limit raised from 10 to 32 (a 4x4 tensor previously rendered only 10
+    // of 16 elements with no marker, indistinguishable from a true 10-element
+    // tensor — red-team v0.2.6 MEDIUM). Also append "..." when truncated so
+    // the trailing-data case is visually unambiguous; downstream parsers
+    // must tolerate the `...` token.
+    out.push("    int64_t limit = t->size < 32 ? t->size : 32;".to_string());
     out.push("    for (int64_t i = 0; i < limit; ++i) {".to_string());
     out.push("        double value = t->data[i];".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
@@ -140,6 +145,7 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
     out.push("            printf(\"%.16g\", value);".to_string());
     out.push("        }".to_string());
     out.push("    }".to_string());
+    out.push("    if (t->size > limit) { printf(\", ...\"); }".to_string());
     out.push("    printf(\"])\");".to_string());
     out.push("}".to_string());
 }
