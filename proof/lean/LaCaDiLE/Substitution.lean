@@ -1419,6 +1419,53 @@ private theorem not_mem_linearCtxDom_append_pair
   simp [linearCtxDom, List.map_append, hzx, hzy] at hz
   exact h (by simpa [linearCtxDom] using hz)
 
+private theorem ctxFresh_append_singleton
+    {Gamma : LinearCtx} {x : String} {slotX : Option Typ} {body : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars body)
+    (hxGamma : x ∉ linearCtxDom Gamma)
+    (hxBody : x ∉ boundVars body) :
+    NoDupNames (Gamma ++ [(x, slotX)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slotX)]) → z ∉ boundVars body) := by
+  have hNodupSome : NoDupNames (Gamma ++ [(x, some Typ.unit)]) :=
+    noDupNames_append_singleton hNodup hxGamma
+  have hNodupSlot : NoDupNames (Gamma ++ [(x, slotX)]) := by
+    simpa [NoDupNames, linearCtxDom] using hNodupSome
+  refine ⟨hNodupSlot, ?_⟩
+  intro z hz
+  simp [linearCtxDom] at hz
+  rcases hz with hz | hz
+  · exact hCtx z (by simpa [linearCtxDom] using hz)
+  · subst z
+    exact hxBody
+
+private theorem ctxFresh_append_pair
+    {Gamma : LinearCtx} {x y : String}
+    {slotX slotY : Option Typ} {body : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars body)
+    (hxGamma : x ∉ linearCtxDom Gamma)
+    (hyGamma : y ∉ linearCtxDom Gamma)
+    (hxy : x ≠ y)
+    (hxBody : x ∉ boundVars body)
+    (hyBody : y ∉ boundVars body) :
+    NoDupNames (Gamma ++ [(x, slotX), (y, slotY)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slotX), (y, slotY)]) →
+        z ∉ boundVars body) := by
+  have hSingle :
+      NoDupNames (Gamma ++ [(x, slotX)]) ∧
+        (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slotX)]) →
+          z ∉ boundVars body) := by
+    exact ctxFresh_append_singleton hNodup hCtx hxGamma hxBody
+  have hyGamma' : y ∉ linearCtxDom (Gamma ++ [(x, slotX)]) := by
+    exact not_mem_linearCtxDom_append_singleton hyGamma (by
+      intro hyx
+      exact hxy hyx.symm)
+  simpa [List.append_assoc] using
+    (ctxFresh_append_singleton
+      (Gamma := Gamma ++ [(x, slotX)]) (x := y) (slotX := slotY) (body := body)
+      hSingle.1 hSingle.2 hyGamma' hyBody)
+
 mutual
 
 /-- Cutoff-indexed weakening for named contexts. Insert a fresh unused
