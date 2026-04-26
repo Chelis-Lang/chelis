@@ -1877,22 +1877,114 @@ private theorem subst_preserves_typing_ctx_fresh_aux
     (x : String) (t1 : Typ)
     {GammaPre suffix GammaOut : LinearCtx} {slotX : Option Typ}
     {e v : Term} {t2 : Typ} {eps : EffectRow}
-    (_h_e : HasType Delta Sigma
+    (h_e : HasType Delta Sigma
       (GammaPre ++ [(x, slotX)] ++ suffix) e t2 eps GammaOut)
-    (_h_live : SlotSub
+    (h_live : SlotSub
       (GammaPre ++ [(x, slotX)] ++ suffix)
       (GammaPre ++ [(x, some t1)] ++ suffix))
-    (_h_nodup : NoDupNames (GammaPre ++ [(x, slotX)] ++ suffix))
-    (_h_ctx_fresh : ∀ y, y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix) → y ∉ boundVars e)
-    (_h_v : HasType Delta Sigma [] v t1 [] [])
-    (_h_closed : Closed v)
-    (_h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v)
-    (_h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
+    (h_nodup : NoDupNames (GammaPre ++ [(x, slotX)] ++ suffix))
+    (h_ctx_fresh : ∀ y, y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix) → y ∉ boundVars e)
+    (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_closed : Closed v)
+    (h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v)
+    (h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ boundVars v) :
     ∃ GammaOut' : LinearCtx,
       HasType Delta Sigma (GammaPre ++ suffix) (subst e v x) t2 eps GammaOut' := by
-  sorry -- Remaining blocker is the theorem's recursive binder-body
-        -- shape: the proof must recurse under suffixes and track the
-        -- live/dead middle slot with SlotSub.
+  have hmain :
+      ∀ {Gamma : LinearCtx} {e : Term} {t2 : Typ} {eps : EffectRow} {GammaOut : LinearCtx},
+        HasType Delta Sigma Gamma e t2 eps GammaOut →
+        ∀ {GammaPre suffix : LinearCtx} {slotX : Option Typ},
+          Gamma = GammaPre ++ [(x, slotX)] ++ suffix →
+          SlotSub Gamma (GammaPre ++ [(x, some t1)] ++ suffix) →
+          NoDupNames Gamma →
+          (∀ y, y ∈ linearCtxDom Gamma → y ∉ boundVars e) →
+          (∀ y, y ∈ linearCtxDom suffix → y ∉ boundVars v) →
+          (∀ y, y ∈ boundVars e → y ∉ boundVars v) →
+          ∃ GammaOut' : LinearCtx,
+            HasType Delta Sigma (GammaPre ++ suffix) (subst e v x) t2 eps GammaOut' := by
+    intro Gamma e t2 eps GammaOut h
+    induction h using HasType.rec
+        (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+    | var Delta Sigma Gamma1 Gamma2 y t =>
+        intro GammaPre suffix slotX hEq h_live h_nodup _h_ctx_fresh h_suffix_fresh _h_bound_fresh
+        exact subst_preserves_typing_ctx_fresh_var
+          Delta Sigma x t1 hEq
+          (by simpa [hEq] using h_live)
+          (by simpa [hEq] using h_nodup)
+          h_v h_closed h_suffix_fresh
+    | unit Delta Sigma Gamma =>
+        intro GammaPre suffix slotX _hEq _h_live _h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        refine ⟨GammaPre ++ suffix, ?_⟩
+        simpa [subst] using HasType.unit Delta Sigma (GammaPre ++ suffix)
+    | abs Delta Sigma Gamma1 Gamma2 y tArg tRes epsBody body slot hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | app Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tArg tRes epsInner eps1 eps2 h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | letBind Delta Sigma Gamma1 Gamma2 Gamma3 y e1 e2 tArg tRes eps1 eps2 slot h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | copy Delta Sigma Gamma1 Gamma2 body ds eps hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | letpair Delta Sigma Gamma1 Gamma2 Gamma3 y z e1 e2 tArg tRes t eps1 eps2 slotY slotZ h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | tpair Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 tLeft tRight eps1 eps2 h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | fst Delta Sigma Gamma1 Gamma2 body tLeft tRight eps hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | snd Delta Sigma Gamma1 Gamma2 body tLeft tRight eps hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | const Delta Sigma Gamma c ds =>
+        intro GammaPre suffix slotX _hEq _h_live _h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        refine ⟨GammaPre ++ suffix, ?_⟩
+        simpa [subst] using HasType.const Delta Sigma (GammaPre ++ suffix) c ds
+    | tadd Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | tmul Delta Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2 h1 h2 ih1 ih2 =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | tsum Delta Sigma Gamma1 Gamma2 body ds d eps hBody hmem ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | texpand Delta Sigma Gamma1 Gamma2 body ds d eps hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | uniformLike Delta Sigma Gamma1 Gamma2 body ds lo hi eps hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | perform Delta Sigma Gamma1 Gamma2 op body tArg tRet eps hBody hsig ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | handle Delta Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
+        hBody hOpsIn hClsIn hCover hClauses ihBody ihClauses =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | tgrad Delta Sigma Gamma y ds dsOut body eps slot hBody hsub ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | tvmap Delta Sigma Gamma y tArg tRes body eps d slot hBody ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | loc Delta Sigma Gamma ell t hlook =>
+        intro GammaPre suffix slotX _hEq _h_live _h_nodup _h_ctx_fresh _h_suffix_fresh _h_bound_fresh
+        refine ⟨GammaPre ++ suffix, ?_⟩
+        simpa [subst] using HasType.loc Delta Sigma (GammaPre ++ suffix) ell t hlook
+    | subEff Delta Sigma Gamma Gamma' body t eps eps' hBody hsub ih =>
+        intro GammaPre suffix slotX hEq h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
+        sorry
+    | nil Delta Sigma Gamma2 t epsR =>
+        trivial
+    | cons Delta Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
+        hMatch hBody hRest ihBody ihRest =>
+        trivial
+  exact hmain h_e rfl h_live h_nodup h_ctx_fresh h_suffix_fresh h_bound_fresh
 
 /-- Honest named substitution theorem for the non-captured context-fresh
     case.
