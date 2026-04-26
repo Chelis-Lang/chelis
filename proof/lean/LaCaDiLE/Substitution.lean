@@ -1466,6 +1466,182 @@ private theorem ctxFresh_append_pair
       (Gamma := Gamma ++ [(x, slotX)]) (x := y) (slotX := slotY) (body := body)
       hSingle.1 hSingle.2 hyGamma' hyBody)
 
+private theorem ctxFresh_abs_body_setup
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {slot : Option Typ} {body : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (Term.abs x tx body))
+    (hScope : WellScoped (Term.abs x tx body)) :
+    NoDupNames (Gamma ++ [(x, slot)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slot)]) → z ∉ boundVars body) := by
+  rcases wellScoped_abs_body hScope with ⟨hxBody, _hBodyScope⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    exact hCtx x hx (by simp [boundVars])
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars body := by
+    intro z hz hzBody
+    exact hCtx z hz (by simp [boundVars, hzBody])
+  exact ctxFresh_append_singleton hNodup hCtxBody hxGamma hxBody
+
+private theorem ctxFresh_letBind_body_setup
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {slot : Option Typ}
+    {e1 e2 : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (Term.letBind x e1 e2))
+    (hScope : WellScoped (Term.letBind x e1 e2)) :
+    NoDupNames (Gamma ++ [(x, slot)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slot)]) → z ∉ boundVars e2) := by
+  rcases wellScoped_letBind_body hScope with ⟨_hScope1, hxBody, _hScope2⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    exact hCtx x hx (by simp [boundVars])
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars e2 := by
+    intro z hz hzBody
+    exact hCtx z hz (by simp [boundVars, List.mem_append, hzBody])
+  exact ctxFresh_append_singleton hNodup hCtxBody hxGamma hxBody
+
+private theorem ctxFresh_letpair_body_setup
+    {Gamma : LinearCtx} {x y : String} {tx ty : Typ}
+    {slotX slotY : Option Typ} {e1 e2 : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (Term.letpair x y e1 e2))
+    (hScope : WellScoped (Term.letpair x y e1 e2)) :
+    NoDupNames (Gamma ++ [(x, slotX), (y, slotY)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slotX), (y, slotY)]) →
+        z ∉ boundVars e2) := by
+  rcases wellScoped_letpair_body hScope with
+    ⟨_hScope1, hxy, hxBody, hyBody, _hScope2⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    exact hCtx x hx (by simp [boundVars])
+  have hyGamma : y ∉ linearCtxDom Gamma := by
+    intro hy
+    exact hCtx y hy (by simp [boundVars])
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars e2 := by
+    intro z hz hzBody
+    exact hCtx z hz (by simp [boundVars, List.mem_append, hzBody])
+  exact ctxFresh_append_pair hNodup hCtxBody hxGamma hyGamma hxy hxBody hyBody
+
+private theorem ctxFresh_grad_body_setup
+    {Gamma : LinearCtx} {x : String} {tx tOut : Typ}
+    {slot : Option Typ} {body : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (Term.grad x tx tOut body))
+    (hScope : WellScoped (Term.grad x tx tOut body)) :
+    NoDupNames (Gamma ++ [(x, slot)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slot)]) → z ∉ boundVars body) := by
+  rcases wellScoped_grad_body hScope with ⟨hxBody, _hBodyScope⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    exact hCtx x hx (by simp [boundVars])
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars body := by
+    intro z hz hzBody
+    exact hCtx z hz (by simp [boundVars, hzBody])
+  exact ctxFresh_append_singleton hNodup hCtxBody hxGamma hxBody
+
+private theorem ctxFresh_vmap_body_setup
+    {Gamma : LinearCtx} {x : String} {tx : Typ} {d : Dim}
+    {slot : Option Typ} {body : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars (Term.vmap x tx d body))
+    (hScope : WellScoped (Term.vmap x tx d body)) :
+    NoDupNames (Gamma ++ [(x, slot)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slot)]) → z ∉ boundVars body) := by
+  rcases wellScoped_vmap_body hScope with ⟨hxBody, _hBodyScope⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    exact hCtx x hx (by simp [boundVars])
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars body := by
+    intro z hz hzBody
+    exact hCtx z hz (by simp [boundVars, hzBody])
+  exact ctxFresh_append_singleton hNodup hCtxBody hxGamma hxBody
+
+private theorem mem_boundVarsClauses_arg'
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    x ∈ boundVarsClauses clauses := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses]
+      · simp [boundVarsClauses, ih htl]
+
+private theorem mem_boundVarsClauses_cont'
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    k ∈ boundVarsClauses clauses := by
+  induction clauses with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses]
+      · simp [boundVarsClauses, ih htl]
+
+private theorem mem_boundVarsClauses_body'
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k z : String} {hb : Term}
+    (hmem : (op, x, k, hb) ∈ clauses)
+    (hz : z ∈ boundVars hb) :
+    z ∈ boundVarsClauses clauses := by
+  induction clauses generalizing op x k hb z with
+  | nil =>
+      cases hmem
+  | cons cl rest ih =>
+      rcases List.mem_cons.mp hmem with hhd | htl
+      · cases hhd
+        simp [boundVarsClauses, hz]
+      · simp [boundVarsClauses, ih htl hz]
+
+private theorem ctxFresh_handle_clause_setup
+    {Gamma : LinearCtx} {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    {op : EffectLabel} {x k : String} {tx tk : Typ}
+    {slotX slotK : Option Typ} {hb : Term}
+    (hNodup : NoDupNames Gamma)
+    (hCtx : ∀ z, z ∈ linearCtxDom Gamma →
+      z ∉ boundVars (Term.handle epsH body clauses))
+    (hScope : WellScoped (Term.handle epsH body clauses))
+    (hmem : (op, x, k, hb) ∈ clauses) :
+    NoDupNames (Gamma ++ [(x, slotX), (k, slotK)]) ∧
+      (∀ z, z ∈ linearCtxDom (Gamma ++ [(x, slotX), (k, slotK)]) →
+        z ∉ boundVars hb) := by
+  rcases wellScoped_handle_clause hScope hmem with
+    ⟨hxk, hxBody, hkBody, _hScopeBody⟩
+  have hxGamma : x ∉ linearCtxDom Gamma := by
+    intro hx
+    have hxb : x ∈ boundVars (Term.handle epsH body clauses) := by
+      have hxb' : x ∈ boundVars body ++ boundVarsClauses clauses := by
+        simpa [List.mem_append] using
+          (show x ∈ boundVars body ∨ x ∈ boundVarsClauses clauses from
+            Or.inr (mem_boundVarsClauses_arg' hmem))
+      simpa [boundVars] using hxb'
+    exact hCtx x hx hxb
+  have hkGamma : k ∉ linearCtxDom Gamma := by
+    intro hk
+    have hkb : k ∈ boundVars (Term.handle epsH body clauses) := by
+      have hkb' : k ∈ boundVars body ++ boundVarsClauses clauses := by
+        simpa [List.mem_append] using
+          (show k ∈ boundVars body ∨ k ∈ boundVarsClauses clauses from
+            Or.inr (mem_boundVarsClauses_cont' hmem))
+      simpa [boundVars] using hkb'
+    exact hCtx k hk hkb
+  have hCtxBody : ∀ z, z ∈ linearCtxDom Gamma → z ∉ boundVars hb := by
+    intro z hz hzBody
+    have hzb : z ∈ boundVars (Term.handle epsH body clauses) := by
+      have hzb' : z ∈ boundVars body ++ boundVarsClauses clauses := by
+        simpa [List.mem_append] using
+          (show z ∈ boundVars body ∨ z ∈ boundVarsClauses clauses from
+            Or.inr (mem_boundVarsClauses_body' hmem hzBody))
+      simpa [boundVars] using hzb'
+    exact hCtx z hz hzb
+  exact ctxFresh_append_pair hNodup hCtxBody hxGamma hkGamma hxk hxBody hkBody
+
 mutual
 
 /-- Cutoff-indexed weakening for named contexts. Insert a fresh unused
