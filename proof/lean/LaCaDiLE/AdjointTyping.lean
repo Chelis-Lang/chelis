@@ -273,6 +273,30 @@ private theorem hasType_copy_inv
       (try cases heq) <;>
         first | exact True.intro | (exfalso; contradiction)
 
+/-- Local variable inversion used by the higher-order product witness.
+    Importing the public inversion surface from `Preservation.lean`
+    would create a cycle. -/
+private theorem hasType_var_ctx_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma GammaOut : LinearCtx}
+    {x : String} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma (Term.var x) t eps GammaOut) :
+    ∃ GammaPre GammaPost,
+      Gamma = GammaPre ++ [(x, some t)] ++ GammaPost ∧
+      GammaOut = GammaPre ++ [(x, none)] ++ GammaPost := by
+  generalize heq : Term.var x = e_in at h
+  generalize hteq : t = t_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | var _ _ GammaPre GammaPost y ty =>
+      cases heq
+      cases hteq
+      exact ⟨GammaPre, GammaPost, rfl, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq hteq
+  | _ =>
+      (try cases heq) <;> (try cases hteq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
 /-- Structural predicate: every `Term.mul` sub-expression of `e` has
     its two operands well-typed as `tensor dsE` in *some* linear
     context chain. Threaded as the body-typing premise of
@@ -917,6 +941,30 @@ private theorem hasType_letBind_inv_local
       (try cases heq) <;>
         first | exact True.intro | (exfalso; contradiction)
 
+private theorem hasType_pair_inv_local
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
+    {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) t eps GammaOut) :
+    ∃ (Gamma2 Gamma3 : LinearCtx) (t1 t2 : Typ) (eps1 eps2 : EffectRow),
+      HasType Delta Sigma Gamma1 e1 t1 eps1 Gamma2 ∧
+      HasType Delta Sigma Gamma2 e2 t2 eps2 Gamma3 ∧
+      t = Typ.pair t1 t2 ∧
+      GammaOut = Gamma3 := by
+  generalize heq : Term.pair e1 e2 = e_in at h
+  generalize hteq : t = t_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tpair _ _ _ Gamma2 Gamma3 _ _ t1 t2 eps1 eps2 h1 h2 _ _ =>
+      cases heq
+      cases hteq
+      exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, h1, h2, rfl, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      obtain ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, h1, h2, ht, hOut⟩ := ih heq hteq
+      exact ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, h1, h2, ht, hOut⟩
+  | _ =>
+      (try cases heq) <;> (try cases hteq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
 private theorem hasType_sum_inv_local
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
     {e : Term} {d : Dim} {t : Typ} {eps : EffectRow}
@@ -1478,6 +1526,347 @@ theorem grad_preservation_expand_regression :
           adjointExpandGapGradT adjointExpandGapGradT adjointExpandGapBody)
   · intro Sigma2
     exact adjointExpandGapGradReduct_typed (Sigma := Sigma2)
+
+private def adjointHigherOrderGapTensorT : Typ :=
+  Typ.tensor DimList.empty
+
+private def adjointHigherOrderGapFnT : Typ :=
+  Typ.arrow adjointHigherOrderGapTensorT adjointHigherOrderGapTensorT []
+
+private def adjointHigherOrderGapBody : Term :=
+  Term.snd adjointHigherOrderGapFnT
+    (Term.pair
+      (Term.abs "y" adjointHigherOrderGapTensorT
+        (Term.add (Term.var "x") (Term.var "y")))
+      (Term.const 0 DimList.empty))
+
+private theorem adjointHigherOrderGapBody_typed
+    {Sigma : StoreTyp} :
+    HasType (Capability.diff :: []) Sigma
+      ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+      adjointHigherOrderGapBody
+      adjointHigherOrderGapTensorT
+      []
+      ([("x", none)] : LinearCtx) := by
+  have hVarX :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (Term.var "x")
+        adjointHigherOrderGapTensorT
+        []
+        ([("x", none), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx) := by
+    simpa [adjointHigherOrderGapTensorT, List.append_assoc] using
+      (HasType.var (Capability.diff :: []) Sigma
+        ([] : LinearCtx)
+        ([("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        "x"
+        adjointHigherOrderGapTensorT)
+  have hVarY :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", none), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (Term.var "y")
+        adjointHigherOrderGapTensorT
+        []
+        ([("x", none), ("y", none)] : LinearCtx) := by
+    simpa [adjointHigherOrderGapTensorT, List.append_assoc] using
+      (HasType.var (Capability.diff :: []) Sigma
+        ([("x", none)] : LinearCtx)
+        ([] : LinearCtx)
+        "y"
+        adjointHigherOrderGapTensorT)
+  have hAdd :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (Term.add (Term.var "x") (Term.var "y"))
+        adjointHigherOrderGapTensorT
+        []
+        ([("x", none), ("y", none)] : LinearCtx) := by
+    simpa [EffectRow.union, adjointHigherOrderGapTensorT] using
+      (HasType.tadd (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        ([("x", none), ("y", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        ([("x", none), ("y", none)] : LinearCtx)
+        (Term.var "x")
+        (Term.var "y")
+        DimList.empty
+        []
+        []
+        hVarX
+        hVarY)
+  have hAbs :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (Term.abs "y" adjointHigherOrderGapTensorT
+          (Term.add (Term.var "x") (Term.var "y")))
+        adjointHigherOrderGapFnT
+        []
+        ([("x", none)] : LinearCtx) := by
+    simpa [adjointHigherOrderGapFnT, adjointHigherOrderGapTensorT] using
+      (HasType.abs (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        ([("x", none)] : LinearCtx)
+        "y"
+        adjointHigherOrderGapTensorT
+        adjointHigherOrderGapTensorT
+        []
+        (Term.add (Term.var "x") (Term.var "y"))
+        none
+        hAdd)
+  have hConst :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", none)] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        adjointHigherOrderGapTensorT
+        []
+        ([("x", none)] : LinearCtx) := by
+    simpa [adjointHigherOrderGapTensorT] using
+      (HasType.const (Capability.diff :: []) Sigma
+        ([("x", none)] : LinearCtx)
+        0
+        DimList.empty)
+  have hPair :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (Term.pair
+          (Term.abs "y" adjointHigherOrderGapTensorT
+            (Term.add (Term.var "x") (Term.var "y")))
+          (Term.const 0 DimList.empty))
+        (Typ.pair adjointHigherOrderGapFnT adjointHigherOrderGapTensorT)
+        []
+        ([("x", none)] : LinearCtx) := by
+    simpa [EffectRow.union, adjointHigherOrderGapFnT, adjointHigherOrderGapTensorT] using
+      (HasType.tpair (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        ([("x", none)] : LinearCtx)
+        ([("x", none)] : LinearCtx)
+        (Term.abs "y" adjointHigherOrderGapTensorT
+          (Term.add (Term.var "x") (Term.var "y")))
+        (Term.const 0 DimList.empty)
+        adjointHigherOrderGapFnT
+        adjointHigherOrderGapTensorT
+        []
+        []
+        hAbs
+        hConst)
+  simpa [adjointHigherOrderGapBody, adjointHigherOrderGapFnT, adjointHigherOrderGapTensorT] using
+    (HasType.snd (Capability.diff :: []) Sigma
+      ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+      ([("x", none)] : LinearCtx)
+      (Term.pair
+        (Term.abs "y" adjointHigherOrderGapTensorT
+          (Term.add (Term.var "x") (Term.var "y")))
+        (Term.const 0 DimList.empty))
+      adjointHigherOrderGapFnT
+      adjointHigherOrderGapTensorT
+      []
+      hPair)
+
+private theorem adjointHigherOrderGap_head :
+    adjointTypedFrom adjointHigherOrderGapBody adjointHigherOrderGapTensorT "x"
+      (Term.var "gs") 0 =
+      Term.letpair (freshName "gA" 0) (freshName "gB" 0)
+        (Term.pair (zeroCotangent adjointHigherOrderGapFnT) (Term.var "gs"))
+        (Term.letBind (freshName "adjA" 0)
+          (adjointTypedFrom
+            (Term.abs "y" adjointHigherOrderGapTensorT
+              (Term.add (Term.var "x") (Term.var "y")))
+            adjointHigherOrderGapFnT
+            "x"
+            (Term.var (freshName "gA" 0))
+            (0 + 3))
+          (adjointTypedFrom
+            (Term.const 0 DimList.empty)
+            adjointHigherOrderGapTensorT
+            "x"
+            (Term.var (freshName "gB" 0))
+            (0 + 3))) := by
+  simp [adjointHigherOrderGapBody, adjointHigherOrderGapFnT,
+    adjointHigherOrderGapTensorT, adjointTypedFrom, zeroCotangent]
+
+private theorem adjointHigherOrderGap_abs_head :
+    adjointTypedFrom
+      (Term.abs "y" adjointHigherOrderGapTensorT
+        (Term.add (Term.var "x") (Term.var "y")))
+      adjointHigherOrderGapFnT
+      "x"
+      (Term.var (freshName "gA" 0))
+      (0 + 3) =
+      Term.letpair (freshName "gA" (0 + 3)) (freshName "gB" (0 + 3))
+        (Term.copy (Term.var (freshName "gA" 0)))
+        (Term.letBind (freshName "adjA" ((0 + 3) + 2))
+          (adjointTypedFrom
+            (Term.var "x")
+            adjointHigherOrderGapTensorT
+            "x"
+            (Term.var (freshName "gA" (0 + 3)))
+            (((0 + 3) + 2) + 1))
+          (adjointTypedFrom
+            (Term.var "y")
+            adjointHigherOrderGapTensorT
+            "x"
+            (Term.var (freshName "gB" (0 + 3)))
+            (((0 + 3) + 2) + 1))) := by
+  simp [adjointHigherOrderGapFnT, adjointHigherOrderGapTensorT,
+    adjointTypedFrom, splitCotangentSeedFrom]
+
+private theorem adjointHigherOrderGap_ctx_no_tensor_gA
+    {GammaPre GammaPost : LinearCtx} {ds : DimList}
+    (h :
+      ([("x", some adjointHigherOrderGapTensorT), ("gs", none),
+        (freshName "gA" 0, some Typ.unit),
+        (freshName "gB" 0, some adjointHigherOrderGapTensorT)] : LinearCtx) =
+        GammaPre ++ [(freshName "gA" 0, some (Typ.tensor ds))] ++ GammaPost) :
+    False := by
+  cases GammaPre with
+  | nil =>
+      simp [adjointHigherOrderGapTensorT, freshName] at h
+  | cons a GammaPre =>
+      cases GammaPre with
+      | nil =>
+          simp [adjointHigherOrderGapTensorT, freshName] at h
+      | cons b GammaPre =>
+          cases GammaPre with
+          | nil =>
+              simp [adjointHigherOrderGapTensorT] at h
+          | cons c GammaPre =>
+              cases GammaPre with
+              | nil =>
+                  simp [adjointHigherOrderGapTensorT, freshName] at h
+              | cons d GammaPre =>
+                  simp [adjointHigherOrderGapTensorT, freshName] at h
+
+private theorem adjointHigherOrderGap_copy_unit_absurd
+    {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    (h : HasType [] Sigma
+      ([( "x", some adjointHigherOrderGapTensorT), ("gs", none),
+        (freshName "gA" 0, some Typ.unit),
+        (freshName "gB" 0, some adjointHigherOrderGapTensorT)] : LinearCtx)
+      (Term.copy (Term.var (freshName "gA" 0)))
+      t
+      eps
+      GammaOut) :
+    False := by
+  obtain ⟨ds, _hteq, hVar⟩ := hasType_copy_inv h
+  obtain ⟨GammaPre, GammaPost, hCtx, _hOut⟩ := hasType_var_ctx_inv hVar
+  exact adjointHigherOrderGap_ctx_no_tensor_gA hCtx
+
+private theorem hasType_unit_inv_local
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma GammaOut : LinearCtx}
+    {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma Term.unit t eps GammaOut) :
+    t = Typ.unit ∧ GammaOut = Gamma := by
+  generalize heq : Term.unit = e_in at h
+  generalize hteq : t = t_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | unit _ _ Gamma =>
+      cases heq
+      cases hteq
+      exact ⟨rfl, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq hteq
+  | _ =>
+      (try cases heq) <;> (try cases hteq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
+private theorem adjointHigherOrderGap_seed_var_inv
+    {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    (h : HasType [] Sigma
+      ([("x", some adjointHigherOrderGapTensorT),
+        ("gs", some adjointHigherOrderGapTensorT)] : LinearCtx)
+      (Term.var "gs")
+      t
+      eps
+      GammaOut) :
+    t = adjointHigherOrderGapTensorT ∧
+      GammaOut =
+        ([("x", some adjointHigherOrderGapTensorT),
+          ("gs", none)] : LinearCtx) := by
+  obtain ⟨GammaPre, GammaPost, hCtx, hOut⟩ := hasType_var_ctx_inv h
+  cases GammaPre with
+  | nil =>
+      simp [adjointHigherOrderGapTensorT] at hCtx
+  | cons a GammaPre =>
+      cases GammaPre with
+      | nil =>
+          cases GammaPost with
+          | nil =>
+              simp [adjointHigherOrderGapTensorT] at hCtx
+              rcases hCtx with ⟨rfl, rfl⟩
+              exact ⟨rfl, by simpa [adjointHigherOrderGapTensorT] using hOut⟩
+          | cons b GammaPost =>
+              simp [adjointHigherOrderGapTensorT] at hCtx
+      | cons b GammaPre =>
+          simp [adjointHigherOrderGapTensorT] at hCtx
+
+private theorem adjointHigherOrderGap_seed_pair_inv
+    {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    (h : HasType [] Sigma
+      ([("x", some adjointHigherOrderGapTensorT),
+        ("gs", some adjointHigherOrderGapTensorT)] : LinearCtx)
+      (Term.pair (zeroCotangent adjointHigherOrderGapFnT) (Term.var "gs"))
+      t
+      eps
+      GammaOut) :
+    t = Typ.pair Typ.unit adjointHigherOrderGapTensorT ∧
+      GammaOut =
+        ([("x", some adjointHigherOrderGapTensorT),
+          ("gs", none)] : LinearCtx) := by
+  rcases hasType_pair_inv_local h with
+    ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, hZero, hSeed, ht, hOut⟩
+  have hUnitInv := hasType_unit_inv_local (by
+    simpa [zeroCotangent, cotangentType, adjointHigherOrderGapFnT] using hZero)
+  have hSeedInv := adjointHigherOrderGap_seed_var_inv (by simpa [hUnitInv.2] using hSeed)
+  cases hUnitInv.1
+  cases hSeedInv.1
+  cases ht
+  exact ⟨rfl, by simpa [hSeedInv.2] using hOut⟩
+
+/-- Even after switching products/projections to typed cotangent seeds,
+    the typed transform is still false on higher-order `grad` bodies:
+    the current `abs` branch passes a non-tensor seed straight into the
+    function body, so a later tensor primitive can still force an
+    ill-typed `copy`. This witnesses that the next honest theorem
+    surface must carry an explicit supported-fragment premise, not just
+    a typed seed. -/
+theorem adjointTyped_higherOrder_counterexample :
+    (∀ Sigma,
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        adjointHigherOrderGapBody
+        adjointHigherOrderGapTensorT
+        []
+        ([("x", none)] : LinearCtx)) ∧
+    (∀ Sigma, ¬ ∃ eps GammaOut,
+      HasType [] Sigma
+        ([("x", some adjointHigherOrderGapTensorT),
+          ("gs", some adjointHigherOrderGapTensorT)] : LinearCtx)
+        (adjointTypedFrom adjointHigherOrderGapBody
+          adjointHigherOrderGapTensorT "x" (Term.var "gs") 0)
+        Typ.unit
+        eps
+        GammaOut) := by
+  refine ⟨?_, ?_⟩
+  · intro Sigma
+    exact adjointHigherOrderGapBody_typed (Sigma := Sigma)
+  · intro Sigma
+    intro h
+    rcases h with ⟨eps, GammaOut, hAdj⟩
+    rw [adjointHigherOrderGap_head] at hAdj
+    rcases hasType_letpair_inv hAdj with
+      ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY,
+        hSeedPair, hBody, _hOut⟩
+    have hSeedInv := adjointHigherOrderGap_seed_pair_inv hSeedPair
+    cases hSeedInv.1
+    cases hSeedInv.2
+    rcases hasType_letBind_inv_local hBody with
+      ⟨GammaMid, GammaEnd, tAdj, epsAdj, epsRest, slotAdj,
+        hAdjAbs, _hRest, _hOut⟩
+    rw [adjointHigherOrderGap_abs_head] at hAdjAbs
+    rcases hasType_letpair_inv hAdjAbs with
+      ⟨GammaCopy, GammaCopyOut, tCopy1, tCopy2, epsCopy, epsBody,
+        slotCopy1, slotCopy2, hCopy, _hBody, _hOut⟩
+    exact adjointHigherOrderGap_copy_unit_absurd hCopy
 
 private def adjointSndGapDim : Dim :=
   Dim.named "dSnd"

@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, fixing the concrete `letBind` / `letpair` adjoint routing bug, landing typed cotangent-seed routing for `pair` / `fst` / `snd` / `copy`, and then classifying the remaining handled product-seed blocker in the legacy public AD theorem surface.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, fixing the concrete `letBind` / `letpair` adjoint routing bug, landing typed cotangent-seed routing for `pair` / `fst` / `snd` / `copy`, proving the supported-fragment closure lemmas, and then classifying both the legacy handled product-seed blocker and the newer higher-order blocker on the typed AD surface.
 
 ## Acceptance Oracle
 
@@ -19,9 +19,20 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `AdjointTyping.lean` now has the repaired structural transform substrate in place:
   - a concrete typed regression showing the repaired `letBind` / `letpair` recursion fixes the old `grad` / `expand` routing bug
   - typed cotangent-seed routing in `AdjointTransform.lean` for `pair` / `fst` / `snd` / `copy`
-- Lean now also contains a handled product-seed counterexample showing that the current public `adjointFrom` theorem surface is still false: `handle` still routes through the legacy tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
+- `AdjointTransform.lean` now also names the current honest first-order AD fragment:
+  - `AdjointTypeSupported`
+  - `AdjointCtxSupported`
+  - `AdjointSupported`
+  - `AdjointSupportedClauses`
+- `Substitution.lean` now proves the key closure facts for that fragment:
+  - `adjointSupported_subst`
+  - `adjointSupportedClauses_substClauses`
+  - `adjointSupported_of_typed_value`
+- Lean now contains both current AD counterexample classes:
+  - a handled product-seed counterexample showing that the legacy public `adjointFrom` theorem surface is still false: `handle` still routes through the tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
+  - a higher-order counterexample showing that unrestricted `adjointTypedFrom` is also false on raw terms, because the typed transform still needs an explicit supported-fragment premise to exclude `abs` / `app` / nested `grad` / nested `vmap`
 - The branch still contains 1 executable `sorry` on the main proof path:
-  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission; the next AD repair is to move the public theorem surface from `adjointFrom` to `adjointTypedFrom` / `adjointTypedClausesFrom`, then close the typed helper and the separate `mul` case
+  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission; the next AD repair is to move the public theorem surface from `adjointFrom` to `adjointTypedFrom` / `adjointTypedClausesFrom`, add the supported-fragment premises, then close the typed helper and the separate `mul` case
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -59,13 +70,14 @@ The current theorem-shape boundary is now explicit in Lean:
    The next public theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The branch now names the stronger candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` already proves a partial one-step `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary. The remaining work is to close the explicit beta/direct-handler/context-freshness debt with the right typing and store-side side conditions so preservation can iterate honestly.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the legacy public `adjointFrom` theorem surface is still false for handled product seeds, because `handle` still uses the tensor-only clause path. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
+   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the AD surface still has two theorem-shape blockers: the legacy `adjointFrom` surface is false for handled product seeds, and unrestricted `adjointTypedFrom` is false for higher-order bodies. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
    - switch the public theorem surface and downstream `tgrad` plumbing to `adjointTypedFrom` / `adjointTypedClausesFrom`
-   - reprove the private typing helper on that typed surface
+   - thread the supported-fragment premises through typing, substitution, and stepping
+   - reprove the private typing helper on that honest typed-and-supported domain
    - separately, solve the `mul` tape/effect-row case
 
 ## Next Moves
 
 1. Refine and close the current `HandlerAwareRuntimeLinear` boundary, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for the remaining side conditions.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies and so it names the current handler-aware boundary honestly.
-3. Re-close the public AD surface against the now-updated transform domain by moving it onto `adjointTypedFrom` / `adjointTypedClausesFrom`, then reprove the private helper there, finish the remaining admitted `mul` case, and return to the AD-correctness wave.
+3. Re-close the public AD surface against the now-updated transform domain by moving it onto `adjointTypedFrom` / `adjointTypedClausesFrom`, threading the supported-fragment premises through `T-Grad` / `E-Grad` / the public theorem, then reprove the private helper there, finish the remaining admitted `mul` case, and return to the AD-correctness wave.

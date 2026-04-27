@@ -17,6 +17,7 @@ import LaCaDiLE.Syntax
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
 import LaCaDiLE.Operational
+import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
 
@@ -176,6 +177,131 @@ theorem substClauses_notFree
           have hb_eq := subst_notFree hb v x h_notfree_hb
           have hcond : ¬ (y = x ∨ k = x) := fun hd => hd.elim hy hk
           simp [hcond, hb_eq, ih_rest]
+
+end
+
+mutual
+
+/-- The supported adjoint fragment is closed under named substitution
+    when the substituted term is itself in the fragment. This is the
+    syntax-side half of the eventual `T-Grad` support premise: any
+    preserved grad-body fragment must survive the value substitutions
+    performed by beta/let/handler reduction. -/
+theorem adjointSupported_subst
+    (e v : Term) (x : String)
+    (hSupp : AdjointSupported e)
+    (hSuppV : AdjointSupported v) :
+    AdjointSupported (subst e v x) := by
+  match e with
+  | Term.var y =>
+      by_cases hy : y = x
+      · simpa [subst, hy] using hSuppV
+      · simp [AdjointSupported, subst, hy]
+  | Term.const n ds =>
+      simp [AdjointSupported, subst]
+  | Term.unit =>
+      simp [AdjointSupported, subst]
+  | Term.loc ell =>
+      simp [AdjointSupported, subst]
+  | Term.add e1 e2 =>
+      rcases hSupp with ⟨h1, h2⟩
+      simpa [AdjointSupported, subst] using
+        And.intro
+          (adjointSupported_subst e1 v x h1 hSuppV)
+          (adjointSupported_subst e2 v x h2 hSuppV)
+  | Term.mul e1 e2 =>
+      rcases hSupp with ⟨h1, h2⟩
+      simpa [AdjointSupported, subst] using
+        And.intro
+          (adjointSupported_subst e1 v x h1 hSuppV)
+          (adjointSupported_subst e2 v x h2 hSuppV)
+  | Term.sum e d =>
+      simpa [AdjointSupported, subst] using
+        adjointSupported_subst e v x hSupp hSuppV
+  | Term.expand e d =>
+      simpa [AdjointSupported, subst] using
+        adjointSupported_subst e v x hSupp hSuppV
+  | Term.copy e =>
+      simpa [AdjointSupported, subst] using
+        adjointSupported_subst e v x hSupp hSuppV
+  | Term.letBind y e1 e2 =>
+      rcases hSupp with ⟨h1, h2⟩
+      by_cases hy : y = x
+      · simp [AdjointSupported, subst, hy]
+        exact And.intro (adjointSupported_subst e1 v x h1 hSuppV) h2
+      · simpa [AdjointSupported, subst, hy] using
+          And.intro
+            (adjointSupported_subst e1 v x h1 hSuppV)
+            (adjointSupported_subst e2 v x h2 hSuppV)
+  | Term.letpair y z e1 e2 =>
+      rcases hSupp with ⟨h1, h2⟩
+      by_cases hy : y = x
+      · simp [AdjointSupported, subst, hy]
+        exact And.intro (adjointSupported_subst e1 v x h1 hSuppV) h2
+      · by_cases hz : z = x
+        · simp [AdjointSupported, subst, hy, hz]
+          exact And.intro (adjointSupported_subst e1 v x h1 hSuppV) h2
+        · simpa [AdjointSupported, subst, hy, hz] using
+            And.intro
+              (adjointSupported_subst e1 v x h1 hSuppV)
+              (adjointSupported_subst e2 v x h2 hSuppV)
+  | Term.pair e1 e2 =>
+      rcases hSupp with ⟨h1, h2⟩
+      simpa [AdjointSupported, subst] using
+        And.intro
+          (adjointSupported_subst e1 v x h1 hSuppV)
+          (adjointSupported_subst e2 v x h2 hSuppV)
+  | Term.fst tRight e =>
+      simpa [AdjointSupported, subst] using
+        adjointSupported_subst e v x hSupp hSuppV
+  | Term.snd tLeft e =>
+      simpa [AdjointSupported, subst] using
+        adjointSupported_subst e v x hSupp hSuppV
+  | Term.handle epsH body clauses =>
+      rcases hSupp with ⟨hBody, hClauses⟩
+      simpa [AdjointSupported, subst] using
+        And.intro
+          (adjointSupported_subst body v x hBody hSuppV)
+          (adjointSupportedClauses_substClauses clauses v x hClauses hSuppV)
+  | Term.perform op e =>
+      rcases hSupp with ⟨hop, hBody⟩
+      simpa [AdjointSupported, subst] using
+        And.intro hop (adjointSupported_subst e v x hBody hSuppV)
+  | Term.abs _ _ _ =>
+      cases hSupp
+  | Term.app _ _ =>
+      cases hSupp
+  | Term.uniformLike _ _ _ =>
+      cases hSupp
+  | Term.grad _ _ _ _ =>
+      cases hSupp
+  | Term.vmap _ _ _ _ =>
+      cases hSupp
+
+/-- Clause-list companion to `adjointSupported_subst`. -/
+theorem adjointSupportedClauses_substClauses
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x : String)
+    (hSupp : AdjointSupportedClauses clauses)
+    (hSuppV : AdjointSupported v) :
+    AdjointSupportedClauses (substClauses clauses v x) := by
+  match clauses with
+  | [] =>
+      simp [AdjointSupportedClauses, substClauses]
+  | (op, y, k, hb) :: rest =>
+      rcases hSupp with ⟨hHead, hRest⟩
+      by_cases hy : y = x
+      · simp [AdjointSupportedClauses, substClauses, hy]
+        exact And.intro hHead
+          (adjointSupportedClauses_substClauses rest v x hRest hSuppV)
+      · by_cases hk : k = x
+        · simp [AdjointSupportedClauses, substClauses, hy, hk]
+          exact And.intro hHead
+            (adjointSupportedClauses_substClauses rest v x hRest hSuppV)
+        · simpa [AdjointSupportedClauses, substClauses, hy, hk] using
+            And.intro
+              (adjointSupported_subst hb v x hHead hSuppV)
+              (adjointSupportedClauses_substClauses rest v x hRest hSuppV)
 
 end
 
@@ -604,6 +730,94 @@ theorem subst_value
       unfold subst
       exact IsValue.pair _ _ ih1 ih2
   | unit => unfold subst; exact IsValue.unit
+
+/-- Typed values at supported first-order cotangent types already lie
+    in the syntax fragment accepted by the current typed adjoint
+    transform. This is the value-side companion to
+    `adjointSupported_subst`: once a linear variable ranges over a
+    supported type, any value substituted for it by beta/let reduction
+    preserves the fragment. -/
+theorem adjointSupported_of_typed_value
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma Gamma' : LinearCtx} {v : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma v t eps Gamma') :
+    ∀ hv : IsValue v, AdjointTypeSupported t → AdjointSupported v := by
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | var =>
+      intro hv
+      cases hv
+  | unit =>
+      intro _hv _ht
+      simp [AdjointSupported]
+  | abs =>
+      intro hv ht
+      cases hv
+      cases ht
+  | app =>
+      intro hv
+      cases hv
+  | letBind =>
+      intro hv
+      cases hv
+  | copy =>
+      intro hv
+      cases hv
+  | letpair =>
+      intro hv
+      cases hv
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ ih1 ih2 =>
+      intro hv ht
+      cases hv with
+      | pair _ _ hv1 hv2 =>
+          rcases ht with ⟨ht1, ht2⟩
+          simpa [AdjointSupported] using
+            And.intro (ih1 hv1 ht1) (ih2 hv2 ht2)
+  | fst =>
+      intro hv
+      cases hv
+  | snd =>
+      intro hv
+      cases hv
+  | const =>
+      intro hv
+      cases hv
+  | tadd =>
+      intro hv
+      cases hv
+  | tmul =>
+      intro hv
+      cases hv
+  | tsum =>
+      intro hv
+      cases hv
+  | texpand =>
+      intro hv
+      cases hv
+  | uniformLike =>
+      intro hv
+      cases hv
+  | perform =>
+      intro hv
+      cases hv
+  | handle =>
+      intro hv
+      cases hv
+  | tgrad =>
+      intro hv
+      cases hv
+  | tvmap =>
+      intro hv
+      cases hv
+  | loc =>
+      intro _hv _ht
+      simp [AdjointSupported]
+  | subEff _ _ _ _ _ _ _ _ hBody _ ih =>
+      exact ih
+  | nil =>
+      trivial
+  | cons =>
+      trivial
 
 /-! ### Context filter helpers for weakening/exchange -/
 

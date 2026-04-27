@@ -104,6 +104,22 @@ def zeroCotangent : Typ → Term
   | Typ.arrow _ _ _     => Term.unit
   | Typ.tyVar _         => Term.unit
 
+/-- The fragment of source/result types whose cotangent seeds are
+    currently represented explicitly by the typed adjoint transform. -/
+def AdjointTypeSupported : Typ → Prop
+  | Typ.tensor _ => True
+  | Typ.pair t1 t2 => AdjointTypeSupported t1 ∧ AdjointTypeSupported t2
+  | Typ.unit => True
+  | Typ.arrow _ _ _ => False
+  | Typ.tyVar _ => False
+
+/-- Every live entry in the linear context lies in the currently
+    supported first-order adjoint fragment. Tombstones are ignored. -/
+def AdjointCtxSupported : LinearCtx → Prop
+  | [] => True
+  | (_, none) :: rest => AdjointCtxSupported rest
+  | (_, some t) :: rest => AdjointTypeSupported t ∧ AdjointCtxSupported rest
+
 /-- Split a cotangent seed for primal type `t` into two cotangent seeds
     of type `cotangentType t`. Tensor leaves use `copy`; product
     cotangents recurse structurally; currently non-differentiable leaves
@@ -139,6 +155,160 @@ decreasing_by
   all_goals
     simp_wf
     omega
+
+mutual
+
+/-- Syntax-only domain predicate for the currently supported adjoint
+    transform fragment. This is the first-order fragment the typed
+    transform actually implements: product structure, primitive tensor
+    operators, handlers, and `perform` of differentiation-compatible
+    effects are allowed; higher-order / staged constructs whose current
+    transform equations are still placeholders are excluded. -/
+def AdjointSupported : Term → Prop
+  | Term.var _ => True
+  | Term.const _ _ => True
+  | Term.unit => True
+  | Term.loc _ => True
+  | Term.add e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.mul e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.sum e _ => AdjointSupported e
+  | Term.expand e _ => AdjointSupported e
+  | Term.copy e => AdjointSupported e
+  | Term.letBind _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.letpair _ _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.pair e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.fst _ e => AdjointSupported e
+  | Term.snd _ e => AdjointSupported e
+  | Term.handle _ body clauses =>
+      AdjointSupported body ∧ AdjointSupportedClauses clauses
+  | Term.perform op e => op ∈ DiffCompat ∧ AdjointSupported e
+  | Term.abs _ _ _ => False
+  | Term.app _ _ => False
+  | Term.uniformLike _ _ _ => False
+  | Term.grad _ _ _ _ => False
+  | Term.vmap _ _ _ _ => False
+
+/-- Clause-list companion to `AdjointSupported`. -/
+def AdjointSupportedClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, _, _, hb) :: rest =>
+      AdjointSupported hb ∧ AdjointSupportedClauses rest
+
+end
+
+mutual
+
+/-- `addDimTerm` preserves the supported adjoint fragment. This keeps
+    `vmap`'s type-preservation transport aligned with the `T-Grad`
+    fragment restriction. -/
+theorem adjointSupported_addDimTerm (d : Dim) :
+    ∀ e, AdjointSupported e → AdjointSupported (addDimTerm d e)
+  | Term.var x, _ => by simp [AdjointSupported, addDimTerm]
+  | Term.const v ds, _ => by simp [AdjointSupported, addDimTerm]
+  | Term.unit, _ => by simp [AdjointSupported, addDimTerm]
+  | Term.loc ell, _ => by simp [AdjointSupported, addDimTerm]
+  | Term.add e1 e2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d e1 h1)
+          (adjointSupported_addDimTerm d e2 h2)
+  | Term.mul e1 e2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d e1 h1)
+          (adjointSupported_addDimTerm d e2 h2)
+  | Term.sum e d', h => by
+      simpa [AdjointSupported, addDimTerm] using
+        adjointSupported_addDimTerm d e h
+  | Term.expand e d', h => by
+      simpa [AdjointSupported, addDimTerm] using
+        adjointSupported_addDimTerm d e h
+  | Term.copy e, h => by
+      simpa [AdjointSupported, addDimTerm] using
+        adjointSupported_addDimTerm d e h
+  | Term.letBind x e1 e2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d e1 h1)
+          (adjointSupported_addDimTerm d e2 h2)
+  | Term.letpair x y e1 e2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d e1 h1)
+          (adjointSupported_addDimTerm d e2 h2)
+  | Term.pair e1 e2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d e1 h1)
+          (adjointSupported_addDimTerm d e2 h2)
+  | Term.fst tRight e, h => by
+      simpa [AdjointSupported, addDimTerm] using
+        adjointSupported_addDimTerm d e h
+  | Term.snd tLeft e, h => by
+      simpa [AdjointSupported, addDimTerm] using
+        adjointSupported_addDimTerm d e h
+  | Term.handle epsH body clauses, h => by
+      rcases h with ⟨hBody, hClauses⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro
+          (adjointSupported_addDimTerm d body hBody)
+          (adjointSupportedClauses_addDimClauses d clauses hClauses)
+  | Term.perform op e, h => by
+      rcases h with ⟨hop, hBody⟩
+      simpa [AdjointSupported, addDimTerm] using
+        And.intro hop (adjointSupported_addDimTerm d e hBody)
+  | Term.abs _ _ _, h => by cases h
+  | Term.app _ _, h => by cases h
+  | Term.uniformLike _ _ _, h => by cases h
+  | Term.grad _ _ _ _, h => by cases h
+  | Term.vmap _ _ _ _, h => by cases h
+
+/-- Clause-list companion to `adjointSupported_addDimTerm`. -/
+theorem adjointSupportedClauses_addDimClauses (d : Dim) :
+    ∀ clauses,
+      AdjointSupportedClauses clauses →
+      AdjointSupportedClauses (addDimClauses d clauses)
+  | [], _ => by simp [AdjointSupportedClauses, addDimClauses]
+  | (_op, _x, _k, hb) :: rest, h => by
+      rcases h with ⟨hHead, hRest⟩
+      simpa [AdjointSupportedClauses, addDimClauses] using
+        And.intro
+          (adjointSupported_addDimTerm d hb hHead)
+          (adjointSupportedClauses_addDimClauses d rest hRest)
+
+end
+
+theorem adjointTypeSupported_addDim (d : Dim) :
+    ∀ t, AdjointTypeSupported t → AdjointTypeSupported (addDim d t)
+  | Typ.tensor ds, _ => by simp [AdjointTypeSupported, addDim]
+  | Typ.pair t1 t2, h => by
+      rcases h with ⟨h1, h2⟩
+      simpa [AdjointTypeSupported, addDim] using
+        And.intro
+          (adjointTypeSupported_addDim d t1 h1)
+          (adjointTypeSupported_addDim d t2 h2)
+  | Typ.unit, _ => by simp [AdjointTypeSupported, addDim]
+  | Typ.arrow _ _ _, h => by cases h
+  | Typ.tyVar _, h => by cases h
+
+theorem adjointCtxSupported_addDimCtx (d : Dim) :
+    ∀ Γ, AdjointCtxSupported Γ → AdjointCtxSupported (Γ.map (fun p => (p.1, p.2.map (addDim d))))
+  | [], _ => by simp [AdjointCtxSupported]
+  | (x, none) :: rest, h => by
+      simpa [AdjointCtxSupported] using
+        adjointCtxSupported_addDimCtx d rest h
+  | (x, some t) :: rest, h => by
+      rcases h with ⟨ht, hrest⟩
+      simpa [AdjointCtxSupported] using
+        And.intro
+          (adjointTypeSupported_addDim d t ht)
+          (adjointCtxSupported_addDimCtx d rest hrest)
 
 mutual
 
