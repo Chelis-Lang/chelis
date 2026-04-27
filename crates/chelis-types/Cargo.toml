@@ -13,3 +13,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chelis-surf.workspace = true
+chelis-macros.workspace = true

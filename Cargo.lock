@@ -558,6 +558,7 @@ name = "chelis-types"
 version = "0.2.7"
 dependencies = [
  "chelis-deep",
+ "chelis-macros",
  "chelis-surf",
  "serde",
  "thiserror",
