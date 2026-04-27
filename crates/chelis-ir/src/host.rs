@@ -2726,6 +2726,13 @@ fn lower_app_host_expr(
         && name != "None"
         && fn_sig.is_some()
     {
+        // When the explicit metadata type is Unknown OR contains unresolved
+        // type variables (decoded as inner `HostType::Unknown`), prefer
+        // the inferred return type from the function's declared signature.
+        // The metadata can decay to "Tuple([Unknown, Unknown])" when the
+        // node-level annotator re-runs inference with a fresh subst that
+        // doesn't share the outer pass's tvar bindings.
+        let prefer_inferred = host_type_has_unknown(&explicit_ty);
         return HostExpr::Call {
             function: name,
             args,
@@ -2733,10 +2740,10 @@ fn lower_app_host_expr(
                 .as_ref()
                 .map(|(param_tys, _)| param_tys.clone())
                 .unwrap_or_default(),
-            ty: if explicit_ty != HostType::Unknown {
-                explicit_ty
-            } else {
+            ty: if prefer_inferred {
                 inferred_ret_ty
+            } else {
+                explicit_ty
             },
         };
     }
