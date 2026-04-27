@@ -91,6 +91,212 @@ private theorem linearity_soundness_aux
       -- touch the store further.
       exact ih h_wf
 
+/-- Runtime-invariant cases that remain open after the handler-aware
+    footprint redesign. These are exactly the steps that still require
+    a dedicated substitution/context proof or depend on the unresolved
+    AD surface. -/
+private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
+  | beta
+      (sigma : Store) (x : String) (t : Typ) (e v : Term)
+      (hv : IsValue v) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.app (Term.abs x t e) v⟩
+        ⟨sigma, subst e v x⟩
+  | letBind
+      (sigma : Store) (x : String) (v e : Term)
+      (hv : IsValue v) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.letBind x v e⟩
+        ⟨sigma, subst e v x⟩
+  | letpair
+      (sigma : Store) (x y : String) (v1 v2 e : Term)
+      (hv1 : IsValue v1) (hv2 : IsValue v2) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.letpair x y (Term.pair v1 v2) e⟩
+        ⟨sigma, subst (subst e v1 x) v2 y⟩
+  | handleOpDirect
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow)
+      (clauses : List (EffectLabel × String × String × Term))
+      (x k : String) (handlerBody : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, x, k, handlerBody) ∈ clauses) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.handle epsH (Term.perform op v) clauses⟩
+        ⟨sigma,
+          subst (subst handlerBody v x)
+            (directIdCont epsH op v clauses tRet) k⟩
+  | handleOpCtx
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (E : EvalCtx)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, xVar, kVar, hb) ∈ clauses)
+      (hop : op ∈ epsH)
+      (hE : EvalCtx.noHandleFor op E) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.handle epsH (plug E (Term.perform op v)) clauses⟩
+        ⟨sigma,
+          subst (subst hb v xVar)
+            (Term.abs (capturedContName
+              (Term.handle epsH (plug E (Term.perform op v)) clauses)) tRet
+              (Term.handle epsH
+                (plug E (Term.var (capturedContName
+                  (Term.handle epsH (plug E (Term.perform op v)) clauses))))
+                clauses)) kVar⟩
+  | handleOpCtxs
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (Es : EvalCtxChain)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, xVar, kVar, hb) ∈ clauses)
+      (hop : op ∈ epsH)
+      (hEs : EvalCtxChain.noHandleFor op Es) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.handle epsH (multiPlug Es (Term.perform op v)) clauses⟩
+        ⟨sigma,
+          subst (subst hb v xVar)
+            (Term.abs (capturedContName
+              (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)) tRet
+              (Term.handle epsH
+                (multiPlug Es (Term.var (capturedContName
+                  (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses))))
+                clauses)) kVar⟩
+  | tgrad
+      (sigma : Store) (x : String) (tv tOut : Typ) (body : Term) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.grad x tv tOut body⟩
+        ⟨sigma,
+          Term.abs x tv
+            (Term.abs (gradSeedName x body) tOut
+              (Term.letBind (gradResultName x body)
+                (Term.handle [EffectLabel.accum]
+                  (adjointFrom body x (Term.var (gradSeedName x body))
+                    (gradAdjointCounter x (gradSeedName x body) body))
+                  [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
+                (Term.var x)))⟩
+  | tvmap
+      (sigma : Store) (x : String) (tv : Typ) (d : Dim) (body : Term) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, Term.vmap x tv d body⟩
+        ⟨sigma, Term.abs x (addDim d tv) (addDimTerm d body)⟩
+  | ctx
+      (sigma sigma' : Store) (E : EvalCtx) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      HandlerAwareRuntimeDebt
+        ⟨sigma, plug E e⟩
+        ⟨sigma', plug E e'⟩
+
+/-- One-step preservation boundary for the stronger handler-aware
+    runtime invariant. The purely runtime/store-structural head rules
+    are closed here; the remaining cases are reported explicitly as
+    `HandlerAwareRuntimeDebt` rather than being silently folded into the
+    theorem statement. -/
+private theorem handlerAwareRuntimeLinear_step_or_debt
+    (c1 c2 : Config)
+    (h_step : Step c1 c2) :
+    HandlerAwareRuntimeLinear c1.term →
+      HandlerAwareRuntimeLinear c2.term ∨ HandlerAwareRuntimeDebt c1 c2 := by
+  induction h_step with
+  | beta sigma x t e v hv =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.beta sigma x t e v hv)
+  | letBind sigma x v e hv =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.letBind sigma x v e hv)
+  | letpair sigma x y v1 v2 e hv1 hv2 =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.letpair sigma x y v1 v2 e hv1 hv2)
+  | fst sigma tRight v1 v2 hv1 hv2 =>
+      intro h
+      rcases (by simpa [HandlerAwareRuntimeLinear] using h) with
+        ⟨_hAct, hPair⟩
+      rcases (by simpa [HandlerAwareRuntimeLinear] using hPair) with
+        ⟨_hPairAct, hv1Aware, _hv2Aware, _hsep12, _hsep21⟩
+      exact Or.inl hv1Aware
+  | snd sigma tLeft v1 v2 hv1 hv2 =>
+      intro h
+      rcases (by simpa [HandlerAwareRuntimeLinear] using h) with
+        ⟨_hAct, hPair⟩
+      rcases (by simpa [HandlerAwareRuntimeLinear] using hPair) with
+        ⟨_hPairAct, _hv1Aware, hv2Aware, _hsep12, _hsep21⟩
+      exact Or.inl hv2Aware
+  | tconst sigma v ds ell hell =>
+      intro _h
+      subst ell
+      simp [HandlerAwareRuntimeLinear]
+  | copy sigma ell ellNew w hlook hfresh =>
+      intro _h
+      have hsome : (storeLookup sigma ell).isSome := by
+        rw [hlook]
+        rfl
+      have hne : ell ≠ ellNew := by
+        rw [hfresh]
+        exact storeFreshLoc_ne sigma ell hsome
+      have hne' : ellNew ≠ ell := by
+        intro hEq
+        exact hne hEq.symm
+      exact Or.inl <| by
+        refine ⟨?_, by simp [HandlerAwareRuntimeLinear],
+          by simp [HandlerAwareRuntimeLinear], ?_, ?_⟩
+        · simp [ActiveRuntimeLinear, activeLocRefs, hne, hne']
+        · simp [LocRefsDisjoint, LocRefsSeparated, StepLocRefs, activeLocRefs, hne, hne']
+        · simp [LocRefsDisjoint, LocRefsSeparated, StepLocRefs, activeLocRefs, hne, hne']
+  | tadd sigma ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      intro _h
+      subst ellOut
+      simp [HandlerAwareRuntimeLinear]
+  | tmul sigma ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      intro _h
+      subst ellOut
+      simp [HandlerAwareRuntimeLinear]
+  | tsum sigma ell ellOut w d hlook hfresh =>
+      intro _h
+      subst ellOut
+      simp [HandlerAwareRuntimeLinear]
+  | texpand sigma ell ellOut w d hlook hfresh =>
+      intro _h
+      subst ellOut
+      simp [HandlerAwareRuntimeLinear]
+  | tuniformLike sigma ell ellOut w lo hi hlook hfresh =>
+      intro _h
+      subst ellOut
+      simp [HandlerAwareRuntimeLinear]
+  | handleRet sigma epsH v clauses hv =>
+      intro h
+      rcases (by simpa [HandlerAwareRuntimeLinear] using h) with
+        ⟨_hAct, hvAware, _hClauses, _hSep⟩
+      exact Or.inl hvAware
+  | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
+          hv hsig hmem)
+  | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
+          hv hsig hmem hop hE)
+  | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
+          hv hsig hmem hop hEs)
+  | tgrad sigma x tv tOut body =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body)
+  | tvmap sigma x tv d body =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.tvmap sigma x tv d body)
+  | ctx sigma sigma' E e e' h_inner ih =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' E e e' h_inner)
+
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term)
