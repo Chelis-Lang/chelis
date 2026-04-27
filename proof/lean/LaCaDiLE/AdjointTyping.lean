@@ -179,6 +179,100 @@ private theorem subEff_accum_into_grad (eps : EffectRow) :
   · apply List.mem_append_right
     simp [hmem]
 
+/-- Zero cotangent seeds are well-typed in any linear context at the
+    structural cotangent type chosen by `AdjointTransform`. -/
+private theorem zeroCotangent_typed
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx) :
+    ∀ t, HasType Delta Sigma Gamma (zeroCotangent t) (cotangentType t) [] Gamma
+  | Typ.tensor ds =>
+      by simpa [zeroCotangent, cotangentType] using
+        (HasType.const Delta Sigma Gamma 0 ds)
+  | Typ.pair t1 t2 =>
+      by
+        have h1 := zeroCotangent_typed Delta Sigma Gamma t1
+        have h2 := zeroCotangent_typed Delta Sigma Gamma t2
+        simpa [zeroCotangent, cotangentType] using
+          (HasType.tpair Delta Sigma Gamma Gamma Gamma
+            (zeroCotangent t1) (zeroCotangent t2)
+            (cotangentType t1) (cotangentType t2) [] [] h1 h2)
+  | Typ.unit =>
+      by simpa [zeroCotangent, cotangentType] using
+        (HasType.unit Delta Sigma Gamma)
+  | Typ.arrow _ _ _ =>
+      by simpa [zeroCotangent, cotangentType] using
+        (HasType.unit Delta Sigma Gamma)
+  | Typ.tyVar _ =>
+      by simpa [zeroCotangent, cotangentType] using
+        (HasType.unit Delta Sigma Gamma)
+
+/-- A pair term can never type-check at a tensor result type. Used by
+    the structured-seed counterexample below. -/
+private theorem hasType_pair_tensor_absurd
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {e1 e2 : Term} {ds : DimList} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.pair e1 e2) (Typ.tensor ds) eps Gamma2) :
+    False := by
+  generalize heq : Term.pair e1 e2 = e_in at h
+  generalize hteq : Typ.tensor ds = t_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tpair _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+      cases heq
+      cases hteq
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq hteq
+  | _ =>
+      (try cases heq) <;> (try cases hteq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
+/-- Local let-pair inversion used by the handled product-seed
+    counterexample. `Progress.lean` has the public theorem, but
+    importing it here would create a cycle through `Preservation`. -/
+private theorem hasType_letpair_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 GammaOut : LinearCtx}
+    {x y : String} {e1 e2 : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.letpair x y e1 e2) t eps GammaOut) :
+    ∃ (Gamma2 Gamma3 : LinearCtx) (t1 t2 : Typ) (eps1 eps2 : EffectRow)
+      (slotX slotY : Option Typ),
+      HasType Delta Sigma Gamma1 e1 (Typ.pair t1 t2) eps1 Gamma2 ∧
+      HasType Delta Sigma (Gamma2 ++ [(x, some t1), (y, some t2)]) e2 t eps2
+              (Gamma3 ++ [(x, slotX), (y, slotY)]) ∧
+      GammaOut = Gamma3 := by
+  generalize heq : Term.letpair x y e1 e2 = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | letpair _ _ _ Γ2 Γ3 _ _ _ _ t1 t2 _ eps1 eps2 slotX slotY h1 h2 _ _ =>
+      cases heq
+      exact ⟨Γ2, Γ3, t1, t2, eps1, eps2, slotX, slotY, h1, h2, rfl⟩
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih heq
+  | _ =>
+      (try cases heq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
+/-- Local copy inversion used by the handled product-seed
+    counterexample. `Preservation.lean` has the public theorem, but
+    importing it here would create a cycle. -/
+private theorem hasType_copy_inv
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.copy e) t eps Gamma2) :
+    ∃ ds, t = Typ.pair (Typ.tensor ds) (Typ.tensor ds) ∧
+          HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 := by
+  generalize heq : Term.copy e = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | copy _ _ _ _ _ ds _ h' _ =>
+      cases heq
+      exact ⟨ds, rfl, h'⟩
+  | subEff Δ S Γ Γ' _ t' eps0 eps' _ hSub ih =>
+      obtain ⟨ds, hteq, hInv⟩ := ih heq
+      refine ⟨ds, hteq, ?_⟩
+      exact HasType.subEff Δ S Γ Γ' e (Typ.tensor ds) eps0 eps' hInv hSub
+  | _ =>
+      (try cases heq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
 /-- Structural predicate: every `Term.mul` sub-expression of `e` has
     its two operands well-typed as `tensor dsE` in *some* linear
     context chain. Threaded as the body-typing premise of
@@ -1463,6 +1557,256 @@ private theorem adjointSndGapBody_typed
     []
     hPair
 
+private def adjointHandleSeedGapT : Typ :=
+  Typ.tensor DimList.empty
+
+private def adjointHandleSeedGapClauseBody : Term :=
+  Term.pair
+    (Term.const 0 DimList.empty)
+    (Term.const 0 DimList.empty)
+
+private def adjointHandleSeedGapForwardBody : Term :=
+  Term.letBind "u"
+    (Term.perform EffectLabel.resource Term.unit)
+    adjointHandleSeedGapClauseBody
+
+private def adjointHandleSeedGapClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.resource, "p", "k", adjointHandleSeedGapClauseBody)]
+
+private def adjointHandleSeedGapBody : Term :=
+  Term.snd adjointHandleSeedGapT
+    (Term.handle [EffectLabel.resource]
+      adjointHandleSeedGapForwardBody
+      adjointHandleSeedGapClauses)
+
+private theorem adjointHandleSeedGapBody_typed
+    {Sigma : StoreTyp} :
+    HasType (Capability.diff :: []) Sigma
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      adjointHandleSeedGapBody
+      adjointHandleSeedGapT
+      []
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx) := by
+  let tPair : Typ := Typ.pair adjointHandleSeedGapT adjointHandleSeedGapT
+  let tK : Typ := Typ.arrow Typ.unit tPair []
+  have hUnit :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        Term.unit Typ.unit []
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx) := by
+    exact HasType.unit (Capability.diff :: []) Sigma _
+  have hPerform :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        (Term.perform EffectLabel.resource Term.unit)
+        Typ.unit
+        [EffectLabel.resource]
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx) := by
+    exact HasType.perform (Capability.diff :: []) Sigma _ _
+      EffectLabel.resource Term.unit Typ.unit Typ.unit [] hUnit
+      (by simp [OpSigMatch, opArgType, opRetType])
+  have hConstX :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        adjointHandleSeedGapT
+        []
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx) := by
+    simpa [adjointHandleSeedGapT] using
+      (HasType.const (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        0 DimList.empty)
+  have hPairBody :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        adjointHandleSeedGapClauseBody
+        tPair
+        []
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx) := by
+    simpa [adjointHandleSeedGapClauseBody, tPair, EffectRow.union] using
+      (HasType.tpair (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT), ("u", some Typ.unit)] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        (Term.const 0 DimList.empty)
+        adjointHandleSeedGapT
+        adjointHandleSeedGapT
+        []
+        []
+        hConstX
+        hConstX)
+  have hForwardBody :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        adjointHandleSeedGapForwardBody
+        tPair
+        [EffectLabel.resource]
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx) := by
+    simpa [adjointHandleSeedGapForwardBody, tPair] using
+      (HasType.letBind (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        "u"
+        (Term.perform EffectLabel.resource Term.unit)
+        adjointHandleSeedGapClauseBody
+        Typ.unit
+        tPair
+        [EffectLabel.resource]
+        []
+        (some Typ.unit)
+        hPerform
+        hPairBody)
+  have hConstP :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        adjointHandleSeedGapT
+        []
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx) := by
+    simpa [adjointHandleSeedGapT] using
+      (HasType.const (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        0 DimList.empty)
+  have hClauseBody :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        adjointHandleSeedGapClauseBody
+        tPair
+        []
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx) := by
+    simpa [adjointHandleSeedGapClauseBody, tPair, EffectRow.union] using
+      (HasType.tpair (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT), ("p", some Typ.unit), ("k", some tK)] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        (Term.const 0 DimList.empty)
+        adjointHandleSeedGapT
+        adjointHandleSeedGapT
+        []
+        []
+        hConstP
+        hConstP)
+  have hClauses :
+      ClausesTyped (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        tPair
+        []
+        adjointHandleSeedGapClauses := by
+    exact ClausesTyped.cons (Capability.diff :: []) Sigma
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      tPair
+      Typ.unit
+      Typ.unit
+      []
+      EffectLabel.resource
+      "p"
+      "k"
+      adjointHandleSeedGapClauseBody
+      []
+      (some Typ.unit)
+      (some tK)
+      (by simp [OpSigMatch, opArgType, opRetType])
+      hClauseBody
+      (ClausesTyped.nil (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        tPair
+        [])
+  have hHandle :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        (Term.handle [EffectLabel.resource]
+          adjointHandleSeedGapForwardBody
+          adjointHandleSeedGapClauses)
+        tPair
+        []
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx) := by
+    exact HasType.handle (Capability.diff :: []) Sigma
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      adjointHandleSeedGapForwardBody
+      adjointHandleSeedGapClauses
+      tPair
+      [EffectLabel.resource]
+      [EffectLabel.resource]
+      hForwardBody
+      (by intro op hop; simp at hop; rcases hop with rfl; simp)
+      (by intro cl hmem; simp [adjointHandleSeedGapClauses] at hmem ⊢; rcases hmem with rfl; simp)
+      (by
+        intro op hop
+        simp at hop
+        rcases hop with rfl
+        exact ⟨(EffectLabel.resource, "p", "k", adjointHandleSeedGapClauseBody),
+          by simp [adjointHandleSeedGapClauses], rfl⟩)
+      hClauses
+  simpa [adjointHandleSeedGapBody, adjointHandleSeedGapT] using
+    (HasType.snd (Capability.diff :: []) Sigma
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+      (Term.handle [EffectLabel.resource]
+        adjointHandleSeedGapForwardBody
+        adjointHandleSeedGapClauses)
+      adjointHandleSeedGapT
+      adjointHandleSeedGapT
+      []
+      hHandle)
+
+private theorem adjointHandleSeedGap_head :
+    adjointFrom adjointHandleSeedGapBody "x" (Term.var "gs") 0 =
+      Term.letpair (freshName "gA" 0) (freshName "gB" 0)
+        (Term.copy (Term.pair (Term.const 0 DimList.empty) (Term.var "gs")))
+        (Term.letBind (freshName "adjHb" 0)
+          (adjointFrom adjointHandleSeedGapClauseBody "x"
+            (Term.var (freshName "gA" 0)) (0 + 3))
+          (adjointFrom adjointHandleSeedGapForwardBody "x"
+            (Term.var (freshName "gB" 0)) (0 + 3))) := by
+  simp [adjointHandleSeedGapBody, adjointHandleSeedGapT,
+    adjointHandleSeedGapForwardBody, adjointHandleSeedGapClauses,
+    adjointHandleSeedGapClauseBody, adjointFrom, adjointClausesFrom,
+    zeroCotangent]
+
+/-- The old product/projection false witness is gone from the transform
+    itself, but the current public theorem surface is still false:
+    `adjointFrom`'s legacy handler path splits every clause seed with
+    tensor-only `copy`, so feeding a structured cotangent seed through
+    `snd` into `handle` produces an untypable adjoint term before the
+    `mul` case is even in play. The staged `adjointTypedFrom` /
+    `adjointTypedClausesFrom` path in `AdjointTransform.lean` is the
+    intended repair. -/
+theorem adjoint_handle_product_seed_counterexample :
+    (∀ Sigma,
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)
+        adjointHandleSeedGapBody
+        adjointHandleSeedGapT
+        []
+        ([("x", some adjointHandleSeedGapT)] : LinearCtx)) ∧
+    (∀ Sigma, ¬ ∃ eps GammaOut,
+      HasType [] Sigma
+        ([("x", some adjointHandleSeedGapT), ("gs", some adjointHandleSeedGapT)] : LinearCtx)
+        (adjointFrom adjointHandleSeedGapBody "x" (Term.var "gs") 0)
+        Typ.unit
+        eps
+        GammaOut) := by
+  refine ⟨?_, ?_⟩
+  · intro Sigma
+    exact adjointHandleSeedGapBody_typed (Sigma := Sigma)
+  · intro Sigma
+    intro h
+    rcases h with ⟨eps, GammaOut, hAdj⟩
+    rw [adjointHandleSeedGap_head] at hAdj
+    rcases hasType_letpair_inv hAdj with
+      ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotX, slotY,
+        hCopy, _hBody, _hOut, _hSub⟩
+    obtain ⟨ds, _hteq, hPairAsTensor⟩ := hasType_copy_inv hCopy
+    exact hasType_pair_tensor_absurd hPairAsTensor
+
 /-- Counter-threaded public typing theorem for `adjointFrom`. This is
     the theorem preservation should use when the operational rule picks
     a start counter above the exposed binder-name lengths.
@@ -1473,10 +1817,16 @@ private theorem adjointSndGapBody_typed
 
     Current branch note: the old monomorphic tensor-seed mismatch for
     `pair` / `fst` / `snd` is repaired in `AdjointTransform.lean`, but
-    this theorem is still admitted because the helper below is still
-    tensor-seed specific. The next real proof step is to generalize the
-    helper to structured cotangent seeds while also closing the separate
-    `mul` operand rebasing/effect-row debt documented above. -/
+    the current public surface here is still false for handled product
+    paths: `adjointFrom` still routes `handle` through the legacy
+    tensor-only `adjointClausesFrom`, and
+    `adjoint_handle_product_seed_counterexample` shows that can force an
+    ill-typed `copy` on a structured seed before `mul` is involved. The
+    next real proof step is therefore stronger than “generalize the
+    helper”: switch the public surface to the staged typed companion
+    transform (`adjointTypedFrom` / `adjointTypedClausesFrom`), then
+    reprove the helper there while separately closing the remaining
+    `mul` operand rebasing/effect-row debt. -/
 theorem adjointFrom_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)

@@ -35,7 +35,7 @@ The substitution lemma with linear context splitting. Always the most painful pa
 
 ## WS3.7 — `AdjointTyping.lean`
 
-The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. The old concrete `letBind` / `letpair` routing bug is repaired, and the transform now routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`. So the remaining AD debt is now concentrated where it belongs: the private helper in `AdjointTyping.lean` is still tensor-seed-specific and must be generalized to the new structured cotangent-seed discipline, after which `mul` remains as the last separate hard case. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
+The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle, but it is no longer the only semantic blocker. The old concrete `letBind` / `letpair` routing bug is repaired, and the transform now routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`. Lean now also contains a handled product-seed counterexample showing that the legacy public `adjointFrom` surface is still false because `handle` still delegates to a tensor-only clause path. So the remaining AD work is: move the public theorem and downstream `tgrad` plumbing onto `adjointTypedFrom` / `adjointTypedClausesFrom`, reprove the helper on that typed surface, and then close `mul`. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
 
 ## WS3.8 — `AddDim.lean`
 
@@ -68,7 +68,7 @@ So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
 - the preservation file itself is syntactically closed on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest endpoint because it still imports an admitted public adjoint theorem surface
-- the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until the false public product/expand surface is replaced and the `mul` case is repaired
+- the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until the false legacy `adjointFrom` surface is replaced by the typed one and the `mul` case is repaired
 
 ## WS3.11 — `DimSafety.lean`
 
