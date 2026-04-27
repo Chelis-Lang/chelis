@@ -367,3 +367,57 @@ the new-code annotation interacting with the cached library type-env.
 - `crates/chelis-cli/src/main.rs` — `cmd_test`, `cmd_internal_test_file`,
   `prepare_eval_in_exec_context` (the line where workers re-enter the legacy pipeline)
 - `crates/chelis-cli/tests/phase3t_compiled_context_bridge.rs` — env-var bridge regression
+
+## Phase G' (final, post-linearity-fix + Json codegen fix) re-bench (2026-04-26)
+
+With the linearity divergence root-caused (Scope 2 of the prior G'
+deferral) and the worker re-wired through `prepare_eval_in_context`
+(Scope 3), `cmd_test` now amortizes the library compile across every
+file in a single run.
+
+### Outcomes
+
+| Scope | Status |
+|---|---|
+| 1. Host-runtime registration gap | FIXED (in prior G') |
+| 2. Linearity divergence | FIXED (`annotate_phase0e_program` registers prelude ADTs; affected sites rewritten with `&t` / `copy(t)`; commits `04f1873` + `d26019d`) |
+| 3. cmd_test worker through `eval_in_context` | FIXED (commit `bf0d568` + parent build re-enable here) |
+| 4. Skip cache build on no-match filter | FIXED (in prior G') |
+
+### Re-bench numbers (post-final)
+
+Same workstation, same Coral checkout. Wall-clock from `time chelis test tests/`:
+
+| Bench | Pre-cache `c13ea7a` | Post-cache `e3b7ccc` | Phase G' (parity) | Phase G' (final, this branch) | Hit < 30 s target? |
+|---|---|---|---|---|---|
+| Coral `chelis test tests/` (63 tests) | 6 m 40.1 s | 9 m 17.8 s | 6 m 38.0 s | **1 m 18 s** | NO (still > 30 s; 5.1× speedup vs prior G') |
+| chelis-std self-test corpus (`chelis test packages/chelis-std/tests/`, 205 tests) | n/a measured | n/a measured | n/a | **7.9 s** | YES |
+| Coral `chelis test tests/ --filter __no_match__` | 0.07 s | 64.88 s | 0.003 s | 0.003 s (unchanged) | YES |
+
+### Where the remaining 1 m 18 s on Coral goes
+
+The dominant cost is now the parent's single `compile_reef_context`
+build itself. `time chelis eval --file tests/frame.ch` (which uses the
+same context-build path) takes ~67 s on its own — i.e., the parent's
+cost. Per-file worker overhead in the new path is ~10 s amortized, far
+below the file-count × per-file cost that dominated the prior G' run.
+
+For chelis-std (smaller library footprint), the parent build is fast
+enough that 205 tests across 35 files run in 7.9 s end-to-end. So the
+cache architecture is sound; the remaining > 30 s gap on Coral is a
+single-call perf bottleneck in `compile_reef_context` itself, not in
+the per-file test loop.
+
+### Recommended next bottleneck
+
+- Profile `compile_reef_context` for Coral specifically. The 67 s
+  single-call cost is the new ceiling. Within that, the most likely
+  culprits are: macro expansion of the library decls (~40 modules of
+  Coral + ~50 modules of chelis-std), the monolithic
+  `check_phase0e_with_context` library check, or the
+  `lower_program_to_library` step.
+- Disk cache (Phase I) once the in-memory cache is fast enough that
+  the disk bridge is worth measuring.
+
+The cache architecture is sound and we have a known surface (single
+`compile_reef_context` call cost) to profile next.
