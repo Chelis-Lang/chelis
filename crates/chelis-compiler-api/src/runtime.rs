@@ -2294,20 +2294,33 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
             RuntimeValue::Int(value) => {
                 precision.get_or_insert(Prim::Int64);
                 if precision != Some(Prim::Int64) {
-                    return Err("to_tensor requires homogeneous numeric list elements".to_string());
+                    return Err(
+                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
+                    );
                 }
                 data.push(*value as f64);
             }
             RuntimeValue::Float(value) => {
                 precision.get_or_insert(Prim::F32);
                 if precision != Some(Prim::F32) {
-                    return Err("to_tensor requires homogeneous numeric list elements".to_string());
+                    return Err(
+                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
+                    );
                 }
                 data.push(*value);
             }
+            RuntimeValue::Bool(value) => {
+                precision.get_or_insert(Prim::Bool);
+                if precision != Some(Prim::Bool) {
+                    return Err(
+                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
+                    );
+                }
+                data.push(if *value { 1.0 } else { 0.0 });
+            }
             other => {
                 return Err(format!(
-                    "to_tensor expects numeric list elements, got {other:?}"
+                    "to_tensor expects numeric or bool list elements, got {other:?}"
                 ));
             }
         }

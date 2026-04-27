@@ -203,3 +203,82 @@ value = where_indices(all_false)
         .stdout(predicate::str::contains("shape=[0]"))
         .stdout(predicate::str::contains("data=[]"));
 }
+
+/// Coral upstream blocker (v0.2.5/v0.3.0): `to_tensor` previously rejected
+/// `List[bool]` at type-check time with "to_tensor expects numeric List
+/// elements, got bool". After this fix, bool lists produce `tensor[N, bool]`
+/// at both `chelis check` and `chelis eval` time, which unblocks
+/// `bool_list_to_tensor` and CSV/JSON bool round trips.
+#[test]
+fn coral_to_tensor_accepts_bool_list() {
+    let (_dir, reef_home, app_pkg) = make_app("coral-to-tensor-bool");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+mask = to_tensor([true, false, true])
+roundtrip = to_list(mask)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"))
+        .stdout(predicate::str::contains("\"errors\": []"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        // Bool tensors are stored as 0.0/1.0 in the runtime f64 buffer.
+        .stdout(predicate::str::contains(
+            "mask = tensor(shape=[3], data=[1.0, 0.0, 1.0])",
+        ))
+        // Round-tripping through to_list recovers the original bool values.
+        .stdout(predicate::str::contains("roundtrip = [true, false, true]"));
+}
+
+/// Negative parity for `to_tensor`: mixing bool and float in a single list
+/// must still be rejected (the runtime requires homogeneous element kinds).
+#[test]
+fn coral_to_tensor_rejects_mixed_bool_and_float_list() {
+    let (_dir, reef_home, app_pkg) = make_app("coral-to-tensor-bool-mixed");
+    // Force a heterogeneous List[bool|float] at the runtime by going through
+    // `if`. The type checker rejects this at the surface, so we use a
+    // surface that type-checks first and exercises the runtime guard via
+    // `--expr` against an unchecked path.
+    //
+    // The simplest negative is the type-check level: a literal list with a
+    // bool and a float must fail unification at the List[α] element type.
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+bad = to_tensor([true, 1.0])
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        // Type checker still flags the heterogeneous list.
+        .stdout(
+            predicate::str::contains("\"errors\":")
+                .and(predicate::str::contains("\"score\": 1").not()),
+        );
+}

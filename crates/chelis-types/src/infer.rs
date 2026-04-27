@@ -6039,7 +6039,10 @@ fn infer_app(
                             match subst.apply(first_arg) {
                                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                                     match &args[0] {
-                                        Type::Prim(precision) if precision.is_numeric() => {
+                                        Type::Prim(precision)
+                                            if precision.is_numeric()
+                                                || matches!(precision, Prim::Bool) =>
+                                        {
                                             return Type::Tensor(vec![Dim::Wildcard], *precision);
                                         }
                                         Type::Var(_) | Type::Error => return result_ty,
@@ -6049,7 +6052,7 @@ fn infer_app(
                                                 with_macro_provenance(
                                                     &deep::Expr::List(list.clone(), zero_span()),
                                                     format!(
-                                                        "to_tensor expects numeric List elements, got {other}"
+                                                        "to_tensor expects numeric or bool List elements, got {other}"
                                                     ),
                                                 ),
                                                 vec![],
