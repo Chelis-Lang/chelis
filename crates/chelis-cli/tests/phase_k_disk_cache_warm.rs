@@ -254,3 +254,77 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
         files_after_cold2
     );
 }
+
+#[test]
+fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
+    // Mirror of `cmd_eval_warm_cache_hit_byte_identical_to_cold` but for
+    // `chelis test`. The parent's `compile_reef_context` call inside
+    // `cmd_test` now goes through `load_or_compile_for_package`, so a
+    // re-run with unchanged sources reuses the on-disk artifact instead
+    // of paying the full library compile.
+    //
+    // We need at least one test file: `chelis test` short-circuits on an
+    // empty tests dir BEFORE the parent's compile_reef_context call, so
+    // an empty dir wouldn't exercise the disk-cache wire-up at all.
+    // A trivial `def test_*` is enough.
+    let (_pkg_dir, root) = path_dep_package();
+    fs::create_dir_all(root.join("tests")).expect("mkdir tests");
+    write_file(
+        &root.join("tests/smoke.ch"),
+        "module App.SmokeTest\n\ndef test_trivial -> bool = true\n",
+    );
+
+    let reef_home = tempdir().expect("reef_home tempdir");
+    assert!(
+        list_cache_files(reef_home.path()).is_empty(),
+        "fresh tempdir must not contain any cache files"
+    );
+
+    // Cold: full compile and save.
+    let cold = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", reef_home.path())
+        .current_dir(&root)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run chelis test (cold)");
+    assert!(
+        cold.status.success(),
+        "cold chelis test must succeed on empty tests dir; exit={:?} stderr={}",
+        cold.status,
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cache_after_cold = list_cache_files(reef_home.path());
+    assert_eq!(
+        cache_after_cold.len(),
+        1,
+        "cold chelis test must write exactly one cache file; got {:?}",
+        cache_after_cold
+    );
+
+    // Warm: cache hit must NOT create a new cache file.
+    let warm = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", reef_home.path())
+        .current_dir(&root)
+        .args(["test", "tests/"])
+        .output()
+        .expect("run chelis test (warm)");
+    assert!(
+        warm.status.success(),
+        "warm chelis test must succeed; exit={:?} stderr={}",
+        warm.status,
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let cache_after_warm = list_cache_files(reef_home.path());
+    assert_eq!(
+        cache_after_warm.len(),
+        1,
+        "warm hit must NOT create a new cache file; got {:?}",
+        cache_after_warm
+    );
+    assert_eq!(
+        cache_after_cold[0], cache_after_warm[0],
+        "warm hit must reuse the exact same cache file the cold run wrote"
+    );
+}

@@ -1204,11 +1204,19 @@ fn cmd_test(
     // which is still correct (just slower). Today the most common
     // miss is LocalRegistry packages whose `source_digests` step
     // isn't yet implemented.
+    //
+    // Phase K: route through `load_or_compile_for_package` so an
+    // unchanged-source re-run (typical CI / dev-loop iteration on
+    // tests) skips the ~67s library compile entirely. When
+    // CHELIS_REEF_HOME is unset we still fall back to the legacy
+    // `compile_reef_context` path via the helper's empty-reef-home
+    // guardrail (see `load_or_compile_for_package` doc comment) — same
+    // wall-clock as pre-Phase-K, no leakage.
     let reef_home_path = env::var("CHELIS_REEF_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/reef_home_unused"));
+        .unwrap_or_default();
     let context_tempfile_opt: Option<CompiledContextTempfile> =
-        match chelis_compiler_api::compile_reef_context(&reef_home_path, &cwd) {
+        match chelis_compiler_api::load_or_compile_for_package(&reef_home_path, &cwd, true) {
             Ok(context) => {
                 let context_bytes = context.encode()?;
                 drop(context);
