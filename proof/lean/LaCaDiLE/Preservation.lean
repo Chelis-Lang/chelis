@@ -3296,6 +3296,83 @@ theorem handlerAwareRuntimeLinear_handleOpCtxs_repaired :
           ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
           handleCtxCounterClauses, handleCtxCounterBody, multiPlug, plug, subst])
 
+/-- Adding the substitution-aware variable sidecar keeps the captured
+    handler witness admissible: the clause's continuation variable stays
+    hidden behind the same abstraction/handler barriers that already
+    justified the concrete-location repair. -/
+theorem substAwareHandlerRuntimeLinear_handleOpCtx_repaired :
+    SubstAwareHandlerRuntimeLinear handleCtxCounterTerm ∧
+    Step ⟨[], handleCtxCounterTerm⟩ ⟨[], handleCtxCounterTerm'⟩ ∧
+    SubstAwareHandlerRuntimeLinear handleCtxCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · refine ⟨handlerAwareRuntimeLinear_handleOpCtx_repaired.1, ?_⟩
+    simp [SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      VarRefsDisjoint, VarRefsSeparated,
+      handleCtxCounterTerm, handleCtxCounterClauses, handleCtxCounterBody, plug]
+  · exact Step.handleOpCtx []
+      EffectLabel.accum Term.unit
+      [EffectLabel.accum] EvalCtx.copy
+      handleCtxCounterClauses
+      "x" "k" handleCtxCounterBody Typ.unit
+      IsValue.unit
+      ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+      (by simp [handleCtxCounterClauses])
+      (by simp)
+      (by simp [EvalCtx.noHandleFor])
+  · refine ⟨handlerAwareRuntimeLinear_handleOpCtx_repaired.2.2, ?_⟩
+    have hFresh : freshInTerm (capturedContName handleCtxCounterTerm) handleCtxCounterTerm :=
+      capturedContName_freshInTerm (e := handleCtxCounterTerm)
+    have hkMem : "k" ∈ boundVars handleCtxCounterTerm := by
+      simp [handleCtxCounterTerm, handleCtxCounterClauses, handleCtxCounterBody,
+        boundVars, boundVarsClauses, plug]
+    have hkNeRight : capturedContName handleCtxCounterTerm ≠ "k" := by
+      intro hEq
+      exact hFresh.2 (by simpa [hEq] using hkMem)
+    have hkNeLeft : "k" ≠ capturedContName handleCtxCounterTerm := hkNeRight.symm
+    have hkFreshPair :
+        ¬ "k" = capturedContName handleCtxCounterTerm ∧
+          ¬ capturedContName handleCtxCounterTerm = "k" :=
+      ⟨hkNeLeft, hkNeRight⟩
+    simpa [SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      VarRefsDisjoint, VarRefsSeparated,
+      handleCtxCounterTerm', handleCtxCounterTerm,
+      handleCtxCounterClauses, handleCtxCounterBody, plug, subst] using
+      hkFreshPair
+
+/-- The store-liveness sidecar keeps the same captured-handler repair
+    on a configuration whose runtime locations are actually live. -/
+theorem storeAwareSubstHandlerRuntimeLinear_handleOpCtx_repaired :
+    StoreAwareSubstHandlerRuntimeLinear ctxCounterSigma handleCtxCounterTerm ∧
+    Step ⟨ctxCounterSigma, handleCtxCounterTerm⟩
+      ⟨ctxCounterSigma, handleCtxCounterTerm'⟩ ∧
+    StoreAwareSubstHandlerRuntimeLinear ctxCounterSigma handleCtxCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · refine ⟨substAwareHandlerRuntimeLinear_handleOpCtx_repaired.1, ?_⟩
+    intro ell hmem
+    simp [handleCtxCounterTerm, handleCtxCounterClauses, handleCtxCounterBody,
+      locRefs, locRefsClauses, plug] at hmem
+    rcases hmem with rfl
+    simp [ctxCounterSigma, storeLookup, List.find?]
+  · exact Step.handleOpCtx ctxCounterSigma
+      EffectLabel.accum Term.unit
+      [EffectLabel.accum] EvalCtx.copy
+      handleCtxCounterClauses
+      "x" "k" handleCtxCounterBody Typ.unit
+      IsValue.unit
+      ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+      (by simp [handleCtxCounterClauses])
+      (by simp)
+      (by simp [EvalCtx.noHandleFor])
+  · refine ⟨substAwareHandlerRuntimeLinear_handleOpCtx_repaired.2.2, ?_⟩
+    intro ell hmem
+    simp [handleCtxCounterTerm', handleCtxCounterTerm,
+      handleCtxCounterClauses, handleCtxCounterBody,
+      locRefs, locRefsClauses, plug, subst] at hmem
+    rcases hmem with rfl
+    simp [ctxCounterSigma, storeLookup, List.find?]
+
 private def handleDirectCounterBody : Term :=
   Term.letBind "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
 
@@ -3689,6 +3766,20 @@ theorem handlerAwareRuntimeLinear_beta_subst_counterexample :
       ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
       handlerAwareBetaSubstCounterTerm']
 
+/-- The substitution-aware sidecar blocks the raw beta witness before
+    the step fires: the duplicated binder is already visible at the
+    abstraction body's variable surface. -/
+theorem substAwareHandlerRuntimeLinear_beta_subst_blocks_counterexample :
+    ¬ SubstAwareHandlerRuntimeLinear handlerAwareBetaSubstCounterTerm := by
+  simp [SubstAwareHandlerRuntimeLinear,
+    HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+    SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+    StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+    activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+    LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handlerAwareBetaSubstCounterTerm, handlerAwareBetaSubstCounterBody]
+
 private def handlerAwareHandleSubstCounterBody : Term :=
   Term.pair (Term.var "x") (Term.var "x")
 
@@ -3736,6 +3827,21 @@ theorem handlerAwareRuntimeLinear_handleOpDirect_subst_counterexample :
       ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
       handlerAwareHandleSubstCounterTerm']
 
+/-- The same substitution-aware sidecar also rejects the raw direct
+    handler witness: duplicating the operation argument binder is
+    already syntactically visible in the selected clause body. -/
+theorem substAwareHandlerRuntimeLinear_handleOpDirect_subst_blocks_counterexample :
+    ¬ SubstAwareHandlerRuntimeLinear handlerAwareHandleSubstCounterTerm := by
+  simp [SubstAwareHandlerRuntimeLinear,
+    HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+    SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+    StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+    activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+    LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
+    handlerAwareHandleSubstCounterBody]
+
 private def handlerAwareCtxFreshCounterTerm : Term :=
   Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
 
@@ -3772,6 +3878,23 @@ theorem handlerAwareRuntimeLinear_ctx_fresh_counterexample :
       LocRefsDisjoint, LocRefsSeparated,
       ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
       handlerAwareCtxFreshCounterTerm']
+
+/-- Fresh-allocation leakage needs the store sidecar rather than the
+    substitution sidecar: the initial term already mentions a stale
+    location that is absent from the store. -/
+theorem storeAwareSubstHandlerRuntimeLinear_ctx_fresh_blocks_counterexample :
+    ¬ StoreAwareSubstHandlerRuntimeLinear ([] : Store)
+        handlerAwareCtxFreshCounterTerm := by
+  simp [StoreAwareSubstHandlerRuntimeLinear, StoreLiveLocRefs,
+    SubstAwareHandlerRuntimeLinear,
+    HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+    SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+    StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+    activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+    LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handlerAwareCtxFreshCounterTerm, locRefs, storeLookup, List.find?]
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :

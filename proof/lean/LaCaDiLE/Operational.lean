@@ -192,6 +192,16 @@ def LocRefsSeparated (xs ys : List Loc) : Prop :=
 def LocRefsDisjoint (xs ys : List Loc) : Prop :=
   LocRefsSeparated xs ys ∧ LocRefsSeparated ys xs
 
+/-- Separation of substitution-relevant variable mentions between two
+    lists. These are the named resources that a future beta / let /
+    handler substitution could turn into concrete runtime locations. -/
+def VarRefsSeparated (xs ys : List String) : Prop :=
+  ∀ x, x ∈ xs → x ∉ ys
+
+/-- Symmetric separation of substitution-relevant variable mentions. -/
+def VarRefsDisjoint (xs ys : List String) : Prop :=
+  VarRefsSeparated xs ys ∧ VarRefsSeparated ys xs
+
 private theorem locRefsSeparated_left_of_nodup_append
     {xs ys : List Loc}
     (h : (xs ++ ys).Nodup) :
@@ -381,6 +391,169 @@ def AppFunLocRefs : Term → List Loc
 
 mutual
 
+/-- Active variable mentions that are visible at the current runtime
+    surface. This mirrors `activeLocRefs`, but tracks named resources
+    that can later be substituted with runtime locations. Handler
+    clauses stay hidden until a handled `perform` exposes them. -/
+def activeVarRefs : Term → List String
+  | Term.var x => [x]
+  | Term.abs _ _ body => activeVarRefs body
+  | Term.app e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.letBind _ e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.copy e => activeVarRefs e
+  | Term.letpair _ _ e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.pair e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.fst _ e => activeVarRefs e
+  | Term.snd _ e => activeVarRefs e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.mul e1 e2 => activeVarRefs e1 ++ activeVarRefs e2
+  | Term.sum e _ => activeVarRefs e
+  | Term.expand e _ => activeVarRefs e
+  | Term.uniformLike e _ _ => activeVarRefs e
+  | Term.grad _ _ _ body => activeVarRefs body
+  | Term.vmap _ _ _ body => activeVarRefs body
+  | Term.handle _ body _ => activeVarRefs body
+  | Term.perform _ e => activeVarRefs e
+  | Term.loc _ => []
+
+/-- One-step exposure footprint for substitution-relevant variables.
+    This mirrors `StepLocRefs`: abstractions/grad/vmap bodies stay
+    behind a barrier until the matching eliminator fires, while handled
+    clauses count because a direct handler step can expose them. -/
+def StepVarRefs : Term → List String
+  | Term.var x => [x]
+  | Term.abs _ _ _ => []
+  | Term.app e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.letBind _ e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.copy e => StepVarRefs e
+  | Term.letpair _ _ e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.pair e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.fst _ e => StepVarRefs e
+  | Term.snd _ e => StepVarRefs e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.mul e1 e2 => StepVarRefs e1 ++ StepVarRefs e2
+  | Term.sum e _ => StepVarRefs e
+  | Term.expand e _ => StepVarRefs e
+  | Term.uniformLike e _ _ => StepVarRefs e
+  | Term.grad _ _ _ _ => []
+  | Term.vmap _ _ _ _ => []
+  | Term.handle _ body clauses => StepVarRefs body ++ StepVarRefsClauses clauses
+  | Term.perform _ e => StepVarRefs e
+  | Term.loc _ => []
+
+/-- Clause companion to `StepVarRefs`. -/
+def StepVarRefsClauses :
+    List (EffectLabel × String × String × Term) → List String
+  | [] => []
+  | (_, _, _, hb) :: rest => StepVarRefs hb ++ StepVarRefsClauses rest
+
+end
+
+/-- Application-side beta exposure for substitution-relevant variables. -/
+def AppFunVarRefs : Term → List String
+  | Term.abs _ _ body => StepVarRefs body
+  | e => StepVarRefs e
+
+mutual
+
+/-- Variable-side analogue of `HandlerAwareRuntimeLinear`. This tracks
+    where a future substitution can expose the same named resource in
+    two places even before that resource has been instantiated with a
+    concrete runtime location. -/
+def SubstAwareRuntimeLinear : Term → Prop
+  | Term.var _ => True
+  | Term.abs x t body =>
+      (activeVarRefs (Term.abs x t body)).Nodup ∧
+      SubstAwareRuntimeLinear body
+  | Term.app e1 e2 =>
+      (activeVarRefs (Term.app e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1) ∧
+      VarRefsDisjoint (AppFunVarRefs e1) (activeVarRefs e2)
+  | Term.letBind x e1 e2 =>
+      (activeVarRefs (Term.letBind x e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1)
+  | Term.copy e =>
+      (activeVarRefs (Term.copy e)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.letpair x y e1 e2 =>
+      (activeVarRefs (Term.letpair x y e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1)
+  | Term.pair e1 e2 =>
+      (activeVarRefs (Term.pair e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1)
+  | Term.fst tRight e =>
+      (activeVarRefs (Term.fst tRight e)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.snd tLeft e =>
+      (activeVarRefs (Term.snd tLeft e)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.unit => True
+  | Term.const _ _ => True
+  | Term.add e1 e2 =>
+      (activeVarRefs (Term.add e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1)
+  | Term.mul e1 e2 =>
+      (activeVarRefs (Term.mul e1 e2)).Nodup ∧
+      SubstAwareRuntimeLinear e1 ∧
+      SubstAwareRuntimeLinear e2 ∧
+      VarRefsDisjoint (StepVarRefs e1) (activeVarRefs e2) ∧
+      VarRefsDisjoint (StepVarRefs e2) (activeVarRefs e1)
+  | Term.sum e d =>
+      (activeVarRefs (Term.sum e d)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.expand e d =>
+      (activeVarRefs (Term.expand e d)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.uniformLike e lo hi =>
+      (activeVarRefs (Term.uniformLike e lo hi)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.grad x t tOut body =>
+      (activeVarRefs (Term.grad x t tOut body)).Nodup ∧
+      SubstAwareRuntimeLinear body
+  | Term.vmap x t d body =>
+      (activeVarRefs (Term.vmap x t d body)).Nodup ∧
+      SubstAwareRuntimeLinear body
+  | Term.handle epsH body clauses =>
+      (activeVarRefs (Term.handle epsH body clauses)).Nodup ∧
+      SubstAwareRuntimeLinear body ∧
+      SubstAwareRuntimeLinearClauses clauses ∧
+      VarRefsDisjoint (StepVarRefsClauses clauses) (activeVarRefs body)
+  | Term.perform op e =>
+      (activeVarRefs (Term.perform op e)).Nodup ∧
+      SubstAwareRuntimeLinear e
+  | Term.loc _ => True
+
+/-- Clause companion to `SubstAwareRuntimeLinear`. -/
+def SubstAwareRuntimeLinearClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, _, _, hb) :: rest =>
+      SubstAwareRuntimeLinear hb ∧
+      SubstAwareRuntimeLinearClauses rest
+
+end
+
+mutual
+
 /-- Final handler-aware runtime invariant. This keeps the recursive
     deep-active checks on subterms and clause bodies, but additionally
     requires the current active surface to stay disjoint from any
@@ -473,6 +646,23 @@ def HandlerAwareRuntimeLinearClauses :
       HandlerAwareRuntimeLinearClauses rest
 
 end
+
+/-- Term-side strengthening that combines the concrete-location
+    handler-aware checks with the analogous substitution-aware variable
+    checks. This blocks the raw beta / handler substitution witnesses
+    that `HandlerAwareRuntimeLinear` still admits. -/
+def SubstAwareHandlerRuntimeLinear (e : Term) : Prop :=
+  HandlerAwareRuntimeLinear e ∧ SubstAwareRuntimeLinear e
+
+/-- Store-side sidecar: every explicit runtime location mentioned by the
+    term must already be live in the current store. This is the missing
+    freshness guard for contextual allocation steps. -/
+def StoreLiveLocRefs (sigma : Store) (e : Term) : Prop :=
+  ∀ ell, ell ∈ locRefs e → (storeLookup sigma ell).isSome
+
+/-- Full current candidate for the runtime-invariant sidecar. -/
+def StoreAwareSubstHandlerRuntimeLinear (sigma : Store) (e : Term) : Prop :=
+  SubstAwareHandlerRuntimeLinear e ∧ StoreLiveLocRefs sigma e
 
 private theorem mem_locRefs_of_mem_activeLocRefs :
     ∀ {e : Term} {ell : Loc}, ell ∈ activeLocRefs e → ell ∈ locRefs e
