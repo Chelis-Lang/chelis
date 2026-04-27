@@ -2007,40 +2007,89 @@ fn compile_check_in_exec_context(
 
 /// Compile the synth_decls once and return a `PreparedEval` handle so
 /// per-test evals share the compile. Routes through the legacy
-/// `compile_with_reef_graph` + `prepare_eval` path regardless of
-/// which `TestExecutionContext` variant is active.
+/// `compile_with_reef_graph` + `prepare_eval` path for the
+/// `ReefGraph` variant, and `prepare_eval_in_context` for the
+/// `Context` variant.
 ///
-/// Phase G' — the in-context fast path (`prepare_eval_in_context`)
-/// is wired into `chelis-compiler-api` and works on its own bench
-/// (`phase_g_compiled_context` tests pass), but `chelis_types`'s
-/// `check_linearity_with_context` rejects patterns the monolithic
-/// `check_linearity` accepts on the chelis-std corpus (the
-/// `_ = assert_shape(actual, ...); assert_close_tensor(actual, ...)`
-/// shape in `test_linspace_endpoints`). Routing the test worker
-/// through the in-context path therefore breaks chelis-std's
-/// self-tests and Coral's tests. Until the linearity divergence is
-/// root-caused, the worker stays on the legacy path; the parent's
-/// `compile_reef_context` work is wasted for `chelis test`, but the
-/// correctness contract holds.
+/// Phase G' (final) — with the linearity divergence root-caused (the
+/// monolithic `annotate_phase0e_program` was masking real
+/// use-after-consume violations because it built with an empty
+/// `AdtRegistry`; see `docs/lin_rca_report.md`) and chelis-std + the
+/// CLI test fixtures rewritten to use `&t` / `copy(t)` at the right
+/// sites, the `Context` arm now goes through
+/// `prepare_eval_in_context(ctx, source)`. Per-file work drops from
+/// "full pipeline on ~50 modules" to "parse + check + lower the test
+/// file's ~10 lines." The `ReefGraph` arm stays on the legacy path
+/// for `LocalRegistry` packages whose graph the new context-builder
+/// can't yet hash.
+#[derive(Clone)]
+enum PreparedTestEval {
+    Legacy(chelis_compiler_api::compiler::PreparedEval),
+    InContext(chelis_compiler_api::compiler::PreparedEvalInContext),
+}
+
+impl PreparedTestEval {
+    fn eval_root(
+        &self,
+        bindings: BTreeMap<String, chelis_compiler_api::schema::TensorValue>,
+        root: &str,
+    ) -> Result<chelis_compiler_api::schema::EvalResult, chelis_compiler_api::compiler::CompilerError>
+    {
+        match self {
+            PreparedTestEval::Legacy(p) => p.eval_root(bindings, root),
+            PreparedTestEval::InContext(p) => p.eval_root(bindings, root),
+        }
+    }
+}
+
 fn prepare_eval_in_exec_context(
     exec_context: &TestExecutionContext,
     synth_decls: &[Decl],
-) -> Result<chelis_compiler_api::compiler::PreparedEval, String> {
-    let prepared = chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
-        .map_err(|e| e.to_string())?;
-    let source_text = chelis_surf::format::format_program(&prepared.decls);
-    chelis_compiler_api::compiler::prepare_eval(EvalRequest {
-        source_kind: SourceKind::Surf,
-        source: source_text,
-        bindings: BTreeMap::new(),
-    })
-    .map_err(|err| {
-        err.errors
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
+) -> Result<PreparedTestEval, String> {
+    match exec_context {
+        TestExecutionContext::Context(ctx) => {
+            // Reef-rewrite the synth decls against the prepared graph
+            // (mirrors the legacy path's `compile_with_reef_graph` work
+            // for name resolution), then format the rewritten program
+            // into Surf source for `prepare_eval_in_context`. The
+            // library decls (chelis-std + reef deps + own modules) are
+            // already inside the `CompiledContext` — only the synth
+            // decls (the file-under-test plus its `__chelis_test_N`
+            // calls) re-run through parse/check/lower.
+            let prepared =
+                chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
+                    .map_err(|e| e.to_string())?;
+            let source_text = chelis_surf::format::format_program(&prepared.decls);
+            chelis_compiler_api::compiler::prepare_eval_in_context(ctx, &source_text)
+                .map(PreparedTestEval::InContext)
+                .map_err(|err| {
+                    err.errors
+                        .iter()
+                        .map(|d| d.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+        }
+        TestExecutionContext::ReefGraph(_) => {
+            let prepared =
+                chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
+                    .map_err(|e| e.to_string())?;
+            let source_text = chelis_surf::format::format_program(&prepared.decls);
+            chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source_text,
+                bindings: BTreeMap::new(),
+            })
+            .map(PreparedTestEval::Legacy)
+            .map_err(|err| {
+                err.errors
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
