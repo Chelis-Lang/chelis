@@ -421,3 +421,112 @@ the per-file test loop.
 
 The cache architecture is sound and we have a known surface (single
 `compile_reef_context` call cost) to profile next.
+
+## Phase K — disk cache wire-up + compile_reef_context profile
+
+### Disk cache (Phase K commits `483272e` deprecation, `a6b3fad` cmd_eval, `29ca9b2` cmd_test)
+
+Before Phase K, every `chelis eval` / `chelis test` invocation rebuilt the
+`CompiledContext` from scratch (~67 s on Coral). The Phase I disk cache
+machinery existed but wasn't wired into the CLI. Phase K plumbs
+`load_or_compile_for_package` (a thin layer over the existing
+`CompiledContext::load_if_fresh` + `save`) into both `cmd_eval` and
+`cmd_test`. The cache key is `(reef_home, root_pkg_id, source_hash)`;
+content invalidation kicks in the moment ANY backed source byte changes.
+
+`cmd_check` is intentionally left wired through the legacy fitness
+emitter — its JSON output shape diverges from `check_in_context`, and a
+JSON-shape parity layer is out of scope for the Phase K close-out.
+
+### Coral wall-clock with disk cache, release build
+
+| Bench | Cold (cache miss) | Warm (cache hit) | Speedup |
+|---|---|---|---|
+| `chelis eval --file src/apismoke.ch` | 76.5 s | 0.24 s | ~318× |
+| `chelis test tests/` (63 tests) | 83.0 s | 11.6 s | ~7.1× |
+
+Warm-cache `chelis test` lands at **11.6 s** on Coral — well under the
+30 s headline target, when (and only when) the source has not changed
+since the previous run. Cold (first run, or any source byte changed)
+still pays the full ~67–80 s `compile_reef_context` build.
+
+### compile_reef_context per-phase breakdown
+
+Instrumentation gated by `CHELIS_PROFILE_COMPILE_CONTEXT=1` (zero-cost
+when unset). Numbers from a Coral `chelis eval --file src/apismoke.ch`
+cold run, release build, no cache:
+
+| Phase | Wall-clock | Share of total |
+|---|---|---|
+| `prepare_reef_graph` | 0.031 s | 0.04% |
+| `source_digests` | ~0 s | ~0% |
+| `hash_digests` | ~0 s | ~0% |
+| `surf_desugar` | 0.011 s | 0.01% |
+| `macro_expand` | 0.046 s | 0.06% |
+| `build_type_env_from_library` | **18.16 s** | 21.7% |
+| `check_phase0e_with_context` | **21.47 s** | 25.7% |
+| `check_effects` | 0.15 s | 0.2% |
+| `check_linearity` | 2.17 s | 2.6% |
+| `lower_program_to_library` | **41.18 s** | 49.3% |
+| **Total** | **83.5 s** | 100% |
+
+### Diagnosis: structural, not bounded
+
+Three phases dominate, totaling ~96% of the cold compile:
+
+- **`lower_program_to_library` (41.2 s, 49% of total)**: eagerly lowers every
+  library function to a DAG. The whole point of `LoweredLibrary` is to be
+  a referenced shared snapshot for `lower_program_with_context` —
+  every function is a potential reference target so we can't skip any.
+  Bounded fixes (e.g., lazy-by-function lowering) require the
+  `LoweredLibrary` schema to become a lazy `Map<name, OnceCell<Dag>>`,
+  threading `&mut` through every borrow site, and re-validating cache
+  bincode round-trip. Outside the ~50–150 LOC bounded-fix budget.
+
+- **`check_phase0e_with_context` (21.5 s, 26%)**: full HM-style type
+  inference over every library decl body. The bodies are different from
+  the headers `build_type_env_from_library` already walked, so this is
+  not redundant work in the obvious sense — the second pass infers
+  types of each body in scope of the first pass's env. Speeding this up
+  would mean the type checker itself becomes incremental, which is a
+  distinct multi-week project.
+
+- **`build_type_env_from_library` (18.2 s, 22%)**: extracts top-level
+  type signatures from every library decl, and resolves every type
+  reference once. This is also one-pass-over-N work; the only way to
+  speed it up is to cache by decl signature (which is what the disk
+  cache already does, end-to-end).
+
+All three are structural — the work fundamentally requires touching
+every node in a 90-module library graph, and each unit of work is
+small. There is no obvious O(N²) cliff or redundant subtree walk to
+eliminate. Per the user's explicit "stop early on Step 3 if structural"
+direction, we are NOT applying a fix in this push.
+
+The instrumentation itself (`CHELIS_PROFILE_COMPILE_CONTEXT=1` in
+`compile_reef_context`) is retained as a permanent operator-facing tool
+so a future profiling pass starts from data, not guesses.
+
+### Recommended next steps (out of scope for Phase K)
+
+The disk cache makes the cold cost a one-time-per-source-change tax
+rather than a per-invocation tax, so the practical impact of the
+remaining 67–80 s cold-compile is now bounded by how often a developer
+edits a library source file. Three follow-ups, ranked by ROI:
+
+1. **Incremental lowering**: change `LoweredLibrary` to a lazy per-decl
+   structure so only the decls actually referenced by `eval_in_context`
+   pay lowering cost. Likely the biggest single win (40 s → ~5 s on
+   Coral if most of the library isn't referenced by a typical eval),
+   but requires a real refactor.
+2. **Incremental type checking**: same idea, applied to
+   `build_type_env_from_library` + `check_phase0e_with_context`
+   together. Likely a multi-week project; not a Phase K scope.
+3. **Workspace-shared cache**: today the cache key is per-`reef_home`.
+   A team-wide shared cache (e.g., over CI artifact storage) would
+   make the cold path fast-cold instead of slow-cold for any developer
+   downloading a known-good cache.
+
+The headline cache work has delivered: 5.1× faster than the prior
+Phase G' baseline, and warm-cache invocations now beat the original
+30 s headline target by a comfortable margin.

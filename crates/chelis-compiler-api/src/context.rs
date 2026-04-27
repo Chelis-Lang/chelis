@@ -664,19 +664,42 @@ pub fn compile_reef_context(
     _reef_home: &Path,
     package_dir: &Path,
 ) -> Result<CompiledContext, CompilerError> {
+    // Phase K profile instrumentation: when `CHELIS_PROFILE_COMPILE_CONTEXT=1`
+    // is set, emit per-phase wall-clock to stderr so the operator can see
+    // which stage dominates. Off by default — zero cost on the hot path.
+    let profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut t = std::time::Instant::now();
+    let log_phase = |name: &str, t: &mut std::time::Instant| {
+        if profile {
+            let elapsed = t.elapsed();
+            eprintln!(
+                "compile_reef_context: {:>32} {:>8.3}s",
+                name,
+                elapsed.as_secs_f64()
+            );
+            *t = std::time::Instant::now();
+        }
+    };
+
     let reef_state = prepare_reef_graph(package_dir).map_err(|e| reef_error(&e))?;
+    log_phase("prepare_reef_graph", &mut t);
     let digests = reef_state.source_digests().map_err(|e| hash_error(&e))?;
+    log_phase("source_digests", &mut t);
     let source_hash = ContextHash::from_digests(&digests);
+    log_phase("hash_digests", &mut t);
 
     // Surf → Deep desugar + macro expand of the library decls.
     // `linked_library_decls` is already linked + internal-name-rewritten
     // by `prepare_reef_graph`.
-    let deep_library_decls = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&reef_state.linked_library_decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
-    .into_exprs();
+    let desugared = chelis_surf::desugar::desugar_program(&reef_state.linked_library_decls);
+    log_phase("surf_desugar", &mut t);
+    let deep_library_decls =
+        chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
+            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
+            .into_exprs();
+    log_phase("macro_expand", &mut t);
 
     // Phase C: build the Phase 0e type-env snapshot from the library.
     let type_env =
@@ -684,6 +707,7 @@ pub fn compile_reef_context(
             stage: "check".to_string(),
             errors: report.errors.iter().map(check_error_diagnostic).collect(),
         })?;
+    log_phase("build_type_env_from_library", &mut t);
 
     // Run the monolithic library check via `check_phase0e_with_context`
     // against an empty outer scope, then layer effects + linearity. This
@@ -697,6 +721,7 @@ pub fn compile_reef_context(
                 errors: report.errors.iter().map(check_error_diagnostic).collect(),
             }
         })?;
+    log_phase("check_phase0e_with_context", &mut t);
     let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
         stage: "effects".to_string(),
         errors: errors
@@ -712,13 +737,16 @@ pub fn compile_reef_context(
             })
             .collect(),
     })?;
+    log_phase("check_effects", &mut t);
     let library_checked = check_linearity(&checked).map_err(|errors| CompilerError {
         stage: "linearity".to_string(),
         errors: errors.iter().map(check_error_diagnostic).collect(),
     })?;
+    log_phase("check_linearity", &mut t);
 
     // Phase F: lower the library to a `LoweredLibrary` carrier.
     let library_dag = lower_program_to_library(&library_checked);
+    log_phase("lower_program_to_library", &mut t);
 
     Ok(CompiledContext {
         source_hash,
