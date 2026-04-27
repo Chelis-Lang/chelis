@@ -196,7 +196,7 @@ import Std.Nn.RmsNorm (forward)
 xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
 unit_gain = to_tensor([cast(1.0, f32), cast(1.0, f32), cast(1.0, f32), cast(1.0, f32)])
 scaled_gain = to_tensor([cast(2.0, f32), cast(2.0, f32), cast(2.0, f32), cast(2.0, f32)])
-rms_unit = forward(xs, unit_gain, cast(0.000001, f32))
+rms_unit = forward(copy(xs), unit_gain, cast(0.000001, f32))
 rms_scaled = forward(xs, scaled_gain, cast(0.000001, f32))
 "#,
     );

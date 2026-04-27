@@ -841,7 +841,24 @@ fn cmd_build(
                 let mut binding = binding.clone();
                 binding.display_name = match binding.ty {
                     chelis_ir::host::HostType::Fn(_, _) => None,
-                    _ => host_display_root_name(&binding.name, &entry_display_root_names),
+                    _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
+                        || {
+                            // Tuple-typed top-level bindings get their root
+                            // name expanded into `name.0` / `name.1` entries
+                            // by `extend_root_names_from_value` (matching
+                            // eval-side behavior). Surface a synthetic
+                            // tuple-prefix display name so the C emitter
+                            // can render the per-field "name.i = ..." lines.
+                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                                host_display_tuple_root_prefix(
+                                    &binding.name,
+                                    &entry_display_root_names,
+                                )
+                            } else {
+                                None
+                            }
+                        },
+                    ),
                 };
                 binding
             })
@@ -3042,6 +3059,25 @@ fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Optio
                 .is_some_and(|(_, tail)| tail == entry))
         .then(|| entry.clone())
     })
+}
+
+/// For a tuple-typed binding, the eval root-name expander produces
+/// `<name>.0`, `<name>.1`, … entries (one per tuple field). The C emit
+/// path stores a single global per binding, so we surface a tuple-prefix
+/// display name (e.g. `"buckets"`) when at least one expanded entry
+/// references this binding's terminal name. The C emitter detects the
+/// `Tuple(_)` host type on the global and renders one labeled line per
+/// field, mirroring eval's output shape.
+fn host_display_tuple_root_prefix(full_name: &str, entry_root_names: &[String]) -> Option<String> {
+    let terminal = full_name
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .unwrap_or(full_name);
+    let prefix_dot = format!("{terminal}.");
+    entry_root_names
+        .iter()
+        .any(|entry| entry.starts_with(&prefix_dot))
+        .then(|| terminal.to_string())
 }
 
 fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {

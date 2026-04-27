@@ -2181,6 +2181,29 @@ impl HostEmitter {
     }
 
     fn emit_labeled_root(&mut self, name: &str, value: &str, ty: &HostType) {
+        // Mirror eval's tuple-root expansion: a `Tuple([T0, T1, ...])`
+        // top-level binding renders as `<name>.0 = ...`, `<name>.1 = ...`
+        // (one labeled line per field). Eval produces this via
+        // `extend_root_names_from_value`; the C backend reaches it here.
+        if let HostType::Tuple(items) = ty {
+            for (index, field_ty) in items.iter().enumerate() {
+                let field_name = format!("{name}.{index}");
+                let field_var = self.next_temp(&format!("root_field{index}"));
+                self.lines.push(format!(
+                    "{}chelis_value {} = chelis_tuple_get({}, {index});",
+                    self.indent, field_var, value
+                ));
+                let field_value = self.next_temp(&format!("root_field_val{index}"));
+                self.lines.push(format!(
+                    "{}{};",
+                    self.indent,
+                    c_decl(field_ty, &field_value)
+                ));
+                self.assign_unboxed_value(&field_value, field_ty, &field_var);
+                self.emit_labeled_root(&field_name, &field_value, field_ty);
+            }
+            return;
+        }
         self.lines
             .push(format!("{}printf(\"%s = \", {:?});", self.indent, name));
         match ty {

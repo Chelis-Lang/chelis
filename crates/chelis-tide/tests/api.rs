@@ -378,15 +378,21 @@ trimmed = dict_remove(merged, "gamma")
         .expect("scanned root");
     assert_eq!(scanned["value"]["type"], "list");
     assert_eq!(scanned["value"]["value"][2]["value"], 6);
-    let buckets = roots
+    // Top-level tuple-typed bindings are expanded into per-field roots
+    // (`<name>.0`, `<name>.1`, …) by `extend_root_names_from_value`, so
+    // the `buckets` tuple-typed binding surfaces as two list roots.
+    let buckets_pass = roots
         .iter()
-        .find(|root| root["name"] == "buckets")
-        .expect("buckets root");
-    assert_eq!(buckets["value"]["type"], "tuple");
-    assert_eq!(buckets["value"]["value"][0]["type"], "list");
-    assert_eq!(buckets["value"]["value"][0]["value"][0]["value"], 2);
-    assert_eq!(buckets["value"]["value"][1]["type"], "list");
-    assert_eq!(buckets["value"]["value"][1]["value"][0]["value"], 1);
+        .find(|root| root["name"] == "buckets.0")
+        .expect("buckets.0 root");
+    assert_eq!(buckets_pass["value"]["type"], "list");
+    assert_eq!(buckets_pass["value"]["value"][0]["value"], 2);
+    let buckets_fail = roots
+        .iter()
+        .find(|root| root["name"] == "buckets.1")
+        .expect("buckets.1 root");
+    assert_eq!(buckets_fail["value"]["type"], "list");
+    assert_eq!(buckets_fail["value"]["value"][0]["value"], 1);
     let exploded = roots
         .iter()
         .find(|root| root["name"] == "exploded")

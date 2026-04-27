@@ -193,10 +193,10 @@ step_lr = step_decay(
   }
 )
 
-adam_state = adamw_init_like(params)
+adam_state = adamw_init_like(copy(params))
 adam_pair = adamw_step(
-  params,
-  grads,
+  copy(params),
+  copy(grads),
   adam_state,
   AdamWConfig {
     lr: 0.1,
@@ -208,9 +208,9 @@ adam_pair = adamw_step(
 )
 adam_params = adam_pair.0
 decay_only = adamw_step(
-  params,
+  copy(params),
   to_tensor([0.0, 0.0, 0.0]),
-  adamw_init_like(params),
+  adamw_init_like(copy(params)),
   AdamWConfig {
     lr: 0.1,
     beta1: 0.9,
@@ -220,7 +220,7 @@ decay_only = adamw_step(
   }
 ).0
 
-lamb_state = lamb_init_like(params)
+lamb_state = lamb_init_like(copy(params))
 lamb_pair = lamb_step(
   params,
   grads,
@@ -327,8 +327,8 @@ cfg = GenerateConfig {
   top_k: cast(2, int64),
   top_p: 0.95
 }
-greedy = generate(toy_model, context, cast(2, int64))
-sampled_a = with seed(7) { generate_with(toy_model, context, cfg) }
+greedy = generate(toy_model, copy(context), cast(2, int64))
+sampled_a = with seed(7) { generate_with(toy_model, copy(context), cfg) }
 sampled_b = with seed(7) { generate_with(toy_model, context, cfg) }
 "#,
     );
