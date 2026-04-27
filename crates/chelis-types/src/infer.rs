@@ -1970,6 +1970,7 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
+    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut declaration_errors = Vec::new();
 
     for expr in exprs {

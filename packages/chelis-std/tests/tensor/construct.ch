@@ -20,13 +20,13 @@ def test_arange_offset() -> unit ! { Test } = {
 def test_linspace_degenerate() -> unit ! { Test } = {
   actual = linspace(cast(3.0, f32), cast(7.0, f32), cast(1, int32))
   expected = to_tensor([cast(3.0, f32)])
-  _ = assert_shape(actual, cast(1, int64), "linspace count=1 length")
+  _ = assert_shape(&actual, cast(1, int64), "linspace count=1 length")
   assert_close_tensor(actual, expected, cast(0.000001, f32), "linspace count=1 value")
 }
 def test_linspace_endpoints() -> unit ! { Test } = {
   actual = linspace(cast(0.0, f32), cast(1.0, f32), cast(3, int32))
   expected = to_tensor([cast(0.0, f32), cast(0.5, f32), cast(1.0, f32)])
-  _ = assert_shape(actual, cast(3, int64), "linspace count=3 length")
+  _ = assert_shape(&actual, cast(3, int64), "linspace count=3 length")
   assert_close_tensor(actual, expected, cast(0.000001, f32), "linspace count=3 endpoints")
 }
 def test_stack_two_rows() -> unit ! { Test } = {
