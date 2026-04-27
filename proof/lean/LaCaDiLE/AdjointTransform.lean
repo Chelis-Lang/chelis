@@ -26,8 +26,11 @@
 --     the real rule (non-parameter free variables should not contribute,
 --     but the handler's origin filter drops them so the net effect is
 --     correct).
---   * `letBind y e1 e2` recurses on `e2` with `e1` passing through —
---     Phase 2 T9 will invert the forward/backward order properly.
+--   * `letBind y e1 e2` currently recurses on the bound expression `e1`
+--     only. This is now known to be semantically too weak: the
+--     `AdjointTyping.grad_preservation_false_witness` shows it can feed
+--     the wrong seed shape into an inner `expand`. Phase 2 T9 needs the
+--     real forward/backward ordering.
 --   * `pair`, `fst`, `snd`, `abs`, `app`, `uniformLike`, `grad`, `vmap`,
 --     `perform` all structurally recurse on sub-terms with a vestigial
 --     `perform accum` at the base; the T0 §4 rules for these are

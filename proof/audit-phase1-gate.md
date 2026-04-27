@@ -152,7 +152,7 @@ rule cited (`T-Var`, `T-Const`, `T-Mul`, `T-Sum`, `T-Grad`, `T-Copy`,
 
 | # | Prereq | Issue real? | Notes |
 |---|---|---|---|
-| 1 | Rewrite `adjoint` with T0 §4 recursion | ✅ catch-all emits vestigial `perform accum`; `letBind` recurses on tail only | |
+| 1 | Rewrite `adjoint` with T0 §4 recursion | ✅ catch-all emits vestigial `perform accum`; `letBind` currently recurses on the bound term only, and the branch now contains a concrete `grad` witness showing that placeholder is semantically too weak | |
 | 2 | Upgrade `EffectRow` to set/multiset | ✅ `abbrev EffectRow := List EffectLabel`; `AdjointTyping` uses `eps ++ [accum]` list concat | |
 | 3 | Add `IsSourceTerm` / parameterize by `StoreTyp` | ✅ `Term.loc` exposed in source grammar | |
 | 4 | Thread `tOut` through `Term.grad` | ✅ `Term.grad` lacks `tOut`; `Step.tgrad` fabricates it as existential | |
