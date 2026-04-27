@@ -579,23 +579,81 @@ Remained:
   JSON-shape parity layer because `check_in_context` returns a
   simpler `CheckResult` than the legacy emitter's
   fitness+effects+linearity composition. Out of scope for Phase K.
-- Cold-compile bottleneck (~70–80 s on Coral) — initially called
-  "structural"; per-decl follow-up (see
-  `docs/perf_baseline_investigation.md`) identified concrete
-  bounded fixes within the ~50–150 LOC fix budget. The fixes are
-  not yet applied; awaiting acceptance of the Step 3 diagnosis
-  report.
-- The 30 s headline number is hit on warm cache only. Cold (first
-  run, or any source byte changed) still pays the full library
-  compile.
 
-### Verdict
+### Verdict (post Phase K + cold-path fixes)
 
 The Compiled Artifact Caching project has delivered. Warm-cache
-`chelis test` runs in 11.6 s on Coral, well under the 30 s headline
-target. The cold path remains paid once per source change, not once
-per invocation, which is the right shape for a developer dev loop.
+`chelis test` runs in 11.1 s on Coral, well under the 30 s headline
+target. As of the cold-path fixes (commits `5eaefdb` and `5ad5a6f`,
+described below), the **cold path is also under 30 s**: 29.4 s on
+Coral's 63-test suite. The disk cache remains valuable for repeated
+runs but is no longer load-bearing for the headline number.
 
-Subsequent project work on the cold path (incremental lowering,
-incremental type checking, workspace-shared cache) is documented
-above and waits on its own dedicated phase.
+## Phase K cold-path follow-up (2026-04-26): bounded fixes applied
+
+The Phase K initial diagnosis labeled the cold-compile bottleneck as
+"structural" with no fixes attempted. A per-decl re-investigation
+(see `docs/perf_baseline_investigation.md`) refuted that conclusion
+on 2 of the 3 dominant phases and identified concrete bounded fixes:
+
+### Fix A — `lower_program_to_library` quadratic (commit `5eaefdb`)
+
+Both `for_each_top_level_item` loops inside
+`lower_program_to_library` were calling
+`top_level_expr_is_lowered(expr, program_exprs, type_env)` per
+iteration, and that helper rebuilt `top_level_lowering_map` from
+scratch each call (1850 calls × full library walk). The precomputed
+`lowered_names` from line 125 was being ignored. Fix: thread it
+through, replacing both call sites with
+`top_level_expr_is_lowered_with_names(...)`.
+
+| Sub-phase             | Before  | After   |
+|-----------------------|---------|---------|
+| top_level_lowering_map| 0.018 s | 0.016 s |
+| assertions_loop       | 20.6 s  | 0.0005 s|
+| lower_top_level_loop  | 9.9 s   | 0.010 s |
+| TOTAL                 | 30.5 s  | 0.046 s |
+
+663× speedup. ~14 LOC.
+
+### Fix B — annotation deduplication (commit `5ad5a6f`)
+
+`compile_reef_context` previously called
+`build_type_env_from_library` followed by
+`check_phase0e_with_context(empty, library)`. Both ran a full HM
+inference + per-decl annotation pass over the same library exprs;
+~16 s of inference and ~13.8 s of annotation were duplicated.
+
+Fix: a new `chelis_types::build_compiled_library_context` runs the
+work once and returns both the `TypeEnv` and the library
+`CheckedProgram`. The two existing public functions are retained for
+external callers.
+
+| Phase                           | Before  | After   |
+|---------------------------------|---------|---------|
+| build_type_env_from_library     | 16.5 s  | (gone)  |
+| check_phase0e_with_context      | 19.3 s  | (gone)  |
+| build_compiled_library_context  | —       | 16.1 s  |
+
+~125 LOC (mostly a new helper that reuses existing primitives).
+
+### Combined effect on Coral
+
+| Bench                                   | Pre-fixes | Post-fixes |
+|-----------------------------------------|-----------|------------|
+| `compile_reef_context` cold             | ~68 s     | ~18 s      |
+| `chelis test tests/` cold (63 tests)    | 81.6 s    | **29.4 s** |
+| `chelis test tests/` warm (63 tests)    | 11.6 s    | 11.1 s     |
+| chelis-std self-test corpus (205 tests) | 7.9 s     | ~7.9 s     |
+
+The cold path now hits the 30 s headline target without disk-cache
+warmth. Both fixes preserve correctness (chelis-std 205/205 passes,
+workspace gate green except 3 known HIP failures).
+
+### What remains (post follow-up)
+
+- Inference itself (~5 s / pass on Coral) is genuinely structural
+  one-pass-over-N HM inference. Eliminating it requires incremental
+  type checking — a multi-week project, NOT a bounded fix.
+- `cmd_check` JSON-shape parity layer still required to route
+  `cmd_check` through the in-context pipeline.
