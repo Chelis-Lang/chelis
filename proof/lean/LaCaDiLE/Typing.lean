@@ -143,14 +143,14 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
       (e : Term) (t1 t2 : Typ) (eps : EffectRow) :
       HasType Delta Sigma Gamma1 e (Typ.pair t1 t2) eps Gamma2 →
-      HasType Delta Sigma Gamma1 (Term.fst e) t1 eps Gamma2
+      HasType Delta Sigma Gamma1 (Term.fst t2 e) t1 eps Gamma2
 
   -- T-Snd.
   | snd
       (Delta : CapCtx) (Sigma : StoreTyp) (Gamma1 Gamma2 : LinearCtx)
       (e : Term) (t1 t2 : Typ) (eps : EffectRow) :
       HasType Delta Sigma Gamma1 e (Typ.pair t1 t2) eps Gamma2 →
-      HasType Delta Sigma Gamma1 (Term.snd e) t2 eps Gamma2
+      HasType Delta Sigma Gamma1 (Term.snd t1 e) t2 eps Gamma2
 
   -- T-Const.
   -- Paper: v is a scalar literal

@@ -88,18 +88,17 @@ own top-level `theorem`, which Lean accepts. -/
     Since fst propagates eps unchanged, no restatement needed. -/
 theorem HasType.fst_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
-    {e : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma1 (Term.fst e) t eps Gamma2) :
-    ∃ t2, HasType Delta Sigma Gamma1 e (Typ.pair t t2) eps Gamma2 := by
-  generalize heq : Term.fst e = e_in at h
+    {e : Term} {t tRight : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.fst tRight e) t eps Gamma2) :
+    HasType Delta Sigma Gamma1 e (Typ.pair t tRight) eps Gamma2 := by
+  generalize heq : Term.fst tRight e = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | fst _ _ _ _ _ _ t2 _ h_inner _ =>
       cases heq
-      exact ⟨t2, h_inner⟩
+      simpa using h_inner
   | subEff Δ S Γ Γ' _ t_m eps0 eps' _h_sub h_sub ih =>
-      obtain ⟨t2, h_inv⟩ := ih heq
-      exact ⟨t2, HasType.subEff Δ S Γ Γ' e (Typ.pair t_m t2) eps0 eps' h_inv h_sub⟩
+      exact HasType.subEff Δ S Γ Γ' e (Typ.pair t_m tRight) eps0 eps' (ih heq) h_sub
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -110,18 +109,17 @@ theorem HasType.fst_inv
 
 theorem HasType.snd_inv
     {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
-    {e : Term} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma1 (Term.snd e) t eps Gamma2) :
-    ∃ t1, HasType Delta Sigma Gamma1 e (Typ.pair t1 t) eps Gamma2 := by
-  generalize heq : Term.snd e = e_in at h
+    {e : Term} {t tLeft : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.snd tLeft e) t eps Gamma2) :
+    HasType Delta Sigma Gamma1 e (Typ.pair tLeft t) eps Gamma2 := by
+  generalize heq : Term.snd tLeft e = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
   | snd Δ S Γ1 Γ2 e' t1 t2 eps' h_inner _ih =>
       cases heq
-      exact ⟨t1, h_inner⟩
+      simpa using h_inner
   | subEff Δ S Γ Γ' e' t' eps0 eps1 _h_sub h_sub ih =>
-      obtain ⟨t1, h_inv⟩ := ih heq
-      exact ⟨t1, HasType.subEff Δ S Γ Γ' e (Typ.pair t1 t') eps0 eps1 h_inv h_sub⟩
+      exact HasType.subEff Δ S Γ Γ' e (Typ.pair tLeft t') eps0 eps1 (ih heq) h_sub
   | _ => (try cases heq) <;> first | exact True.intro | (exfalso; contradiction)
 
 /-- Pair inversion with subEff widening. Produces sub-derivations at
@@ -1575,16 +1573,14 @@ theorem HasType.plug_inner_closed
   cases E with
   | hole =>
       exact ⟨t, eps, by simpa [plug] using h⟩
-  | fst =>
-      have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
+  | fst tRight =>
+      have h' : HasType [] Sigma [] (Term.fst tRight e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
-      exact ⟨Typ.pair t t2, eps, h_e⟩
-  | snd =>
-      have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
+      exact ⟨Typ.pair t tRight, eps, HasType.fst_inv h'⟩
+  | snd tLeft =>
+      have h' : HasType [] Sigma [] (Term.snd tLeft e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
-      exact ⟨Typ.pair t1 t, eps, h_e⟩
+      exact ⟨Typ.pair tLeft t, eps, HasType.snd_inv h'⟩
   | copy =>
       have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
         simpa [plug] using h
@@ -1730,16 +1726,18 @@ theorem plug_preserves_typing
               StoreTypSub Sigma Sigma2 := by
   cases E with
   | hole => simpa [plug] using h_inner h
-  | fst =>
-      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by simpa [plug] using h
-      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+  | fst tRight =>
+      have h' : HasType Delta Sigma Gamma (Term.fst tRight e) t eps Gamma' := by
+        simpa [plug] using h
+      let h_e := HasType.fst_inv h'
       obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
-      exact ⟨S2, HasType.fst _ S2 _ _ _ _ t2 _ h_e', h_sub⟩
-  | snd =>
-      have h' := by simpa [plug] using h
-      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      exact ⟨S2, HasType.fst _ S2 _ _ _ _ tRight _ h_e', h_sub⟩
+  | snd tLeft =>
+      have h' : HasType Delta Sigma Gamma (Term.snd tLeft e) t eps Gamma' := by
+        simpa [plug] using h
+      let h_e := HasType.snd_inv h'
       obtain ⟨S2, h_e', h_sub⟩ := h_inner h_e
-      exact ⟨S2, HasType.snd _ S2 _ _ _ t1 _ _ h_e', h_sub⟩
+      exact ⟨S2, HasType.snd _ S2 _ _ _ tLeft _ _ h_e', h_sub⟩
   | copy =>
       have h' := by simpa [plug] using h
       obtain ⟨ds, hteq, h_e⟩ := HasType.copy_inv h'
@@ -1977,22 +1975,22 @@ theorem plug_replace_with_prefixed_hole
   cases E with
   | hole =>
       simpa [plug] using h_inner h
-  | fst =>
-      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by
+  | fst tRight =>
+      have h' : HasType Delta Sigma Gamma (Term.fst tRight e) t eps Gamma' := by
         simpa [plug] using h
-      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      let h_e := HasType.fst_inv h'
       exact HasType.fst Delta Sigma
         (((outer ++ [(y, some ty)]) ++ Gamma))
         (((outer ++ [(y, none)]) ++ Gamma'))
-        e' t t2 eps (h_inner h_e)
-  | snd =>
-      have h' : HasType Delta Sigma Gamma (Term.snd e) t eps Gamma' := by
+        e' t tRight eps (h_inner h_e)
+  | snd tLeft =>
+      have h' : HasType Delta Sigma Gamma (Term.snd tLeft e) t eps Gamma' := by
         simpa [plug] using h
-      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      let h_e := HasType.snd_inv h'
       exact HasType.snd Delta Sigma
         (((outer ++ [(y, some ty)]) ++ Gamma))
         (((outer ++ [(y, none)]) ++ Gamma'))
-        e' t1 t eps (h_inner h_e)
+        e' tLeft t eps (h_inner h_e)
   | copy =>
       have h' : HasType Delta Sigma Gamma (Term.copy e) t eps Gamma' := by
         simpa [plug] using h
@@ -2320,18 +2318,18 @@ theorem plug_preserves_typing_closed
   cases E with
   | hole =>
       simpa [plug] using h_inner h
-  | fst =>
-      have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
+  | fst tRight =>
+      have h' : HasType [] Sigma [] (Term.fst tRight e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      let h_e := HasType.fst_inv h'
       obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_e
-      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t t2 eps h_e', h_sub⟩
-  | snd =>
-      have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
+      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t tRight eps h_e', h_sub⟩
+  | snd tLeft =>
+      have h' : HasType [] Sigma [] (Term.snd tLeft e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      let h_e := HasType.snd_inv h'
       obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_e
-      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' t1 t eps h_e', h_sub⟩
+      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' tLeft t eps h_e', h_sub⟩
   | copy =>
       have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
         simpa [plug] using h
@@ -2566,18 +2564,18 @@ theorem plug_preserves_typing_closed_on_ctxLocRefs
   | hole =>
       rcases h_inner h with ⟨Sigma2, h_e', h_wf2, h_on⟩
       simpa [plug] using ⟨Sigma2, h_e', h_wf2, h_on⟩
-  | fst =>
-      have h' : HasType [] Sigma [] (Term.fst e) t eps [] := by
+  | fst tRight =>
+      have h' : HasType [] Sigma [] (Term.fst tRight e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t2, h_e⟩ := HasType.fst_inv h'
+      let h_e := HasType.fst_inv h'
       rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
-      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t t2 eps h_e', h_wf2, h_on⟩
-  | snd =>
-      have h' : HasType [] Sigma [] (Term.snd e) t eps [] := by
+      exact ⟨Sigma2, HasType.fst [] Sigma2 [] [] e' t tRight eps h_e', h_wf2, h_on⟩
+  | snd tLeft =>
+      have h' : HasType [] Sigma [] (Term.snd tLeft e) t eps [] := by
         simpa [plug] using h
-      obtain ⟨t1, h_e⟩ := HasType.snd_inv h'
+      let h_e := HasType.snd_inv h'
       rcases h_inner h_e with ⟨Sigma2, h_e', h_wf2, h_on⟩
-      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' t1 t eps h_e', h_wf2, h_on⟩
+      exact ⟨Sigma2, HasType.snd [] Sigma2 [] [] e' tLeft t eps h_e', h_wf2, h_on⟩
   | copy =>
       have h' : HasType [] Sigma [] (Term.copy e) t eps [] := by
         simpa [plug] using h
@@ -4654,7 +4652,7 @@ private theorem preservation_aux
         fun _ _ _ hlook => hlook⟩
   | fst s v1 v2 hv1 hv2 =>
       intro locs _hsep _hlinear t eps h_typ _h_scope
-      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h_typ
+      let h_pair := HasType.fst_inv h_typ
       obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
       have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
       subst hmid
@@ -4664,7 +4662,7 @@ private theorem preservation_aux
         fun _ _ _ hlook => hlook⟩
   | snd s v1 v2 hv1 hv2 =>
       intro locs _hsep _hlinear t eps h_typ _h_scope
-      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h_typ
+      let h_pair := HasType.snd_inv h_typ
       obtain ⟨Γmid, eps1, eps2, h1, h2, hsub⟩ := HasType.pair_inv h_pair
       have hmid : Γmid = [] := has_type_closed_output_of_closed_input h1
       subst hmid
@@ -5629,23 +5627,23 @@ theorem preservation
   | hole =>
       -- plug hole e = e; directly apply the inner-step hypothesis.
       simpa [plug] using h_inner h
-  | fst =>
+  | fst tRight =>
       -- plug fst e = Term.fst e.
-      have h' : HasType Delta Sigma Gamma (Term.fst e) t eps Gamma' := by
+      have h' : HasType Delta Sigma Gamma (Term.fst tRight e) t eps Gamma' := by
         simpa [plug] using h
-      obtain ⟨t2, h_pair⟩ := HasType.fst_inv h'
+      let h_pair := HasType.fst_inv h'
       obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_pair
       refine ⟨Sigma2, ?_, h_sub⟩
-      show HasType Delta Sigma2 Gamma (Term.fst e') t eps Gamma'
-      exact HasType.fst Delta Sigma2 Gamma Gamma' e' t t2 eps h_e'
-  | snd =>
-      have h' : HasType Delta Sigma Gamma (Term.snd e) t eps Gamma' := by
+      show HasType Delta Sigma2 Gamma (Term.fst tRight e') t eps Gamma'
+      exact HasType.fst Delta Sigma2 Gamma Gamma' e' t tRight eps h_e'
+  | snd tLeft =>
+      have h' : HasType Delta Sigma Gamma (Term.snd tLeft e) t eps Gamma' := by
         simpa [plug] using h
-      obtain ⟨t1, h_pair⟩ := HasType.snd_inv h'
+      let h_pair := HasType.snd_inv h'
       obtain ⟨Sigma2, h_e', h_sub⟩ := h_inner h_pair
       refine ⟨Sigma2, ?_, h_sub⟩
-      show HasType Delta Sigma2 Gamma (Term.snd e') t eps Gamma'
-      exact HasType.snd Delta Sigma2 Gamma Gamma' e' t1 t eps h_e'
+      show HasType Delta Sigma2 Gamma (Term.snd tLeft e') t eps Gamma'
+      exact HasType.snd Delta Sigma2 Gamma Gamma' e' tLeft t eps h_e'
   | copy =>
       have h' : HasType Delta Sigma Gamma (Term.copy e) t eps Gamma' := by
         simpa [plug] using h

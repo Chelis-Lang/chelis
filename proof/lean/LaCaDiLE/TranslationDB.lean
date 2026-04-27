@@ -661,9 +661,9 @@ def eraseTerm (rho : BinderEnv) : Term → Option TermDB
       let e1' <- eraseTerm rho e1
       let e2' <- eraseTerm rho e2
       pure (TermDB.pair e1' e2')
-  | Term.fst e =>
+  | Term.fst _ e =>
       TermDB.fst <$> eraseTerm rho e
-  | Term.snd e =>
+  | Term.snd _ e =>
       TermDB.snd <$> eraseTerm rho e
   | Term.unit =>
       pure TermDB.unit
@@ -752,9 +752,9 @@ def eraseTermNames (rho : BinderNameSlots) : Term → Option TermDB
       let e1' <- eraseTermNames rho e1
       let e2' <- eraseTermNames rho e2
       pure (TermDB.pair e1' e2')
-  | Term.fst e =>
+  | Term.fst _ e =>
       TermDB.fst <$> eraseTermNames rho e
-  | Term.snd e =>
+  | Term.snd _ e =>
       TermDB.snd <$> eraseTermNames rho e
   | Term.unit =>
       pure TermDB.unit
@@ -908,9 +908,9 @@ theorem eraseTermNames_map_some
   | Term.pair e1 e2 => by
       simp [eraseTermNames, eraseTerm, eraseTermNames_map_some rho e1,
         eraseTermNames_map_some rho e2]
-  | Term.fst e => by
+  | Term.fst _ e => by
       simp [eraseTermNames, eraseTerm, eraseTermNames_map_some rho e]
-  | Term.snd e => by
+  | Term.snd _ e => by
       simp [eraseTermNames, eraseTerm, eraseTermNames_map_some rho e]
   | Term.unit => by
       simp [eraseTermNames, eraseTerm]
@@ -1003,11 +1003,11 @@ theorem eraseTerm_locRefs :
       rcases h2 : eraseTerm ρ e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at hErase
       cases hErase
       simp [locRefs, locRefsDB, eraseTerm_locRefs h1, eraseTerm_locRefs h2]
-  | ρ, Term.fst e, eDB, hErase => by
+  | ρ, Term.fst _ e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       simpa [locRefs, locRefsDB] using eraseTerm_locRefs he
-  | ρ, Term.snd e, eDB, hErase => by
+  | ρ, Term.snd _ e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       simpa [locRefs, locRefsDB] using eraseTerm_locRefs he
@@ -1155,11 +1155,11 @@ theorem eraseTerm_activeLocRefs :
         simp [eraseTerm, h1, h2] at hErase
       cases hErase
       simp [activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs h1, eraseTerm_activeLocRefs h2]
-  | ρ, Term.fst e, eDB, hErase => by
+  | ρ, Term.fst _ e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
-  | ρ, Term.snd e, eDB, hErase => by
+  | ρ, Term.snd _ e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       simpa [activeLocRefs, activeLocRefsDB] using eraseTerm_activeLocRefs he
@@ -1394,21 +1394,21 @@ theorem eraseTerm_deepActiveRuntimeLinear_iff :
         and_iff_congr3 hAct
           (eraseTerm_deepActiveRuntimeLinear_iff h1)
           (eraseTerm_deepActiveRuntimeLinear_iff h2)
-  | ρ, Term.fst e, eDB, hErase => by
+  | ρ, Term.fst tRight e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       have hAct :
-          ActiveRuntimeLinear (Term.fst e) ↔
+          ActiveRuntimeLinear (Term.fst tRight e) ↔
             ActiveRuntimeLinearDB (TermDB.fst eDB') := by
         simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
           activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
       simpa [DeepActiveRuntimeLinear, DeepActiveRuntimeLinearDB] using
         and_iff_congr2 hAct (eraseTerm_deepActiveRuntimeLinear_iff he)
-  | ρ, Term.snd e, eDB, hErase => by
+  | ρ, Term.snd tLeft e, eDB, hErase => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at hErase
       cases hErase
       have hAct :
-          ActiveRuntimeLinear (Term.snd e) ↔
+          ActiveRuntimeLinear (Term.snd tLeft e) ↔
             ActiveRuntimeLinearDB (TermDB.snd eDB') := by
         simp [ActiveRuntimeLinear, ActiveRuntimeLinearDB,
           activeLocRefs, activeLocRefsDB, eraseTerm_activeLocRefs he]
@@ -1629,11 +1629,11 @@ theorem eraseTerm_suffix :
       rcases h2 : eraseTerm ρ e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at h
       cases h
       simp [eraseTerm, eraseTerm_suffix h1 σ, eraseTerm_suffix h2 σ]
-  | ρ, Term.fst e, eDB, h, σ => by
+  | ρ, Term.fst _ e, eDB, h, σ => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at h
       cases h
       simp [eraseTerm, eraseTerm_suffix he σ]
-  | ρ, Term.snd e, eDB, h, σ => by
+  | ρ, Term.snd _ e, eDB, h, σ => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at h
       cases h
       simp [eraseTerm, eraseTerm_suffix he σ]
@@ -2982,11 +2982,11 @@ theorem eraseTerm_liftAux_len :
       rcases h2 : eraseTerm ρ e2 with _ | e2DB <;> simp [eraseTerm, h1, h2] at h
       cases h
       simp [liftAux, eraseTerm_liftAux_len h1, eraseTerm_liftAux_len h2]
-  | ρ, Term.fst e, eDB, h => by
+  | ρ, Term.fst _ e, eDB, h => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at h
       cases h
       simp [liftAux, eraseTerm_liftAux_len he]
-  | ρ, Term.snd e, eDB, h => by
+  | ρ, Term.snd _ e, eDB, h => by
       rcases he : eraseTerm ρ e with _ | eDB' <;> simp [eraseTerm, he] at h
       cases h
       simp [liftAux, eraseTerm_liftAux_len he]
@@ -3186,13 +3186,13 @@ theorem eraseTerm_subst_tail
       have ih1 := eraseTerm_subst_tail hρ hv h1 hx.1
       have ih2 := eraseTerm_subst_tail hρ hv h2 hx.2
       simp [eraseTerm, subst, substDBAux, ih1, ih2]
-  | Term.fst e, bodyDB, hbody, hx => by
+  | Term.fst _ e, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases he : eraseTerm (ρ ++ [x]) e with _ | eDB <;> simp [eraseTerm, he] at hbody
       cases hbody
       have ih := eraseTerm_subst_tail hρ hv he hx
       simp [eraseTerm, subst, substDBAux, ih]
-  | Term.snd e, bodyDB, hbody, hx => by
+  | Term.snd _ e, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases he : eraseTerm (ρ ++ [x]) e with _ | eDB <;> simp [eraseTerm, he] at hbody
       cases hbody
@@ -3483,13 +3483,13 @@ theorem eraseTerm_subst_split
       have ih1 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h1 hx.1
       have ih2 := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv h2 hx.2
       simp [eraseTerm, subst, substDBAux, ih1, ih2]
-  | Term.fst e, bodyDB, hbody, hx => by
+  | Term.fst _ e, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
       cases hbody
       have ih := eraseTerm_subst_split (ρin := ρin) (ρout := ρout) hρin hv he hx
       simp [eraseTerm, subst, substDBAux, ih]
-  | Term.snd e, bodyDB, hbody, hx => by
+  | Term.snd _ e, bodyDB, hbody, hx => by
       simp [boundVars] at hx
       rcases he : eraseTerm (ρin ++ x :: ρout) e with _ | eDB <;> simp [eraseTerm, he] at hbody
       cases hbody
@@ -3759,9 +3759,9 @@ theorem subst_commute_closed
   | Term.pair e1 e2 =>
       simp [subst, subst_commute_closed e1 v1 v2 x y hxy hv1 hv2,
         subst_commute_closed e2 v1 v2 x y hxy hv1 hv2]
-  | Term.fst e =>
+  | Term.fst _ e =>
       simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
-  | Term.snd e =>
+  | Term.snd _ e =>
       simp [subst, subst_commute_closed e v1 v2 x y hxy hv1 hv2]
   | Term.unit =>
       simp [subst]

@@ -206,8 +206,8 @@ def AdjointMulTyped (Delta : CapCtx) (Sigma : StoreTyp) (dsE : DimList) :
       AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
   | Term.pair e1 e2      =>
       AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
-  | Term.fst e           => AdjointMulTyped Delta Sigma dsE e
-  | Term.snd e           => AdjointMulTyped Delta Sigma dsE e
+  | Term.fst _ e         => AdjointMulTyped Delta Sigma dsE e
+  | Term.snd _ e         => AdjointMulTyped Delta Sigma dsE e
   | Term.add e1 e2       =>
       AdjointMulTyped Delta Sigma dsE e1 ∧ AdjointMulTyped Delta Sigma dsE e2
   | Term.mul e1 e2       =>
@@ -315,11 +315,11 @@ private theorem adjoint_typed_aux
       simp only [adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
               h_seed h_fresh_s h_fresh_s'
-  | Term.fst e1 =>
+  | Term.fst _ e1 =>
       simp only [adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
               h_seed h_fresh_s h_fresh_s'
-  | Term.snd e1 =>
+  | Term.snd _ e1 =>
       simp only [adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
               h_seed h_fresh_s h_fresh_s'
@@ -1405,7 +1405,7 @@ private def adjointSndGapDim : Dim :=
   Dim.named "dSnd"
 
 private def adjointSndGapBody : Term :=
-  Term.snd
+  Term.snd (Typ.tensor (ins DimList.empty adjointSndGapDim))
     (Term.pair
       (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
       (Term.const 0 DimList.empty))

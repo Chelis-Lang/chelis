@@ -40,8 +40,8 @@ def subst (target : Term) (v : Term) (x : String) : Term :=
       Term.letpair y z (subst e1 v x)
         (if y = x ∨ z = x then e2 else subst e2 v x)
   | Term.pair e1 e2 => Term.pair (subst e1 v x) (subst e2 v x)
-  | Term.fst e => Term.fst (subst e v x)
-  | Term.snd e => Term.snd (subst e v x)
+  | Term.fst tRight e => Term.fst tRight (subst e v x)
+  | Term.snd tLeft e => Term.snd tLeft (subst e v x)
   | Term.unit => Term.unit
   | Term.const c ds => Term.const c ds
   | Term.add e1 e2 => Term.add (subst e1 v x) (subst e2 v x)
@@ -98,8 +98,8 @@ inductive EvalCtx where
   | letpair    (x y : String) (e2 : Term)           : EvalCtx
   | pairL      (e2 : Term)                          : EvalCtx
   | pairR      (v1 : Term)                          : EvalCtx
-  | fst                                             : EvalCtx
-  | snd                                             : EvalCtx
+  | fst        (tRight : Typ)                      : EvalCtx
+  | snd        (tLeft : Typ)                       : EvalCtx
   | addL       (e2 : Term)                          : EvalCtx
   | addR       (v1 : Term)                          : EvalCtx
   | mulL       (e2 : Term)                          : EvalCtx
@@ -124,8 +124,8 @@ def plug : EvalCtx → Term → Term
   | EvalCtx.letpair x y e2, e      => Term.letpair x y e e2
   | EvalCtx.pairL e2, e            => Term.pair e e2
   | EvalCtx.pairR v1, e            => Term.pair v1 e
-  | EvalCtx.fst, e                 => Term.fst e
-  | EvalCtx.snd, e                 => Term.snd e
+  | EvalCtx.fst tRight, e          => Term.fst tRight e
+  | EvalCtx.snd tLeft, e           => Term.snd tLeft e
   | EvalCtx.addL e2, e             => Term.add e e2
   | EvalCtx.addR v1, e             => Term.add v1 e
   | EvalCtx.mulL e2, e             => Term.mul e e2
@@ -147,8 +147,8 @@ def ctxLocRefs : EvalCtx → List Loc
   | EvalCtx.letpair _ _ e2 => locRefs e2
   | EvalCtx.pairL e2 => locRefs e2
   | EvalCtx.pairR v1 => locRefs v1
-  | EvalCtx.fst => []
-  | EvalCtx.snd => []
+  | EvalCtx.fst _ => []
+  | EvalCtx.snd _ => []
   | EvalCtx.addL e2 => locRefs e2
   | EvalCtx.addR v1 => locRefs v1
   | EvalCtx.mulL e2 => locRefs e2
@@ -172,8 +172,8 @@ def activeCtxLocRefs : EvalCtx → List Loc
   | EvalCtx.letpair _ _ e2 => activeLocRefs e2
   | EvalCtx.pairL e2 => activeLocRefs e2
   | EvalCtx.pairR v1 => activeLocRefs v1
-  | EvalCtx.fst => []
-  | EvalCtx.snd => []
+  | EvalCtx.fst _ => []
+  | EvalCtx.snd _ => []
   | EvalCtx.addL e2 => activeLocRefs e2
   | EvalCtx.addR v1 => activeLocRefs v1
   | EvalCtx.mulL e2 => activeLocRefs e2
@@ -293,8 +293,8 @@ def DeepActiveCtx : EvalCtx → Prop
   | EvalCtx.letpair _ _ e2 => DeepActiveRuntimeLinear e2
   | EvalCtx.pairL e2 => DeepActiveRuntimeLinear e2
   | EvalCtx.pairR v1 => DeepActiveRuntimeLinear v1
-  | EvalCtx.fst => True
-  | EvalCtx.snd => True
+  | EvalCtx.fst _ => True
+  | EvalCtx.snd _ => True
   | EvalCtx.addL e2 => DeepActiveRuntimeLinear e2
   | EvalCtx.addR v1 => DeepActiveRuntimeLinear v1
   | EvalCtx.mulL e2 => DeepActiveRuntimeLinear e2
@@ -386,9 +386,9 @@ theorem runtimeLinear_plug
       rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using h) with
         ⟨_hv1, he, _hsep⟩
       exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, locRefs] using h)⟩
-  | fst =>
+  | fst _ =>
       simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
-  | snd =>
+  | snd _ =>
       simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
   | addL e2 =>
       rcases List.nodup_append.mp (by simpa [RuntimeLinear, plug, locRefs] using h) with
@@ -476,9 +476,9 @@ theorem activeRuntimeLinear_plug
       rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
         ⟨_hv1, he, _hsep⟩
       exact ⟨he, locRefsSeparated_left_of_nodup_append (by simpa [plug, activeLocRefs] using h)⟩
-  | fst =>
+  | fst _ =>
       simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
-  | snd =>
+  | snd _ =>
       simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
   | addL e2 =>
       rcases List.nodup_append.mp (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using h) with
@@ -590,10 +590,10 @@ theorem deepActiveRuntimeLinear_plug
           (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using hAct),
         locRefsSeparated_right_of_nodup_append
           (by simpa [ActiveRuntimeLinear, plug, activeLocRefs] using hAct)⟩
-  | fst =>
+  | fst _ =>
       rcases h with ⟨_hAct, he⟩
       exact ⟨he, ⟨trivial, ⟨locRefsSeparated_nil_left, locRefsSeparated_nil_right⟩⟩⟩
-  | snd =>
+  | snd _ =>
       rcases h with ⟨_hAct, he⟩
       exact ⟨he, ⟨trivial, ⟨locRefsSeparated_nil_left, locRefsSeparated_nil_right⟩⟩⟩
   | addL e2 =>
@@ -719,9 +719,9 @@ theorem runtimeLinear_plug_of
         intro ell hLocV1 ell' hLoc hEq
         subst ell'
         exact hSep ell hLocV1 hLoc⟩
-  | fst =>
+  | fst _ =>
       simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
-  | snd =>
+  | snd _ =>
       simpa [RuntimeLinear, LocRefsSeparated, plug, ctxLocRefs, locRefs] using h
   | addL e2 =>
       exact List.nodup_append.mpr ⟨h, hCtx, by
@@ -832,9 +832,9 @@ theorem activeRuntimeLinear_plug_of
         intro ell hLocV1 ell' hLoc hEq
         subst ell'
         exact hSep ell hLocV1 hLoc⟩
-  | fst =>
+  | fst _ =>
       simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
-  | snd =>
+  | snd _ =>
       simpa [ActiveRuntimeLinear, LocRefsSeparated, plug, activeCtxLocRefs, activeLocRefs] using h
   | addL e2 =>
       exact List.nodup_append.mpr ⟨h, hCtx, by
@@ -949,12 +949,12 @@ theorem deepActiveRuntimeLinear_plug_of
           (deepActiveCtx_activeNodup hCtx)
           (deepActiveRuntimeLinear_active h) hSep hSepSymm,
         hCtx, h⟩
-  | fst =>
+  | fst _ =>
       exact ⟨activeRuntimeLinear_plug_of
           (deepActiveCtx_activeNodup hCtx)
           (deepActiveRuntimeLinear_active h) hSep hSepSymm,
         h⟩
-  | snd =>
+  | snd _ =>
       exact ⟨activeRuntimeLinear_plug_of
           (deepActiveCtx_activeNodup hCtx)
           (deepActiveRuntimeLinear_active h) hSep hSepSymm,
@@ -1200,16 +1200,16 @@ inductive Step : Config → Config → Prop
 
   -- E-Fst: fst((v1, v2))  ↦  v1
   | fst
-      (sigma : Store) (v1 v2 : Term) :
+      (sigma : Store) (tRight : Typ) (v1 v2 : Term) :
       IsValue v1 → IsValue v2 →
-      Step ⟨sigma, Term.fst (Term.pair v1 v2)⟩
+      Step ⟨sigma, Term.fst tRight (Term.pair v1 v2)⟩
            ⟨sigma, v1⟩
 
   -- E-Snd: snd((v1, v2))  ↦  v2
   | snd
-      (sigma : Store) (v1 v2 : Term) :
+      (sigma : Store) (tLeft : Typ) (v1 v2 : Term) :
       IsValue v1 → IsValue v2 →
-      Step ⟨sigma, Term.snd (Term.pair v1 v2)⟩
+      Step ⟨sigma, Term.snd tLeft (Term.pair v1 v2)⟩
            ⟨sigma, v2⟩
 
   /- ## Store-allocating primitives -/

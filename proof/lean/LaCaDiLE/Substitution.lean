@@ -91,10 +91,10 @@ theorem subst_notFree
       simp only [freeVars, List.mem_append, not_or] at h
       obtain ⟨h1, h2⟩ := h
       simp [subst, subst_notFree e1 v x h1, subst_notFree e2 v x h2]
-  | Term.fst e =>
+  | Term.fst _ e =>
       simp only [freeVars] at h
       simp [subst, subst_notFree e v x h]
-  | Term.snd e =>
+  | Term.snd _ e =>
       simp only [freeVars] at h
       simp [subst, subst_notFree e v x h]
   | Term.unit => simp [subst]
@@ -248,10 +248,10 @@ theorem mem_locRefs_subst
           (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
       · exact Or.elim (mem_locRefs_subst e2 v x ell hmem)
           (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
-  | Term.fst e =>
+  | Term.fst _ e =>
       simp [subst, locRefs] at hmem ⊢
       exact mem_locRefs_subst e v x ell hmem
-  | Term.snd e =>
+  | Term.snd _ e =>
       simp [subst, locRefs] at hmem ⊢
       exact mem_locRefs_subst e v x ell hmem
   | Term.unit =>
@@ -426,10 +426,10 @@ theorem mem_boundVars_subst
           (fun h => Or.inl (Or.inl h)) (fun h => Or.inr h)
       · exact Or.elim (mem_boundVars_subst e2 v x z hmem)
           (fun h => Or.inl (Or.inr h)) (fun h => Or.inr h)
-  | Term.fst e =>
+  | Term.fst _ e =>
       simp [subst, boundVars] at hmem ⊢
       exact mem_boundVars_subst e v x z hmem
-  | Term.snd e =>
+  | Term.snd _ e =>
       simp [subst, boundVars] at hmem ⊢
       exact mem_boundVars_subst e v x z hmem
   | Term.unit =>
@@ -889,14 +889,14 @@ theorem freshInTerm_copy {y : String} {e : Term}
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩
 
-theorem freshInTerm_fst {y : String} {e : Term}
-    (h : freshInTerm y (Term.fst e)) : freshInTerm y e := by
+theorem freshInTerm_fst {y : String} {e : Term} {tRight : Typ}
+    (h : freshInTerm y (Term.fst tRight e)) : freshInTerm y e := by
   rcases h with ⟨hf, hb⟩
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩
 
-theorem freshInTerm_snd {y : String} {e : Term}
-    (h : freshInTerm y (Term.snd e)) : freshInTerm y e := by
+theorem freshInTerm_snd {y : String} {e : Term} {tLeft : Typ}
+    (h : freshInTerm y (Term.snd tLeft e)) : freshInTerm y e := by
   rcases h with ⟨hf, hb⟩
   simp only [freeVars, boundVars] at hf hb
   exact ⟨hf, hb⟩

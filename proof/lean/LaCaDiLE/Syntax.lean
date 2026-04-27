@@ -275,8 +275,8 @@ inductive Term where
   | letpair (x : String) (y : String) (e1 : Term) (e2 : Term)
   -- pair constructors / projections / unit
   | pair    (e1 : Term) (e2 : Term)
-  | fst     (e : Term)
-  | snd     (e : Term)
+  | fst     (tRight : Typ) (e : Term)
+  | snd     (tLeft : Typ) (e : Term)
   | unit    : Term
   -- RISC primitives
   | const       (v : Float) (ds : DimList)
@@ -317,8 +317,8 @@ def addDimTerm (d : Dim) : Term → Term
   | Term.letpair x y e1 e2 =>
       Term.letpair x y (addDimTerm d e1) (addDimTerm d e2)
   | Term.pair e1 e2 => Term.pair (addDimTerm d e1) (addDimTerm d e2)
-  | Term.fst e => Term.fst (addDimTerm d e)
-  | Term.snd e => Term.snd (addDimTerm d e)
+  | Term.fst tRight e => Term.fst (addDim d tRight) (addDimTerm d e)
+  | Term.snd tLeft e => Term.snd (addDim d tLeft) (addDimTerm d e)
   | Term.unit => Term.unit
   | Term.const v ds => Term.const v (DimList.cons d ds)
   | Term.add e1 e2 => Term.add (addDimTerm d e1) (addDimTerm d e2)
@@ -368,8 +368,8 @@ def freeVars : Term → List String
   | Term.letpair x y e1 e2 =>
       freeVars e1 ++ (freeVars e2).filter (fun z => z != x && z != y)
   | Term.pair e1 e2 => freeVars e1 ++ freeVars e2
-  | Term.fst e => freeVars e
-  | Term.snd e => freeVars e
+  | Term.fst _ e => freeVars e
+  | Term.snd _ e => freeVars e
   | Term.unit => []
   | Term.const _ _ => []
   | Term.add e1 e2 => freeVars e1 ++ freeVars e2
@@ -412,8 +412,8 @@ def locRefs : Term → List Loc
   | Term.copy e => locRefs e
   | Term.letpair _ _ e1 e2 => locRefs e1 ++ locRefs e2
   | Term.pair e1 e2 => locRefs e1 ++ locRefs e2
-  | Term.fst e => locRefs e
-  | Term.snd e => locRefs e
+  | Term.fst _ e => locRefs e
+  | Term.snd _ e => locRefs e
   | Term.unit => []
   | Term.const _ _ => []
   | Term.add e1 e2 => locRefs e1 ++ locRefs e2
@@ -451,8 +451,8 @@ theorem locRefs_addDimTerm (d : Dim) :
       simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
   | Term.pair e1 e2 => by
       simp [addDimTerm, locRefs, locRefs_addDimTerm d e1, locRefs_addDimTerm d e2]
-  | Term.fst e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
-  | Term.snd e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.fst _ e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
+  | Term.snd _ e => by simpa [addDimTerm, locRefs] using locRefs_addDimTerm d e
   | Term.unit => rfl
   | Term.const _ _ => rfl
   | Term.add e1 e2 => by
@@ -497,8 +497,8 @@ def activeLocRefs : Term → List Loc
   | Term.copy e => activeLocRefs e
   | Term.letpair _ _ e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
   | Term.pair e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
-  | Term.fst e => activeLocRefs e
-  | Term.snd e => activeLocRefs e
+  | Term.fst _ e => activeLocRefs e
+  | Term.snd _ e => activeLocRefs e
   | Term.unit => []
   | Term.const _ _ => []
   | Term.add e1 e2 => activeLocRefs e1 ++ activeLocRefs e2
@@ -569,11 +569,11 @@ def DeepActiveRuntimeLinear : Term → Prop
       ActiveRuntimeLinear (Term.pair e1 e2) ∧
       DeepActiveRuntimeLinear e1 ∧
       DeepActiveRuntimeLinear e2
-  | Term.fst e =>
-      ActiveRuntimeLinear (Term.fst e) ∧
+  | Term.fst tRight e =>
+      ActiveRuntimeLinear (Term.fst tRight e) ∧
       DeepActiveRuntimeLinear e
-  | Term.snd e =>
-      ActiveRuntimeLinear (Term.snd e) ∧
+  | Term.snd tLeft e =>
+      ActiveRuntimeLinear (Term.snd tLeft e) ∧
       DeepActiveRuntimeLinear e
   | Term.unit => True
   | Term.const _ _ => True
@@ -651,10 +651,10 @@ theorem mem_activeLocRefs_subset
       rcases h with h | h
       · exact Or.inl (mem_activeLocRefs_subset (e := e1) h)
       · exact Or.inr (mem_activeLocRefs_subset (e := e2) h)
-  | Term.fst e =>
+  | Term.fst _ e =>
       simpa [activeLocRefs, locRefs] using
         mem_activeLocRefs_subset (e := e) h
-  | Term.snd e =>
+  | Term.snd _ e =>
       simpa [activeLocRefs, locRefs] using
         mem_activeLocRefs_subset (e := e) h
   | Term.unit =>
@@ -762,10 +762,10 @@ theorem runtimeLinear_active
       subst ell'
       exact hsep ell (mem_activeLocRefs_subset hmem1) ell
         (mem_activeLocRefs_subset hmem2) rfl
-  | Term.fst e =>
+  | Term.fst _ e =>
       simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
         runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
-  | Term.snd e =>
+  | Term.snd _ e =>
       simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
         runtimeLinear_active (e := e) (by simpa [RuntimeLinear, locRefs] using h)
   | Term.unit =>
@@ -866,10 +866,10 @@ theorem runtimeLinear_deepActive
       exact ⟨runtimeLinear_active h,
         runtimeLinear_deepActive h1,
         runtimeLinear_deepActive h2⟩
-  | Term.fst e, h => by
+  | Term.fst _ e, h => by
       exact ⟨runtimeLinear_active h,
         runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
-  | Term.snd e, h => by
+  | Term.snd _ e, h => by
       exact ⟨runtimeLinear_active h,
         runtimeLinear_deepActive (by simpa [RuntimeLinear, locRefs] using h)⟩
   | Term.unit, _ => by
@@ -955,8 +955,8 @@ def boundVars : Term → List String
   | Term.copy e => boundVars e
   | Term.letpair x y e1 e2 => x :: y :: (boundVars e1 ++ boundVars e2)
   | Term.pair e1 e2 => boundVars e1 ++ boundVars e2
-  | Term.fst e => boundVars e
-  | Term.snd e => boundVars e
+  | Term.fst _ e => boundVars e
+  | Term.snd _ e => boundVars e
   | Term.unit => []
   | Term.const _ _ => []
   | Term.add e1 e2 => boundVars e1 ++ boundVars e2
@@ -1529,7 +1529,8 @@ theorem lexical_letpair_bound
 
 theorem lexical_fst_body
     {Gamma : LinearCtx} {e : Term}
-    (h : LexicallyScoped (Gamma := Gamma) (Term.fst e)) :
+    {tRight : Typ}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.fst tRight e)) :
     LexicallyScoped Gamma e := by
   rcases h with ⟨hnd, hdom, hws⟩
   refine ⟨hnd, ?_, ?_⟩
@@ -1539,7 +1540,8 @@ theorem lexical_fst_body
 
 theorem lexical_snd_body
     {Gamma : LinearCtx} {e : Term}
-    (h : LexicallyScoped (Gamma := Gamma) (Term.snd e)) :
+    {tLeft : Typ}
+    (h : LexicallyScoped (Gamma := Gamma) (Term.snd tLeft e)) :
     LexicallyScoped Gamma e := by
   rcases h with ⟨hnd, hdom, hws⟩
   refine ⟨hnd, ?_, ?_⟩

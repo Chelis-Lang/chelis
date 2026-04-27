@@ -99,8 +99,8 @@ def termToDB (env : List String) : Term → TermDB
       -- shape. Environment prepend order: y then x.
       TermDB.letpair (termToDB env e1) (termToDB (y :: x :: env) e2)
   | Term.pair e1 e2 => TermDB.pair (termToDB env e1) (termToDB env e2)
-  | Term.fst e => TermDB.fst (termToDB env e)
-  | Term.snd e => TermDB.snd (termToDB env e)
+  | Term.fst _ e => TermDB.fst (termToDB env e)
+  | Term.snd _ e => TermDB.snd (termToDB env e)
   | Term.unit => TermDB.unit
   | Term.const v ds => TermDB.const v ds
   | Term.add e1 e2 => TermDB.add (termToDB env e1) (termToDB env e2)

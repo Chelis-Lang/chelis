@@ -453,17 +453,17 @@ theorem stuck_bubbles
             simpa [multiPlug, plug] using h
           obtain ⟨_, _, _, _, eps2, _, _, h2, hsub⟩ := HasType.plug_pair_inv h'
           exact hsub op (union_mem_right _ _ op (ih hEs' h2))
-      | fst =>
+      | fst tRight =>
           have h' : HasType Delta Sigma Gamma
-              (Term.fst (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+              (Term.fst tRight (multiPlug Es (Term.perform op v))) t eps Gamma' := by
             simpa [multiPlug, plug] using h
-          obtain ⟨_, h_inner⟩ := HasType.fst_inv h'
+          let h_inner := HasType.fst_inv h'
           exact ih hEs' h_inner
-      | snd =>
+      | snd tLeft =>
           have h' : HasType Delta Sigma Gamma
-              (Term.snd (multiPlug Es (Term.perform op v))) t eps Gamma' := by
+              (Term.snd tLeft (multiPlug Es (Term.perform op v))) t eps Gamma' := by
             simpa [multiPlug, plug] using h
-          obtain ⟨_, h_inner⟩ := HasType.snd_inv h'
+          let h_inner := HasType.snd_inv h'
           exact ih hEs' h_inner
       | addL e2 =>
           have h' : HasType Delta Sigma Gamma
@@ -722,38 +722,38 @@ theorem progress_aux
         rw [hrw]
         exact StuckOnPerform.mk (EvalCtx.letpair x y e2 :: Es) v hv
           ⟨trivial, hEs⟩
-  | fst e1 =>
-      obtain ⟨t2, h_inner⟩ := HasType.fst_inv h
-      rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair t t2) Gamma' eps h_inner
+  | fst tRight e1 =>
+      let h_inner := HasType.fst_inv h
+      rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair t tRight) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
-        exact Or.inr (Or.inl ⟨sigma, v1, Step.fst sigma v1 v2 hv1 hv2⟩)
-      · exact Or.inr (Or.inl ⟨sigma', Term.fst e1',
-          by simpa using Step.ctx sigma sigma' EvalCtx.fst e1 e1' hstep⟩)
+        exact Or.inr (Or.inl ⟨sigma, v1, Step.fst sigma tRight v1 v2 hv1 hv2⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.fst tRight e1',
+          by simpa using Step.ctx sigma sigma' (EvalCtx.fst tRight) e1 e1' hstep⟩)
       · obtain ⟨Es, v, hv, hEs⟩ := stk
         refine Or.inr (Or.inr ⟨op, ?_⟩)
-        have hrw : Term.fst (multiPlug Es (Term.perform op v)) =
-            multiPlug (EvalCtx.fst :: Es) (Term.perform op v) := by
+        have hrw : Term.fst tRight (multiPlug Es (Term.perform op v)) =
+            multiPlug (EvalCtx.fst tRight :: Es) (Term.perform op v) := by
           simp [multiPlug, plug]
         rw [hrw]
-        exact StuckOnPerform.mk (EvalCtx.fst :: Es) v hv ⟨trivial, hEs⟩
-  | snd e1 =>
-      obtain ⟨t1, h_inner⟩ := HasType.snd_inv h
-      rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair t1 t) Gamma' eps h_inner
+        exact StuckOnPerform.mk (EvalCtx.fst tRight :: Es) v hv ⟨trivial, hEs⟩
+  | snd tLeft e1 =>
+      let h_inner := HasType.snd_inv h
+      rcases progress_aux sigma Sigma h_wf h_store_wf e1 (Typ.pair tLeft t) Gamma' eps h_inner
           with hv | ⟨sigma', e1', hstep⟩ | ⟨op, stk⟩
       · obtain ⟨v1, v2, heq, hv1, hv2⟩ := canonical_forms_pair h_wf h_inner hv
         subst heq
-        exact Or.inr (Or.inl ⟨sigma, v2, Step.snd sigma v1 v2 hv1 hv2⟩)
-      · exact Or.inr (Or.inl ⟨sigma', Term.snd e1',
-          by simpa using Step.ctx sigma sigma' EvalCtx.snd e1 e1' hstep⟩)
+        exact Or.inr (Or.inl ⟨sigma, v2, Step.snd sigma tLeft v1 v2 hv1 hv2⟩)
+      · exact Or.inr (Or.inl ⟨sigma', Term.snd tLeft e1',
+          by simpa using Step.ctx sigma sigma' (EvalCtx.snd tLeft) e1 e1' hstep⟩)
       · obtain ⟨Es, v, hv, hEs⟩ := stk
         refine Or.inr (Or.inr ⟨op, ?_⟩)
-        have hrw : Term.snd (multiPlug Es (Term.perform op v)) =
-            multiPlug (EvalCtx.snd :: Es) (Term.perform op v) := by
+        have hrw : Term.snd tLeft (multiPlug Es (Term.perform op v)) =
+            multiPlug (EvalCtx.snd tLeft :: Es) (Term.perform op v) := by
           simp [multiPlug, plug]
         rw [hrw]
-        exact StuckOnPerform.mk (EvalCtx.snd :: Es) v hv ⟨trivial, hEs⟩
+        exact StuckOnPerform.mk (EvalCtx.snd tLeft :: Es) v hv ⟨trivial, hEs⟩
   | add e1 e2 =>
       obtain ⟨ds, Γmid, eps1, eps2, _hteq, h1, h2⟩ := HasType.add_inv h
       rcases progress_aux sigma Sigma h_wf h_store_wf e1

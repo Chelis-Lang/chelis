@@ -170,8 +170,8 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       adjointFrom e2 x gSeed n
   | Term.pair e1 _ =>
       adjointFrom e1 x gSeed n
-  | Term.fst e => adjointFrom e x gSeed n
-  | Term.snd e => adjointFrom e x gSeed n
+  | Term.fst _ e => adjointFrom e x gSeed n
+  | Term.snd _ e => adjointFrom e x gSeed n
   | Term.copy e => adjointFrom e x gSeed n
   | Term.abs _ _ e => adjointFrom e x gSeed n
   | Term.app e1 _ => adjointFrom e1 x gSeed n
