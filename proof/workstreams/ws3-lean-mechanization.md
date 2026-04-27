@@ -67,8 +67,8 @@ That premise is still not the final answer. The current branch now also shows:
 So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
-- the preservation file itself is now closed on the executable branch, including `tgrad` and `tvmap`
-- the remaining AD-side admission has moved back into `AdjointTyping.lean`
+- the preservation file itself is syntactically closed on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest endpoint because it currently imports a public adjoint theorem surface Lean now falsifies with a concrete typed `E-Grad` witness
+- the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until that public surface is repaired
 
 ## WS3.11 — `DimSafety.lean`
 

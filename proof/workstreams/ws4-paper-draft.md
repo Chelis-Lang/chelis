@@ -71,13 +71,14 @@ Reduction rules including heap store. Figures. The interesting rules:
 
 All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant, and the runtime-linearity invariant needed to iterate preservation. Full proofs in supplementary appendix.
 
-The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now precise: `sum` is mechanized, while `mul` and the false seed-polymorphic `expand` helper remain. The section should therefore:
+The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now precise: `sum` is mechanized, while `mul` and the false seed-polymorphic `expand` helper remain, and Lean now also contains a concrete typed `E-Grad` witness whose reduct is untypable under that admitted public surface. The section should therefore:
 
 1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
 2. explain the captured-handler counterexample against plain `RuntimeLinear`
 3. explain the direct-handler counterexample showing that the first `ActiveRuntimeLinear` repair is still too weak
 4. explain the new deep-active two-step counterexample, where beta exposes a dormant clause beside an active sibling and a later contextual direct-handler step activates that overlap
-5. state the final stronger cross-boundary handler-aware invariant once it is settled in Lean
+5. explain that the current executable `tgrad` branch is only syntactically closed: the actual preservation argument must wait for the public adjoint theorem surface to be restated honestly
+6. state the final stronger cross-boundary handler-aware invariant once it is settled in Lean
 
 ## WS4.7 — §6 Implementation (~1.5 pages)
 

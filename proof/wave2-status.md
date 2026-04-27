@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, and adding a concrete `expand` counterexample for the remaining adjoint theorem shape.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, adding a concrete `expand` counterexample for the remaining adjoint theorem shape, and proving a typed `E-Grad` witness whose reduct is untypable under that admitted public surface.
 
 ## Acceptance Oracle
 
@@ -12,11 +12,13 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 
 - `cd proof/lean && lake build` is green again on the current branch head.
 - `TranslationDB.lean`'s four DB-backed preservation wrappers are closed.
-- `Preservation.lean` closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, `ctx`, `tgrad`, and `tvmap`.
+- `Preservation.lean` syntactically closes the substitution-dependent cases, `handleOpCtx`, `handleOpCtxs`, `ctx`, `tgrad`, and `tvmap`.
 - `Substitution.lean` is closed under the honest lexical-scoped theorem shape.
 - `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
 - `AdjointTyping.lean`'s repaired `handle` branch is now typed.
-- `AdjointTyping.lean` now also contains a concrete typed counterexample showing the current admitted `expand` theorem surface is false under the Phase 1 structural recursion.
+- `AdjointTyping.lean` now also contains:
+  - a concrete typed counterexample showing the current admitted `expand` theorem surface is false under the Phase 1 structural recursion
+  - a concrete typed `grad` term whose `tgrad` reduct is untypable for every store typing under that same admitted public surface
 - The branch still contains 1 executable `sorry` on the main proof path:
   - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `expand` adjoint cases
 
@@ -53,10 +55,10 @@ The current theorem-shape boundary is now explicit in Lean:
    The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
 
 2. `AdjointTyping.lean`
-   `tgrad` preservation is now closed, the repaired `handle` branch is closed, and the remaining admitted adjoint cases still block the final AD-correctness wave.
+   The repaired `handle` branch is closed, but `tgrad` preservation is not honestly settled yet: Lean now contains a concrete typed `E-Grad` witness whose reduct is untypable under the current admitted public `adjointFrom` theorem surface. The next AD step is to replace that false public surface with the stronger source-shape relation it actually needs, while still separately resolving the remaining `mul` case.
 
 ## Next Moves
 
 1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
-3. Replace the false seed-polymorphic `expand` helper shape with the source-typing/dimension relation it actually needs, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.
+3. Replace the false seed-polymorphic `expand` helper shape with the source-typing/dimension relation it actually needs, re-close the `tgrad` preservation branch against that honest theorem surface, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.

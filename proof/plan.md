@@ -5,13 +5,13 @@
 - Branch: `chelis-proof`
 - Proof build oracle: `cd proof/lean && lake build`
 - Current proof state: the branch builds cleanly, the four DB-backed preservation wrappers are closed, `Translation.lean` now exposes the honest lexical forward bridge without admits, `Substitution.lean` is closed under its honest lexical-scoped theorem shape, and the only remaining executable admit is the consolidated catch-all in `AdjointTyping.lean`
-- `Preservation.lean` is now admit-free on the executable branch, including `tgrad` and `tvmap`. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
-- `AdjointTyping.lean`'s repaired `handle` branch is now closed; the remaining admitted AD gap is localized to `mul` and a concrete false `expand` theorem shape on the current admitted public surface
+- `Preservation.lean` is syntactically admit-free on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest closed result: Lean now contains a concrete typed `E-Grad` witness whose reduct is untypable under the current admitted public adjoint theorem surface. Separately, the stronger runtime-invariant story for iterating preservation is still unsettled: plain `RuntimeLinear` is false, `ActiveRuntimeLinear` is too weak for direct handled operations, and the current recursive `DeepActiveRuntimeLinear` candidate is still not compositional across a beta step followed by contextual `handleOpDirect`
+- `AdjointTyping.lean`'s repaired `handle` branch is now closed; the remaining admitted AD gap is localized to `mul` and a concrete false `expand` theorem shape on the current admitted public surface, and Lean now also contains a concrete `grad`-reduction witness showing that this false surface reaches the actual preservation story rather than staying trapped inside a private helper
 - `AddDim.lean` is closed, the earlier `tvmap` dimension-choice mismatch was repaired by making the batch dimension explicit in the term syntax, and the remaining `tvmap` preservation proof is now closed
 - Immediate critical path:
-  1. settle the stronger cross-boundary handler-aware runtime invariant
-  2. finish the remaining admitted adjoint cases in `AdjointTyping.lean`
-  3. return to the AD-correctness wave once the runtime invariant and adjoint catch-all are both reduced further
+  1. repair the admitted public adjoint theorem surface in `AdjointTyping.lean`, so the `tgrad` preservation branch rests on an honest theorem again
+  2. settle the stronger cross-boundary handler-aware runtime invariant
+  3. return to the AD-correctness wave once both the adjoint surface and runtime invariant are reduced further
 
 This file tracks the real branch state, not the original project plan as imagined before the mechanization work started landing.
 
@@ -41,8 +41,8 @@ WS1 → WS2 + WS3 (parallel per-theorem) → WS4 §3–§5 → WS5 + WS6
 
 The critical path runs through WS3, specifically:
 
-- **WS3.7 (`AdjointTyping.lean`):** the remaining executable admit is now the consolidated `mul` / `expand` catch-all after closing the repaired `handle` branch; `sum` is closed, and Lean now contains a concrete counterexample showing the current admitted `adjointFrom_preserves_typing` surface is still too strong for the Phase 1 structural `letBind` / `letpair` recursion.
-- **WS3.10 (`Preservation.lean`):** the substitution-dependent and context cases are now closed, but the runtime-side invariant is still not in its final form.
+- **WS3.7 (`AdjointTyping.lean`):** the remaining executable admit is now the consolidated `mul` / `expand` catch-all after closing the repaired `handle` branch; `sum` is closed, Lean contains a concrete counterexample showing the current admitted `adjointFrom_preserves_typing` surface is still too strong for the Phase 1 structural `letBind` / `letpair` recursion, and Lean now also contains a typed `E-Grad` witness whose reduct is untypable under that same false public surface.
+- **WS3.10 (`Preservation.lean`):** the substitution-dependent and context cases are now closed, but the runtime-side invariant is still not in its final form, and the `tgrad` branch is only as honest as the admitted AD surface it currently imports.
 - **WS3.14 (`ADCorrectness.lean`):** the hardest individual file. Requires denotational semantics layer.
 
 If WS3.14 proves intractable, the fallback is: state Theorem 5 in Lean, `sorry` the proof, provide the paper proof in the appendix, and note this in the README. This is honest and still a strong paper — four fully mechanized theorems plus a paper proof of the fifth is a substantial contribution. But attempt the full mechanization first.

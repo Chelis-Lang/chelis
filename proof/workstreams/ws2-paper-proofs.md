@@ -49,7 +49,7 @@ This extra premise is not cosmetic. The Lean development now contains a concrete
 
 The hard cases:
 
-- `grad` reduction: the reduced term is `λx. handle[Accum] adjoint(e, x) with {...}`. The adjoint typing lemma (WS2.2) shows the adjoint body is well-typed with `Accum` in its effect row. The explicit `Accum` handler is well-typed by the standard `handle` rule, removing `Accum` from the effect row. This is clean because `grad`'s reduction reuses existing handle machinery.
+- `grad` reduction: the reduced term is `λx. handle[Accum] adjoint(e, x) with {...}`. This case is no longer safe to describe as “closed modulo the current Lean helper”: the branch now contains a concrete typed `E-Grad` witness whose reduct is untypable under the current admitted public adjoint theorem surface. So the paper proof has to repair the adjoint typing statement first, then rerun the standard “adjoint body is typed with `Accum`, handler removes `Accum`” argument against that honest surface.
 - `vmap` reduction: typing and stepping now share one explicit batch-dimension choice through the `vmap` term itself, and that preservation case is now closed on the executable Lean branch.
 - Effect handling with one-shot continuation: the continuation captures linear context. One-shot consumption (continuation is linear) preserves linearity. Uses the substitution lemma (WS2.1).
 - Store operations: allocation extends `σ` consistently; deallocation removes entries consumed linearly. `copy` allocates a fresh location with duplicated data. The store typing relation must be maintained.
