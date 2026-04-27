@@ -6,9 +6,9 @@
 -- functions and connecting the syntactic adjoint transformation to the
 -- mathematical derivative.
 --
--- Fallback plan: if WS2.9 proves intractable in Lean, state the theorem
--- as-is and provide the paper proof in the appendix. Phase 1 skeleton:
--- trivial `True` stub.
+-- Current state: Phase 1 skeleton is still a trivial `True` stub, but
+-- the project target remains full mechanization of this theorem rather
+-- than a paper-only escape hatch.
 
 import LaCaDiLE.Syntax
 import LaCaDiLE.Typing

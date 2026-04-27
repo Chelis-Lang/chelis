@@ -31,15 +31,15 @@
 --     structural Phase 1 placeholder, but it at least matches the
 --     forward-pass sequencing shape from the tape design notes. Phase 2
 --     T9 still needs the real forward/backward ordering.
---   * `pair`, `fst`, `snd`, `abs`, `app`, `uniformLike`, `grad`, `vmap`,
---     `perform` all still use structural placeholders. The new typed
---     `snd` / `pair` / `expand` witness in `AdjointTyping.lean` shows
---     this is no longer just “unfinished T0 §4 work”: a monomorphic
---     tensor seed is insufficient for product/projection paths. The
---     real Phase 2 fix is either:
---       (a) a typed cotangent-seed transform, or
---       (b) an explicit restriction/normalization pass that removes
---           products and projections from grad bodies before AD.
+--   * `pair`, `fst`, `snd`, and `copy` now use typed cotangent seeds:
+--     products split their incoming seed structurally, and
+--     projections pad the inactive component with a zero cotangent.
+--     This repairs the old monomorphic tensor-seed mismatch for
+--     product/projection paths.
+--   * `abs`, `app`, `uniformLike`, `grad`, `vmap`, `perform` still
+--     use structural placeholders. Phase 2 T9 still needs to replace
+--     those with the real T0 §4 adjoint rules or make the theorem
+--     surface explicit about their transform domain.
 --   * `loc` and `unit` are leaves.
 --   * `handle` recurses into clause bodies via `adjointClauses`.
 
@@ -83,6 +83,26 @@ def freshName (base : String) (n : Nat) : String :=
 def adjointLeaf (gSeed : Term) (n : Nat) : Term :=
   Term.letBind (freshName "adjA" n) gSeed
     (Term.perform EffectLabel.accum Term.unit)
+
+/-- Internal cotangent payload shape for the current reverse-mode
+    transform. Tensor cotangents stay tensors, product cotangents
+    distribute over products, and currently non-differentiable
+    components collapse to `unit`, matching `spec/06-transformations.md`. -/
+def cotangentType : Typ → Typ
+  | Typ.tensor ds       => Typ.tensor ds
+  | Typ.pair t1 t2      => Typ.pair (cotangentType t1) (cotangentType t2)
+  | Typ.unit            => Typ.unit
+  | Typ.arrow _ _ _     => Typ.unit
+  | Typ.tyVar _         => Typ.unit
+
+/-- Zero cotangent seed used to pad inactive branches in product /
+    projection adjoints. -/
+def zeroCotangent : Typ → Term
+  | Typ.tensor ds       => Term.const 0 ds
+  | Typ.pair t1 t2      => Term.pair (zeroCotangent t1) (zeroCotangent t2)
+  | Typ.unit            => Term.unit
+  | Typ.arrow _ _ _     => Term.unit
+  | Typ.tyVar _         => Term.unit
 
 mutual
 
@@ -168,11 +188,24 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       adjointFrom e2 x gSeed n
   | Term.letpair _ _ _ e2 =>
       adjointFrom e2 x gSeed n
-  | Term.pair e1 _ =>
-      adjointFrom e1 x gSeed n
-  | Term.fst _ e => adjointFrom e x gSeed n
-  | Term.snd _ e => adjointFrom e x gSeed n
-  | Term.copy e => adjointFrom e x gSeed n
+  | Term.pair e1 e2 =>
+      -- Split the cotangent product and route one branch to each
+      -- component.
+      Term.letpair (freshName "gA" n) (freshName "gB" n) gSeed
+        (Term.letBind (freshName "adjA" n)
+          (adjointFrom e1 x (Term.var (freshName "gA" n)) (n + 3))
+          (adjointFrom e2 x (Term.var (freshName "gB" n)) (n + 3)))
+  | Term.fst tRight e =>
+      adjointFrom e x (Term.pair gSeed (zeroCotangent tRight)) n
+  | Term.snd tLeft e =>
+      adjointFrom e x (Term.pair (zeroCotangent tLeft) gSeed) n
+  | Term.copy e =>
+      -- `copy : a -> a ⊗ a`, so the input cotangent is the sum of the
+      -- two output cotangents.
+      Term.letpair (freshName "gA" n) (freshName "gB" n) gSeed
+        (adjointFrom e x
+          (Term.add (Term.var (freshName "gA" n))
+                    (Term.var (freshName "gB" n))) (n + 3))
   | Term.abs _ _ e => adjointFrom e x gSeed n
   | Term.app e1 _ => adjointFrom e1 x gSeed n
   | Term.grad _ _ _ e =>

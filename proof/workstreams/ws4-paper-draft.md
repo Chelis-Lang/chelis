@@ -71,13 +71,13 @@ Reduction rules including heap store. Figures. The interesting rules:
 
 All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint typing, `addDim` preserves typing, store invariant, and the runtime-linearity invariant needed to iterate preservation. Full proofs in supplementary appendix.
 
-The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now narrower and more precise: `sum` is mechanized, the old concrete `letBind` / `letpair` routing bug is repaired, and Lean now contains a positive regression for that former `grad` / `expand` witness. But Lean also contains a second typed `snd` / `pair` / `expand` false witness, so the admitted AD debt is not just one missing helper: the current monomorphic tensor-seed transform is still too strong for product/projection paths, alongside `mul`. The section should therefore:
+The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now narrower and more precise: `sum` is mechanized, the old concrete `letBind` / `letpair` routing bug is repaired, and the transform now routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`. The admitted AD debt is therefore no longer “find a product/projection routing rule”; it is the proof-level step of generalizing the typing helper to that structured seed discipline, alongside `mul`. The section should therefore:
 
 1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
 2. explain the captured-handler counterexample against plain `RuntimeLinear`
 3. explain the direct-handler counterexample showing that the first `ActiveRuntimeLinear` repair is still too weak
 4. explain the new deep-active two-step counterexample, where beta exposes a dormant clause beside an active sibling and a later contextual direct-handler step activates that overlap
-5. explain that the current executable `tgrad` branch is only syntactically closed: the old concrete routing bug is fixed, but the actual preservation argument must still wait for the public adjoint theorem surface to be restated honestly around the broader product/`expand`/`mul` blockers
+5. explain that the current executable `tgrad` branch is only syntactically closed: the old concrete routing bug is fixed and the structured seed transform is now in place, but the actual preservation argument must still wait for the public adjoint theorem surface to be reproved around that helper generalization and the remaining `mul` blocker
 6. state the final stronger cross-boundary handler-aware invariant once it is settled in Lean
 
 ## WS4.7 — §6 Implementation (~1.5 pages)

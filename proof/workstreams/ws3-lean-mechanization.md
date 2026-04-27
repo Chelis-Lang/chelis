@@ -35,7 +35,7 @@ The substitution lemma with linear context splitting. Always the most painful pa
 
 ## WS3.7 — `AdjointTyping.lean`
 
-The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. The old concrete `letBind` / `letpair` routing bug is repaired, and Lean now contains a positive regression for that `grad` / `expand` body. But Lean also now contains a typed `snd` / `pair` / `expand` false witness, so the remaining AD debt is broader than one local helper: the current monomorphic tensor-seed transform cannot type product/projection paths honestly, and the next real fix is either typed cotangent seeds or an explicit restriction/normalization to the product-free grad fragment. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
+The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. The old concrete `letBind` / `letpair` routing bug is repaired, and the transform now routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`. So the remaining AD debt is now concentrated where it belongs: the private helper in `AdjointTyping.lean` is still tensor-seed-specific and must be generalized to the new structured cotangent-seed discipline, after which `mul` remains as the last separate hard case. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
 
 ## WS3.8 — `AddDim.lean`
 
@@ -90,4 +90,4 @@ This workstream now also carries the runtime-side invariant needed to make prese
 
 ## WS3.14 — `ADCorrectness.lean`
 
-The hardest file. Requires a denotational semantics mapping terms to mathematical functions, plus a proof that the adjoint transformation computes the derivative. If this proves intractable in Lean, fall back to stating the theorem and providing a paper proof in the appendix — but attempt the full mechanization first.
+The hardest file. Requires a denotational semantics mapping terms to mathematical functions, plus a proof that the adjoint transformation computes the derivative. Full mechanization remains required.

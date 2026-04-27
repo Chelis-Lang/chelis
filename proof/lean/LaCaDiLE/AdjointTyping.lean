@@ -311,22 +311,6 @@ private theorem adjoint_typed_aux
       simp only [adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e2 gSeed
               h_seed h_fresh_s h_fresh_s'
-  | Term.pair e1 _ =>
-      simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
-  | Term.fst _ e1 =>
-      simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
-  | Term.snd _ e1 =>
-      simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
-  | Term.copy e1 =>
-      simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
-              h_seed h_fresh_s h_fresh_s'
   | Term.abs _ _ e1 =>
       simp only [adjointFrom]
       exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
@@ -1479,105 +1463,6 @@ private theorem adjointSndGapBody_typed
     []
     hPair
 
-private theorem adjointSndGapVarInv
-    {Delta : CapCtx} {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
-    (h :
-      HasType Delta Sigma
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Term.var "gs")
-        t
-        eps
-        GammaOut) :
-    t = Typ.tensor DimList.empty := by
-  generalize hctx :
-      ([("x", some (Typ.tensor DimList.empty)),
-        ("gs", some (Typ.tensor DimList.empty))] : LinearCtx) = GammaIn at h
-  generalize heq : Term.var "gs" = e_in at h
-  induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | var Delta Sigma Gamma_pre Gamma_post y ty =>
-      cases heq
-      cases Gamma_pre with
-      | nil =>
-          cases Gamma_post with
-          | nil =>
-              simp at hctx
-          | cons hd tl =>
-              cases tl with
-              | nil =>
-                  cases hd
-                  simp at hctx
-              | cons hd2 tl2 =>
-                  simp at hctx
-      | cons hd tl =>
-          cases tl with
-          | nil =>
-              cases Gamma_post with
-              | nil =>
-                  cases hd
-                  simp at hctx
-                  subst_vars
-                  exact hctx.2.symm
-              | cons hd2 tl2 =>
-                  simp at hctx
-          | cons hd2 tl2 =>
-              simp at hctx
-  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
-      exact ih hctx heq
-  | _ =>
-      (try cases heq) <;>
-        first | exact True.intro | (exfalso; contradiction)
-
-private theorem adjointSndGapAdjoint_untypable
-    {Sigma : StoreTyp} {n : Nat} :
-    ¬ ∃ eps GammaOut,
-      HasType [] Sigma
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (adjointFrom adjointSndGapBody "x" (Term.var "gs") n)
-        Typ.unit
-        eps
-        GammaOut := by
-  intro h
-  rcases h with ⟨eps, GammaOut, hAdj⟩
-  have hLet :
-      HasType [] Sigma
-        ([("x", some (Typ.tensor DimList.empty)),
-          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-        (Term.letBind (freshName "adjA" n)
-          (Term.sum (Term.var "gs") adjointSndGapDim)
-          (Term.perform EffectLabel.accum Term.unit))
-        Typ.unit
-        eps
-        GammaOut := by
-    simpa [adjointSndGapBody, adjointFrom, adjointLeaf] using hAdj
-  rcases hasType_letBind_inv_local hLet with
-    ⟨Gamma2, _Gamma3, t1, eps1, _eps2, _slot, hSum, _hBody, _hOut⟩
-  obtain ⟨ds, _htEq, hMem, hVar⟩ := hasType_sum_inv_local hSum
-  have hDs : ds = DimList.empty := by
-    simpa using adjointSndGapVarInv hVar
-  subst hDs
-  change adjointSndGapDim ∈ ([] : List Dim) at hMem
-  simp at hMem
-
-theorem adjoint_snd_expand_false_witness :
-    HasType (Capability.diff :: []) [] [("x", some (Typ.tensor DimList.empty))]
-      adjointSndGapBody (Typ.tensor DimList.empty) []
-      [("x", some (Typ.tensor DimList.empty))] ∧
-    ∀ n,
-      ¬ ∃ eps GammaOut,
-        HasType [] [] 
-          ([("x", some (Typ.tensor DimList.empty)),
-            ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-          (adjointFrom adjointSndGapBody "x" (Term.var "gs") n)
-          Typ.unit
-          eps
-          GammaOut := by
-  refine ⟨adjointSndGapBody_typed, ?_⟩
-  intro n
-  exact adjointSndGapAdjoint_untypable (Sigma := []) (n := n)
-
 /-- Counter-threaded public typing theorem for `adjointFrom`. This is
     the theorem preservation should use when the operational rule picks
     a start counter above the exposed binder-name lengths.
@@ -1586,15 +1471,12 @@ theorem adjoint_snd_expand_false_witness :
     name (`freshName base m` for `m ≥ n` and `base ∈ adjointBases`)
     collides with a name already in `Γ ++ [(x, _), (gs, _)]`.
 
-    Current branch note: this statement is still admitted. The old
-    concrete `letBind` / `letpair` routing bug is repaired, but Lean
-    now also contains a typed `snd` / `pair` / `expand` false witness.
-    So the remaining proof debt is not only a missing `expand` premise:
-    the current monomorphic tensor-seed transform is itself too weak for
-    product/projection paths. The next honest fix is either a typed
-    cotangent-seed transform or an explicit restriction/normalization of
-    grad bodies to the product-free fragment, while `mul` still needs
-    the operand rebasing/effect-row repair documented above. -/
+    Current branch note: the old monomorphic tensor-seed mismatch for
+    `pair` / `fst` / `snd` is repaired in `AdjointTransform.lean`, but
+    this theorem is still admitted because the helper below is still
+    tensor-seed specific. The next real proof step is to generalize the
+    helper to structured cotangent seeds while also closing the separate
+    `mul` operand rebasing/effect-row debt documented above. -/
 theorem adjointFrom_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
