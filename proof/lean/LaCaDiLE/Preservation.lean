@@ -3772,7 +3772,6 @@ theorem handlerAwareRuntimeLinear_ctx_fresh_counterexample :
       LocRefsDisjoint, LocRefsSeparated,
       ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
       handlerAwareCtxFreshCounterTerm']
-
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
