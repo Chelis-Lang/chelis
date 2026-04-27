@@ -205,7 +205,6 @@ private theorem handlerAwareRuntimeLinear_active
     first
     | exact h.1
     | exact h
-
 /-- One-step preservation boundary for the stronger handler-aware
     runtime invariant. The purely runtime/store-structural head rules
     are closed here; the remaining cases are reported explicitly as
