@@ -434,9 +434,16 @@ machinery existed but wasn't wired into the CLI. Phase K plumbs
 `cmd_test`. The cache key is `(reef_home, root_pkg_id, source_hash)`;
 content invalidation kicks in the moment ANY backed source byte changes.
 
-`cmd_check` is intentionally left wired through the legacy fitness
-emitter — its JSON output shape diverges from `check_in_context`, and a
-JSON-shape parity layer is out of scope for the Phase K close-out.
+`cmd_check` is intentionally NOT routed through `check_in_context`.
+The legacy fitness emitter (`chelis_types::check_phase0e_fitness`)
+produces a specific JSON output shape (`FitnessComponents`,
+`unresolved_names`) that chelis-tide and other downstream tooling
+depend on. Routing through `check_in_context` would change this
+shape. Future work: verify that `check_in_context`'s output matches
+`check_phase0e_fitness` byte-for-byte across success AND all error
+cases. Until that parity is established, `cmd_check` stays on the
+legacy path. The disk cache wins for `cmd_check` come for free once
+the parity layer lands.
 
 ### Coral wall-clock with disk cache, release build
 
@@ -470,38 +477,38 @@ cold run, release build, no cache:
 | `lower_program_to_library` | **41.18 s** | 49.3% |
 | **Total** | **83.5 s** | 100% |
 
-### Diagnosis: structural, not bounded
+### Diagnosis (initial): claimed structural — REVISED
 
-Three phases dominate, totaling ~96% of the cold compile:
+The original Phase K diagnosis claimed all three dominant phases
+were structural one-pass-over-N work. **A follow-up per-decl
+investigation (see `docs/perf_baseline_investigation.md`)
+contradicts that claim.** The three phases break down as follows
+when sub-phase instrumentation is enabled
+(`CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`):
 
-- **`lower_program_to_library` (41.2 s, 49% of total)**: eagerly lowers every
-  library function to a DAG. The whole point of `LoweredLibrary` is to be
-  a referenced shared snapshot for `lower_program_with_context` —
-  every function is a potential reference target so we can't skip any.
-  Bounded fixes (e.g., lazy-by-function lowering) require the
-  `LoweredLibrary` schema to become a lazy `Map<name, OnceCell<Dag>>`,
-  threading `&mut` through every borrow site, and re-validating cache
-  bincode round-trip. Outside the ~50–150 LOC bounded-fix budget.
+- **`lower_program_to_library` (~30s)**: only **0.009s** is actual
+  lowering work; **20.6s** is in an `assertions_loop` that calls
+  `top_level_expr_is_lowered` once per decl, and that helper rebuilds
+  `top_level_lowering_map` from scratch on every call (1850 calls ×
+  full library walk = quadratic). Another ~9.9s in the main loop's
+  filter check exhibits the same pattern. **Bounded fix:** thread the
+  precomputed `lowered_names` through the assertions loop and the
+  filter check, replacing `top_level_expr_is_lowered(...)` with the
+  existing `top_level_expr_is_lowered_with_names(...)`. Estimated
+  saving: ~30s.
 
-- **`check_phase0e_with_context` (21.5 s, 26%)**: full HM-style type
-  inference over every library decl body. The bodies are different from
-  the headers `build_type_env_from_library` already walked, so this is
-  not redundant work in the obvious sense — the second pass infers
-  types of each body in scope of the first pass's env. Speeding this up
-  would mean the type checker itself becomes incremental, which is a
-  distinct multi-week project.
+- **`check_phase0e_with_context` (~19s)**: only 2.4s is HM
+  inference; **16.8s is annotation post-pass**, and that post-pass
+  duplicates work already done by `build_type_env_from_library`.
 
-- **`build_type_env_from_library` (18.2 s, 22%)**: extracts top-level
-  type signatures from every library decl, and resolves every type
-  reference once. This is also one-pass-over-N work; the only way to
-  speed it up is to cache by decl signature (which is what the disk
-  cache already does, end-to-end).
+- **`build_type_env_from_library` (~16s)**: 2.25s is HM inference
+  + 0.10s validation; **13.8s is a per-decl annotation outer
+  loop** at line 185-191 of `infer.rs`. The same annotation work
+  happens again inside `check_phase0e_with_context`.
 
-All three are structural — the work fundamentally requires touching
-every node in a 90-module library graph, and each unit of work is
-small. There is no obvious O(N²) cliff or redundant subtree walk to
-eliminate. Per the user's explicit "stop early on Step 3 if structural"
-direction, we are NOT applying a fix in this push.
+The previous "structural, not bounded" framing is retained above
+for historical accuracy; the actual diagnosis is now in
+`docs/perf_baseline_investigation.md`.
 
 The instrumentation itself (`CHELIS_PROFILE_COMPILE_CONTEXT=1` in
 `compile_reef_context`) is retained as a permanent operator-facing tool
@@ -554,10 +561,17 @@ Landed:
   Includes integration tests covering cold→warm parity, source-edit
   invalidation, and cmd_test cache reuse.
 - `compile_reef_context` profile instrumentation (`af6e230`),
-  gated on `CHELIS_PROFILE_COMPILE_CONTEXT=1`. Documented diagnosis:
-  the dominant phases (`lower_program_to_library`,
-  `check_phase0e_with_context`, `build_type_env_from_library`) are
-  structural one-pass-over-N work, not bounded O(N²) cliffs.
+  gated on `CHELIS_PROFILE_COMPILE_CONTEXT=1`. Initial diagnosis
+  claimed the dominant phases were "structural one-pass-over-N
+  work" — that diagnosis was premature. A follow-up per-decl
+  investigation (see `docs/perf_baseline_investigation.md`) found
+  bounded fixes: a quadratic `top_level_lowering_map` rebuild
+  inside `lower_program_to_library`'s pre-flight loops (~30s
+  recoverable), and a redundant library annotation pass shared
+  between `build_type_env_from_library` and
+  `check_phase0e_with_context` (~14s recoverable). The detailed
+  per-decl instrumentation is gated on
+  `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`.
 
 Remained:
 - `cmd_check` is still on the legacy fitness emitter. Wiring it
@@ -565,9 +579,12 @@ Remained:
   JSON-shape parity layer because `check_in_context` returns a
   simpler `CheckResult` than the legacy emitter's
   fitness+effects+linearity composition. Out of scope for Phase K.
-- Cold-compile bottleneck (~70–80 s on Coral) is structural; bounded
-  fixes require a lazy `LoweredLibrary` schema + incremental type
-  checking, neither of which fits the ~50–150 LOC fix budget.
+- Cold-compile bottleneck (~70–80 s on Coral) — initially called
+  "structural"; per-decl follow-up (see
+  `docs/perf_baseline_investigation.md`) identified concrete
+  bounded fixes within the ~50–150 LOC fix budget. The fixes are
+  not yet applied; awaiting acceptance of the Step 3 diagnosis
+  report.
 - The 30 s headline number is hit on warm cache only. Cold (first
   run, or any source byte changed) still pays the full library
   compile.

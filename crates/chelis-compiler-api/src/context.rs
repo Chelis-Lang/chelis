@@ -701,6 +701,14 @@ pub fn compile_reef_context(
             .into_exprs();
     log_phase("macro_expand", &mut t);
 
+    if profile {
+        let (modules, decls) = library_structural_summary(&deep_library_decls);
+        eprintln!(
+            "compile_reef_context: structural_summary modules={} top_level_decls={}",
+            modules, decls
+        );
+    }
+
     // Phase C: build the Phase 0e type-env snapshot from the library.
     let type_env =
         build_type_env_from_library(&deep_library_decls).map_err(|report| CompilerError {
@@ -755,6 +763,54 @@ pub fn compile_reef_context(
         library_checked,
         library_dag,
     })
+}
+
+/// Profile-only: count modules and top-level decls in a library expr
+/// list. Used for the `CHELIS_PROFILE_COMPILE_CONTEXT=1` structural
+/// summary. Cheap O(N) walk; not on the hot path.
+fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize) {
+    let mut modules = 0usize;
+    let mut decls = 0usize;
+    for expr in exprs {
+        let chelis_deep::ast::Expr::List(list, _) = expr else {
+            continue;
+        };
+        // Match the `top_level_decl_items` walk: descend through
+        // `(module {} name children...)`.
+        let tag = list
+            .elements
+            .first()
+            .and_then(|e| match e {
+                chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(s), _) => {
+                    Some(s.as_str())
+                }
+                _ => None,
+            })
+            .unwrap_or("");
+        if tag == "module" {
+            modules += 1;
+            for child in list.elements.iter().skip(3) {
+                if let chelis_deep::ast::Expr::List(child_list, _) = child {
+                    let child_tag = child_list
+                        .elements
+                        .first()
+                        .and_then(|e| match e {
+                            chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(s), _) => {
+                                Some(s.as_str())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or("");
+                    if matches!(child_tag, "def" | "defsig" | "deftype" | "typealias") {
+                        decls += 1;
+                    }
+                }
+            }
+        } else if matches!(tag, "def" | "defsig" | "deftype" | "typealias") {
+            decls += 1;
+        }
+    }
+    (modules, decls)
 }
 
 fn reef_error(msg: &str) -> CompilerError {
