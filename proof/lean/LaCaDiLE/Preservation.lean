@@ -3653,6 +3653,126 @@ theorem handlerAwareRuntimeLinear_beta_gap_blocks_counterexample :
     deepActiveGapTerm, deepActiveGapAbsBody, deepActiveGapHandle,
     deepActiveGapClauses, deepActiveGapClauseBody]
 
+private def handlerAwareBetaSubstCounterBody : Term :=
+  Term.pair (Term.var "x") (Term.var "x")
+
+private def handlerAwareBetaSubstCounterTerm : Term :=
+  Term.app
+    (Term.abs "x" (Typ.tensor DimList.empty) handlerAwareBetaSubstCounterBody)
+    (Term.loc 1)
+
+private def handlerAwareBetaSubstCounterTerm' : Term :=
+  Term.pair (Term.loc 1) (Term.loc 1)
+
+/-- The final handler-aware invariant is still not closed under raw
+    beta without the typing-side linear-use discipline: variables carry
+    no runtime locations before substitution, so duplicating a bound
+    variable is invisible until the argument location is substituted. -/
+theorem handlerAwareRuntimeLinear_beta_subst_counterexample :
+    HandlerAwareRuntimeLinear handlerAwareBetaSubstCounterTerm ∧
+    Step ⟨([] : Store), handlerAwareBetaSubstCounterTerm⟩
+      ⟨[], handlerAwareBetaSubstCounterTerm'⟩ ∧
+    ¬ HandlerAwareRuntimeLinear handlerAwareBetaSubstCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareBetaSubstCounterTerm, handlerAwareBetaSubstCounterBody]
+  · simpa [handlerAwareBetaSubstCounterTerm, handlerAwareBetaSubstCounterTerm',
+      handlerAwareBetaSubstCounterBody, subst] using
+      (Step.beta ([] : Store) "x" (Typ.tensor DimList.empty)
+        handlerAwareBetaSubstCounterBody (Term.loc 1) (IsValue.loc 1))
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareBetaSubstCounterTerm']
+
+private def handlerAwareHandleSubstCounterBody : Term :=
+  Term.pair (Term.var "x") (Term.var "x")
+
+private def handlerAwareHandleSubstCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", handlerAwareHandleSubstCounterBody)]
+
+private def handlerAwareHandleSubstCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (Term.perform EffectLabel.accum (Term.loc 1))
+    handlerAwareHandleSubstCounterClauses
+
+private def handlerAwareHandleSubstCounterTerm' : Term :=
+  Term.pair (Term.loc 1) (Term.loc 1)
+
+/-- Raw direct-handler preservation also still needs the typing-side
+    one-shot continuation / linear-argument discipline: the clause body
+    can duplicate `x` without violating the runtime predicate until the
+    handled value is substituted. -/
+theorem handlerAwareRuntimeLinear_handleOpDirect_subst_counterexample :
+    HandlerAwareRuntimeLinear handlerAwareHandleSubstCounterTerm ∧
+    Step ⟨([] : Store), handlerAwareHandleSubstCounterTerm⟩
+      ⟨[], handlerAwareHandleSubstCounterTerm'⟩ ∧
+    ¬ HandlerAwareRuntimeLinear handlerAwareHandleSubstCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
+      handlerAwareHandleSubstCounterBody]
+  · simpa [handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterTerm',
+      handlerAwareHandleSubstCounterClauses, handlerAwareHandleSubstCounterBody,
+      subst, substClauses, directIdCont, directIdContName] using
+      (Step.handleOpDirect ([] : Store)
+        EffectLabel.accum (Term.loc 1) [EffectLabel.accum]
+        handlerAwareHandleSubstCounterClauses
+        "x" "k" handlerAwareHandleSubstCounterBody Typ.unit
+        (IsValue.loc 1)
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [handlerAwareHandleSubstCounterClauses]))
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareHandleSubstCounterTerm']
+
+private def handlerAwareCtxFreshCounterTerm : Term :=
+  Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
+
+private def handlerAwareCtxFreshCounterTerm' : Term :=
+  Term.pair (Term.loc 1) (Term.loc 1)
+
+/-- Complex contexts are still a real raw-runtime blocker: a store step
+    can allocate a fresh live location that collides with a stale
+    sibling location mention outside the redex, and the bare runtime
+    invariant does not relate terms to store liveness. -/
+theorem handlerAwareRuntimeLinear_ctx_fresh_counterexample :
+    HandlerAwareRuntimeLinear handlerAwareCtxFreshCounterTerm ∧
+    Step ⟨([] : Store), handlerAwareCtxFreshCounterTerm⟩
+      ⟨storeExtend [] 1 ⟨DimList.empty, 0.0⟩,
+        handlerAwareCtxFreshCounterTerm'⟩ ∧
+    ¬ HandlerAwareRuntimeLinear handlerAwareCtxFreshCounterTerm' := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareCtxFreshCounterTerm]
+  · have hInner :
+        Step ⟨([] : Store), Term.const 0.0 DimList.empty⟩
+          ⟨storeExtend [] 1 ⟨DimList.empty, 0.0⟩, Term.loc 1⟩ := by
+      simpa [storeFreshLoc] using
+        (Step.tconst ([] : Store) 0.0 DimList.empty 1 rfl)
+    simpa [handlerAwareCtxFreshCounterTerm, handlerAwareCtxFreshCounterTerm', plug] using
+      (Step.ctx ([] : Store) (storeExtend [] 1 ⟨DimList.empty, 0.0⟩)
+        (EvalCtx.pairL (Term.loc 1))
+        (Term.const 0.0 DimList.empty) (Term.loc 1) hInner)
+  · simp [HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      LocRefsDisjoint, LocRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      handlerAwareCtxFreshCounterTerm']
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
