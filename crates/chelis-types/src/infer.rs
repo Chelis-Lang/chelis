@@ -222,6 +222,113 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
     }))
 }
 
+/// Combined library-build helper: run the Phase 0e pipeline ONCE over the
+/// library and return both the [`TypeEnv`] (for downstream `_with_context`
+/// calls) and a [`CheckedProgram`] equivalent to what
+/// `check_phase0e_with_context(&TypeEnv::empty(), library_exprs)` would
+/// return.
+///
+/// This avoids the duplicated work that occurs when callers run
+/// [`build_type_env_from_library`] followed by
+/// `check_phase0e_with_context(empty, library)` — both paths separately
+/// run a full HM inference + annotation pass over the same library
+/// exprs. Per `docs/perf_baseline_investigation.md`, the unified path
+/// saves ~16s of duplicated inference + annotation on Coral.
+///
+/// Behavior contract:
+/// - The returned `TypeEnv` is identical (modulo non-determinism in
+///   `HashMap` iteration) to `build_type_env_from_library(library_exprs)`.
+/// - The returned `CheckedProgram` has the same `annotated_exprs()` and
+///   `type_env()` shapes that
+///   `check_phase0e_with_context(&TypeEnv::empty(), library_exprs)`
+///   produces — namely, annotated library exprs in source order plus a
+///   `phase0e_types` map keyed on every library def.
+/// - On any error the same `Err(InferResult)` is returned that the
+///   sequential calls would have returned.
+///
+/// Internal sequencing:
+/// 1. Build the per-decl `Phase0eTypeEnv` from un-annotated source.
+/// 2. Run `infer_phase0e_program_with_state` once, populating `state`.
+/// 3. Run all validators (`validate_phase0e_program`,
+///    `validate_tensor_precisions_in_program`,
+///    `suppress_unbound_for_cycle_members`).
+/// 4. Annotate the library exprs once using the populated `state.env`.
+/// 5. Build `library_phase0e_annotated` from the annotated exprs.
+/// 6. Compose the `TypeEnv` from `state` + `library_phase0e_annotated`.
+/// 7. Compose the `CheckedProgram` from the annotated exprs +
+///    `library_phase0e_annotated`.
+pub fn build_compiled_library_context(
+    library_exprs: &[deep::Expr],
+) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    // Mirror `build_type_env_from_library` up through the validators so the
+    // type_env half stays bit-compatible with the existing public API.
+    let empty = TypeEnv::empty();
+    let mut state = empty.inner().clone();
+
+    let library_phase0e = build_phase0e_type_env(library_exprs);
+
+    let mut result = infer_phase0e_program_with_state(
+        library_exprs,
+        &library_phase0e,
+        &mut state,
+        /* combined_phase0e_for_validate = */ &library_phase0e,
+        /* run_validate_passes_on = */ None,
+    );
+    validate_phase0e_program(library_exprs, &library_phase0e, &mut result.errors);
+    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    if !result.errors.is_empty() {
+        return Err(result);
+    }
+
+    // Capture library def names before consuming `state` into `TypeEnv`.
+    let mut library_def_names = std::collections::HashSet::new();
+    for expr in top_level_decl_items(library_exprs) {
+        if let deep::Expr::List(list, _) = expr
+            && get_tag(list) == Some("def")
+            && let Some(name) = children(list).first().and_then(symbol_name)
+        {
+            library_def_names.insert(name.to_string());
+        }
+    }
+
+    // Drain accumulated errors back into the state's storage; they were
+    // empty above so this is a no-op, but the call site is symmetric
+    // with check_phase0e_with_context.
+    let _ = result.errors.drain(..);
+
+    // SINGLE annotation pass — feeds both the TypeEnv's
+    // `phase0e_types` AND the returned CheckedProgram's `annotated_exprs`.
+    // Previously `build_type_env_from_library` did one annotation here
+    // (~13.8s on Coral) and `check_phase0e_with_context(empty, library)`
+    // did a separate, redundant inference+annotation pass (~16.8s).
+    let library_annotated: Vec<deep::Expr> = library_exprs
+        .iter()
+        .map(|e| {
+            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
+        })
+        .collect();
+    let library_phase0e_annotated = build_phase0e_type_env(&library_annotated);
+
+    let type_env = TypeEnv::from_inner(TypeEnvInner {
+        env: state.env,
+        var_gen: state.var_gen,
+        subst: state.subst,
+        adt_reg: state.adt_reg,
+        phase0e_types: library_phase0e_annotated.clone(),
+        library_def_names,
+    });
+
+    // Build the CheckedProgram with the same `annotated_type_env` shape
+    // that `check_phase0e_with_context(empty, library)` produces. With an
+    // empty outer scope, `context.inner().phase0e_types` is empty, so the
+    // union step is a no-op and `annotated_type_env ==
+    // library_phase0e_annotated`.
+    let checked = CheckedProgram::from_parts(library_annotated, library_phase0e_annotated);
+
+    Ok((type_env, checked))
+}
+
 /// Type-check `new_exprs` against an outer-scope `context`. New-code
 /// bindings shadow but do not consume library bindings; library ADT
 /// constructor sets remain visible to new-code `match` exhaustivity
