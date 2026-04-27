@@ -223,7 +223,38 @@ For memory efficiency, `grad(f, checkpoint=true)` opts into gradient checkpointi
 
 This is not implemented in Phase 0 but is specified here so the DAG representation can accommodate it from the start.
 
-### 2.10 Interaction With Phase 2a Effects
+### 2.10 Backend support: tensor lane vs host lane
+
+`grad` is fully supported on the **tensor lane** of `chelis build --target c`
+— the lane that lowers pure tensor expressions to a RISC DAG. Functions that
+live in the tensor lane have at least one tensor input and a scalar or tensor
+output; their bodies use only pure tensor ops (`add`, `mul`, `einsum`, `sum`,
+etc.). The supported pattern is encoded by the regression test
+`build_c_tensor_grad_local_wrapper_over_function_param_builds` in
+`crates/chelis-cli/tests/cli.rs`:
+
+```chelis
+def jac_row[n](
+  model: tensor[n, f32] -> f32 -> f32 -> f32,
+  theta: tensor[n, f32], x: f32, y: f32
+) -> tensor[n, f32] = {
+  target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)
+  grad(target, wrt=(theta_local))(theta)
+}
+```
+
+`grad` is **not** currently supported on the **host lane** — top-level
+functions whose return type is a scalar `f32` and whose differentiation
+input is a scalar (e.g. `def square(x: f32) -> f32 = mul(x, x);
+def dsquare(x: f32) -> f32 = grad(square)(x)`). `chelis check` accepts
+these, but `chelis build --target c` rejects with a guard pointing at the
+working pattern. The host lane has no AD transform; adding scalar AD to the
+host lane is tracked under Phase 5
+(`spec/design/phase5_host_scalar_ad.md` — recommendation: forward-mode
+dual numbers; deferred until a real driver appears). All current downstream
+consumers (Coral, Nautilus, Shoals) use the supported tensor-lane pattern.
+
+### 2.11 Interaction With Phase 2a Effects
 
 `grad` remains a compiler transform, not a user-visible effect handler.
 

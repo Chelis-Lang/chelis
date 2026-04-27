@@ -28,7 +28,7 @@ Detailed Phase 3 planning lives in `spec/design/chelis_phase3_plan.md`.
 | **2** | Remaining Phase 2 work: broader effects, linear types, macros, `vmap`, Tide Agent API + MCP, LSP, TUI (`chelis cove`) | In progress; 2e Tide Agent API + MCP, 2f LSP, 2g Cove, and the 2gb Deep pretty-formatting side quest are shipped alongside the initial 2a subset; seed corpus work from the original 2s track was deferred to Phase 4a; detailed design in `spec/design/chelis_phase2_plan.md` |
 | **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, Rust runtime rewrite, data loading/tokenization, `Std.Time`/`Std.Decimal`, SKILL.md v2 | In progress; `3a`, `3b`, `3b-ii`, `3c`, `3d`, `3e`, `3g`, `3h`, `3i`, and `3m` are shipped; the real `3f` redo remains |
 | **4** | ML & AI coding: seed corpus, ICL measurement, trajectory collection, local model training, model integration |  |
-| **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization |  |
+| **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization, host-lane scalar AD (`grad` over `f32 -> f32` functions; design locked in `spec/design/phase5_host_scalar_ad.md` — recommendation: forward-mode dual numbers; deferred until a real driver appears) |  |
 
 ## Red Team Checkpoints
 
