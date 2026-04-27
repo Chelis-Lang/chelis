@@ -396,6 +396,16 @@ impl<'a> EvalContext<'a> {
                     other => Err(format!("copy expects tensor input, got {other:?}")),
                 }
             }
+            Some("borrow") => {
+                // The IR lower path treats `borrow` as identity
+                // (chelis-ir/src/lower.rs::lower_identity); mirror that
+                // here so `&t` syntax type-checks AND evaluates.
+                self.eval_expr(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| "borrow missing value".to_string())?,
+                )
+            }
             Some("record") => self.eval_record(list),
             Some("access") => self.eval_access(list),
             Some("tuple-get") => self.eval_tuple_get(list),
