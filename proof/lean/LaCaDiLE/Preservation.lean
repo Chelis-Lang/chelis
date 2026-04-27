@@ -5242,11 +5242,13 @@ private theorem preservation_aux
         have hmaxle : maxStringLength [x, gs] ≤
             maxStringLength (gs :: x :: (freeVars body ++ boundVars body)) := by
           simp [maxStringLength]
-          apply max_le
-          · exact le_trans (le_max_left x.toList.length (maxStringLength (freeVars body ++ boundVars body)))
-              (le_max_right gs.toList.length (max x.toList.length (maxStringLength (freeVars body ++ boundVars body))))
-          · exact le_max_left gs.toList.length
-              (max x.toList.length (maxStringLength (freeVars body ++ boundVars body)))
+          exact Nat.max_le_of_le_of_le
+            (Nat.le_trans
+              (Nat.le_max_left x.toList.length (maxStringLength (freeVars body ++ boundVars body)))
+              (Nat.le_max_right gs.toList.length
+                (max x.toList.length (maxStringLength (freeVars body ++ boundVars body)))))
+            (Nat.le_max_left gs.toList.length
+              (max x.toList.length (maxStringLength (freeVars body ++ boundVars body))))
         exact Nat.lt_of_le_of_lt hmaxle (Nat.lt_succ_self _)
       have hFreshFull :
           AdjointNamesFresh n

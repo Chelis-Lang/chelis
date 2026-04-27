@@ -232,12 +232,16 @@ mutual
     structural cases recurse syntactically; the hard `mul` / `expand`
     cases are still parked below. After the Phase 1 placeholder was
     corrected to recurse through the result-producing `letBind` /
-    `letpair` body, the old concrete `expand` witness disappeared. The
-    remaining `expand` debt is now the generic theorem-shape gap:
-    `adjoint_typed_aux` only tracks the current seed typing, but the
-    `expand` branch needs a source-side relation strong enough to show
-    the incoming seed dimension list actually contains the summed
-    dimension. -/
+    `letpair` body, the old concrete `grad` / `expand` witness
+    disappeared. But the current public surface is still too strong:
+    Lean now also contains a typed `snd` / `pair` / `expand` witness
+    showing that structural recursion can still route an incompatible
+    seed into an `expand` subterm. So the remaining `expand` debt is a
+    broader theorem-shape gap: `adjoint_typed_aux` only tracks the
+    current seed typing, but the `expand` branch needs a source-side
+    relation strong enough to show the incoming seed dimension list
+    actually contains the summed dimension along every structural route
+    that can reach that subterm. -/
 private theorem adjoint_typed_aux
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
     (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
@@ -835,6 +839,26 @@ private theorem hasType_letBind_inv_local
       (try cases heq) <;>
         first | exact True.intro | (exfalso; contradiction)
 
+private theorem hasType_sum_inv_local
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {e : Term} {d : Dim} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 (Term.sum e d) t eps Gamma2) :
+    ∃ ds, t = Typ.tensor (rem ds d) ∧ d ∈ ds ∧
+          HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 := by
+  generalize heq : Term.sum e d = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | tsum _ _ _ _ _ ds _ _ h' hmem _ =>
+      cases heq
+      exact ⟨ds, rfl, hmem, h'⟩
+  | subEff Δ S Γ Γ' _ _ eps0 eps' _hSub hSub ih =>
+      obtain ⟨ds, hteq, hmem, hInv⟩ := ih heq
+      refine ⟨ds, hteq, hmem, ?_⟩
+      exact HasType.subEff Δ S Γ Γ' e (Typ.tensor ds) eps0 eps' hInv hSub
+  | _ =>
+      (try cases heq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
 private def adjointExpandGapDim : Dim :=
   Dim.named "dGap"
 
@@ -1376,6 +1400,183 @@ theorem grad_preservation_expand_regression :
           adjointExpandGapGradT adjointExpandGapGradT adjointExpandGapBody)
   · intro Sigma2
     exact adjointExpandGapGradReduct_typed (Sigma := Sigma2)
+
+private def adjointSndGapDim : Dim :=
+  Dim.named "dSnd"
+
+private def adjointSndGapBody : Term :=
+  Term.snd
+    (Term.pair
+      (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
+      (Term.const 0 DimList.empty))
+
+private theorem adjointSndGapBody_typed
+    {Sigma : StoreTyp} :
+    HasType (Capability.diff :: []) Sigma
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+      adjointSndGapBody
+      (Typ.tensor DimList.empty)
+      []
+      ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+  have hExpandArg :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        (Typ.tensor DimList.empty)
+        []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    exact HasType.const (Capability.diff :: []) Sigma _ 0 DimList.empty
+  have hExpand :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
+        (Typ.tensor (ins DimList.empty adjointSndGapDim))
+        []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    exact HasType.texpand (Capability.diff :: []) Sigma
+      _ _ _ DimList.empty adjointSndGapDim []
+      hExpandArg
+  have hConst :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.const 0 DimList.empty)
+        (Typ.tensor DimList.empty)
+        []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    exact HasType.const (Capability.diff :: []) Sigma _ 0 DimList.empty
+  have hPair :
+      HasType (Capability.diff :: []) Sigma
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.pair
+          (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
+          (Term.const 0 DimList.empty))
+        (Typ.pair
+          (Typ.tensor (ins DimList.empty adjointSndGapDim))
+          (Typ.tensor DimList.empty))
+        []
+        ([("x", some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    simpa [EffectRow.union] using
+      (HasType.tpair (Capability.diff :: []) Sigma
+        ([( "x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([( "x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([( "x", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
+        (Term.const 0 DimList.empty)
+        (Typ.tensor (ins DimList.empty adjointSndGapDim))
+        (Typ.tensor DimList.empty)
+        []
+        []
+        hExpand
+        hConst)
+  exact HasType.snd (Capability.diff :: []) Sigma
+    ([( "x", some (Typ.tensor DimList.empty))] : LinearCtx)
+    ([( "x", some (Typ.tensor DimList.empty))] : LinearCtx)
+    (Term.pair
+      (Term.expand (Term.const 0 DimList.empty) adjointSndGapDim)
+      (Term.const 0 DimList.empty))
+    (Typ.tensor (ins DimList.empty adjointSndGapDim))
+    (Typ.tensor DimList.empty)
+    []
+    hPair
+
+private theorem adjointSndGapVarInv
+    {Delta : CapCtx} {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    (h :
+      HasType Delta Sigma
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.var "gs")
+        t
+        eps
+        GammaOut) :
+    t = Typ.tensor DimList.empty := by
+  generalize hctx :
+      ([("x", some (Typ.tensor DimList.empty)),
+        ("gs", some (Typ.tensor DimList.empty))] : LinearCtx) = GammaIn at h
+  generalize heq : Term.var "gs" = e_in at h
+  induction h using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
+  | var Delta Sigma Gamma_pre Gamma_post y ty =>
+      cases heq
+      cases Gamma_pre with
+      | nil =>
+          cases Gamma_post with
+          | nil =>
+              simp at hctx
+          | cons hd tl =>
+              cases tl with
+              | nil =>
+                  cases hd
+                  simp at hctx
+              | cons hd2 tl2 =>
+                  simp at hctx
+      | cons hd tl =>
+          cases tl with
+          | nil =>
+              cases Gamma_post with
+              | nil =>
+                  cases hd
+                  simp at hctx
+                  subst_vars
+                  exact hctx.2.symm
+              | cons hd2 tl2 =>
+                  simp at hctx
+          | cons hd2 tl2 =>
+              simp at hctx
+  | subEff _ _ _ _ _ _ _ _ _ _ ih =>
+      exact ih hctx heq
+  | _ =>
+      (try cases heq) <;>
+        first | exact True.intro | (exfalso; contradiction)
+
+private theorem adjointSndGapAdjoint_untypable
+    {Sigma : StoreTyp} {n : Nat} :
+    ¬ ∃ eps GammaOut,
+      HasType [] Sigma
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (adjointFrom adjointSndGapBody "x" (Term.var "gs") n)
+        Typ.unit
+        eps
+        GammaOut := by
+  intro h
+  rcases h with ⟨eps, GammaOut, hAdj⟩
+  have hLet :
+      HasType [] Sigma
+        ([("x", some (Typ.tensor DimList.empty)),
+          ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.letBind (freshName "adjA" n)
+          (Term.sum (Term.var "gs") adjointSndGapDim)
+          (Term.perform EffectLabel.accum Term.unit))
+        Typ.unit
+        eps
+        GammaOut := by
+    simpa [adjointSndGapBody, adjointFrom, adjointLeaf] using hAdj
+  rcases hasType_letBind_inv_local hLet with
+    ⟨Gamma2, _Gamma3, t1, eps1, _eps2, _slot, hSum, _hBody, _hOut⟩
+  obtain ⟨ds, _htEq, hMem, hVar⟩ := hasType_sum_inv_local hSum
+  have hDs : ds = DimList.empty := by
+    simpa using adjointSndGapVarInv hVar
+  subst hDs
+  change adjointSndGapDim ∈ ([] : List Dim) at hMem
+  simp at hMem
+
+theorem adjoint_snd_expand_false_witness :
+    HasType (Capability.diff :: []) [] [("x", some (Typ.tensor DimList.empty))]
+      adjointSndGapBody (Typ.tensor DimList.empty) []
+      [("x", some (Typ.tensor DimList.empty))] ∧
+    ∀ n,
+      ¬ ∃ eps GammaOut,
+        HasType [] [] 
+          ([("x", some (Typ.tensor DimList.empty)),
+            ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
+          (adjointFrom adjointSndGapBody "x" (Term.var "gs") n)
+          Typ.unit
+          eps
+          GammaOut := by
+  refine ⟨adjointSndGapBody_typed, ?_⟩
+  intro n
+  exact adjointSndGapAdjoint_untypable (Sigma := []) (n := n)
 
 /-- Counter-threaded public typing theorem for `adjointFrom`. This is
     the theorem preservation should use when the operational rule picks

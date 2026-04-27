@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, fixing the concrete `letBind` / `letpair` adjoint routing bug, and proving a positive `E-Grad` regression showing the former `grad` / `expand` reduct is typable again under that repaired transform.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, fixing the concrete `letBind` / `letpair` adjoint routing bug, proving a positive `E-Grad` regression showing the former `grad` / `expand` reduct is typable again under that repaired transform, and then adding a second typed `snd` / `pair` / `expand` false witness showing the current public AD theorem surface is still too strong.
 
 ## Acceptance Oracle
 
@@ -18,7 +18,7 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `AdjointTyping.lean`'s repaired `handle` branch is now typed.
 - `AdjointTyping.lean` now also contains:
   - a concrete typed regression showing the repaired `letBind` / `letpair` recursion fixes the old `grad` / `expand` routing bug
-  - the remaining admitted `expand` debt localized to the generic source-shape premise that the public theorem surface still does not quantify
+  - a second typed `snd` / `pair` / `expand` false witness showing the current public theorem surface is still too strong after that repair
 - The branch still contains 1 executable `sorry` on the main proof path:
   - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `expand` adjoint cases
 
@@ -47,7 +47,9 @@ The current theorem-shape boundary is now explicit in Lean:
   - why unconditional runtime preservation is false
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
-- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the old concrete `letBind` / `letpair` routing bug is repaired, and the file now records the narrower generic gap instead.
+- `AdjointTyping.lean` now makes the remaining `expand` blocker concrete in both directions:
+  - the old concrete `letBind` / `letpair` routing bug is repaired
+  - but the current public surface is still false for a second structural `snd` / `pair` / `expand` route, so the real debt is theorem shape rather than proof search
 
 ## Remaining Critical Path
 
@@ -55,10 +57,10 @@ The current theorem-shape boundary is now explicit in Lean:
    The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, and the old concrete `E-Grad` routing bug is repaired too, but `tgrad` preservation is still not honestly settled: the public `adjointFrom` theorem surface remains admitted, and its remaining blockers are now the generic `expand` source-shape premise plus the separate `mul` tape/effect-row case.
+   The repaired `handle` branch is closed, and the old concrete `E-Grad` routing bug is repaired too, but `tgrad` preservation is still not honestly settled: the public `adjointFrom` theorem surface remains admitted, and Lean now contains a second typed `snd` / `pair` / `expand` false witness showing that surface is still too strong. The remaining AD blockers are therefore the broader `expand` theorem-shape repair plus the separate `mul` tape/effect-row case.
 
 ## Next Moves
 
 1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
-3. Replace the false seed-polymorphic `expand` helper shape with the source-typing/dimension relation it actually needs, re-close the `tgrad` preservation branch against that honest theorem surface, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.
+3. Replace the false public `expand` theorem surface with one that carries the source-typing/dimension relation structural recursion actually needs, re-close the `tgrad` preservation branch against that honest theorem surface, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.
