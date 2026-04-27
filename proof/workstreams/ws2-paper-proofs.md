@@ -44,7 +44,7 @@ For each reduction rule, show the result is well-typed. The current mechanized s
 
 This extra premise is not cosmetic. The Lean development now contains a concrete closed, well-typed counterexample showing that unconditional preservation is false for runtime terms with duplicated explicit locations in sibling subterms. The paper proof therefore has to split the argument into two pieces:
 
-1. preservation under the final stronger handler-aware runtime invariant
+1. preservation under the stronger cross-boundary handler-aware runtime boundary now named `HandlerAwareRuntimeLinear` in the Lean tree
 2. a separate invariant showing evaluation from checked source programs stays inside that invariant
 
 The hard cases:
@@ -71,8 +71,11 @@ This workstream now also needs the runtime-location side invariant that closes t
 
 - if a checked runtime configuration is `RuntimeLinear`, one reduction step preserves `RuntimeLinear`
 
-is false, and the naive handler-specific repair is not strong enough either. The remaining theorem-design task is to state the stronger handler-aware invariant that the Lean development can actually preserve.
-is false, and the naive handler-specific repair is not strong enough either. The current recursive `DeepActiveRuntimeLinear` candidate is still not enough: Lean now contains a typed two-step witness where beta exposes a dormant clause beside an active sibling with the same location, and a subsequent contextual direct-handler step activates that overlap. So the remaining theorem-design task is to state the stronger cross-boundary handler-aware invariant that the Lean development can actually preserve.
+is false, and the naive handler-specific repair is not strong enough either. The branch now names the stronger cross-boundary predicate `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` proves a partial one-step boundary that either preserves it or exposes explicit debt. What remains is not inventing the invariant from scratch, but closing the explicit debt cases and deciding which extra typing and store-freshness side conditions belong in the paper theorem. The blocking raw-runtime witnesses are:
+
+- beta substitution can duplicate a bound location that was invisible before substitution
+- direct-handler substitution needs the one-shot / linear-argument typing discipline
+- context steps can allocate a fresh live location that collides with a stale sibling mention outside the redex
 
 ## WS2.9 — AD correctness (Theorem 5)
 

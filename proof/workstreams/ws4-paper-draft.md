@@ -73,12 +73,12 @@ All five theorem statements. Proof sketches. Key lemmas: substitution, adjoint t
 
 The current Lean development forces a stronger correction to the paper statement of preservation: unconditional runtime preservation is false, and the first runtime-linear repair is still not the final invariant for handled runtime states. Separately, the current AD typing gap is now narrower and more precise: `sum` is mechanized, the old concrete `letBind` / `letpair` routing bug is repaired, and the transform now routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`. But the legacy public `adjointFrom` theorem surface is still false for handled product seeds because `handle` still uses the tensor-only clause path. The section should therefore:
 
-1. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
-2. explain the captured-handler counterexample against plain `RuntimeLinear`
-3. explain the direct-handler counterexample showing that the first `ActiveRuntimeLinear` repair is still too weak
-4. explain the new deep-active two-step counterexample, where beta exposes a dormant clause beside an active sibling and a later contextual direct-handler step activates that overlap
-5. explain that the current executable `tgrad` branch is only syntactically closed: the old concrete routing bug is fixed and the typed cotangent transform is now in place, but the actual preservation argument must still wait for the public theorem surface to move off legacy `adjointFrom`, be reproved on the typed surface, and then close the remaining `mul` blocker
-6. state the final stronger cross-boundary handler-aware invariant once it is settled in Lean
+1. state Theorem 1b in the honest branch shape first: the executable Lean theorem preserves typing for closed, well-scoped, `RuntimeLinear` terms
+2. explain the closed well-typed counterexample showing why unconditional runtime preservation is false for arbitrary runtime terms with duplicated explicit locations
+3. explain why `ActiveRuntimeLinear` and then `DeepActiveRuntimeLinear` both fail, and introduce `HandlerAwareRuntimeLinear` as the current stronger cross-boundary candidate
+4. summarize the partial one-step `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary and the remaining beta/direct-handler/context-freshness debt
+5. explain that the AD proof sketch must move from legacy `adjointFrom` to `adjointTypedFrom` / `adjointTypedClausesFrom`; the old routing bug is fixed and typed cotangent seeds are in place, but the public theorem surface and the `mul` case are still open
+6. send the exact proved-vs-staged split to the supplement rather than letting §5 imply that the runtime or AD side is already fully closed
 
 ## WS4.7 — §6 Implementation (~1.5 pages)
 

@@ -1,0 +1,25 @@
+This section needs to distinguish the final theorem package from the theorem surfaces that are actually closed on the current branch. Progress, the \texttt{addDim} lemma, the \texttt{vmap} preservation case, and the store-wellformedness core of linearity soundness already fix most of the proof shape. The moving pieces are the runtime invariant needed to iterate preservation and the public adjoint typing surface used by \texttt{tgrad}.
+
+\paragraph{Theorem 1a (Progress).}
+Keep the standard closed-term statement. A well-typed closed term is a value, can step, or is suspended at an explicit \texttt{perform}; Theorem~3 removes the last branch when the effect row is empty.
+
+\paragraph{Theorem 1b (Preservation).}
+State the executable Lean theorem honestly first: if a closed term is well typed, well scoped, and \texttt{RuntimeLinear}, then one step preserves typing and store wellformedness. This is a staging theorem, not the final paper statement. The mechanization already contains a closed counterexample to unconditional preservation, so the paper proof has to separate the current branch theorem from the stronger multi-step invariant used in the final metatheory package.
+
+\paragraph{Runtime invariant boundary.}
+The failed repairs are now concrete. \texttt{ActiveRuntimeLinear} fixes the captured-handler context witness but fails for direct handled operations. \texttt{DeepActiveRuntimeLinear} repairs that local gap but fails on the two-step beta-then-handle witness. \texttt{Operational.lean} now names the stronger cross-boundary candidate \texttt{HandlerAwareRuntimeLinear}, and \texttt{LinearitySoundness.lean} proves a partial one-step boundary that either preserves this predicate or enters an explicit \texttt{HandlerAwareRuntimeDebt} case. The appendix should list the remaining debt precisely: beta substitution, direct-handler substitution, and context freshness.
+
+\paragraph{Theorem 2 (Dimension safety).}
+Dimension safety still follows the usual preservation route. The important branch-local fact is that \texttt{addDim} is closed and \texttt{vmap} now carries one explicit batch-dimension choice in both typing and stepping, so the earlier theorem-shape mismatch on \texttt{tvmap} is gone.
+
+\paragraph{Theorem 3 (Effect correctness).}
+This theorem keeps the standard effect-row argument: reduction does not introduce new unhandled operations, and a closed term typed with the empty row cannot reach an unhandled \texttt{perform}.
+
+\paragraph{Theorem 4 (Linearity soundness).}
+The closed mechanized core here is store wellformedness preservation. The paper sketch should present the live-location argument together with the runtime-invariant boundary above, rather than implying that the full multi-step linearity package is already settled independently of the handler-aware debt cases.
+
+\paragraph{Adjoint typing lemma.}
+The AD-side proof sketch needs the same honesty. The old concrete \texttt{letBind} / \texttt{letpair} routing bug is fixed, and the transform now threads typed cotangent seeds through \texttt{pair}, \texttt{fst}, \texttt{snd}, and \texttt{copy}. But the legacy public surface \texttt{adjointFrom} is still false for handled product seeds. Section~5 should therefore sketch the typed proof on \texttt{adjointTypedFrom} / \texttt{adjointTypedClausesFrom}, while the supplement records that the executable branch still carries the final \texttt{mul} case and public-surface migration as open obligations.
+
+\paragraph{Theorem 5 (AD correctness).}
+Keep this theorem explicitly future-facing on the current branch. The denotational argument is still to be written, and the paper body should describe it as the target end state rather than as a finished mechanized result.

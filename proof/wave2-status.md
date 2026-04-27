@@ -29,6 +29,7 @@ The current theorem-shape boundary is now explicit in Lean:
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
 - the recursive `DeepActiveRuntimeLinear` repair is still too weak globally: a typed deep-active beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later that overlap becomes active and breaks the invariant
+- `Operational.lean` now packages the next stronger candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` can already classify one step as either preserving that predicate or entering an explicit `HandlerAwareRuntimeDebt` case; what remains is to discharge the beta/direct-handler/context-freshness debt with the right typing and store-side side conditions
 - `tvmap` is no longer blocked on theorem shape: typing and stepping now share the batch dimension through the explicit `vmap` term annotation, and the preservation case is closed
 
 ## What Closed Recently
@@ -50,11 +51,12 @@ The current theorem-shape boundary is now explicit in Lean:
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
 - `AdjointTransform.lean` now also routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`, so the old monomorphic product/projection mismatch has been removed from the transform surface itself.
 - `LinearitySoundness.lean` now packages the current bridge from `RuntimeLinear` to the handler-aware runtime debt classification instead of leaving that branch implicit.
+- `Operational.lean` now contains the stronger cross-boundary candidate predicate `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` closes the head-rule part of the one-step handler-aware boundary.
 
 ## Remaining Critical Path
 
 1. Handler-aware runtime invariant
-   The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
+   The next public theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The branch now names the stronger candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` already proves a partial one-step `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary. The remaining work is to close the explicit beta/direct-handler/context-freshness debt with the right typing and store-side side conditions so preservation can iterate honestly.
 
 2. `AdjointTyping.lean`
    The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the legacy public `adjointFrom` theorem surface is still false for handled product seeds, because `handle` still uses the tensor-only clause path. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
@@ -64,6 +66,6 @@ The current theorem-shape boundary is now explicit in Lean:
 
 ## Next Moves
 
-1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
-2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
+1. Refine and close the current `HandlerAwareRuntimeLinear` boundary, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for the remaining side conditions.
+2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies and so it names the current handler-aware boundary honestly.
 3. Re-close the public AD surface against the now-updated transform domain by moving it onto `adjointTypedFrom` / `adjointTypedClausesFrom`, then reprove the private helper there, finish the remaining admitted `mul` case, and return to the AD-correctness wave.
