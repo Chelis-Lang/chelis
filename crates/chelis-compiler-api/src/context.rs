@@ -22,10 +22,7 @@
 
 use chelis_ir::lower::{LoweredLibrary, lower_program_to_library};
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph};
-use chelis_types::{
-    CheckedProgram, TypeEnv, build_type_env_from_library, check_linearity,
-    check_phase0e_with_context,
-};
+use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context, check_linearity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -709,27 +706,23 @@ pub fn compile_reef_context(
         );
     }
 
-    // Phase C: build the Phase 0e type-env snapshot from the library.
-    let type_env =
-        build_type_env_from_library(&deep_library_decls).map_err(|report| CompilerError {
+    // Phase C+0e: build the type-env snapshot AND the library
+    // `CheckedProgram` in a single pass. The unified helper
+    // `build_compiled_library_context` runs the per-decl HM
+    // inference + per-decl annotation ONCE and returns both the
+    // [`TypeEnv`] (for downstream `_with_context` calls) and the
+    // [`CheckedProgram`] (for effects + linearity + lowering).
+    //
+    // The previous code path called `build_type_env_from_library`
+    // and `check_phase0e_with_context(&TypeEnv::empty(), library)`
+    // sequentially; both ran a full inference + annotation pass,
+    // duplicating ~16s of work on Coral.
+    let (type_env, checked) =
+        build_compiled_library_context(&deep_library_decls).map_err(|report| CompilerError {
             stage: "check".to_string(),
             errors: report.errors.iter().map(check_error_diagnostic).collect(),
         })?;
-    log_phase("build_type_env_from_library", &mut t);
-
-    // Run the monolithic library check via `check_phase0e_with_context`
-    // against an empty outer scope, then layer effects + linearity. This
-    // produces the `library_checked` snapshot that
-    // `check_effects_with_context` / `check_linearity_with_context`
-    // expect as their library argument.
-    let checked =
-        check_phase0e_with_context(&TypeEnv::empty(), &deep_library_decls).map_err(|report| {
-            CompilerError {
-                stage: "check".to_string(),
-                errors: report.errors.iter().map(check_error_diagnostic).collect(),
-            }
-        })?;
-    log_phase("check_phase0e_with_context", &mut t);
+    log_phase("build_compiled_library_context", &mut t);
     let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
         stage: "effects".to_string(),
         errors: errors
