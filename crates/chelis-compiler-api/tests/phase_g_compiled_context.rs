@@ -30,7 +30,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     )
     .expect("write app reef.toml");
     // Root package keeps a tiny placeholder module — the snippet under
@@ -43,7 +43,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     )
     .expect("write mylib reef.toml");
     fs::write(
@@ -57,7 +57,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock");
     (dir, root)
@@ -253,7 +253,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
 
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     ).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
@@ -262,7 +262,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     .expect("write main.ch");
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     ).expect("write mylib reef.toml");
     // String concatenation lives in the host runtime path (no tensor
     // lowering). New-code calls into it will fail unless the
@@ -276,7 +276,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     .expect("write text.ch");
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     ).expect("write reef.lock");
 
     // Use a NON-fn top-level binding (`name = expr`, not `def name -> T = expr`)
@@ -322,7 +322,7 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     ).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
@@ -331,7 +331,7 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     .expect("write main.ch");
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     ).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/text.ch"),
@@ -341,7 +341,7 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     .expect("write text.ch");
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     ).expect("write reef.lock");
 
     let snippet = "module App.Eval\nimport Mylib.Text (label)\n\n\
@@ -433,7 +433,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     )
     .expect("write app reef.toml");
     fs::write(
@@ -444,7 +444,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     )
     .expect("write mylib reef.toml");
 
@@ -470,7 +470,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock");
     (dir, root)

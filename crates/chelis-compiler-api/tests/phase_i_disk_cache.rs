@@ -39,7 +39,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     )
     .expect("write app reef.toml");
     fs::write(
@@ -50,7 +50,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     )
     .expect("write mylib reef.toml");
     fs::write(
@@ -64,7 +64,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock");
     (dir, root)
@@ -401,7 +401,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
     )
     .expect("write app reef.toml alt");
     fs::write(
@@ -412,7 +412,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
     )
     .expect("write mylib reef.toml alt");
     fs::write(
@@ -424,7 +424,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
 
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock alt");
     (dir, root)

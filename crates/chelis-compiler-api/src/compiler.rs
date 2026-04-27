@@ -260,12 +260,12 @@ pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Re
 /// (matching `chelis test`'s per-root reporting) and is easier for callers
 /// than a mixed Result<Vec<_>> + compile-error channel.
 ///
-/// **Deprecated since 0.2.7** — prefer
+/// **Deprecated since 0.3.0** — prefer
 /// [`eval_many_in_context`] with a [`crate::CompiledContext`]. The
 /// in-context path amortizes the library compile across every call so
 /// per-invocation work drops to just the new source.
 #[deprecated(
-    since = "0.2.7",
+    since = "0.3.0",
     note = "use eval_many_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::eval_many_in_context"
 )]
 pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Result<EvalResult>)> {
@@ -318,7 +318,7 @@ impl PreparedEval {
 /// specific roots against it many times. Used by `chelis test` to share
 /// one compile across every test in a file.
 ///
-/// **Deprecated since 0.2.7** — prefer
+/// **Deprecated since 0.3.0** — prefer
 /// [`prepare_eval_in_context`] with a [`crate::CompiledContext`]. The
 /// in-context path keeps this function's amortization-across-roots
 /// guarantee but additionally amortizes the library compile across
@@ -328,7 +328,7 @@ impl PreparedEval {
 /// `LocalRegistry` fallback path inside `chelis test` until
 /// `source_digests` gains `LocalRegistry` support.
 #[deprecated(
-    since = "0.2.7",
+    since = "0.3.0",
     note = "use prepare_eval_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::prepare_eval_in_context"
 )]
 pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {

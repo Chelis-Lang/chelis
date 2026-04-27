@@ -666,7 +666,7 @@ fn reef_std_generate_is_lowered_through_host_lane() {
             r#"[package]
 name = "phase3i-generate-lowering"
 version = "0.1.0"
-compiler = "=0.2.7"
+compiler = "=0.3.0"
 module_prefix = "Demo"
 
 [dependencies]

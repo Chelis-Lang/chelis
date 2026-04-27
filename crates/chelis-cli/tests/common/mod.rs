@@ -48,7 +48,7 @@ use tempfile::{TempDir, tempdir};
 /// Pinned compiler version for fixture `reef.toml` files. Bump in lockstep
 /// with the workspace version so the fixtures match the chelis binary
 /// they invoke.
-pub const COMPILER_VERSION: &str = "0.2.7";
+pub const COMPILER_VERSION: &str = "0.3.0";
 
 pub fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
