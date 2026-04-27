@@ -1624,6 +1624,16 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
   program generation over Deep AST ADTs so the compiler can validate the spec and the
   spec can validate the compiler. Blocked on LaCaDiLE rule finalization, a Deep parser
   in Chelis, and `chelis fuzz` infrastructure. Phase 4/5 item, not a Phase 3 sub-phase.
+- `beacon` — automated static analysis on the tensor DAG. Depends on `chelis-std`
+  + the compiler's DAG IR. Computes over-approximations of value ranges at each node
+  to detect division by zero, overflow, NaN propagation, and unbounded outputs without
+  user annotations. Pre-deployment gate (minutes, not milliseconds). Trust stack
+  Level 3. Future stub, not designed.
+
+`chelis fuzz` scope has expanded from a CLI-flag property testing tool to first-class
+executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
+full design. Implementation remains deferred until after the RLVR pipeline (Phase 4)
+but the design is locked.
 
 ---
 
@@ -1756,6 +1766,7 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3l`: Shoals | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
 | `3t`: Native Testing | medium | Bug 9 fix, fast eval | Chelis library (`Std.Test`) + CLI (`chelis test` command) + test migrations for Nautilus and Coral |
 | `3f`: SKILL.md v2 | small | all above | Documentation |
+| Beacon (future) | TBD | `chelis-std` + DAG IR | Automated static analysis shell (value range inference, hazard detection). **Future**, not in Phase 3. |
 
 This phase is intentionally sequential and pragmatic. The remaining work is about making
 Chelis usable, not publishable. `3m` is the runtime/ABI choke point that must land
@@ -1764,9 +1775,9 @@ surface and a reliable release binary. `3j` (nautilus) and `3k` (coral) can over
 mutual dependency). `3l` depends on both. `3f` goes truly last because it must cover the
 complete ecosystem including the domain shells.
 
-`school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), and
-`hull` (executable language specification) are post-Phase-3 shell stubs and do not
-appear in this table.
+`school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), `hull`
+(executable language specification), and `beacon` (automated static analysis on the
+tensor DAG) are post-Phase-3 shell stubs and do not appear as Phase 3 sub-phases.
 
 ---
 

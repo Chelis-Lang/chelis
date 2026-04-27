@@ -18,9 +18,34 @@ Its core technical differentiators are:
 - named tensor dimensions and explicit precision tracking
 - compiler feedback as graded training signal
 - a compact RISC DAG that keeps transforms and backend work tractable
+- executable properties as spec — customer-authored `@property` functions verified
+  against AI-generated implementations on random inputs (`chelis fuzz`)
 
 Chelis is not trying to be a general-purpose language or a Python replacement.
 It targets the model-definition and compiler layer for AI workloads.
+
+---
+
+## Executable Properties as Spec
+
+No other platform lets you write "for all valid inputs, put-call parity holds" as
+executable code and have the toolchain verify it on 100,000 random inputs against the
+AI-generated implementation. Properties are Chelis functions annotated with
+`@property`. They define correctness. The toolchain enforces it. The customer reviews
+properties (simple, one-line domain facts), not generated code (complex, optimized,
+opaque). This directly addresses the consequential computing concern: "I can't define
+a spec and ensure it's in the generated code." The answer: "You define the spec as
+properties. We verify the code satisfies them."
+
+Where this fits relative to the rest of the verification stack — and how it compares
+to the prevailing alternative:
+
+| Platform | Spec verification |
+|---|---|
+| Other AI codegen platforms | None — manual review and PDF specs that rot |
+| Chelis | Executable properties: domain invariants + reference-implementation correspondence, verified on random inputs via `chelis fuzz` |
+
+Full design: `chelis_trust_stack.md`.
 
 ---
 

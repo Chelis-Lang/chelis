@@ -663,6 +663,13 @@ This is a product feature for model-validation teams ("machine-generated certifi
 that your simulation is reproducible"). Full design:
 `chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
 
+**Trust stack integration.** Shoals ships with example `@property` annotations for
+standard pricing models (put-call parity, delta bounds, price positivity,
+reference-implementation correspondence). These demonstrate the
+executable-properties-as-spec pattern to finance customers — properties are the
+artifact the customer reviews; `chelis fuzz` enforces that the optimized
+implementation satisfies them. See `chelis_trust_stack.md`.
+
 ### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
 
 A reef package. The notation bridge between quant-finance LaTeX and Chelis Deep.
@@ -754,6 +761,15 @@ but no Phase 3 sub-phase implements them.
   surrounding prose so model-validation teams can ingest an entire model document as
   a unit. Parser scope is significantly larger than the quant-finance expression
   subset shipped in `3n`. Depends on the full `3n`/`3o` Octant surface.
+- **`beacon`** — automated static analysis (`chelis-lang/beacon`). Depends on
+  `chelis-std` and the compiler's tensor DAG IR. A specialized analysis tool that
+  computes over-approximations of value ranges at each DAG node. Detects division by
+  zero, overflow, NaN propagation, and unbounded output without user annotations. The
+  user specifies input ranges; Beacon infers output ranges and flags hazards.
+  Computationally expensive (minutes, not milliseconds) — a pre-deployment gate, not
+  an inner-loop tool. Inspired by Astree (Airbus A380 flight control verification).
+  Future shell, not designed. Marine rationale: a lighthouse warning of hazards. Full
+  design pointer: `chelis_trust_stack.md` (Level 3 of the trust stack).
 
 ### 3t: Chelis-Native Testing
 
@@ -855,6 +871,12 @@ in each shell's SKILL.md. Nautilus v0.1.0 candidates for `stable`: all of Specia
 of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API may
 change when autonomous Random sampling lands). Apply the same convention to Coral and
 Shoals when they ship.
+
+**`chelis fuzz` — executable properties as spec.** The earlier pre-Phase 4 framing of
+`chelis fuzz` as a CLI-flag property tester is now subsumed by the broader
+executable-properties-as-spec design (first-class `@property` Chelis functions,
+type-directed input generation, counterexample minimization). See the expanded
+`chelis fuzz` section below and `chelis_trust_stack.md` for the full design.
 
 ### Why This Is a Distinct Phase
 
@@ -995,19 +1017,31 @@ Phase 4 success condition:
   optional research extra
 - ChelisBench provides reproducible evidence for the "designed for LLMs" thesis
 
-### Future: `chelis fuzz` — Type-Driven Property Testing
+### `chelis fuzz` — Executable Properties as Spec
 
-Deferred until after the RLVR pipeline exists. A `chelis fuzz` command that generates
-random well-typed inputs for a function and checks declared properties. The type system
-already provides the input domain (`f32`, `tensor[n, f32]`, etc.). Mathematical
-properties (output range, monotonicity, symmetry) are expressed as lightweight
-annotations or CLI flags:
+Evolution of the originally planned CLI-flag property testing tool into Chelis's core
+verification mechanism for AI-generated code. Properties are first-class Chelis
+functions with `@property` annotations, living alongside implementation code,
+version-controlled, CI-enforced.
 
-```bash
-chelis fuzz erf --property "output_in(-1, 1)" --property "monotonic" --trials 10000
-chelis fuzz normal_cdf --property "output_in(0, 1)" --property "monotonic" --trials 10000
-chelis fuzz solve_2x2 --property "no_nan_on_valid_input" --trials 1000
-```
+Three property categories:
+
+1. **Domain invariants** — things that must always be true: output is non-negative,
+   delta is between 0 and 1, portfolio weights sum to 1.
+2. **Spec correspondence** — the optimized implementation matches a simple reference
+   implementation on random inputs. The reference IS the spec. Differential testing is
+   a property, not a separate tool.
+3. **Behavioral constraints** — monotonicity, continuity, symmetry, convergence. Domain
+   knowledge encoded as executable checks.
+
+`chelis fuzz src/pricer.ch` discovers `@property` annotations, generates type-directed
+random inputs, tests each property, reports failures with minimal counterexamples. CI
+integration via `chelis fuzz` as a gate alongside `chelis test`.
+
+This is the highest-ranking new value prop for consequential computing customers. The
+customer writes properties that define correctness. The toolchain verifies the
+generated code satisfies them. The customer reviews properties (simple, one-line domain
+facts), not generated code (complex, optimized, opaque).
 
 Value for the AI story: fuzz properties become part of the RLVR reward signal. A
 generated function that passes 10k random inputs without NaN is higher quality than one
@@ -1017,6 +1051,9 @@ results as a continuous reward component alongside the 0-1 fitness score.
 Value for the numerical library story: catches edge cases that golden fixture grids
 miss. The Nautilus bessel_y1 drift in (7.5, 8) would have been caught by fuzzing before
 it became a documented known limitation.
+
+Implementation remains deferred until after the RLVR pipeline (Phase 4) but the design
+is locked. Full design: `chelis_trust_stack.md`.
 
 ---
 

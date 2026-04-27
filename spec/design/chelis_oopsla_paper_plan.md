@@ -155,6 +155,8 @@ Honest:
 
 Future: distributed runtime (the D1-D4 phasing), complex numbers (Phase 5f, unblocking Signal), the Octant LaTeX bridge, general-n iterative LinAlg, and Hull - a self-hosted executable specification shell where the LaCaDiLE typing rules are implemented as Chelis functions over Deep AST ADTs, enabling differential testing between the spec and the compiler in the language itself. Hull is a natural OOPSLA story: the language specifies itself, the spec is checked by the compiler, and the compiler is tested against the spec. Self-hosted executable specifications are rare in PL literature and directly reinforce the "designed for AI reimplementation" thesis.
 
+The executable-properties-as-spec pattern (`@property` annotations + `chelis fuzz`) is a natural extension of the compiler fitness story for this section: properties are the user-facing version of what the compiler fitness score does for the RLVR training loop. The compiler checks structural soundness automatically; properties check domain correctness empirically. Together they form a trust stack that no Python-based platform can offer. If `chelis fuzz` with `@property` is shipped before submission, it strengthens Section 3 (novel capabilities). If not, it belongs here in Section 6 (future work). Full design: `chelis_trust_stack.md`.
+
 ### Section 7: Conclusion (~0.5 pages)
 
 Restate: first language combining effects + linearity + AD + named dimensions with a working compiler and ecosystem. AD through dataframes is a novel capability. Effect-tracked reproducibility is a regulatory-grade guarantee. Compiled fusion beats the pydata stack. The formal foundations are verified (cite LaCaDiLE at POPL).

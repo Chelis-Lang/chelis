@@ -723,6 +723,7 @@ chelis-lang/hull/
 - **LaCaDiLE (Lean):** Proves the typing rules are sound. Hull implements the rules as executable code. Lean proves "these rules are correct"; Hull checks "the compiler follows these rules."
 - **`chelis fuzz`:** Language-level random generation. `chelis fuzz` generates random inputs to test individual functions. Hull generates random programs to test the compiler. Different levels of abstraction, complementary.
 - **Conformance test suite:** Hull generates the suite. The suite is checked into the repo. The suite runs in CI against the Rust compiler. Hull is the test generator; the suite is the test artifact.
+- **Trust stack — proof of pattern:** Hull validates the executable-properties-as-spec pattern on the highest-stakes code in the system: the compiler itself. The reference type checker is a property ("the compiler's type-checking behavior matches the formal rules"). Differential testing is the verification mechanism. The same architecture — reference implementation + production implementation + agreement on random inputs — is what user-facing `@property fn matches_reference(...)` does for application code. Hull proves the pattern works; `chelis fuzz` makes it available to users. See `chelis_trust_stack.md`.
 
 ---
 

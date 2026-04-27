@@ -136,6 +136,7 @@ All project-level naming follows the turtle/ocean metaphor.
 | Classical ML shell | **School** | A school of fish learning together — and the ML sense of *learning* |
 | Evolutionary algorithms shell | **Darwin** | Natural selection — survival of the fittest programs, mutated and crossed over the Deep AST |
 | Language specification shell | **Hull** | The hull defines the shape of the vessel — the spec defines the shape of the language |
+| Automated static analysis shell | **Beacon** | A lighthouse warning of hazards |
 
 Chelis is pronounced **CHEL-is**.
 The domain is **chelis.ch**.
@@ -148,8 +149,9 @@ deterministic lowering + rendering + provenance) has the same prerequisite as
 `shoals` (namely `nautilus` green) and runs **in parallel with `shoals`**; `octant`
 Part B (finance-notation lowering through `shoals`, Greek rendering, notebook) is
 sequential after `shoals`. `school` (classical ML), `darwin` (evolutionary
-algorithms), and `hull` (executable language specification) are post-Phase-3 stubs, as
-is `octant-docs` (full LaTeX document ingestion, Octant Phase 4).
+algorithms), `hull` (executable language specification), and `beacon` (automated
+static analysis on the tensor DAG) are post-Phase-3 stubs, as is `octant-docs` (full
+LaTeX document ingestion, Octant Phase 4).
 
 | Shell | Depends On | Status | Contents |
 |---|---|---|---|
@@ -161,15 +163,17 @@ is `octant-docs` (full LaTeX document ingestion, Octant Phase 4).
 | `school` | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
 | `darwin` | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
 | `hull` | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
+| `beacon` | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
 
 Design rule: `chelis-std` covers what every Chelis program may need (tensors, neural
 primitives, time, decimal). `nautilus` owns general numerical methods. `coral` owns
 tabular data. `shoals` is finance-only. `school` is classical ML only. `darwin` is
 evolutionary search only. If it's about the language's own specification and
-conformance testing, it goes in `hull`. `octant` is a notation bridge layered on top
-of `nautilus` and (optionally) `shoals` — it consumes their APIs and adds no numerical
-capabilities of its own. Time and decimal stay in `chelis-std` because every domain
-needs dates and exact arithmetic.
+conformance testing, it goes in `hull`. If it's about automated static analysis on the
+DAG (range inference, overflow detection, numerical stability), it goes in `beacon`.
+`octant` is a notation bridge layered on top of `nautilus` and (optionally) `shoals` —
+it consumes their APIs and adds no numerical capabilities of its own. Time and decimal
+stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 ### Cross-Cutting Design Decisions
 
@@ -186,6 +190,8 @@ needs dates and exact arithmetic.
 **Structured fitness score with per-property components.** The 0-1 fitness score is broken into components in the fitness JSON: dimension score, effect score, linearity score, differentiability score, syntax score. Agents see which property failed and focus repair on that specific issue. The aggregate score is still computed for RLVR reward; the components are exposed for agent introspection and trajectory analysis.
 
 **Reproducibility manifests.** `chelis manifest program.ch` extracts all `Random`-effect-annotated operations from the typed AST into a structured JSON report: which operations introduce randomness, which seed handlers cover them, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. Finance product feature for model validation teams. Full design: `chelis_reproducibility_manifests.md`.
+
+**Executable properties as spec (trust stack Level 2).** Properties are first-class Chelis functions annotated with `@property`. They define what "correct" means for the implementation they accompany. `chelis fuzz` discovers properties, generates type-directed random inputs, and verifies each property holds. Three categories: domain invariants (output bounds, conservation laws), spec correspondence (optimized impl matches simple reference impl), and behavioral constraints (monotonicity, continuity, symmetry). Properties are the primary artifact the customer interacts with for verification of AI-generated code. Generated code is not reviewed directly — properties are reviewed, and the toolchain enforces agreement. Full design: `chelis_trust_stack.md`.
 
 **Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with seed(n)` for Random (already used), `with_deterministic_random(sequence)` for exact output testing, `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
 
@@ -230,6 +236,9 @@ chelis test tests/foo.ch              # run a specific test file
 chelis test tests/ --filter erf       # run only tests matching "erf"
 chelis test tests/ --timeout 10       # per-test wall-clock timeout (seconds, default 30)
 chelis test tests/ --json             # emit newline-delimited JSON records instead of plain text
+chelis fuzz src/pricer.ch             # discover @property annotations, test on random inputs
+chelis fuzz src/ --trials 100000      # control sample count (default 10,000)
+chelis fuzz src/ --property delta     # filter to properties matching "delta"
 ```
 
 This is the intended stable surface for project-level documentation.
