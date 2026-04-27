@@ -474,6 +474,523 @@ def HandlerAwareRuntimeLinearClauses :
 
 end
 
+private theorem mem_locRefs_of_mem_activeLocRefs :
+    ∀ {e : Term} {ell : Loc}, ell ∈ activeLocRefs e → ell ∈ locRefs e
+  | Term.var _, _, h => by cases h
+  | Term.abs _ _ body, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := body) h
+  | Term.app e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.letBind _ e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.copy e, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.letpair _ _ e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.pair e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.fst _ e, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.snd _ e, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.unit, _, h => by
+      cases h
+  | Term.const _ _, _, h => by
+      cases h
+  | Term.add e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.mul e1 e2, _, h => by
+      simp [activeLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_activeLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_activeLocRefs (e := e2) h)
+  | Term.sum e _, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.expand e _, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.uniformLike e _ _, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.grad _ _ _ body, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := body) h
+  | Term.vmap _ _ _ body, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := body) h
+  | Term.handle _ body _, ell, h => by
+      have hBody : ell ∈ activeLocRefs body := by
+        simpa [activeLocRefs, activeLocRefsClauses] using h
+      simpa [locRefs] using
+        (show ell ∈ locRefs body ∨ ell ∈ locRefsClauses _ from
+          Or.inl (mem_locRefs_of_mem_activeLocRefs (e := body) hBody))
+  | Term.perform _ e, _, h => by
+      simpa [activeLocRefs, locRefs] using
+        mem_locRefs_of_mem_activeLocRefs (e := e) h
+  | Term.loc _, _, h => by
+      simpa [activeLocRefs, locRefs] using h
+termination_by e => sizeOf e
+decreasing_by
+  all_goals
+    simp_wf
+    try omega
+
+mutual
+
+private theorem mem_locRefs_of_mem_stepLocRefs :
+    ∀ {e : Term} {ell : Loc}, ell ∈ StepLocRefs e → ell ∈ locRefs e
+  | Term.var _, _, h => by cases h
+  | Term.abs _ _ _, _, h => by cases h
+  | Term.app e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.letBind _ e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.copy e, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.letpair _ _ e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.pair e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.fst _ e, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.snd _ e, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.unit, _, h => by
+      cases h
+  | Term.const _ _, _, h => by
+      cases h
+  | Term.add e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.mul e1 e2, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := e1) h)
+      · exact Or.inr (mem_locRefs_of_mem_stepLocRefs (e := e2) h)
+  | Term.sum e _, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.expand e _, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.uniformLike e _ _, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.grad _ _ _ _, _, h => by
+      cases h
+  | Term.vmap _ _ _ _, _, h => by
+      cases h
+  | Term.handle _ body clauses, _, h => by
+      simp [StepLocRefs, locRefs] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := body) h)
+      · exact Or.inr (mem_locRefsClauses_of_mem_stepLocRefsClauses h)
+  | Term.perform _ e, _, h => by
+      simpa [StepLocRefs, locRefs] using
+        mem_locRefs_of_mem_stepLocRefs (e := e) h
+  | Term.loc _, _, h => by
+      simpa [StepLocRefs, locRefs] using h
+termination_by e => sizeOf e
+decreasing_by
+  all_goals
+    simp_wf
+    try omega
+
+private theorem mem_locRefsClauses_of_mem_stepLocRefsClauses
+    :
+    ∀ {clauses : List (EffectLabel × String × String × Term)} {ell : Loc},
+      ell ∈ StepLocRefsClauses clauses → ell ∈ locRefsClauses clauses
+  | [], _, h => by
+      cases h
+  | (_, _, _, hb) :: rest, _, h => by
+      simp [StepLocRefsClauses, locRefsClauses] at h ⊢
+      rcases h with h | h
+      · exact Or.inl (mem_locRefs_of_mem_stepLocRefs (e := hb) h)
+      · exact Or.inr (mem_locRefsClauses_of_mem_stepLocRefsClauses h)
+termination_by clauses => sizeOf clauses
+decreasing_by
+  all_goals
+    simp_wf
+    try omega
+
+end
+
+private theorem mem_locRefs_of_mem_appFunLocRefs
+    {e : Term} {ell : Loc}
+    (h : ell ∈ AppFunLocRefs e) :
+    ell ∈ locRefs e := by
+  cases e with
+  | abs x t body =>
+      simpa [AppFunLocRefs, locRefs] using mem_locRefs_of_mem_stepLocRefs h
+  | _ =>
+      simpa [AppFunLocRefs] using mem_locRefs_of_mem_stepLocRefs h
+
+private theorem activeRuntimeLinear_of_runtimeLinear :
+    ∀ {e : Term}, RuntimeLinear e → ActiveRuntimeLinear e
+  | Term.var _, _ => by simp [RuntimeLinear, ActiveRuntimeLinear, activeLocRefs]
+  | Term.abs _ _ body, h => by
+      have hBody : RuntimeLinear body := by
+        simpa [RuntimeLinear, locRefs] using h
+      simpa [ActiveRuntimeLinear, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := body) hBody
+  | Term.app e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.letBind _ e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.copy e, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.letpair _ _ e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.pair e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.fst _ e, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.snd _ e, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.unit, _ => by simp [RuntimeLinear, ActiveRuntimeLinear, activeLocRefs]
+  | Term.const _ _, _ => by simp [RuntimeLinear, ActiveRuntimeLinear, activeLocRefs]
+  | Term.add e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.mul e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine List.nodup_append.mpr ⟨activeRuntimeLinear_of_runtimeLinear h1,
+        activeRuntimeLinear_of_runtimeLinear h2, ?_⟩
+      intro ell hAct1 ell' hAct2 hEq
+      subst ell'
+      exact hSep ell
+        (mem_locRefs_of_mem_activeLocRefs hAct1)
+        ell (mem_locRefs_of_mem_activeLocRefs hAct2) rfl
+  | Term.sum e _, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.expand e _, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.uniformLike e _ _, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.grad _ _ _ body, h => by
+      have hBody : RuntimeLinear body := by
+        simpa [RuntimeLinear, locRefs] using h
+      simpa [ActiveRuntimeLinear, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := body) hBody
+  | Term.vmap _ _ _ body, h => by
+      have hBody : RuntimeLinear body := by
+        simpa [RuntimeLinear, locRefs] using h
+      simpa [ActiveRuntimeLinear, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := body) hBody
+  | Term.handle _ body clauses, h => by
+      have hSplit : (locRefs body ++ locRefsClauses clauses).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨hBody, _hClauses, _hSep⟩
+      simpa [ActiveRuntimeLinear, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := body) hBody
+  | Term.perform _ e, h => by
+      simpa [RuntimeLinear, ActiveRuntimeLinear, locRefs, activeLocRefs] using
+        activeRuntimeLinear_of_runtimeLinear (e := e) h
+  | Term.loc _, _ => by simp [RuntimeLinear, ActiveRuntimeLinear, activeLocRefs]
+
+mutual
+
+/-- Full runtime-linearity is a sufficient root invariant for the
+    stronger handler-aware surface: if a term has no duplicate runtime
+    locations anywhere, then the active footprint, one-step exposure
+    footprint, and recursive dormant-handler checks required by
+    `HandlerAwareRuntimeLinear` all follow structurally. -/
+theorem handlerAwareRuntimeLinear_of_runtimeLinear :
+    ∀ {e : Term}, RuntimeLinear e → HandlerAwareRuntimeLinear e
+  | Term.var _, _ => by simp [RuntimeLinear, HandlerAwareRuntimeLinear]
+  | Term.abs x t body, h => by
+      have hBody : RuntimeLinear body := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hBody⟩
+  | Term.app e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hFun hAct
+          exact hSep ell (mem_locRefs_of_mem_appFunLocRefs hFun)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hFun
+          exact hSep ell (mem_locRefs_of_mem_appFunLocRefs hFun)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+  | Term.letBind x e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+  | Term.copy e, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.letpair x y e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+  | Term.pair e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+  | Term.fst tRight e, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.snd tLeft e, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.unit, _ => by simp [HandlerAwareRuntimeLinear]
+  | Term.const _ _, _ => by simp [HandlerAwareRuntimeLinear]
+  | Term.add e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+  | Term.mul e1 e2, h => by
+      have hSplit : (locRefs e1 ++ locRefs e2).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨h1, h2, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear h1,
+        handlerAwareRuntimeLinear_of_runtimeLinear h2, ?_, ?_⟩
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_stepLocRefs hStep)
+            ell (mem_locRefs_of_mem_activeLocRefs hAct) rfl
+      · refine ⟨?_, ?_⟩
+        · intro ell hStep hAct
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+        · intro ell hAct hStep
+          exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+            ell (mem_locRefs_of_mem_stepLocRefs hStep) rfl
+  | Term.sum e d, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.expand e d, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.uniformLike e lo hi, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.grad x t tOut body, h => by
+      have hBody : RuntimeLinear body := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hBody⟩
+  | Term.vmap x t d body, h => by
+      have hBody : RuntimeLinear body := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hBody⟩
+  | Term.handle epsH body clauses, h => by
+      have hSplit : (locRefs body ++ locRefsClauses clauses).Nodup := by
+        simpa [RuntimeLinear, locRefs] using h
+      rcases List.nodup_append.mp hSplit with ⟨hBody, hClauses, hSep⟩
+      refine ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hBody,
+        handlerAwareRuntimeLinearClauses_of_runtimeLinear hClauses, ?_⟩
+      refine ⟨?_, ?_⟩
+      · intro ell hStep hAct
+        exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+          ell (mem_locRefsClauses_of_mem_stepLocRefsClauses hStep) rfl
+      · intro ell hAct hStep
+        exact hSep ell (mem_locRefs_of_mem_activeLocRefs hAct)
+          ell (mem_locRefsClauses_of_mem_stepLocRefsClauses hStep) rfl
+  | Term.perform op e, h => by
+      have hInner : RuntimeLinear e := by simpa [RuntimeLinear, locRefs] using h
+      exact ⟨activeRuntimeLinear_of_runtimeLinear h,
+        handlerAwareRuntimeLinear_of_runtimeLinear hInner⟩
+  | Term.loc _, _ => by simp [HandlerAwareRuntimeLinear]
+
+theorem handlerAwareRuntimeLinearClauses_of_runtimeLinear :
+    ∀ {clauses : List (EffectLabel × String × String × Term)},
+      (locRefsClauses clauses).Nodup → HandlerAwareRuntimeLinearClauses clauses
+  | [], _ => by simp [HandlerAwareRuntimeLinearClauses]
+  | (op, x, k, hb) :: rest, h => by
+      have hSplit : (locRefs hb ++ locRefsClauses rest).Nodup := by
+        simpa [locRefsClauses] using h
+      rcases List.nodup_append.mp hSplit with ⟨hHead, hRest, _hSep⟩
+      exact ⟨handlerAwareRuntimeLinear_of_runtimeLinear hHead,
+        handlerAwareRuntimeLinearClauses_of_runtimeLinear hRest⟩
+
+end
+
 /-- Every deep-active term has a duplicate-free active footprint at its
     root. -/
 theorem deepActiveRuntimeLinear_active

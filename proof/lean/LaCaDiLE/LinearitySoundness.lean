@@ -412,6 +412,19 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
           · exact Or.inr
               (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
 
+/-- Full-step entry point for the current runtime-invariant track.
+    A globally runtime-linear source term is strong enough to enter the
+    newer handler-aware surface in one step; the only remaining gaps are
+    the explicitly classified debt constructors. -/
+private theorem runtimeLinear_step_or_handlerAwareDebt
+    (c1 c2 : Config)
+    (h_step : Step c1 c2) :
+    RuntimeLinear c1.term →
+      HandlerAwareRuntimeLinear c2.term ∨ HandlerAwareRuntimeDebt c1 c2 := by
+  intro hRuntime
+  exact handlerAwareRuntimeLinear_step_or_debt c1 c2 h_step
+    (handlerAwareRuntimeLinear_of_runtimeLinear hRuntime)
+
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term)
