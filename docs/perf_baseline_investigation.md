@@ -271,5 +271,13 @@ python3 /tmp/perf-investigate/aggregate.py /tmp/perf-investigate/full_detail.log
   `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`; default behavior
   unchanged, no overhead when unset).
 - Diagnosis complete. Two bounded fixes identified.
-- **Awaiting ack** before applying fixes (per the prompt's mandatory
-  Step 3 report-back gate).
+- **Both fixes applied and pushed** after explicit ack:
+  - Commit `5eaefdb`: lowering quadratic
+    (`lower_program_to_library` 30.5 s → 0.046 s; 663× speedup).
+  - Commit `5ad5a6f`: unified `build_compiled_library_context`
+    (35.8 s → 16.1 s; eliminates the duplicated inference + annotation).
+- Combined Coral cold `compile_reef_context`: **~68 s → ~18 s**.
+- Coral cold `chelis test tests/` (63 tests): **81.6 s → 29.4 s**
+  (under the 30 s headline on the cold path, no warm cache needed).
+- chelis-std self-test corpus 205/205 still passes.
+- Workspace gate green (3 known HIP failures only).
