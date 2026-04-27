@@ -188,6 +188,10 @@ def activeCtxLocRefs : EvalCtx → List Loc
 def LocRefsSeparated (xs ys : List Loc) : Prop :=
   ∀ ell, ell ∈ xs → ell ∉ ys
 
+/-- Symmetric separation of runtime-location mentions. -/
+def LocRefsDisjoint (xs ys : List Loc) : Prop :=
+  LocRefsSeparated xs ys ∧ LocRefsSeparated ys xs
+
 private theorem locRefsSeparated_left_of_nodup_append
     {xs ys : List Loc}
     (h : (xs ++ ys).Nodup) :
@@ -328,6 +332,147 @@ theorem mem_activeLocRefs_multiPlug
       simp [multiPlug, activeChainLocRefs]
   | cons E Es ih =>
       simp [multiPlug, activeChainLocRefs, mem_activeLocRefs_plug, ih, or_left_comm, or_assoc]
+
+mutual
+
+/-- One-step exposure footprint for runtime locations. This tracks
+    locations that can become active while the term evaluates in its
+    current surrounding context, but treats lambda/grad/vmap bodies as
+    barriers until the enclosing eliminator fires. Handler clauses are
+    included because a handled `perform` can expose them in one step. -/
+def StepLocRefs : Term → List Loc
+  | Term.var _ => []
+  | Term.abs _ _ _ => []
+  | Term.app e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.letBind _ e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.copy e => StepLocRefs e
+  | Term.letpair _ _ e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.pair e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.fst _ e => StepLocRefs e
+  | Term.snd _ e => StepLocRefs e
+  | Term.unit => []
+  | Term.const _ _ => []
+  | Term.add e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.mul e1 e2 => StepLocRefs e1 ++ StepLocRefs e2
+  | Term.sum e _ => StepLocRefs e
+  | Term.expand e _ => StepLocRefs e
+  | Term.uniformLike e _ _ => StepLocRefs e
+  | Term.grad _ _ _ _ => []
+  | Term.vmap _ _ _ _ => []
+  | Term.handle _ body clauses => StepLocRefs body ++ StepLocRefsClauses clauses
+  | Term.perform _ e => StepLocRefs e
+  | Term.loc ell => [ell]
+
+/-- Clause companion to `StepLocRefs`. -/
+def StepLocRefsClauses :
+    List (EffectLabel × String × String × Term) → List Loc
+  | [] => []
+  | (_, _, _, hb) :: rest => StepLocRefs hb ++ StepLocRefsClauses rest
+
+end
+
+/-- Extra one-step exposure for the function side of an application:
+    once the function is a value, beta can immediately expose the body
+    of an abstraction even though `StepLocRefs` treats abstractions as
+    barriers during ordinary contextual stepping. -/
+def AppFunLocRefs : Term → List Loc
+  | Term.abs _ _ body => StepLocRefs body
+  | e => StepLocRefs e
+
+mutual
+
+/-- Final handler-aware runtime invariant. This keeps the recursive
+    deep-active checks on subterms and clause bodies, but additionally
+    requires the current active surface to stay disjoint from any
+    locations that can be exposed in one step by dormant handlers or,
+    in application position, by beta-opening an abstraction. -/
+def HandlerAwareRuntimeLinear : Term → Prop
+  | Term.var _ => True
+  | Term.abs x t body =>
+      ActiveRuntimeLinear (Term.abs x t body) ∧
+      HandlerAwareRuntimeLinear body
+  | Term.app e1 e2 =>
+      ActiveRuntimeLinear (Term.app e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1) ∧
+      LocRefsDisjoint (AppFunLocRefs e1) (activeLocRefs e2)
+  | Term.letBind x e1 e2 =>
+      ActiveRuntimeLinear (Term.letBind x e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1)
+  | Term.copy e =>
+      ActiveRuntimeLinear (Term.copy e) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.letpair x y e1 e2 =>
+      ActiveRuntimeLinear (Term.letpair x y e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1)
+  | Term.pair e1 e2 =>
+      ActiveRuntimeLinear (Term.pair e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1)
+  | Term.fst tRight e =>
+      ActiveRuntimeLinear (Term.fst tRight e) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.snd tLeft e =>
+      ActiveRuntimeLinear (Term.snd tLeft e) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.unit => True
+  | Term.const _ _ => True
+  | Term.add e1 e2 =>
+      ActiveRuntimeLinear (Term.add e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1)
+  | Term.mul e1 e2 =>
+      ActiveRuntimeLinear (Term.mul e1 e2) ∧
+      HandlerAwareRuntimeLinear e1 ∧
+      HandlerAwareRuntimeLinear e2 ∧
+      LocRefsDisjoint (StepLocRefs e1) (activeLocRefs e2) ∧
+      LocRefsDisjoint (StepLocRefs e2) (activeLocRefs e1)
+  | Term.sum e d =>
+      ActiveRuntimeLinear (Term.sum e d) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.expand e d =>
+      ActiveRuntimeLinear (Term.expand e d) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.uniformLike e lo hi =>
+      ActiveRuntimeLinear (Term.uniformLike e lo hi) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.grad x t tOut body =>
+      ActiveRuntimeLinear (Term.grad x t tOut body) ∧
+      HandlerAwareRuntimeLinear body
+  | Term.vmap x t d body =>
+      ActiveRuntimeLinear (Term.vmap x t d body) ∧
+      HandlerAwareRuntimeLinear body
+  | Term.handle epsH body clauses =>
+      ActiveRuntimeLinear (Term.handle epsH body clauses) ∧
+      HandlerAwareRuntimeLinear body ∧
+      HandlerAwareRuntimeLinearClauses clauses ∧
+      LocRefsDisjoint (StepLocRefsClauses clauses) (activeLocRefs body)
+  | Term.perform op e =>
+      ActiveRuntimeLinear (Term.perform op e) ∧
+      HandlerAwareRuntimeLinear e
+  | Term.loc _ => True
+
+/-- Clause companion to `HandlerAwareRuntimeLinear`. -/
+def HandlerAwareRuntimeLinearClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, _, _, hb) :: rest =>
+      HandlerAwareRuntimeLinear hb ∧
+      HandlerAwareRuntimeLinearClauses rest
+
+end
 
 /-- Every deep-active term has a duplicate-free active footprint at its
     root. -/
