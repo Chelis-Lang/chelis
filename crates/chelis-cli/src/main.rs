@@ -1183,19 +1183,33 @@ fn cmd_test(
     // up-front "is this a reef package?" gate.
     let _ = chelis_reef::prepare_reef_graph(&cwd)?;
 
-    // Phase G' — the worker is currently on the legacy
-    // `compile_with_reef_graph + prepare_eval` path because
-    // `check_linearity_with_context` empirically rejects patterns the
-    // monolithic checker accepts on chelis-std. Building the
-    // `CompiledContext` here is therefore wasted work for the test
-    // path; we leave the build wired up but skip it until the
-    // linearity divergence is fixed and the worker can actually
-    // benefit from the cached state. `chelis eval` and `chelis check`
-    // already route through `compile_reef_context` directly and
-    // continue to benefit.
-    let context_tempfile_opt: Option<CompiledContextTempfile> = None;
-    // (Suppress unused-import warnings while the build is gated off.)
-    let _ = env::var("CHELIS_REEF_HOME").map(PathBuf::from);
+    // Phase G' (final) — with the linearity divergence root-caused
+    // (annotate_phase0e_program now registers prelude ADTs, matching
+    // the _with_context variants) and the worker re-wired through
+    // prepare_eval_in_context, the parent re-enables the
+    // `compile_reef_context` build. The encoded context is handed to
+    // each per-file worker via a bincode tempfile + env var; workers
+    // rehydrate the library snapshot ONCE per spawn instead of
+    // re-running the full reef graph + compile pipeline per file.
+    //
+    // Best-effort: failures fall back to the legacy reef-graph path,
+    // which is still correct (just slower). Today the most common
+    // miss is LocalRegistry packages whose `source_digests` step
+    // isn't yet implemented.
+    let reef_home_path = env::var("CHELIS_REEF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/reef_home_unused"));
+    let context_tempfile_opt: Option<CompiledContextTempfile> =
+        match chelis_compiler_api::compile_reef_context(&reef_home_path, &cwd) {
+            Ok(context) => {
+                let context_bytes = context.encode()?;
+                drop(context);
+                let tempfile = CompiledContextTempfile::write(&context_bytes)?;
+                drop(context_bytes);
+                Some(tempfile)
+            }
+            Err(_err) => None,
+        };
 
     let mut passed: usize = 0;
     let mut failed: usize = 0;
@@ -2048,18 +2062,15 @@ fn prepare_eval_in_exec_context(
 ) -> Result<PreparedTestEval, String> {
     match exec_context {
         TestExecutionContext::Context(ctx) => {
-            // Reef-rewrite the synth decls against the prepared graph
-            // (mirrors the legacy path's `compile_with_reef_graph` work
-            // for name resolution), then format the rewritten program
-            // into Surf source for `prepare_eval_in_context`. The
-            // library decls (chelis-std + reef deps + own modules) are
-            // already inside the `CompiledContext` — only the synth
-            // decls (the file-under-test plus its `__chelis_test_N`
-            // calls) re-run through parse/check/lower.
-            let prepared =
-                chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
-                    .map_err(|e| e.to_string())?;
-            let source_text = chelis_surf::format::format_program(&prepared.decls);
+            // `prepare_eval_in_context` runs the reef rewriter
+            // (rewrite_entry_decls_with_reef_graph) and the
+            // _with_context type/effect/linearity stages internally
+            // against the cached library snapshot. Per-file work is
+            // just the test file's ~10 decls, not the full reef
+            // graph's ~50 modules. Avoid the legacy
+            // compile_with_reef_graph call here — it would re-check
+            // the entire library and defeat the cache.
+            let source_text = chelis_surf::format::format_program(synth_decls);
             chelis_compiler_api::compiler::prepare_eval_in_context(ctx, &source_text)
                 .map(PreparedTestEval::InContext)
                 .map_err(|err| {
