@@ -104,6 +104,42 @@ def zeroCotangent : Typ → Term
   | Typ.arrow _ _ _     => Term.unit
   | Typ.tyVar _         => Term.unit
 
+/-- Split a cotangent seed for primal type `t` into two cotangent seeds
+    of type `cotangentType t`. Tensor leaves use `copy`; product
+    cotangents recurse structurally; currently non-differentiable leaves
+    duplicate `unit`. The continuation receives the next fresh counter
+    after the split's binder names so callers can keep later adjoint
+    binders disjoint from the split scaffold. -/
+def splitCotangentSeedFrom
+    (t : Typ) (gSeed : Term) (n : Nat)
+    (k : Nat → Term → Term → Term) : Term :=
+  match t with
+  | Typ.tensor _ =>
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      Term.letpair gA gB (Term.copy gSeed)
+        (k (n + 2) (Term.var gA) (Term.var gB))
+  | Typ.pair t1 t2 =>
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      Term.letpair gA gB gSeed
+        (splitCotangentSeedFrom t1 (Term.var gA) (n + 2)
+          (fun n' gA1 gA2 =>
+            splitCotangentSeedFrom t2 (Term.var gB) n'
+              (fun n'' gB1 gB2 =>
+                k n'' (Term.pair gA1 gB1) (Term.pair gA2 gB2))))
+  | Typ.unit =>
+      k n Term.unit Term.unit
+  | Typ.arrow _ _ _ =>
+      k n Term.unit Term.unit
+  | Typ.tyVar _ =>
+      k n Term.unit Term.unit
+termination_by sizeOf t
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
 mutual
 
 /-- The adjoint term-to-term transformation, counter-threaded form.
@@ -263,5 +299,167 @@ def adjoint (body : Term) (x : String) (gSeed : Term) : Term :=
 def adjointClauses (clauses : List (EffectLabel × String × String × Term))
                    (x : String) (body : Term) (gSeed : Term) : Term :=
   adjointClausesFrom clauses x body gSeed 0
+
+mutual
+
+/-- Typed companion to `adjointFrom`. The legacy transform stays
+    untyped for compatibility with the current proof surface; this
+    companion threads the primal result type explicitly so handler
+    clauses can split structured cotangent seeds recursively rather than
+    relying on tensor-only `copy`. Branches whose current structural
+    placeholder still lacks enough type information fall back to the
+    legacy transform. -/
+def adjointTypedFrom
+    (body : Term) (bodyTy : Typ) (x : String) (gSeed : Term) (n : Nat) : Term :=
+  match body with
+  | Term.var y =>
+      if y = x then
+        adjointLeaf gSeed n
+      else
+        adjointLeaf gSeed n
+  | Term.const _ _ =>
+      adjointLeaf gSeed n
+  | Term.unit =>
+      adjointLeaf gSeed n
+  | Term.loc _ =>
+      adjointLeaf gSeed n
+  | Term.add e1 e2 =>
+      match bodyTy with
+      | Typ.tensor _ =>
+          splitCotangentSeedFrom bodyTy gSeed n
+            (fun n' gA gB =>
+              let adjA := freshName "adjA" n'
+              Term.letBind adjA
+                (adjointTypedFrom e1 bodyTy x gA (n' + 1))
+                (adjointTypedFrom e2 bodyTy x gB (n' + 1)))
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.mul e1 e2 =>
+      match bodyTy with
+      | Typ.tensor _ =>
+          splitCotangentSeedFrom bodyTy gSeed n
+            (fun n' gA gB =>
+              let a := freshName "a" n'
+              let aTape := freshName "aTape" n'
+              let b := freshName "b" (n' + 1)
+              let bTape := freshName "bTape" (n' + 1)
+              let y := freshName "y" (n' + 2)
+              let adjA := freshName "adjA" (n' + 3)
+              Term.letpair a aTape (Term.copy e1)
+                (Term.letpair b bTape (Term.copy e2)
+                  (Term.letBind y
+                    (Term.mul (Term.var a) (Term.var b))
+                    (Term.letBind adjA
+                      (adjointTypedFrom e1 bodyTy x
+                        (Term.mul gA (Term.var bTape)) (n' + 4))
+                      (adjointTypedFrom e2 bodyTy x
+                        (Term.mul gB (Term.var aTape)) (n' + 4))))))
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.sum e d =>
+      match bodyTy with
+      | Typ.tensor ds =>
+          adjointTypedFrom e (Typ.tensor (ins ds d)) x (Term.expand gSeed d) n
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.expand e d =>
+      match bodyTy with
+      | Typ.tensor ds =>
+          adjointTypedFrom e (Typ.tensor (rem ds d)) x (Term.sum gSeed d) n
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.uniformLike e _ _ =>
+      match bodyTy with
+      | Typ.tensor _ =>
+          adjointTypedFrom e bodyTy x gSeed n
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.letBind _ _ e2 =>
+      adjointTypedFrom e2 bodyTy x gSeed n
+  | Term.letpair _ _ _ e2 =>
+      adjointTypedFrom e2 bodyTy x gSeed n
+  | Term.pair e1 e2 =>
+      match bodyTy with
+      | Typ.pair t1 t2 =>
+          Term.letpair (freshName "gA" n) (freshName "gB" n) gSeed
+            (Term.letBind (freshName "adjA" n)
+              (adjointTypedFrom e1 t1 x (Term.var (freshName "gA" n)) (n + 3))
+              (adjointTypedFrom e2 t2 x (Term.var (freshName "gB" n)) (n + 3)))
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.fst tRight e =>
+      adjointTypedFrom e (Typ.pair bodyTy tRight) x
+        (Term.pair gSeed (zeroCotangent tRight)) n
+  | Term.snd tLeft e =>
+      adjointTypedFrom e (Typ.pair tLeft bodyTy) x
+        (Term.pair (zeroCotangent tLeft) gSeed) n
+  | Term.copy e =>
+      match bodyTy with
+      | Typ.pair (Typ.tensor ds) (Typ.tensor _) =>
+          Term.letpair (freshName "gA" n) (freshName "gB" n) gSeed
+            (adjointTypedFrom e (Typ.tensor ds) x
+              (Term.add (Term.var (freshName "gA" n))
+                        (Term.var (freshName "gB" n))) (n + 3))
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.abs _ _ e =>
+      match bodyTy with
+      | Typ.arrow _ tOut _ =>
+          adjointTypedFrom e tOut x gSeed n
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.app _ _ =>
+      adjointFrom body x gSeed n
+  | Term.grad _ _ tOut e =>
+      adjointTypedFrom e tOut x gSeed n
+  | Term.vmap _ _ _ _ =>
+      adjointFrom body x gSeed n
+  | Term.perform op e =>
+      match bodyTy with
+      | Typ.unit =>
+          adjointTypedFrom e (opArgType op) x gSeed n
+      | _ =>
+          adjointFrom body x gSeed n
+  | Term.handle _ body clauses =>
+      adjointTypedClausesFrom clauses x body bodyTy gSeed n
+termination_by (sizeOf body, 1)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
+/-- Typed companion to `adjointClausesFrom`. The handled result type
+    `bodyTy` lets clause threading reuse `splitCotangentSeedFrom`, so
+    structured cotangent seeds no longer have to go through tensor-only
+    `copy` at this surface. -/
+def adjointTypedClausesFrom
+    (clauses : List (EffectLabel × String × String × Term))
+    (x : String) (body : Term) (bodyTy : Typ) (gSeed : Term) (n : Nat) : Term :=
+  match clauses with
+  | [] =>
+      adjointTypedFrom body bodyTy x gSeed n
+  | (_op, _xv, _kv, hb) :: rest =>
+      splitCotangentSeedFrom bodyTy gSeed n
+        (fun n' gA gB =>
+          let adjHb := freshName "adjHb" n'
+          Term.letBind adjHb
+            (adjointTypedFrom hb bodyTy x gA (n' + 1))
+            (adjointTypedClausesFrom rest x body bodyTy gB (n' + 1)))
+termination_by (sizeOf clauses + sizeOf body + 1, 0)
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
+end
+
+/-- Compatibility shim for `adjointTypedFrom`. -/
+def adjointTyped (body : Term) (bodyTy : Typ) (x : String) (gSeed : Term) : Term :=
+  adjointTypedFrom body bodyTy x gSeed 0
+
+/-- Compatibility shim for `adjointTypedClausesFrom`. -/
+def adjointTypedClauses (clauses : List (EffectLabel × String × String × Term))
+    (x : String) (body : Term) (bodyTy : Typ) (gSeed : Term) : Term :=
+  adjointTypedClausesFrom clauses x body bodyTy gSeed 0
 
 end LaCaDiLE
