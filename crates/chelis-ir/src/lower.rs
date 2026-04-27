@@ -110,33 +110,73 @@ pub struct LoweredLibrary {
 /// the only difference is that `symbol_table`, `program_defs`,
 /// `program_types`, and `linearity` are also exposed.
 pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut sub_t = std::time::Instant::now();
+    let log_sub = |label: &str, t: &mut std::time::Instant| {
+        if detail_profile {
+            eprintln!("lower_sub: {:>8.4}s {}", t.elapsed().as_secs_f64(), label);
+            *t = std::time::Instant::now();
+        }
+    };
+
     let program_type_env = program.type_env();
     let lowered_names = top_level_lowering_map(program.exprs(), program_type_env);
+    log_sub("top_level_lowering_map", &mut sub_t);
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered(expr, program.exprs(), program_type_env) {
             assert_phase0e_lowerable(expr);
             assert_phase0e_typed(expr);
         }
     });
+    log_sub("assertions_loop", &mut sub_t);
     let program_types: HashMap<String, TensorType> = program
         .type_env()
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
+    log_sub("program_types_build", &mut sub_t);
     let program_defs = collect_top_level_defs(program.exprs());
+    log_sub("collect_top_level_defs", &mut sub_t);
     let mut ctx = LowerCtx::new(
         program_types.clone(),
         program_defs.clone(),
         program.linearity().clone(),
     );
+    log_sub("lower_ctx_new", &mut sub_t);
+    let mut last_dag_size: usize = ctx.dag.len();
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
                 && top_level_expr_is_lowered(expr, program.exprs(), program_type_env))
         {
+            let t0 = if detail_profile {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            // For pre-flight gate counting, we want to know how often
+            // top_level_expr_is_lowered fires (each call rebuilds the
+            // lowering map — quadratic).
             ctx.lower_top_level(expr);
+            if let Some(t0) = t0 {
+                let elapsed = t0.elapsed();
+                let nodes = ctx.dag.len();
+                let added = nodes.saturating_sub(last_dag_size);
+                last_dag_size = nodes;
+                let name = top_level_expr_name(expr).unwrap_or("<anon>");
+                eprintln!(
+                    "lower_decl: {:>8.4}s nodes_added={:>5} dag_total={:>6} {}",
+                    elapsed.as_secs_f64(),
+                    added,
+                    nodes,
+                    name
+                );
+            }
         }
     });
+    log_sub("lower_top_level_loop", &mut sub_t);
 
     // Collect the pre-DCE name -> NodeId mapping from the lowering ctx's
     // top-level bindings. We flatten tuple-decomposed defs into dotted
@@ -147,8 +187,10 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     for (name, value) in ctx.bindings.iter() {
         flatten_binding_into(name, value, &mut pre_dce_table);
     }
+    log_sub("flatten_bindings", &mut sub_t);
 
     let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    log_sub("dce", &mut sub_t);
 
     // Renumber the symbol table through DCE's remap. Names whose nodes
     // were eliminated drop out of the table.
@@ -156,6 +198,7 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
         .into_iter()
         .filter_map(|(name, old)| remap.get(&old).map(|new| (name, *new)))
         .collect();
+    log_sub("renumber_symbol_table", &mut sub_t);
 
     LoweredLibrary {
         dag: dce_dag,

@@ -134,12 +134,27 @@ pub fn check_phase0e_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, Inf
 /// [`check_phase0e_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut sub_t = std::time::Instant::now();
+    let log_sub = |label: &str, t: &mut std::time::Instant| {
+        if detail_profile {
+            eprintln!(
+                "build_type_env_sub: {:>8.4}s {}",
+                t.elapsed().as_secs_f64(),
+                label
+            );
+            *t = std::time::Instant::now();
+        }
+    };
     // Start from the empty (builtins + prelude ADTs) state.
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
     // Library Phase 0e declared-type lookup.
     let library_phase0e = build_phase0e_type_env(library_exprs);
+    log_sub("build_phase0e_type_env_initial", &mut sub_t);
 
     let mut result = infer_phase0e_program_with_state(
         library_exprs,
@@ -148,9 +163,13 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
         /* combined_phase0e_for_validate = */ &library_phase0e,
         /* run_validate_passes_on = */ None,
     );
+    log_sub("infer_phase0e_program_with_state", &mut sub_t);
     validate_phase0e_program(library_exprs, &library_phase0e, &mut result.errors);
+    log_sub("validate_phase0e_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
+    log_sub("validate_tensor_precisions", &mut sub_t);
     suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -166,6 +185,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
             library_def_names.insert(name.to_string());
         }
     }
+    log_sub("collect_library_def_names", &mut sub_t);
 
     // Drain accumulated errors back into the state's storage; they were
     // empty above so this is a no-op, but the call site is symmetric
@@ -188,7 +208,9 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
             annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
         })
         .collect();
+    log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
     let library_phase0e_annotated = build_phase0e_type_env(&library_annotated);
+    log_sub("build_phase0e_type_env_from_annotated", &mut sub_t);
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -227,6 +249,20 @@ pub fn check_phase0e_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut sub_t = std::time::Instant::now();
+    let log_sub = |label: &str, t: &mut std::time::Instant| {
+        if detail_profile {
+            eprintln!(
+                "check_phase0e_sub: {:>8.4}s {}",
+                t.elapsed().as_secs_f64(),
+                label
+            );
+            *t = std::time::Instant::now();
+        }
+    };
     let mut state = context.inner().clone();
 
     // New-code declared types (Phase 0e) layered on top of library's.
@@ -237,6 +273,7 @@ pub fn check_phase0e_with_context(
         .chain(new_phase0e.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    log_sub("build_phase0e_and_combine", &mut sub_t);
 
     // Library is already validated; only run validate / inference on
     // new exprs. The Phase 0e env passed to inference is the new-code's
@@ -248,16 +285,20 @@ pub fn check_phase0e_with_context(
         &combined_phase0e,
         /* run_validate_passes_on = */ None,
     );
+    log_sub("infer_phase0e_program_with_state", &mut sub_t);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined Phase 0e env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
     validate_phase0e_program(new_exprs, &combined_phase0e, &mut result.errors);
+    log_sub("validate_phase0e_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
+    log_sub("validate_tensor_precisions", &mut sub_t);
     suppress_unbound_for_cycle_members_against_context(
         new_exprs,
         &context.inner().library_def_names,
         &mut result.errors,
     );
+    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     if !result.errors.is_empty() {
         return Err(result);
     }
@@ -265,6 +306,7 @@ pub fn check_phase0e_with_context(
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
     let annotated_exprs = annotate_phase0e_program_with_context(context, new_exprs);
+    log_sub("annotate_phase0e_program_with_context", &mut sub_t);
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
@@ -275,6 +317,7 @@ pub fn check_phase0e_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
     }
+    log_sub("annotated_type_env_build", &mut sub_t);
     Ok(CheckedProgram::from_parts(
         annotated_exprs,
         annotated_type_env,
@@ -427,7 +470,18 @@ fn infer_phase0e_program_with_state(
         state.env.bind(name.clone(), scheme);
     }
 
+    // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
+    // one stderr line per top-level decl with its name and inference time.
+    // Aggregated by name in caller scripts to attribute cost per module.
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     for expr in top_level_decl_items(exprs) {
+        let t0 = if detail_profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         infer_top_level(
             expr,
             &mut state.env,
@@ -438,6 +492,15 @@ fn infer_phase0e_program_with_state(
             &mut typed_nodes,
             &mut total_nodes,
         );
+        if let Some(t0) = t0 {
+            let elapsed = t0.elapsed();
+            let name = top_level_decl_name(expr).unwrap_or("<anon>");
+            eprintln!(
+                "infer_phase0e_decl: {:>8.4}s {}",
+                elapsed.as_secs_f64(),
+                name
+            );
+        }
     }
 
     for warning in chelis_deep::validate::validate(exprs) {
@@ -816,6 +879,20 @@ fn body_is_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
 /// wrapper if present. Deep sources produced by Surf `module X` desugaring
 /// have every def/defsig/deftype inside this wrapper; without flattening,
 /// top-level walkers see a single `(module ...)` and miss everything inside.
+/// Extract the name of a top-level decl (`def`, `defsig`, `deftype`,
+/// `typealias`) for profile instrumentation. Returns `None` for shapes
+/// that don't have a leading symbol.
+fn top_level_decl_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    let tag = get_tag(list)?;
+    if !matches!(tag, "def" | "defsig" | "deftype" | "typealias") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
+}
+
 fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
     fn push<'a>(expr: &'a deep::Expr, out: &mut Vec<&'a deep::Expr>) {
         if let deep::Expr::List(list, _) = expr
@@ -1984,8 +2061,16 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
         );
     }
 
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
+        let t0 = if detail_profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
@@ -2000,7 +2085,19 @@ fn annotate_phase0e_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
             &mut total_nodes,
         );
 
-        annotated.push(annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg));
+        let annotated_expr = annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg);
+        if let Some(t0) = t0 {
+            let elapsed = t0.elapsed();
+            let label = top_level_decl_name(expr)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<anon>".to_string());
+            eprintln!(
+                "annotate_phase0e_decl: {:>8.4}s {}",
+                elapsed.as_secs_f64(),
+                label
+            );
+        }
+        annotated.push(annotated_expr);
     }
 
     annotated
@@ -2036,8 +2133,16 @@ fn annotate_phase0e_program_with_context(
         );
     }
 
+    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
+        let t0 = if detail_profile {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let mut step_errors = Vec::new();
         let mut typed_nodes = 0;
         let mut total_nodes = 0;
@@ -2052,16 +2157,42 @@ fn annotate_phase0e_program_with_context(
             &mut total_nodes,
         );
 
-        annotated.push(annotate_expr_with_scope(
+        let annotated_expr = annotate_expr_with_scope(
             expr,
             &state.env,
             &state.var_gen,
             &state.subst,
             &state.adt_reg,
-        ));
+        );
+        if let Some(t0) = t0 {
+            let elapsed = t0.elapsed();
+            // exprs here is at the module-wrapper level; pull a label.
+            let label = top_level_decl_name(expr)
+                .map(|s| s.to_string())
+                .or_else(|| module_name(expr).map(|m| format!("module:{m}")))
+                .unwrap_or_else(|| "<anon>".to_string());
+            eprintln!(
+                "annotate_phase0e_decl: {:>8.4}s {}",
+                elapsed.as_secs_f64(),
+                label
+            );
+        }
+        annotated.push(annotated_expr);
     }
 
     annotated
+}
+
+/// Extract the module name from a `(module {} name ...)` expr for
+/// profile labeling. Returns `None` if `expr` is not a module.
+fn module_name(expr: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("module") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
 }
 
 fn annotate_expr_with_scope(
