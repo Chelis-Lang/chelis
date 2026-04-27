@@ -995,6 +995,7 @@ private def adjointExpandGapGradTmp : String :=
 
 private def adjointExpandGapGradCounter : Nat :=
   gradAdjointCounter adjointExpandGapGradX adjointExpandGapGradSeed
+    adjointExpandGapBody
 
 private def adjointExpandGapGradClauseBody : Term :=
   Term.app (Term.var "k") (Term.var "p")

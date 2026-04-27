@@ -5232,19 +5232,27 @@ private theorem preservation_aux
       subst t
       let gs := gradSeedName x body
       let tmp := gradResultName x body
-      let n := gradAdjointCounter x gs
+      let n := gradAdjointCounter x gs body
       let epsAdj : EffectRow := EffectRow.union epsBody [EffectLabel.accum]
       let epsHandle : EffectRow := EffectRow.removeOps epsAdj [EffectLabel.accum]
       let clauseBody := Term.app (Term.var "k") (Term.var "p")
       let clauses : List (EffectLabel × String × String × Term) :=
         [(EffectLabel.accum, "p", "k", clauseBody)]
       have hFullLen : maxStringLength [x, gs] < n := by
-        simpa [n, gs, gradAdjointCounter] using Nat.lt_succ_self (maxStringLength [x, gs])
+        have hmaxle : maxStringLength [x, gs] ≤
+            maxStringLength (gs :: x :: (freeVars body ++ boundVars body)) := by
+          simp [maxStringLength]
+          apply max_le
+          · exact le_trans (le_max_left x.toList.length (maxStringLength (freeVars body ++ boundVars body)))
+              (le_max_right gs.toList.length (max x.toList.length (maxStringLength (freeVars body ++ boundVars body))))
+          · exact le_max_left gs.toList.length
+              (max x.toList.length (maxStringLength (freeVars body ++ boundVars body)))
+        exact Nat.lt_of_le_of_lt hmaxle (Nat.lt_succ_self _)
       have hFreshFull :
           AdjointNamesFresh n
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx) := by
         apply adjointNamesFresh_of_length_bound
-        simpa [linearCtxDom, n, gs] using hFullLen
+        simpa [linearCtxDom, n, gs, gradAdjointCounter] using hFullLen
       have hxle : maxStringLength [x] ≤ maxStringLength [x, gs] := by
         have : x ∈ [x, gs] := by simp
         simpa [maxStringLength] using mem_maxStringLength this
@@ -5253,7 +5261,7 @@ private theorem preservation_aux
             ([(x, some (Typ.tensor ds))] : LinearCtx) := by
         apply adjointNamesFresh_of_length_bound
         have hSmallLen : maxStringLength [x] < n := Nat.lt_of_le_of_lt hxle hFullLen
-        simpa [linearCtxDom, n, gs] using hSmallLen
+        simpa [linearCtxDom, n, gs, gradAdjointCounter] using hSmallLen
       have hAdj :
           HasType [] Sigma
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)

@@ -1164,11 +1164,11 @@ def gradResultName (x : String) (e : Term) : String :=
   freshNameAvoiding (gradSeedName x e :: x :: (freeVars e ++ boundVars e))
 
 /-- Start counter for the adjoint transform inside `E-Grad`. Choosing a
-    counter above the exposed binder-name lengths keeps all internal
-    `freshName` binders disjoint from the grad parameter and seed
-    binders. -/
-def gradAdjointCounter (x gs : String) : Nat :=
-  maxStringLength [x, gs] + 1
+    counter above every visible name in the source body keeps all
+    internal `freshName` binders disjoint from the grad parameter, the
+    seed binder, and the body's free or bound names. -/
+def gradAdjointCounter (x gs : String) (e : Term) : Nat :=
+  maxStringLength (gs :: x :: (freeVars e ++ boundVars e)) + 1
 
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
@@ -1432,7 +1432,7 @@ inductive Step : Config → Config → Prop
                 (Term.letBind (gradResultName x e)
                   (Term.handle [EffectLabel.accum]
                     (adjointFrom e x (Term.var (gradSeedName x e))
-                      (gradAdjointCounter x (gradSeedName x e)))
+                      (gradAdjointCounter x (gradSeedName x e) e))
                     [(EffectLabel.accum, "p", "k",
                       Term.app (Term.var "k") (Term.var "p"))])
                   (Term.var x)))⟩
