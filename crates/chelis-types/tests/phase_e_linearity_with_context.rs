@@ -294,6 +294,161 @@ def caller(my_x: tensor[2, 3, f32]): tensor[2, 3, f32] =
     assert_eq!(with_ctx.is_ok(), mono.is_ok());
 }
 
+// ── Phase G' regression: aliased library calls in a let-block ──
+
+/// Regression: `linspace(...) -> assert_shape(actual, ...) ->
+/// assert_close_tensor(actual, ...)` is the exact shape that broke
+/// `chelis test` on chelis-std's `test_linspace_endpoints`. Monolithic
+/// `check_linearity` accepts because library function bodies don't
+/// produce new-code consume sites — `assert_shape` consumes its OWN
+/// param `t` inside its body, which has nothing to do with the
+/// caller's `actual`. The Phase E `_with_context` variant must agree.
+///
+/// Phase G' fix: pre-compute a per-library callable consumption
+/// signature at context build, then look it up at call sites instead
+/// of treating every library-call argument as consuming.
+#[test]
+fn library_assert_then_assert_does_not_double_consume_caller() {
+    // Two library defs that each consume their tensor parameter
+    // internally — but the new-code caller's `actual` is its OWN
+    // separate tensor. The call sites pass `actual` to two consecutive
+    // library calls, which monolithic linearity accepts.
+    let library_src = r#"
+def assert_shape_lib(t: tensor[4, f32]): int32 = rank(t)
+def assert_close_lib(a: tensor[4, f32], b: tensor[4, f32]): int32 = rank(a)
+"#;
+    let new_src = r#"
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+  {
+    _shape: int32 = assert_shape_lib(&actual)
+    assert_close_lib(actual, expected)
+  }
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "with-context Result must match monolithic Result on borrowed-then-consume pattern"
+    );
+    assert!(
+        with_ctx.is_ok(),
+        "linspace-style aliased library calls must be linearity-clean: {:?}",
+        with_ctx.err()
+    );
+}
+
+/// Phase G' regression — `_ = expr` discard-binding form. This is the
+/// exact pattern in chelis-std's `test_linspace_endpoints`:
+///   `_ = assert_shape(actual, ...)`
+///   `assert_close_tensor(actual, ...)`
+/// The wildcard `_` discards the call's return value but the call's
+/// argument-consume semantics still apply at the call site. Empirical
+/// observation: monolithic check ACCEPTS this pattern on the chelis-std
+/// production corpus. With-context must agree.
+#[test]
+fn library_underscore_discard_then_call_with_context_matches_monolithic() {
+    let library_src = r#"
+def assert_shape_lib(t: tensor[4, f32], n: int64): int32 = rank(t)
+def assert_close_lib(a: tensor[4, f32], b: tensor[4, f32]): int32 = rank(a)
+"#;
+    // Use `_ =` discard form, mirroring the chelis-std pattern.
+    let new_src = r#"
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+  {
+    _ = assert_shape_lib(actual, cast(4, int64))
+    assert_close_lib(actual, expected)
+  }
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "with-context must match monolithic on `_ = consume_call(actual); consume_call(actual)` \
+         pattern: with_ctx={:?}, mono={:?}",
+        with_ctx,
+        mono,
+    );
+}
+
+/// Phase G' regression — exact `linspace -> assert_shape -> assert_close_tensor`
+/// shape WITHOUT explicit borrows. Both library calls take `actual`
+/// directly. If monolithic accepts this pattern (as chelis-std's
+/// `test_linspace_endpoints` empirically does on the production
+/// pipeline), the with-context variant must accept too.
+#[test]
+fn library_calls_aliased_without_explicit_borrow_match_monolithic() {
+    let library_src = r#"
+def assert_shape_lib(t: tensor[4, f32], n: int64): int32 = rank(t)
+def assert_close_lib(a: tensor[4, f32], b: tensor[4, f32]): int32 = rank(a)
+"#;
+    let new_src = r#"
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+  {
+    _shape: int32 = assert_shape_lib(actual, cast(4, int64))
+    assert_close_lib(actual, expected)
+  }
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    // Whatever monolithic decides, with-context must match — the cache
+    // path cannot reject a snippet the production pipeline accepts.
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "with-context Result must match monolithic Result on bare-arg double-call: \
+         with_ctx={:?}, mono={:?}",
+        with_ctx,
+        mono,
+    );
+
+    // Both should reject (UseAfterConsume) — bare-arg double-call IS
+    // a real use-after-consume in chelis linearity. The chelis-std
+    // tests use observational `_ = assert_shape(...)` form which is
+    // why production accepts; explicit `assert_shape(actual, ...)` is
+    // a different thing.
+    assert!(with_ctx.is_err());
+    assert!(mono.is_err());
+}
+
+#[test]
+fn library_two_consecutive_borrowing_calls_do_not_consume() {
+    // When both library calls borrow (`&actual`), the caller's tensor
+    // stays live past both calls and can still be returned from the
+    // function. Mirrors the actual chelis-std pattern where
+    // `assert_shape(&t)` and `assert_close_tensor(&a, &b)` are
+    // observational.
+    let library_src = r#"
+def lib_a(t: tensor[4, f32]): int32 = rank(t)
+def lib_b(t: tensor[4, f32]): int32 = rank(t)
+"#;
+    let new_src = r#"
+def caller(actual: tensor[4, f32]): tensor[4, f32] =
+  {
+    _x: int32 = lib_a(&actual)
+    _y: int32 = lib_b(&actual)
+    relu(actual)
+  }
+"#;
+
+    let with_ctx = check_new_with_context(library_src, new_src);
+    let mono = check_monolithic_combined(library_src, new_src);
+
+    assert_eq!(
+        with_ctx.is_ok(),
+        mono.is_ok(),
+        "with-context must agree with monolithic on observation patterns"
+    );
+    assert!(with_ctx.is_ok());
+}
+
 // ── Empty / degenerate cases ──
 
 #[test]

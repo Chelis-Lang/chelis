@@ -236,6 +236,138 @@ fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
     assert_eq!(combined_by_name, many_by_name);
 }
 
+/// Phase G' — host runtime parity. A library that exposes a
+/// non-tensor-typed function (string body) cannot be evaluated through
+/// the lowered DAG; the host evaluator must see the library def in its
+/// `top_level_defs` table to resolve the call. Pre-G' this errored
+/// `unknown runtime name <library_internal_name>` because
+/// `evaluate_host_program_filtered` only iterated `program.exprs()`,
+/// missing every library def.
+#[test]
+fn eval_in_context_resolves_library_string_call_in_host_runtime() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+
+    fs::write(
+        root.join("reef.toml"),
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+    ).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(
+        root.join("mylib/reef.toml"),
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+    ).expect("write mylib reef.toml");
+    // String concatenation lives in the host runtime path (no tensor
+    // lowering). New-code calls into it will fail unless the
+    // CompiledContext's library defs are seeded into the runtime's
+    // `top_level_defs` table.
+    fs::write(
+        root.join("mylib/src/text.ch"),
+        "module Mylib.Text\nexport (greet)\n\n\
+         def greet(who: string) -> string = string_concat(\"hello, \", who)\n",
+    )
+    .expect("write text.ch");
+    fs::write(
+        root.join("reef.lock"),
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+    ).expect("write reef.lock");
+
+    // Use a NON-fn top-level binding (`name = expr`, not `def name -> T = expr`)
+    // so the host evaluator's `top_level_order` includes it for eager
+    // resolution. `def name -> T = body` desugars to a 0-arg fn and is
+    // explicitly excluded from `top_level_order`, so it never triggers
+    // the runtime lookup that surfaces this bug. The `chelis test`
+    // worker's synthesized `__chelis_test_k = test_k()` shape (see
+    // `chelis_cli::cmd_internal_test_file`) is the canonical example
+    // of a non-fn top-level call into a library function.
+    let snippet = "module App.Eval\nimport Mylib.Text (greet)\n\n\
+                   greeting = greet(\"world\")\n";
+
+    let formatted = format_library_plus_snippet(&root, snippet);
+    let baseline = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: formatted,
+        bindings: BTreeMap::new(),
+    })
+    .expect("baseline eval");
+    let baseline_named = collect_named_roots_json(&baseline.roots, &["greeting"]);
+
+    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
+    let result_named = collect_named_roots_json(&result.roots, &["greeting"]);
+
+    assert_eq!(
+        baseline_named, result_named,
+        "Phase G' — eval_in_context must resolve library string-call \
+         through host-runtime top_level_defs, matching the monolithic baseline"
+    );
+}
+
+/// Phase G' — same parity check, but verified end-to-end after the
+/// CompiledContext round-trips through bincode (the worker path used
+/// by `chelis test`). Catches a host-runtime regression that ships in
+/// the wire-bytes but not in the in-process-only path.
+#[test]
+fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+    fs::write(
+        root.join("reef.toml"),
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+    ).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(
+        root.join("mylib/reef.toml"),
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\nmodule_prefix = \"Mylib\"\n",
+    ).expect("write mylib reef.toml");
+    fs::write(
+        root.join("mylib/src/text.ch"),
+        "module Mylib.Text\nexport (label)\n\n\
+         def label(prefix: string, n: int64) -> string = string_concat(prefix, to_string(n))\n",
+    )
+    .expect("write text.ch");
+    fs::write(
+        root.join("reef.lock"),
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.2.7\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+    ).expect("write reef.lock");
+
+    let snippet = "module App.Eval\nimport Mylib.Text (label)\n\n\
+                   caption = label(\"n=\", cast(7, int64))\n";
+
+    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    // Round-trip through bincode (mirrors the worker tempfile bridge).
+    let bytes = bincode::serialize(&ctx).expect("serialize");
+    let restored: CompiledContext = bincode::deserialize(&bytes).expect("deserialize");
+    let result = eval_in_context(&restored, snippet).expect("eval_in_context after decode");
+    let post_named = collect_named_roots_json(&result.roots, &["caption"]);
+
+    let formatted = format_library_plus_snippet(&root, snippet);
+    let baseline = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: formatted,
+        bindings: BTreeMap::new(),
+    })
+    .expect("baseline");
+    let baseline_named = collect_named_roots_json(&baseline.roots, &["caption"]);
+
+    assert_eq!(
+        baseline_named, post_named,
+        "Phase G' — round-tripped CompiledContext must still resolve library calls"
+    );
+}
+
 #[test]
 fn check_in_context_accepts_well_typed_snippet() {
     let (_dir, root) = library_fixture();

@@ -13,8 +13,8 @@ use chelis_surf::ast::{
 use chelis_types::{CheckedProgram, errors::CheckError};
 
 use crate::runtime::{
-    RuntimeTensorValue, evaluate_host_program_filtered, lookup_runtime_value_for_root,
-    runtime_value_to_schema,
+    RuntimeTensorValue, evaluate_host_program_filtered, evaluate_host_program_with_library,
+    lookup_runtime_value_for_root, runtime_value_to_schema,
 };
 use crate::schema::{
     BatchRequest, BatchResult, BatchResultEnvelope, CheckResult, CompileRequest, CompileResult,
@@ -467,6 +467,19 @@ fn compile_new_source_in_context(
     let mut dag_for_eval = composed_dag;
     dag_for_eval.set_roots(new_root_ids);
 
+    // Phase G' — carry the library defs + lowered classification into
+    // the runtime. Without this, the host evaluator's `top_level_defs`
+    // would see only new code's defs and would error
+    // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
+    // on any new-code call into a library function.
+    let library_runtime = LibraryRuntime {
+        exprs: context.library_checked.annotated_exprs().to_vec(),
+        lowered_names: crate::runtime::library_lowered_names(
+            context.library_checked.annotated_exprs(),
+            context.library_checked.type_env(),
+        ),
+    };
+
     Ok(CompiledSource {
         checked: new_checked,
         dag: dag_for_eval,
@@ -474,6 +487,7 @@ fn compile_new_source_in_context(
         tensor_root_names: new_tensor_root_names,
         named_roots,
         forward_nodes_by_name,
+        library_runtime: Some(library_runtime),
     })
 }
 
@@ -676,11 +690,27 @@ fn eval_compiled(
     // top-levels are eagerly evaluated. This is what lets a single compile
     // feed many per-test evaluations in `chelis test` without every test
     // paying for the others' module-init side effects.
-    let host_outcome = evaluate_host_program_filtered(
-        &compiled.checked,
-        &tensor_values_by_name,
-        selected_root_names,
-    )
+    //
+    // Phase G' — when `compiled.library_runtime` is `Some`, route through
+    // the library-aware evaluator entry point so library `def`s (e.g.
+    // chelis-std functions) are reachable from new-code calls. Without
+    // this carry-over, the runtime errored
+    // `unknown runtime name pkg__chelis__std__...`.
+    let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
+        evaluate_host_program_with_library(
+            &compiled.checked,
+            &library.exprs,
+            Some(&library.lowered_names),
+            &tensor_values_by_name,
+            selected_root_names,
+        )
+    } else {
+        evaluate_host_program_filtered(
+            &compiled.checked,
+            &tensor_values_by_name,
+            selected_root_names,
+        )
+    }
     .map_err(|message| stage_error("eval", message, "eval_error"))?;
 
     let roots = compiled
@@ -834,6 +864,27 @@ struct CompiledSource {
     tensor_root_names: Vec<String>,
     named_roots: BTreeMap<String, NodeId>,
     forward_nodes_by_name: BTreeMap<String, NodeId>,
+    /// Phase G' — optional library context payload threaded into the
+    /// host evaluator so library `def` names resolve at runtime when
+    /// new code calls them. `None` on the monolithic `compile_source`
+    /// path (no separate library to merge); `Some` on the in-context
+    /// path produced by `compile_new_source_in_context`.
+    library_runtime: Option<LibraryRuntime>,
+}
+
+/// The library payload threaded through `eval_compiled` so the host
+/// evaluator's `top_level_defs` table can resolve library function
+/// references when called from new code.
+#[derive(Clone)]
+struct LibraryRuntime {
+    /// Library `def` annotated_exprs. Pulled into `top_level_defs`
+    /// before the new-code defs so new-code can shadow on collision.
+    exprs: Vec<DeepExpr>,
+    /// Library-side lowered-vs-host classification. Threaded through
+    /// so `evaluate_host_program_with_library`'s "is this a tensor
+    /// root vs a host-init" decision is byte-identical to what the
+    /// monolithic pipeline would have computed.
+    lowered_names: HashMap<String, bool>,
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
@@ -912,6 +963,7 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
         tensor_root_names,
         named_roots,
         forward_nodes_by_name,
+        library_runtime: None,
     })
 }
 

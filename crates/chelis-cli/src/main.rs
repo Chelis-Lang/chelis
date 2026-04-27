@@ -1028,10 +1028,12 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
 /// is unique per parent so two `chelis test` invocations cannot clobber
 /// each other, and (c) the Drop impl removes the file even on panic.
 struct CompiledContextTempfile {
+    #[allow(dead_code)]
     file: tempfile::NamedTempFile,
 }
 
 impl CompiledContextTempfile {
+    #[allow(dead_code)]
     fn write(bytes: &[u8]) -> Result<Self, String> {
         // Build the tempfile with a recognizable prefix so a stray copy is
         // easy to attribute back to `chelis test` if it ever leaks.
@@ -1057,6 +1059,7 @@ impl CompiledContextTempfile {
         Ok(Self { file })
     }
 
+    #[allow(dead_code)]
     fn path(&self) -> &Path {
         self.file.path()
     }
@@ -1112,6 +1115,29 @@ fn cmd_test(
         return Ok(0);
     }
 
+    // Phase G' — fast path: when `--filter <substring>` matches zero
+    // tests across every discovered file, skip the (expensive)
+    // `compile_reef_context` build entirely. The pre-G' code paid the
+    // full ~65 s parent overhead even for `chelis test --filter __no_match__`,
+    // a documented bottleneck in `docs/perf_baseline.md`. Surf-parsing
+    // each test file is ~10 ms; that's the ceiling we accept here.
+    //
+    // We do this BEFORE `prepare_reef_graph` runs so a no-match
+    // invocation pays only the file-walk + per-file parse cost.
+    if let Some(needle) = filter
+        && !any_file_has_filter_match(&test_files, &cwd, needle)?
+    {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        if json {
+            writeln!(out, "{{\"summary\":{{\"passed\":0,\"failed\":0}}}}")
+                .map_err(|e| e.to_string())?;
+        } else {
+            writeln!(out, "0 passed, 0 failed").map_err(|e| e.to_string())?;
+        }
+        return Ok(0);
+    }
+
     // Phase H: build the `CompiledContext` ONCE in the parent and hand it
     // to each per-file worker via a bincode-encoded tempfile. The
     // context wraps the lockfile-resolved package graph, the linked
@@ -1140,42 +1166,19 @@ fn cmd_test(
     // up-front "is this a reef package?" gate.
     let _ = chelis_reef::prepare_reef_graph(&cwd)?;
 
-    let reef_home_path = env::var("CHELIS_REEF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/reef_home_unused"));
-    // Now try to build the cacheable `CompiledContext`. This is
-    // best-effort: it fails today on packages whose deps are installed
-    // via `chelis reef install` (LocalRegistry) because
-    // `PreparedReefGraph::source_digests` is an explicit Phase I TODO
-    // for that source kind. Rather than refusing to run the test
-    // suite when the parent cannot build a `CompiledContext`, we fall
-    // back to spawning workers without the env var set — that drives
-    // the worker's legacy `prepare_reef_graph` path and preserves
-    // correctness end-to-end for the LocalRegistry case (at the cost
-    // of paying that walk per worker, the pre-Phase-H behavior).
-    // Path-dep + monorepo workflows (every chelis-std self-test, every
-    // Phase 0 example) keep the single-context fast path unchanged.
-    let context_tempfile_opt: Option<CompiledContextTempfile> =
-        match chelis_compiler_api::compile_reef_context(&reef_home_path, &cwd) {
-            Ok(context) => {
-                let context_bytes = context.encode()?;
-                // Drop the context after encoding — every worker
-                // rehydrates from the tempfile, so the parent does
-                // not need the in-memory copy past this point.
-                drop(context);
-                let tempfile = CompiledContextTempfile::write(&context_bytes)?;
-                drop(context_bytes);
-                Some(tempfile)
-            }
-            Err(_err) => {
-                // Silent fallback is acceptable here ONLY because the
-                // worker still runs the full reef graph + compile +
-                // eval pipeline; no test result is dropped. The
-                // performance regression vs the fast path is the
-                // documented LocalRegistry gap.
-                None
-            }
-        };
+    // Phase G' — the worker is currently on the legacy
+    // `compile_with_reef_graph + prepare_eval` path because
+    // `check_linearity_with_context` empirically rejects patterns the
+    // monolithic checker accepts on chelis-std. Building the
+    // `CompiledContext` here is therefore wasted work for the test
+    // path; we leave the build wired up but skip it until the
+    // linearity divergence is fixed and the worker can actually
+    // benefit from the cached state. `chelis eval` and `chelis check`
+    // already route through `compile_reef_context` directly and
+    // continue to benefit.
+    let context_tempfile_opt: Option<CompiledContextTempfile> = None;
+    // (Suppress unused-import warnings while the build is gated off.)
+    let _ = env::var("CHELIS_REEF_HOME").map(PathBuf::from);
 
     let mut passed: usize = 0;
     let mut failed: usize = 0;
@@ -1239,6 +1242,74 @@ fn cmd_test(
     }
 
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+/// Phase G' — pre-flight filter scan. Returns `true` if any test file
+/// contains at least one `def test_*` whose `<rel_display>::<name>`
+/// key contains the filter substring. Returns `false` when the filter
+/// matches zero tests across every file. A parse error on any file
+/// surfaces as `Err`; the caller treats that as "fall through to the
+/// normal path" because suppressing it here would silently swallow a
+/// real file-level failure.
+///
+/// This intentionally mirrors the per-file enumeration logic in
+/// `enumerate_test_fns` so the pre-flight is consistent with the
+/// per-worker filter check; it just runs with no library link, so it's
+/// dramatically cheaper than the full `compile_reef_context` walk.
+fn any_file_has_filter_match(
+    test_files: &[PathBuf],
+    cwd: &Path,
+    filter_needle: &str,
+) -> Result<bool, String> {
+    for file in test_files {
+        let rel_display = file
+            .strip_prefix(cwd)
+            .unwrap_or(file.as_path())
+            .display()
+            .to_string();
+        let source = match fs::read_to_string(file) {
+            Ok(s) => s,
+            // Unreadable file: don't short-circuit; let the normal path
+            // surface the read error as a per-file FAIL row.
+            Err(_) => return Ok(true),
+        };
+        let parsed = match chelis_surf::parser::parse_str(&source) {
+            Ok(p) => p,
+            // Parse error: same — let the normal path surface the
+            // file-level error.
+            Err(_) => return Ok(true),
+        };
+        let flat = flatten_module_decls(&parsed);
+        for decl in &flat {
+            let Decl::FunDef {
+                name,
+                params,
+                ret_ty,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+            // Same gating as enumerate_test_fns: nullary, test_-prefixed,
+            // unit-typed.
+            if !name.starts_with("test_") || name == "test_" {
+                continue;
+            }
+            if !params.is_empty() {
+                continue;
+            }
+            if let Some(ty) = ret_ty
+                && !is_unit_type(ty)
+            {
+                continue;
+            }
+            let key = format!("{rel_display}::{name}");
+            if key.contains(filter_needle) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1731,6 +1802,12 @@ enum TestExecutionContext {
 }
 
 impl TestExecutionContext {
+    /// Read-only borrow of the underlying reef graph. Currently only
+    /// surfaced through the in-context fast paths via the explicit
+    /// match arms; kept here for any caller that needs the raw graph
+    /// (e.g. a future direct compile pass) without cloning the
+    /// surrounding context.
+    #[allow(dead_code)]
     fn reef_graph(&self) -> &chelis_reef::PreparedReefGraph {
         match self {
             TestExecutionContext::Context(ctx) => ctx.reef_state(),
@@ -1889,10 +1966,19 @@ where
     Ok(())
 }
 
-/// File-level compile pre-check used by `run_test_file`. Routes through
-/// the (shared) reef-graph compile path; both `TestExecutionContext`
-/// variants expose a `PreparedReefGraph` (the in-context variant via
-/// `CompiledContext::reef_state()`).
+/// File-level compile pre-check used by `run_test_file`. Routes
+/// through `compile_with_reef_graph` regardless of which
+/// `TestExecutionContext` variant is active — this stage is a name-
+/// resolution + module-shape gate, NOT a full pipeline check. The
+/// full type/effect/linearity check happens later inside
+/// `prepare_eval_in_exec_context` (in-context path) or
+/// `prepare_eval` (legacy path); pre-G' the file-level gate also
+/// went through `compile_with_reef_graph`, so keeping it here
+/// preserves behavior. Routing the file-level gate through the
+/// stricter `check_in_context` would surface `_with_context`
+/// linearity-rejections that the monolithic checker accepts (e.g.
+/// chelis-std's `test_linspace_endpoints` two-call-on-same-arg
+/// pattern), making the in-context path strictly worse than legacy.
 fn compile_check_in_exec_context(
     exec_context: &TestExecutionContext,
     flat_decls: &[Decl],
@@ -1904,8 +1990,21 @@ fn compile_check_in_exec_context(
 
 /// Compile the synth_decls once and return a `PreparedEval` handle so
 /// per-test evals share the compile. Routes through the legacy
-/// `compile_with_reef_graph` + `prepare_eval` path, regardless of which
-/// `TestExecutionContext` variant supplied the reef graph.
+/// `compile_with_reef_graph` + `prepare_eval` path regardless of
+/// which `TestExecutionContext` variant is active.
+///
+/// Phase G' — the in-context fast path (`prepare_eval_in_context`)
+/// is wired into `chelis-compiler-api` and works on its own bench
+/// (`phase_g_compiled_context` tests pass), but `chelis_types`'s
+/// `check_linearity_with_context` rejects patterns the monolithic
+/// `check_linearity` accepts on the chelis-std corpus (the
+/// `_ = assert_shape(actual, ...); assert_close_tensor(actual, ...)`
+/// shape in `test_linspace_endpoints`). Routing the test worker
+/// through the in-context path therefore breaks chelis-std's
+/// self-tests and Coral's tests. Until the linearity divergence is
+/// root-caused, the worker stays on the legacy path; the parent's
+/// `compile_reef_context` work is wasted for `chelis test`, but the
+/// correctness contract holds.
 fn prepare_eval_in_exec_context(
     exec_context: &TestExecutionContext,
     synth_decls: &[Decl],
@@ -2076,6 +2175,10 @@ fn eval_module_init(
         return None;
     }
 
+    // Phase G' — module-init evaluation. Routes through legacy
+    // `compile_with_reef_graph` + `eval_selected`. The in-context
+    // path is unblocked for `chelis eval`/`check` consumers but not
+    // for `chelis test` until the linearity divergence is fixed.
     let prepared = match chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), flat_decls)
     {
         Ok(p) => p,
@@ -2089,14 +2192,12 @@ fn eval_module_init(
                 source: source_text,
                 bindings: BTreeMap::new(),
             };
-            Ok(chelis_compiler_api::compiler::eval_selected(
-                request,
-                &module_roots,
-            ))
+            Ok(chelis_compiler_api::compiler::eval_selected(request, &module_roots).map(|_| ()))
         },
         timeout,
         &format!("module-init timeout after {}s", timeout.as_secs()),
     );
+
     match outcome {
         Err(msg) => Some(msg),
         Ok(Ok(_)) => None,

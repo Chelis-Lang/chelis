@@ -66,36 +66,77 @@ pub(crate) fn evaluate_host_program_filtered(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
-    let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    evaluate_host_program_with_library(program, &[], None, tensor_bindings, selected_roots)
+}
+
+/// Phase G' — host-runtime entry that seeds the `top_level_defs` table
+/// with library defs in addition to the new-code program. This is the
+/// host-side parity counterpart to `lower_program_with_context`: when
+/// new code calls a library function (e.g. `Std.Time.is_leap_year`),
+/// `eval_app` looks up that name through `lookup_top_level_def`, and
+/// the function body must be reachable. Pre-Phase-G' the runtime only
+/// saw `program.exprs()`, so library names errored as `unknown runtime
+/// name`.
+///
+/// Library defs are registered FIRST, then new-code defs, so on a name
+/// collision the new-code def shadows the library def — mirroring the
+/// type-env stacking semantics in `check_phase0e_with_context`.
+///
+/// `library_lowered_names` is the optional library-side
+/// lowered-vs-host classification, threaded through so a library def
+/// that the lowering pass identifies as "lives in the tensor DAG, not
+/// in the host runtime" stays out of the host runtime's eager-eval
+/// list. The new code's lowering map (computed locally below) merges
+/// on top.
+pub(crate) fn evaluate_host_program_with_library(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
+    // Lowered classification: start with library's (if provided), then
+    // overlay the new-code program's. New-code wins on shadow.
+    let new_lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    let mut lowered_names: HashMap<String, bool> = HashMap::new();
+    if let Some(lib) = library_lowered_names {
+        lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+    lowered_names.extend(new_lowered_names);
+
+    // ADT field map covers both library and new-code constructors so a
+    // record-pattern match on a library ADT in new code resolves field
+    // names correctly.
+    let mut adt_fields = collect_adt_ctor_fields(library_exprs);
+    adt_fields.extend(collect_adt_ctor_fields(program.exprs()));
+
     let mut top_level_defs = HashMap::new();
     let mut top_level_order = Vec::new();
-    let adt_fields = collect_adt_ctor_fields(program.exprs());
-    for expr in top_level_items(program.exprs()) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some("def") {
-            continue;
-        }
-        let kids = children(list);
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(body) = kids.get(1) else {
-            continue;
-        };
-        top_level_defs.insert(name.to_string(), body.clone());
-        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
-        if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
-            let selected = match selected_roots {
-                None => true,
-                Some(filter) => filter.iter().any(|s| s == name),
-            };
-            if selected {
-                top_level_order.push(name.to_string());
-            }
-        }
-    }
+
+    // Register library defs FIRST. New-code defs will overwrite on
+    // name collision below — matching the Phase C type-env shadow rule
+    // (new code wins).
+    register_top_level_defs(
+        library_exprs,
+        &lowered_names,
+        selected_roots,
+        &mut top_level_defs,
+        &mut top_level_order,
+        /* register_runtime_order = */ false,
+    );
+    // Register new-code defs. New-code is the only source of eager
+    // module-init bindings in `top_level_order` — library was already
+    // checked + lowered at context-build time and any side effects
+    // would have happened then; re-running them on every per-test
+    // worker is exactly the regression we're fixing.
+    register_top_level_defs(
+        program.exprs(),
+        &lowered_names,
+        selected_roots,
+        &mut top_level_defs,
+        &mut top_level_order,
+        /* register_runtime_order = */ true,
+    );
 
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
@@ -116,6 +157,58 @@ pub(crate) fn evaluate_host_program_filtered(
         host_bindings: ctx.bindings,
         transcript: ctx.transcript,
     })
+}
+
+fn register_top_level_defs(
+    exprs: &[Expr],
+    lowered_names: &HashMap<String, bool>,
+    selected_roots: Option<&[String]>,
+    top_level_defs: &mut HashMap<String, Expr>,
+    top_level_order: &mut Vec<String>,
+    register_runtime_order: bool,
+) {
+    for expr in top_level_items(exprs) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        top_level_defs.insert(name.to_string(), body.clone());
+        if !register_runtime_order {
+            continue;
+        }
+        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
+        if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
+            let selected = match selected_roots {
+                None => true,
+                Some(filter) => filter.iter().any(|s| s == name),
+            };
+            if selected {
+                top_level_order.push(name.to_string());
+            }
+        }
+    }
+}
+
+/// Compute a lowered-vs-host classification map for a slice of
+/// library exprs, using its own type-env. Phase G' threads this from
+/// the `CompiledContext`'s `library_checked` into the host runtime so
+/// the new-code lowering map merges with library state instead of
+/// re-deriving the wrong answer for library names that shadow
+/// builtins.
+pub(crate) fn library_lowered_names(
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+) -> HashMap<String, bool> {
+    top_level_lowering_map(library_exprs, library_type_env)
 }
 
 fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {

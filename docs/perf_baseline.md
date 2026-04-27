@@ -282,6 +282,84 @@ bench reproducible so a future regression triggers visible noise. The success cr
 recorded there is "bench script exits 0 and JSON output contains numbers for every
 named row." The 30 s contract will only be added once the bottleneck above is fixed.
 
+## Phase G' re-bench (2026-04-26)
+
+Phase G' addressed the four bugs documented above; the re-bench numbers
+below replace the post-cache baseline ONLY in the sense that they sit
+on a later commit. The original Phase J baseline above remains the
+historical record of where the cache work landed empty-handed.
+
+### Scope outcomes
+
+| Scope | Status | Effect on benches |
+|---|---|---|
+| 1. Host-runtime registration gap | FIXED | `eval_in_context` resolves library `def`s; `unknown runtime name pkg__chelis__std__...` does not fire on snippets that call into chelis-std host-side functions. Locked in `crates/chelis-compiler-api/tests/phase_g_compiled_context.rs::eval_in_context_resolves_library_string_call_*`. |
+| 2. Linearity over-strict on aliased tensor refs | INVESTIGATED, NOT FIXED | `check_linearity_with_context` empirically rejects `_ = lib_consume(t); other_lib_consume(t, ...)` patterns the monolithic `check_linearity` accepts (chelis-std `test_linspace_endpoints`). Direct experiment: monolithic-over-`library_checked.annotated_exprs() ++ new_checked.annotated_exprs()` ALSO rejects, indicating the divergence is structural in how cached library annotation differs from the format-then-reparse legacy path, NOT in `_with_context`'s walking strategy. Root cause not isolated within Phase G'. |
+| 3. Wire `eval_in_context` into `cmd_test` worker | DEFERRED | Implementation drafted (`PreparedTestEval` enum, `prepare_eval_in_context` worker call); reverted to legacy `compile_with_reef_graph + prepare_eval` path because the linearity divergence (#2) breaks chelis-std's self-test corpus and Coral's tests when the worker uses the in-context path. The `chelis-compiler-api` API surface (`prepare_eval_in_context`, `eval_in_context`, `eval_many_in_context`, `check_in_context`) is correct on its own bench (`phase_g_compiled_context` + `phase_h_*` integration tests pass) and external CLI consumers (`chelis eval --file`, `chelis check`) DO use it. The cmd_test worker stays on legacy until the linearity divergence is root-caused. |
+| 4. Skip cache build on no-match filter | FIXED | `chelis test --filter __no_match__` returns in 0.003 s instead of 64.88 s (21,000× speedup). Pre-flight surf-parse scan in `cmd_test` short-circuits before any reef-graph or context-build work. |
+
+### Re-bench numbers (Coral, post-Phase-G')
+
+Same workstation, same Coral checkout commit `53b2fd6` with the path-dep
+edits documented above.
+
+| Bench | Pre-cache `c13ea7a` | Post-cache `e3b7ccc` | Phase G' | Hit target? |
+|---|---|---|---|---|
+| Coral `chelis test tests/` (63 tests) | 6 m 40.1 s | 9 m 17.8 s | **6 m 38.0 s** | NO (target < 30 s; on par with pre-cache) |
+| Coral `chelis test tests/ --filter __no_match__` | 0.07 s | 64.88 s | **0.003 s** | YES — 21,000× speedup |
+| Coral `chelis check src/core.ch` | 28.76 s | 28.93 s | n/a — unchanged (legacy) | n/a |
+
+The 6 m 38 s post-G' figure is parity with pre-cache (-29% vs post-cache,
+matching pre-cache wall-clock). It does NOT hit the 30 s target. The
+remaining bottleneck is the worker's per-file `prepare_eval` cost
+(library re-compile every spawn) — exactly the load-bearing fix that
+Scope 3 was supposed to deliver. With Scope 3 deferred, the cache wins
+for `chelis eval --file` / `chelis check` (which consume the in-context
+API directly) but NOT for `chelis test` (which runs through the
+worker's legacy path until the linearity divergence is fixed).
+
+### What's blocking the 30 s target
+
+Root-causing the linearity divergence is the only remaining gate.
+Reproduction:
+
+```sh
+cd /home/jeff/Documents/scratch/chelis/.../packages/chelis-std
+target/release/chelis test tests/tensor/construct.ch --filter test_linspace_endpoints
+# Expected (legacy worker path): PASS
+# In-context worker path: FAIL with `variable 'actual' was already consumed by call to 'pkg__chelis__std__Std__Test__assert_shape' at offset 0`
+```
+
+The in-context path's `compile_new_source_in_context` calls
+`check_linearity_with_context(library_checked, new_checked)`. Both args
+are correctly built (`check_phase0e_with_context` annotates the new
+exprs against the library's TypeEnv; library was already linearity-
+checked at context build). Yet the two-call-on-`actual` pattern is
+flagged as use-after-consume even though the format-then-reparse
+legacy path's monolithic `check_linearity(library_text + new_text)`
+accepts it. A direct comparison run from inside
+`compile_new_source_in_context` — concatenating
+`library_checked.annotated_exprs()` and `new_checked.annotated_exprs()`
+into one `CheckedProgram` and running monolithic `check_linearity` over
+the concatenation — ALSO rejects, so the bug is NOT in
+`_with_context`'s walking strategy. It's structural in either:
+
+1. how `library_checked.annotated_exprs()` (built once in
+   `compile_reef_context`) differs from the same library re-annotated
+   alongside new code in the legacy path; OR
+2. how `chelis_reef::rewrite_entry_decls_with_reef_graph` produces deep
+   AST with synthesized spans (the error reports both consume + reuse
+   sites at offset 0, suggesting span loss); OR
+3. some interaction between macro expansion of the library context vs
+   the legacy single-pass macro expansion over the combined source.
+
+Next investigation: dump
+`library_checked.annotated_exprs()[that_def].canonical_print()` vs the
+legacy path's deep-print of the same def from a format-reparse cycle,
+diff the two. If they differ, fix
+`compile_reef_context`'s annotation step. If they agree, the bug is in
+the new-code annotation interacting with the cached library type-env.
+
 ## See also
 
 - `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md` — the full phase plan
