@@ -259,6 +259,15 @@ pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Re
 /// requested root. That keeps the return shape a 1:1 mapping with `test_roots`
 /// (matching `chelis test`'s per-root reporting) and is easier for callers
 /// than a mixed Result<Vec<_>> + compile-error channel.
+///
+/// **Deprecated since 0.2.7** — prefer
+/// [`eval_many_in_context`] with a [`crate::CompiledContext`]. The
+/// in-context path amortizes the library compile across every call so
+/// per-invocation work drops to just the new source.
+#[deprecated(
+    since = "0.2.7",
+    note = "use eval_many_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::eval_many_in_context"
+)]
 pub fn eval_many(request: EvalRequest, test_roots: &[String]) -> Vec<(String, Result<EvalResult>)> {
     let compiled = match compile_source(request.source_kind, &request.source) {
         Ok(compiled) => compiled,
@@ -308,6 +317,20 @@ impl PreparedEval {
 /// Compile a program once so downstream callers can cheaply evaluate
 /// specific roots against it many times. Used by `chelis test` to share
 /// one compile across every test in a file.
+///
+/// **Deprecated since 0.2.7** — prefer
+/// [`prepare_eval_in_context`] with a [`crate::CompiledContext`]. The
+/// in-context path keeps this function's amortization-across-roots
+/// guarantee but additionally amortizes the library compile across
+/// every CLI invocation that hits the same package, dropping cold
+/// `chelis test` and `chelis eval` startup from O(library) to O(new
+/// source). Retained for backward compatibility and as the
+/// `LocalRegistry` fallback path inside `chelis test` until
+/// `source_digests` gains `LocalRegistry` support.
+#[deprecated(
+    since = "0.2.7",
+    note = "use prepare_eval_in_context with a CompiledContext for ~5x faster amortized eval; see crates/chelis-compiler-api/src/compiler.rs::prepare_eval_in_context"
+)]
 pub fn prepare_eval(request: EvalRequest) -> Result<PreparedEval> {
     let compiled = compile_source(request.source_kind, &request.source)?;
     Ok(PreparedEval {
@@ -2052,6 +2075,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercises eval_many for behavior parity; deprecation is for external callers
 mod tests {
     use super::*;
     use crate::schema::ExecutionValue;

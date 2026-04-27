@@ -1,4 +1,5 @@
 //! RT-G adversarial probes for the Compiled Artifact Cache pipeline.
+#![allow(deprecated)] // baseline parity tests intentionally exercise prepare_eval
 //!
 //! Per the red-team contract, these tests deliberately probe
 //! compose-across-the-boundary behaviour where the implementer was likely

@@ -2086,13 +2086,17 @@ fn prepare_eval_in_exec_context(
                 chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
                     .map_err(|e| e.to_string())?;
             let source_text = chelis_surf::format::format_program(&prepared.decls);
-            chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+            // Phase K: `prepare_eval` is deprecated externally but retained
+            // as the LocalRegistry fallback path until source_digests grows
+            // LocalRegistry support. Silence the deprecation here — this
+            // is the canonical fallback.
+            #[allow(deprecated)]
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
                 source_kind: SourceKind::Surf,
                 source: source_text,
                 bindings: BTreeMap::new(),
-            })
-            .map(PreparedTestEval::Legacy)
-            .map_err(|err| {
+            });
+            prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
                 err.errors
                     .iter()
                     .map(|d| d.message.clone())

@@ -1,6 +1,7 @@
 //! Phase G acceptance tests: `compile_reef_context` + `eval_in_context`
 //! produce byte-identical eval output to the monolithic
 //! `prepare_eval(format(library + snippet))` baseline.
+#![allow(deprecated)] // baseline parity tests intentionally exercise prepare_eval
 //!
 //! Plus: bincode round-trip on `CompiledContext`, parity for
 //! `eval_many_in_context`, and a microbench locking a >= 10x speedup
