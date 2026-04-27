@@ -660,7 +660,10 @@ type system's extension points).
 which operations introduce randomness, which seed handlers cover them, and whether the
 computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating.
 This is a product feature for model-validation teams ("machine-generated certificate
-that your simulation is reproducible"). Full design:
+that your simulation is reproducible"). Now demo-blocking for regulated-finance
+prospects: the compile-time guarantee on the Random effect is shipped, the CLI tool
+that produces the audit artifact is the missing piece. Full design:
+`chelis_manifest_spec.md` (current concrete spec); historical context in
 `chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
 
 **Trust stack integration.** Shoals ships with example `@property` annotations for
@@ -678,6 +681,15 @@ pass), credibility artifacts (the shell verifies itself), and templates for
 customer-written properties. Convention: every domain shell ships canonical properties
 alongside its implementation code. Properties are NOT a separate shell — they are
 co-located with and version-controlled alongside the functions they constrain.
+
+**Reference implementations.** Shoals ships `references/` containing simple
+textbook-formula implementations of standard models: Black-Scholes call/put with
+Greeks, Heston, Vasicek, CIR, vanilla Monte Carlo pricer, standard portfolio risk
+measures. These are co-located with the production implementations in `src/`.
+Customer pattern: customer writes proprietary models in their own packages, uses
+Shoals references for standard models, writes properties that include
+`@property fn matches_reference(...)`. Full design:
+`chelis_reference_implementations_spec.md`.
 
 ### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
 
@@ -1070,15 +1082,32 @@ it became a documented known limitation.
 
 **Convention: domain shells ship canonical properties.** Every shell that targets a
 specific domain (Shoals for finance, Octant for LaTeX, future vertical shells)
-includes a `properties/` directory with reference `@property` functions. These are the
-onboarding entry point for new users (install the shell, run `chelis fuzz src/`, see
-the canonical properties pass) and the credibility proof that the shell's
-implementations satisfy standard domain invariants. The properties are co-located with
-the implementation, NOT packaged separately — a standalone "properties" shell with no
+includes a `properties/` directory with reference `@property` functions, and (where
+the domain has standard textbook models) a co-located `references/` directory with
+simple, obviously-correct reference implementations. These are the onboarding entry
+point for new users (install the shell, run `chelis fuzz src/`, see the canonical
+properties pass), the credibility proof that the shell's implementations satisfy
+standard domain invariants, and the spec artifact for the spec-correspondence
+property category. The properties and references are co-located with the
+implementation, NOT packaged separately — a standalone "properties" shell with no
 implementation code is an empty vessel.
 
-Implementation remains deferred until after the RLVR pipeline (Phase 4) but the design
-is locked. Full design: `chelis_trust_stack.md`.
+**Priority elevation.** `chelis fuzz` with first-class `@property` annotations is now
+demo-blocking for the first commercial CProof prospect. The trust stack pitch lives
+or dies on this being demonstrable. Specification is concrete (see
+`chelis_fuzz_spec.md`) and the build is a focused project, not a research
+investigation. Components: parser changes for `@property` and `@range`, type-directed
+input generation, counterexample minimizer, CLI subcommand. Move ahead of
+secondary-priority Phase 4 prep work.
+
+**`chelis manifest` priority elevation.** The compile-time guarantee on the Random
+effect is shipped. The CLI tool that produces the audit artifact is now demo-blocking
+for regulated-finance prospects. Specification is concrete (see
+`chelis_manifest_spec.md`). Build the subcommand and JSON output format. CI
+integration via `chelis manifest --check` as a gate.
+
+Full design: `chelis_trust_stack.md`, `chelis_fuzz_spec.md`,
+`chelis_manifest_spec.md`, `chelis_reference_implementations_spec.md`.
 
 ---
 

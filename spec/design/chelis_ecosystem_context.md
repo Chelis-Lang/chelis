@@ -37,15 +37,24 @@ opaque). This directly addresses the consequential computing concern: "I can't d
 a spec and ensure it's in the generated code." The answer: "You define the spec as
 properties. We verify the code satisfies them."
 
+Domain shells ship reference implementations alongside properties. The customer
+doesn't write a reference for standard models — Shoals provides Black-Scholes,
+Heston, Vasicek; future vertical shells provide their domain's standard models. The
+customer writes references only for proprietary models. The toolchain proves
+optimized implementations agree with references on random inputs. The customer
+reviews properties and references (short, declarative, human-readable), not generated
+code (long, optimized, opaque).
+
 Where this fits relative to the rest of the verification stack — and how it compares
 to the prevailing alternative:
 
 | Platform | Spec verification |
 |---|---|
-| Other AI codegen platforms | None — manual review and PDF specs that rot |
-| Chelis | Executable properties: domain invariants + reference-implementation correspondence, verified on random inputs via `chelis fuzz` |
+| Other AI codegen platforms | None (manual review, PDF specs that rot) |
+| Chelis | Executable properties + reference implementations: shell-provided references for standard models, customer-written properties for invariants and reference-correspondence, all verified by `chelis fuzz` on random inputs |
 
-Full design: `chelis_trust_stack.md`.
+Full design: `chelis_trust_stack.md`, `chelis_reference_implementations_spec.md`,
+`chelis_fuzz_spec.md`.
 
 ---
 

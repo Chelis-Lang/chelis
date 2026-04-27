@@ -114,6 +114,22 @@ The onboarding story: "Install Shoals. Run `chelis fuzz src/`. See 15 canonical 
 
 The convention is a hard rule: properties are co-located with the implementation they verify, NOT packaged as a separate "properties" shell. The `@property` infrastructure is in the compiler (`chelis fuzz`); the properties themselves are domain-specific and belong inside the domain shell. A standalone "finance properties" package with no implementation code is an empty vessel.
 
+### Reference Implementations as Spec Artifacts
+
+The "spec correspondence" property category requires a reference implementation to compare against. For standard domain models, the user does not write the reference — the domain shell provides it. Domain shells ship a `references/` directory alongside `properties/`, containing simple, obviously-correct implementations of standard models (Black-Scholes, Heston, Vasicek for finance; standard control laws for aerospace; etc.).
+
+The customer writes:
+- Properties (declarative invariants and reference-correspondence checks)
+- References for proprietary models that don't have a textbook formula
+
+The customer does NOT write:
+- References for standard models (provided by the shell)
+- The optimized implementations themselves (these are AI-generated or human-written, verified against references)
+
+This addresses the failure mode where AI generates code that's mathematically valid but implements the wrong of two plausible relationships. The reference is the disambiguator. The user reads the reference (5-10 lines, obvious-by-inspection) instead of the optimized implementation (50-200 lines, opaque).
+
+Full design: `chelis_reference_implementations_spec.md`.
+
 ### Level 3 -- Automated Static Analysis (future, power-tool, opt-in)
 
 A specialized analysis tool (working name: Beacon) that runs on the compiled tensor DAG and computes over-approximations of value ranges at each node. The user doesn't annotate anything. The tool infers properties automatically.

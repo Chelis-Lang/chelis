@@ -195,6 +195,8 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 **Canonical domain properties ship with domain shells.** Every domain shell includes a `properties/` directory containing reference `@property` functions for the domain's standard invariants. These are onboarding templates, credibility artifacts, and documentation-by-example. They are co-located with the implementation code they verify, NOT packaged as separate shells. `chelis fuzz src/` runs all properties against the shell's exports. Convention applies to Shoals (finance invariants — put-call parity, delta/gamma bounds, Monte Carlo convergence, no-arbitrage), Octant (round-trip and provenance invariants), and any future vertical shell. A standalone "properties" package with no implementation is an empty vessel; the convention exists so no future agent creates one.
 
+**Canonical references and properties co-located with domain shells.** Every domain shell that targets standard, well-defined models ships two co-located artifact directories: `references/` (simple, obviously-correct reference implementations) and `properties/` (invariants and `matches_reference` checks). These are not separate packages. Customers verify their own (or AI-generated) optimized implementations against the shell's references via `chelis fuzz`. Customers write their own references only for proprietary models. Convention applies to Shoals (finance), Octant (LaTeX bridge), and any future vertical shell. Full design: `chelis_reference_implementations_spec.md`.
+
 **Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with seed(n)` for Random (already used), `with_deterministic_random(sequence)` for exact output testing, `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
 
 **Lazy list fusion (future compiler optimization).** The tensor DAG fuses elementwise tensor operations. The host lane (lists, strings) is eager and creates intermediate allocations for chained `map`/`filter`/`fold`. A future compiler pass could fuse host-lane list operation chains into single-pass traversals, eliminating intermediates. Same principle as tensor fusion, applied to the host lane. Low priority — becomes relevant when profiling shows list allocation as a bottleneck in Coral string columns or Hull AST processing.
@@ -238,10 +240,16 @@ chelis test tests/foo.ch              # run a specific test file
 chelis test tests/ --filter erf       # run only tests matching "erf"
 chelis test tests/ --timeout 10       # per-test wall-clock timeout (seconds, default 30)
 chelis test tests/ --json             # emit newline-delimited JSON records instead of plain text
+chelis fuzz                           # discover properties in current package, run all
+chelis fuzz src/                      # explicit path
 chelis fuzz src/pricer.ch             # discover @property annotations, test on random inputs
 chelis fuzz src/ --trials 100000      # control sample count (default 10,000)
-chelis fuzz src/ --property delta     # filter to properties matching "delta"
+chelis fuzz src/ --filter delta       # filter to properties matching "delta"
+chelis fuzz src/ --seed 42            # reproducible fuzzing run
+chelis fuzz src/ --json               # machine-readable output for CI integration
 ```
+
+`chelis manifest` and `chelis fuzz` are demo-blocking for the first commercial CProof prospect. Full CLI surface and JSON schemas: `chelis_manifest_spec.md`, `chelis_fuzz_spec.md`.
 
 This is the intended stable surface for project-level documentation.
 `chelis deep` defaults to canonical pretty Deep; `--flat` is the explicit flat-output
