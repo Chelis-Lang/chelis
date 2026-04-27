@@ -42,10 +42,10 @@ impl Env {
     pub fn instantiate(&self, scheme: &Scheme, var_gen: &mut VarGen) -> Type {
         let mut subst = Subst::new();
         for &tv in &scheme.tvars {
-            subst.types.insert(tv, var_gen.fresh_type());
+            subst.insert_type(tv, var_gen.fresh_type());
         }
         for &dv in &scheme.dvars {
-            subst.dims.insert(dv, var_gen.fresh_dim());
+            subst.insert_dim(dv, var_gen.fresh_dim());
         }
         subst.apply(&scheme.body)
     }
