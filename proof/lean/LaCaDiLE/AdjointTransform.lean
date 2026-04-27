@@ -32,9 +32,14 @@
 --     forward-pass sequencing shape from the tape design notes. Phase 2
 --     T9 still needs the real forward/backward ordering.
 --   * `pair`, `fst`, `snd`, `abs`, `app`, `uniformLike`, `grad`, `vmap`,
---     `perform` all structurally recurse on sub-terms with a vestigial
---     `perform accum` at the base; the T0 §4 rules for these are
---     Phase 2 T9 work.
+--     `perform` all still use structural placeholders. The new typed
+--     `snd` / `pair` / `expand` witness in `AdjointTyping.lean` shows
+--     this is no longer just “unfinished T0 §4 work”: a monomorphic
+--     tensor seed is insufficient for product/projection paths. The
+--     real Phase 2 fix is either:
+--       (a) a typed cotangent-seed transform, or
+--       (b) an explicit restriction/normalization pass that removes
+--           products and projections from grad bodies before AD.
 --   * `loc` and `unit` are leaves.
 --   * `handle` recurses into clause bodies via `adjointClauses`.
 

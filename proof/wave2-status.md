@@ -47,9 +47,9 @@ The current theorem-shape boundary is now explicit in Lean:
   - why unconditional runtime preservation is false
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
-- `AdjointTyping.lean` now makes the remaining `expand` blocker concrete in both directions:
+- `AdjointTyping.lean` now makes the remaining AD blocker concrete in both directions:
   - the old concrete `letBind` / `letpair` routing bug is repaired
-  - but the current public surface is still false for a second structural `snd` / `pair` / `expand` route, so the real debt is theorem shape rather than proof search
+  - but the current public surface is still false for a second structural `snd` / `pair` / `expand` route, so the real debt is not proof search; it is the mismatch between a monomorphic tensor-seed transform and product/projection paths
 
 ## Remaining Critical Path
 
@@ -57,10 +57,12 @@ The current theorem-shape boundary is now explicit in Lean:
    The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, and the old concrete `E-Grad` routing bug is repaired too, but `tgrad` preservation is still not honestly settled: the public `adjointFrom` theorem surface remains admitted, and Lean now contains a second typed `snd` / `pair` / `expand` false witness showing that surface is still too strong. The remaining AD blockers are therefore the broader `expand` theorem-shape repair plus the separate `mul` tape/effect-row case.
+   The repaired `handle` branch is closed, and the old concrete `E-Grad` routing bug is repaired too, but `tgrad` preservation is still not honestly settled: the public `adjointFrom` theorem surface remains admitted, and Lean now contains a second typed `snd` / `pair` / `expand` false witness showing that surface is still too strong. The remaining AD blockers are therefore:
+   - replace the current monomorphic tensor-seed transform with either typed cotangent seeds or an explicit restriction/normalization to a product-free grad fragment
+   - separately, solve the `mul` tape/effect-row case
 
 ## Next Moves
 
 1. State the correct stronger cross-boundary handler-aware runtime invariant, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for theorem shape.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies.
-3. Replace the false public `expand` theorem surface with one that carries the source-typing/dimension relation structural recursion actually needs, re-close the `tgrad` preservation branch against that honest theorem surface, finish the remaining admitted `mul` / `expand` adjoint cases, and then return to the AD-correctness wave.
+3. Replace the false public AD surface with one that matches the actual transform domain: either typed cotangent seeds or an explicit product-free grad fragment. Then re-close the `tgrad` preservation branch against that honest surface, finish the remaining admitted `mul` / `expand` adjoint cases, and return to the AD-correctness wave.

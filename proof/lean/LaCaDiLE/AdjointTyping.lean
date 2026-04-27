@@ -1586,12 +1586,15 @@ theorem adjoint_snd_expand_false_witness :
     name (`freshName base m` for `m ≥ n` and `base ∈ adjointBases`)
     collides with a name already in `Γ ++ [(x, _), (gs, _)]`.
 
-    Current branch note: this statement is still admitted, but the old
-    concrete `letBind` / `letpair` routing bug is now repaired. The
-    remaining proof debt is theorem shape, not that concrete transform
-    choice: `expand` needs a stronger source-side invariant than the
-    current seed-polymorphic helper carries, while `mul` still needs the
-    operand rebasing/effect-row repair documented above. -/
+    Current branch note: this statement is still admitted. The old
+    concrete `letBind` / `letpair` routing bug is repaired, but Lean
+    now also contains a typed `snd` / `pair` / `expand` false witness.
+    So the remaining proof debt is not only a missing `expand` premise:
+    the current monomorphic tensor-seed transform is itself too weak for
+    product/projection paths. The next honest fix is either a typed
+    cotangent-seed transform or an explicit restriction/normalization of
+    grad bodies to the product-free fragment, while `mul` still needs
+    the operand rebasing/effect-row repair documented above. -/
 theorem adjointFrom_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
