@@ -404,6 +404,97 @@ impl CompiledContext {
     }
 }
 
+/// Phase K disk-cache wire-up: probe the on-disk cache for a fresh
+/// [`CompiledContext`] for `package_dir`, falling back to a full
+/// `compile_reef_context` build (with side-effect: save to disk) on miss.
+///
+/// The cache key is derived from `(reef_home, root_package_id, source_hash)`
+/// where `source_hash` is the hash of every source file backing the
+/// resolved package graph. The probe walks `prepare_reef_graph +
+/// source_digests` first to compute the hash, which is the same work
+/// `compile_reef_context` does — but the rest of the library compile
+/// (desugar, macro expand, type/effects/linearity check, lower) is skipped
+/// on a hit. On a Coral-shape package this drops 67s cold to ~5s warm
+/// (just the hash probe + bincode decode).
+///
+/// `verbose_corruption_to_stderr` controls one piece of operator-facing
+/// behavior: when a cache file exists but is corrupt / version-skewed /
+/// hash-mismatched, the helper logs to stderr and treats it as a miss
+/// (recompile + overwrite) rather than aborting. Set to `false` for
+/// tests that want silence.
+///
+/// The fallback path is `Ok` even if the post-compile `save` fails (the
+/// compile itself succeeded; surface a stderr warning and continue with
+/// the in-memory context). The next invocation will retry the save.
+pub fn load_or_compile_for_package(
+    reef_home: &Path,
+    package_dir: &Path,
+    verbose_corruption_to_stderr: bool,
+) -> Result<CompiledContext, CompilerError> {
+    // Phase K guardrail: if `reef_home` is empty (caller unset
+    // `CHELIS_REEF_HOME`), the disk cache would land at a relative
+    // `.cache/compiled/...` path in CWD — leaking artifacts into the
+    // user's working tree. Bypass the cache entirely in that case and
+    // delegate to a pure `compile_reef_context` build. The user opts
+    // in to the disk cache by setting `CHELIS_REEF_HOME`.
+    if reef_home.as_os_str().is_empty() {
+        return compile_reef_context(reef_home, package_dir);
+    }
+    // Step 1: walk the reef graph + hash every source file. This is the
+    // mandatory pre-work for both the cache probe AND a full compile, so
+    // we always pay it. On Coral-shape packages this is ~5s; the savings
+    // come from skipping the rest of `compile_reef_context` on a hit.
+    let live_graph = match prepare_reef_graph(package_dir) {
+        Ok(g) => g,
+        Err(e) => return Err(reef_error(&e)),
+    };
+    let live_digests = match live_graph.source_digests() {
+        Ok(d) => d,
+        Err(e) => {
+            // LocalRegistry packages don't have source_digests support
+            // yet. Surface the same `hash_error` shape `compile_reef_context`
+            // would surface so the CLI's existing LocalRegistry-detection
+            // fallback continues to work unchanged.
+            return Err(hash_error(&e));
+        }
+    };
+    let source_hash = ContextHash::from_digests(&live_digests);
+    let (root_name, root_version) = live_graph.root_package_id();
+    let cache_path =
+        CompiledContext::cache_path_for(reef_home, (root_name, root_version), source_hash);
+
+    // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
+    // Corrupt / version-skewed / hash-mismatched files fall through to a
+    // full compile + overwrite, with a stderr breadcrumb for the operator.
+    match CompiledContext::load_if_fresh(&cache_path, reef_home, package_dir) {
+        Ok(Some(ctx)) => return Ok(ctx),
+        Ok(None) => {}
+        Err(e) => {
+            if verbose_corruption_to_stderr {
+                eprintln!(
+                    "chelis: disk cache at {} unusable ({e}); recompiling and overwriting",
+                    cache_path.display()
+                );
+            }
+        }
+    }
+
+    // Step 3: cache miss. Run the full compile and save the result.
+    // The save is best-effort — if it fails, the compile result is still
+    // usable for this invocation; only the next invocation pays the cold
+    // cost again.
+    let ctx = compile_reef_context(reef_home, package_dir)?;
+    if let Err(e) = ctx.save(&cache_path)
+        && verbose_corruption_to_stderr
+    {
+        eprintln!(
+            "chelis: warning: failed to save compiled context cache to {}: {e}",
+            cache_path.display()
+        );
+    }
+    Ok(ctx)
+}
+
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).

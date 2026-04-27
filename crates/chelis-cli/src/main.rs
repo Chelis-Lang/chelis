@@ -554,37 +554,45 @@ enum EvalInContextError {
 
 /// Build a `CompiledContext` for `package_root`, then evaluate `source`
 /// against it. `reef_home` is sourced from the `CHELIS_REEF_HOME` env var
-/// if present (matching how `chelis test` plumbs it to workers); the
-/// current `compile_reef_context` implementation does not consume it but
-/// Phase I will key the disk cache off it.
+/// if present (matching how `chelis test` plumbs it to workers); Phase K
+/// uses it to key the disk cache so a warm `chelis eval --file` re-run
+/// against unchanged sources skips the ~67s library compile entirely.
 fn run_eval_in_context(package_root: &Path, source: &str) -> Result<(), EvalInContextError> {
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
-    let context = match chelis_compiler_api::compile_reef_context(&reef_home, package_root) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            // The hash step is the one place `compile_reef_context`
-            // can fail today on a graph the legacy path handles fine
-            // (LocalRegistry source_digests TODO). Detect that
-            // specifically — anything else is a real error and must
-            // not be silently swallowed.
-            let is_hash_unsupported = err
-                .errors
-                .iter()
-                .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"));
-            if is_hash_unsupported {
-                return Err(EvalInContextError::HashUnsupported);
+    // Phase K: route through `load_or_compile_for_package` so the disk
+    // cache amortizes cold-compile cost across invocations. On a hit
+    // (source unchanged since last run), the library compile is skipped
+    // entirely. On a miss, the helper runs the full compile and saves
+    // the result for next time. `verbose=true` so an operator with a
+    // corrupt cache file sees a stderr breadcrumb instead of a silent
+    // recompile.
+    let context =
+        match chelis_compiler_api::load_or_compile_for_package(&reef_home, package_root, true) {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                // The hash step is the one place `compile_reef_context`
+                // can fail today on a graph the legacy path handles fine
+                // (LocalRegistry source_digests TODO). Detect that
+                // specifically — anything else is a real error and must
+                // not be silently swallowed.
+                let is_hash_unsupported = err
+                    .errors
+                    .iter()
+                    .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"));
+                if is_hash_unsupported {
+                    return Err(EvalInContextError::HashUnsupported);
+                }
+                let msg = err
+                    .errors
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(EvalInContextError::Compile(msg));
             }
-            let msg = err
-                .errors
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(EvalInContextError::Compile(msg));
-        }
-    };
+        };
     let result = chelis_compiler_api::eval_in_context(&context, source).map_err(|err| {
         EvalInContextError::Compile(
             err.errors
