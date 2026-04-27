@@ -124,8 +124,12 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     let program_type_env = program.type_env();
     let lowered_names = top_level_lowering_map(program.exprs(), program_type_env);
     log_sub("top_level_lowering_map", &mut sub_t);
+    // Reuse the precomputed `lowered_names` rather than calling
+    // `top_level_expr_is_lowered`, which would rebuild the map from
+    // scratch on every call (1850 calls × full library walk = quadratic
+    // before this fix; ~20s on Coral).
     for_each_top_level_item(program.exprs(), &mut |expr| {
-        if top_level_expr_is_lowered(expr, program.exprs(), program_type_env) {
+        if top_level_expr_is_lowered_with_names(expr, program_type_env, &lowered_names) {
             assert_phase0e_lowerable(expr);
             assert_phase0e_typed(expr);
         }
@@ -146,10 +150,16 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     );
     log_sub("lower_ctx_new", &mut sub_t);
     let mut last_dag_size: usize = ctx.dag.len();
+    // Same reasoning as the assertions_loop above: prefer the
+    // precomputed `lowered_names` over a fresh `top_level_expr_is_lowered`
+    // rebuild for non-named decls (these are non-`def` top-levels like
+    // `defsig`/`deftype`/`typealias`; the `_with_names` path returns true
+    // for them, matching the original semantics — they're not `def` so
+    // not lowered, but they still pass through the wrapping check).
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
-                && top_level_expr_is_lowered(expr, program.exprs(), program_type_env))
+                && top_level_expr_is_lowered_with_names(expr, program_type_env, &lowered_names))
         {
             let t0 = if detail_profile {
                 Some(std::time::Instant::now())
