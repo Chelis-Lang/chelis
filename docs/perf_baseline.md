@@ -530,3 +530,55 @@ edits a library source file. Three follow-ups, ranked by ROI:
 The headline cache work has delivered: 5.1× faster than the prior
 Phase G' baseline, and warm-cache invocations now beat the original
 30 s headline target by a comfortable margin.
+
+## Final Coral re-bench (post Phase K + disk-cache + profile)
+
+Numbers from a clean post-Phase-K release build, run after Phase K
+disk cache was wired into `cmd_eval` and `cmd_test`. Each row uses a
+**fresh tempdir for `CHELIS_REEF_HOME`** so the "cold" measurement
+captures a true cache miss (no carry-over between rows).
+
+| Bench | Cold (cache miss) | Warm (cache hit) | Speedup | Notes |
+|---|---|---|---|---|
+| Coral `chelis test tests/` (63 tests) | 81.6 s | **11.6 s** | ~7.0× | warm-cache hits the < 30 s headline |
+| Coral `chelis eval --file tests/internal.ch` | 72.5 s | **0.38 s** | ~191× | the parent's compile_reef_context dominates the cold cost |
+| Coral `chelis check src/*.ch` | not measured | not measured | — | cmd_check not wired; LocalRegistry-prereq fixture missing |
+
+### What landed vs. what remained
+
+Landed:
+- Phase K (`483272e`) — `prepare_eval` deprecated in favor of
+  `prepare_eval_in_context` / `eval_in_context` / `check_in_context`.
+- Disk cache wired into `cmd_eval` (`a6b3fad`) and `cmd_test`
+  (`29ca9b2`) via the new `load_or_compile_for_package` helper.
+  Includes integration tests covering cold→warm parity, source-edit
+  invalidation, and cmd_test cache reuse.
+- `compile_reef_context` profile instrumentation (`af6e230`),
+  gated on `CHELIS_PROFILE_COMPILE_CONTEXT=1`. Documented diagnosis:
+  the dominant phases (`lower_program_to_library`,
+  `check_phase0e_with_context`, `build_type_env_from_library`) are
+  structural one-pass-over-N work, not bounded O(N²) cliffs.
+
+Remained:
+- `cmd_check` is still on the legacy fitness emitter. Wiring it
+  through `check_in_context + load_or_compile_for_package` requires a
+  JSON-shape parity layer because `check_in_context` returns a
+  simpler `CheckResult` than the legacy emitter's
+  fitness+effects+linearity composition. Out of scope for Phase K.
+- Cold-compile bottleneck (~70–80 s on Coral) is structural; bounded
+  fixes require a lazy `LoweredLibrary` schema + incremental type
+  checking, neither of which fits the ~50–150 LOC fix budget.
+- The 30 s headline number is hit on warm cache only. Cold (first
+  run, or any source byte changed) still pays the full library
+  compile.
+
+### Verdict
+
+The Compiled Artifact Caching project has delivered. Warm-cache
+`chelis test` runs in 11.6 s on Coral, well under the 30 s headline
+target. The cold path remains paid once per source change, not once
+per invocation, which is the right shape for a developer dev loop.
+
+Subsequent project work on the cold path (incremental lowering,
+incremental type checking, workspace-shared cache) is documented
+above and waits on its own dedicated phase.
