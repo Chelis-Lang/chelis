@@ -94,6 +94,26 @@ The currently planned `chelis fuzz` accepts CLI flags for simple properties. The
 
 No separate differential testing infrastructure needed. It's a property that compares two implementations. The fuzzer handles the random input generation and the agreement checking.
 
+**Canonical domain properties ship with domain shells.** Every domain shell includes a `properties/` directory containing reference `@property` functions for the domain's standard invariants. These are not tests (they live alongside `tests/`, not inside it). They are verification contracts that demonstrate the `@property` pattern on real domain code.
+
+For Shoals (finance):
+
+- `properties/pricing.ch` -- put-call parity, price positivity, call bounded by spot, delta in [0,1], gamma positive for vanilla Europeans
+- `properties/greeks.ch` -- grad-derived Greeks match finite-difference Greeks within tolerance, vega positive for vanilla options
+- `properties/monte_carlo.ch` -- Monte Carlo price converges to analytic price as path count increases, variance decreases with path count
+- `properties/no_arbitrage.ch` -- no-arbitrage conditions on option spreads (bull spread payoff non-negative, butterfly spread payoff non-negative)
+
+For Octant (LaTeX bridge):
+
+- `properties/roundtrip.ch` -- `parse(render(expr))` recovers the original expression; `lower(parse(latex))` type-checks
+- `properties/provenance.ch` -- every Deep AST node has a provenance span that points inside the original LaTeX string
+
+For future vertical shells: the same pattern. Canonical properties are the first thing a new domain shell ships, alongside the implementation code they verify.
+
+The onboarding story: "Install Shoals. Run `chelis fuzz src/`. See 15 canonical finance properties pass on the reference implementations. Now write your own pricing model and add your own properties." The properties are documentation-by-example, not a separate product.
+
+The convention is a hard rule: properties are co-located with the implementation they verify, NOT packaged as a separate "properties" shell. The `@property` infrastructure is in the compiler (`chelis fuzz`); the properties themselves are domain-specific and belong inside the domain shell. A standalone "finance properties" package with no implementation code is an empty vessel.
+
 ### Level 3 -- Automated Static Analysis (future, power-tool, opt-in)
 
 A specialized analysis tool (working name: Beacon) that runs on the compiled tensor DAG and computes over-approximations of value ranges at each node. The user doesn't annotate anything. The tool infers properties automatically.

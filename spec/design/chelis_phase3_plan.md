@@ -1306,6 +1306,23 @@ extracts all `Random`-effect-annotated operations into a structured JSON report.
 `chelis manifest --check` is a CI gate: fail the build if any random operation in a
 Shoals program is unseeded. Full design: `chelis_reproducibility_manifests.md`.
 
+**Canonical finance properties.** Shoals ships with a `properties/` directory of
+reference `@property` functions:
+
+- `properties/pricing.ch` — put-call parity, price positivity, call bounded by spot,
+  delta in [0,1], gamma positive for vanilla Europeans
+- `properties/greeks.ch` — grad-derived Greeks match finite-difference Greeks within
+  tolerance, vega positive for vanilla options
+- `properties/monte_carlo.ch` — Monte Carlo price converges to analytic price as path
+  count increases, variance decreases with path count
+- `properties/no_arbitrage.ch` — bull spread payoff non-negative, butterfly spread
+  payoff non-negative
+
+Convention (cross-cutting, applies to every domain shell): properties are co-located
+with the implementation code they constrain — same repo, same package, version-
+controlled together. Properties are NOT a separate shell. `chelis fuzz src/` runs them
+all against the shipped exports. Full convention: `chelis_trust_stack.md`.
+
 ### Acceptance Oracle
 
 `cargo test -p chelis-cli phase3l_shoals_oracle -- --exact` — prices a European call

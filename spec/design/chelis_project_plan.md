@@ -670,6 +670,15 @@ executable-properties-as-spec pattern to finance customers — properties are th
 artifact the customer reviews; `chelis fuzz` enforces that the optimized
 implementation satisfies them. See `chelis_trust_stack.md`.
 
+**Canonical domain properties.** Shoals ships with a `properties/` directory
+containing reference `@property` functions for standard finance invariants: put-call
+parity, price positivity, delta/gamma bounds, Monte Carlo convergence, no-arbitrage
+conditions on spreads. These are onboarding tools (run `chelis fuzz src/` to see them
+pass), credibility artifacts (the shell verifies itself), and templates for
+customer-written properties. Convention: every domain shell ships canonical properties
+alongside its implementation code. Properties are NOT a separate shell — they are
+co-located with and version-controlled alongside the functions they constrain.
+
 ### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
 
 A reef package. The notation bridge between quant-finance LaTeX and Chelis Deep.
@@ -690,6 +699,13 @@ Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsi
 | `Octant.Lower` (deterministic path) | SymExpr → Deep for every form the LaTeX uniquely determines. Special functions → `Nautilus.Special`/`Nautilus.Distributions`; integrals → `Nautilus.Integrate`; matrix ops → `Nautilus.LinAlg`. |
 | `Octant.Render` | Deep → LaTeX with type overlays (named tensor dims → subscripts, effect markers, `grad` → partial-derivative notation). |
 | `Octant.Provenance` | Source-span annotations on **every** Deep node produced by Octant lowering. Core value proposition — without the audit trail the first round-trip ships a parser, not a product. |
+
+**Canonical properties.** Octant ships with `properties/roundtrip.ch` (parse-render
+round-trip: `parse(render(expr))` recovers the original expression and
+`lower(parse(latex))` type-checks) and `properties/provenance.ch` (every Deep AST node
+has a valid source span pointing inside the original LaTeX string). Same convention as
+Shoals: properties co-located with implementation, run via `chelis fuzz src/`, never
+packaged as a separate shell. See `chelis_trust_stack.md`.
 
 ### 3o: Octant — Finance Notation + Notebook (Part B)
 
@@ -1051,6 +1067,15 @@ results as a continuous reward component alongside the 0-1 fitness score.
 Value for the numerical library story: catches edge cases that golden fixture grids
 miss. The Nautilus bessel_y1 drift in (7.5, 8) would have been caught by fuzzing before
 it became a documented known limitation.
+
+**Convention: domain shells ship canonical properties.** Every shell that targets a
+specific domain (Shoals for finance, Octant for LaTeX, future vertical shells)
+includes a `properties/` directory with reference `@property` functions. These are the
+onboarding entry point for new users (install the shell, run `chelis fuzz src/`, see
+the canonical properties pass) and the credibility proof that the shell's
+implementations satisfy standard domain invariants. The properties are co-located with
+the implementation, NOT packaged separately — a standalone "properties" shell with no
+implementation code is an empty vessel.
 
 Implementation remains deferred until after the RLVR pipeline (Phase 4) but the design
 is locked. Full design: `chelis_trust_stack.md`.
