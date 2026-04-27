@@ -26,11 +26,11 @@
 --     the real rule (non-parameter free variables should not contribute,
 --     but the handler's origin filter drops them so the net effect is
 --     correct).
---   * `letBind y e1 e2` currently recurses on the bound expression `e1`
---     only. This is now known to be semantically too weak: the
---     `AdjointTyping.grad_preservation_false_witness` shows it can feed
---     the wrong seed shape into an inner `expand`. Phase 2 T9 needs the
---     real forward/backward ordering.
+--   * `letBind y e1 e2` now recurses on the result-producing body `e2`
+--     rather than the bound expression `e1`. This is still only a
+--     structural Phase 1 placeholder, but it at least matches the
+--     forward-pass sequencing shape from the tape design notes. Phase 2
+--     T9 still needs the real forward/backward ordering.
 --   * `pair`, `fst`, `snd`, `abs`, `app`, `uniformLike`, `grad`, `vmap`,
 --     `perform` all structurally recurse on sub-terms with a vestigial
 --     `perform accum` at the base; the T0 §4 rules for these are
@@ -158,12 +158,11 @@ def adjointFrom (body : Term) (x : String) (gSeed : Term) (n : Nat) : Term :=
       -- this case is vacuous — but we structurally recurse anyway to
       -- keep `adjointFrom` total.
       adjointFrom e x gSeed n
-  | Term.letBind _ e1 _ =>
-      -- Phase 2 T9 will invert the forward/backward order; Phase 1
-      -- skeleton recurses into `e1` to preserve the structural measure.
-      adjointFrom e1 x gSeed n
-  | Term.letpair _ _ e1 _ =>
-      adjointFrom e1 x gSeed n
+  | Term.letBind _ _ e2 =>
+      -- Phase 1 placeholder: recurse on the result-producing body.
+      adjointFrom e2 x gSeed n
+  | Term.letpair _ _ _ e2 =>
+      adjointFrom e2 x gSeed n
   | Term.pair e1 _ =>
       adjointFrom e1 x gSeed n
   | Term.fst e => adjointFrom e x gSeed n

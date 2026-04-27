@@ -230,12 +230,14 @@ mutual
     the seed's typing, the structural shape of `e`, and the freshness
     of adjoint counter-indexed names at counters ≥ `n`. The closed
     structural cases recurse syntactically; the hard `mul` / `expand`
-    cases are still parked below. The in-file
-    `adjointExpandGapCounterexample` shows that the remaining `expand`
-    issue is theorem shape, not proof search: once the Phase 1
-    structural `letBind` skeleton recurses into a subterm at the outer
-    seed type, the current public theorem surface is already too
-    strong. -/
+    cases are still parked below. After the Phase 1 placeholder was
+    corrected to recurse through the result-producing `letBind` /
+    `letpair` body, the old concrete `expand` witness disappeared. The
+    remaining `expand` debt is now the generic theorem-shape gap:
+    `adjoint_typed_aux` only tracks the current seed typing, but the
+    `expand` branch needs a source-side relation strong enough to show
+    the incoming seed dimension list actually contains the summed
+    dimension. -/
 private theorem adjoint_typed_aux
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
     (dsE : DimList) (epsSeed : EffectRow) (x : String) (n : Nat)
@@ -297,13 +299,13 @@ private theorem adjoint_typed_aux
       simp only [adjointFrom]; exact leaf_perform
   -- Vestigial Phase-1 structural cases: adjoint recurses on a single
   -- sub-term with the same seed and counter.
-  | Term.letBind _ e1 _ =>
+  | Term.letBind _ _ e2 =>
       simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
+      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e2 gSeed
               h_seed h_fresh_s h_fresh_s'
-  | Term.letpair _ _ e1 _ =>
+  | Term.letpair _ _ _ e2 =>
       simp only [adjointFrom]
-      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e1 gSeed
+      exact adjoint_typed_aux Delta Sigma Gamma_s Gamma_s' dsE epsSeed x n e2 gSeed
               h_seed h_fresh_s h_fresh_s'
   | Term.pair e1 _ =>
       simp only [adjointFrom]
@@ -596,14 +598,11 @@ private theorem adjoint_typed_aux
   -- `mul` work needs a stronger theorem-level invariant for rebasing
   -- operand tape typings and their effect rows.
   --
-  -- `expand` is no longer a “missing local lemma” issue. The concrete
-  -- `adjointExpandGapCounterexample` below shows that, under the
-  -- current Phase 1 structural `letBind` / `letpair` skeletons,
-  -- the admitted public theorem surface itself is too strong: a
-  -- well-typed source body can recurse into an `expand` subterm at an
-  -- outer seed shape where `sum gSeed d` is untypable. Closing this
-  -- branch therefore requires a theorem-surface or transform change,
-  -- not another seed-polymorphic helper.
+  -- `expand` is no longer blocked by the old structural `letBind` /
+  -- `letpair` routing bug. The remaining issue is theorem shape:
+  -- this helper only carries the seed typing, but the `expand` branch
+  -- needs the source-side relation that witnesses the summed dimension
+  -- is actually present in the current seed shape.
   -- `handle` is now typed for the repaired seed-threading shape; the
   -- transform still eagerly sequences every clause adjoint, but that is
   -- a known Phase 1 semantic caveat in `AdjointTransform`, not a typing
@@ -836,26 +835,6 @@ private theorem hasType_letBind_inv_local
       (try cases heq) <;>
         first | exact True.intro | (exfalso; contradiction)
 
-private theorem hasType_sum_inv_local
-    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
-    {e : Term} {d : Dim} {t : Typ} {eps : EffectRow}
-    (h : HasType Delta Sigma Gamma1 (Term.sum e d) t eps Gamma2) :
-    ∃ ds, t = Typ.tensor (rem ds d) ∧ d ∈ ds ∧
-          HasType Delta Sigma Gamma1 e (Typ.tensor ds) eps Gamma2 := by
-  generalize heq : Term.sum e d = e_in at h
-  induction h using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | tsum _ _ _ _ _ ds _ _ h' hmem _ =>
-      cases heq
-      exact ⟨ds, rfl, hmem, h'⟩
-  | subEff Δ S Γ Γ' _ t' eps0 eps' _h_sub h_sub ih =>
-      obtain ⟨ds, hteq, hmem, h_inv⟩ := ih heq
-      refine ⟨ds, hteq, hmem, ?_⟩
-      exact HasType.subEff Δ S Γ Γ' e (Typ.tensor ds) eps0 eps' h_inv h_sub
-  | _ =>
-      (try cases heq) <;>
-        first | exact True.intro | (exfalso; contradiction)
-
 private def adjointExpandGapDim : Dim :=
   Dim.named "dGap"
 
@@ -913,89 +892,90 @@ private theorem adjointExpandGapBody_typed
     hExpand
     hBody
 
-private theorem hasType_var_seed_empty_local
-    {Sigma : StoreTyp} {x gs : String} (hneq : gs ≠ x)
-    {ds : DimList} {eps : EffectRow} {Gamma_out : LinearCtx}
-    (h : HasType [] Sigma
-      ([(x, some (Typ.tensor DimList.empty)),
-        (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
-      (Term.var gs)
-      (Typ.tensor ds)
-      eps
-      Gamma_out) :
-    ds = DimList.empty := by
-  have hmem :
-      (gs, some (Typ.tensor ds)) ∈
-        ([(x, some (Typ.tensor DimList.empty)),
-          (gs, some (Typ.tensor DimList.empty))] : LinearCtx) :=
-    HasType.var_mem_of_typing h
-  simp [hneq] at hmem
-  exact hmem
-
-private theorem no_sum_var_seed_empty_local
-    {Sigma : StoreTyp} {x gs : String} (hneq : gs ≠ x)
-    {t : Typ} {eps : EffectRow} {Gamma_out : LinearCtx} :
-    ¬ HasType [] Sigma
-      ([(x, some (Typ.tensor DimList.empty)),
-        (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
-      (Term.sum (Term.var gs) adjointExpandGapDim)
-      t
-      eps
-      Gamma_out := by
-  intro h
-  obtain ⟨ds, _hteq, hmem, hVar⟩ := hasType_sum_inv_local h
-  have hds : ds = DimList.empty :=
-    hasType_var_seed_empty_local (Sigma := Sigma) (x := x) (gs := gs) hneq hVar
-  subst hds
-  have hmemQ :
-      DimList.mem adjointExpandGapDim (Quotient.mk ListDimSetoid ([] : List Dim)) := by
-    simpa [DimList.empty, DimList.mk] using hmem
-  change adjointExpandGapDim ∈ ([] : List Dim) at hmemQ
-  cases hmemQ
-
-private theorem no_adjointLeaf_sum_var_seed_empty_local
-    {Sigma : StoreTyp} {x gs : String} (hneq : gs ≠ x)
-    {n : Nat} {t : Typ} {eps : EffectRow} {Gamma_out : LinearCtx} :
-    ¬ HasType [] Sigma
-      ([(x, some (Typ.tensor DimList.empty)),
-        (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
-      (adjointLeaf (Term.sum (Term.var gs) adjointExpandGapDim) n)
-      t
-      eps
-      Gamma_out := by
-  intro h
-  obtain ⟨_, _, _, _, _, _, hSeed, _hBody, _hout⟩ := hasType_letBind_inv_local h
-  exact no_sum_var_seed_empty_local (Sigma := Sigma) (x := x) (gs := gs) hneq hSeed
-
-private theorem adjointExpandGapCounterexample_gen
-    {Sigma : StoreTyp} {x gs : String} (hneq : gs ≠ x)
-    {n : Nat} {t : Typ} {eps : EffectRow} {Gamma_out : LinearCtx} :
-    ¬ HasType [] Sigma
+private theorem adjointExpandGapAdjoint_typed_gen
+    {Sigma : StoreTyp} {x gs : String} {n : Nat} :
+    HasType [] Sigma
       ([(x, some (Typ.tensor DimList.empty)),
         (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
       (adjointFrom adjointExpandGapBody x (Term.var gs) n)
-      t
-      eps
-      Gamma_out := by
-  simpa [adjointExpandGapBody, adjointFrom, adjointLeaf] using
-    (no_adjointLeaf_sum_var_seed_empty_local
-      (Sigma := Sigma) (x := x) (gs := gs) (n := n)
-      (t := t) (eps := eps) (Gamma_out := Gamma_out) hneq)
-
-private theorem adjointExpandGapCounterexample :
-    ¬ HasType [] []
-      ([("x", some (Typ.tensor DimList.empty)),
-        ("gs", some (Typ.tensor DimList.empty))] : LinearCtx)
-      (adjointFrom adjointExpandGapBody "x" (Term.var "gs") 0)
       Typ.unit
       (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-      ([("x", some (Typ.tensor DimList.empty)),
-        ("gs", none)] : LinearCtx) := by
-  exact adjointExpandGapCounterexample_gen
-    (Sigma := []) (x := "x") (gs := "gs") (n := 0)
-    (t := Typ.unit) (eps := EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-    (Gamma_out := [("x", some (Typ.tensor DimList.empty)), ("gs", none)])
-    (by decide)
+      ([(x, some (Typ.tensor DimList.empty)),
+        (gs, none)] : LinearCtx) := by
+  have hSeed :
+      HasType [] Sigma
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.var gs)
+        (Typ.tensor DimList.empty)
+        []
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none)] : LinearCtx) := by
+    simpa [List.append_assoc] using
+      (HasType.var [] Sigma
+        ([(x, some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([] : LinearCtx)
+        gs
+        (Typ.tensor DimList.empty))
+  have hAccumSig : OpSigMatch EffectLabel.accum Typ.unit Typ.unit := by
+    simp [OpSigMatch, opArgType, opRetType]
+  have hPerform :
+      HasType [] Sigma
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none),
+          (freshName "adjA" n, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.perform EffectLabel.accum Term.unit)
+        Typ.unit
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none),
+          (freshName "adjA" n, some (Typ.tensor DimList.empty))] : LinearCtx) := by
+    exact HasType.perform [] Sigma
+      _ _ EffectLabel.accum Term.unit Typ.unit Typ.unit []
+      (HasType.unit [] Sigma _)
+      hAccumSig
+  have hLet :
+      HasType [] Sigma
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (adjointLeaf (Term.var gs) n)
+        Typ.unit
+        (EffectRow.union []
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none)] : LinearCtx) := by
+    simpa [adjointLeaf] using
+      (HasType.letBind [] Sigma
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none)] : LinearCtx)
+        ([(x, some (Typ.tensor DimList.empty)),
+          (gs, none)] : LinearCtx)
+        (freshName "adjA" n)
+        (Term.var gs)
+        (Term.perform EffectLabel.accum Term.unit)
+        (Typ.tensor DimList.empty)
+        Typ.unit
+        []
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+        (some (Typ.tensor DimList.empty))
+        hSeed
+        hPerform)
+  have hSub :=
+    HasType.subEff [] Sigma
+      ([(x, some (Typ.tensor DimList.empty)),
+        (gs, some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([(x, some (Typ.tensor DimList.empty)),
+        (gs, none)] : LinearCtx)
+      (adjointLeaf (Term.var gs) n)
+      Typ.unit
+      (EffectRow.union []
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+      hLet
+      (subEff_seed_accum [])
+  simpa [adjointExpandGapBody, adjointFrom] using hSub
 
 private def adjointExpandGapGradT : Typ :=
   Typ.tensor DimList.empty
@@ -1048,8 +1028,7 @@ private theorem adjointExpandGapGradSeed_ne_x :
     freshNameAvoiding_not_mem
       ("x" :: (freeVars adjointExpandGapBody ++ boundVars adjointExpandGapBody))
   apply hnot
-  simpa [hs] using
-    (List.mem_cons_self "x" (freeVars adjointExpandGapBody ++ boundVars adjointExpandGapBody))
+  simp [hs]
 
 private theorem adjointExpandGapGradTerm_typed
     {Sigma : StoreTyp} :
@@ -1059,45 +1038,333 @@ private theorem adjointExpandGapGradTerm_typed
     (some (Typ.tensor DimList.empty)) adjointExpandGapBody_typed (by
       simp [subsetEffRow, DiffCompat])
 
-private theorem adjointExpandGapGradReduct_untypable
+private theorem adjointExpandGapGradReduct_typed
     {Sigma : StoreTyp} :
-    ¬ HasType [] Sigma [] adjointExpandGapGradReduct adjointExpandGapGradType [] [] := by
-  intro h
-  rcases HasType.abs_inv h with
-    ⟨tInner, epsOuter, GammaOuter, slotX, hTyOuter, hBodyOuter, hOutOuter⟩
-  cases hTyOuter
-  cases hOutOuter
-  rcases HasType.abs_inv hBodyOuter with
-    ⟨tBody, epsInner, GammaInner, slotGs, hTyInner, hBodyInner, hOutInner⟩
-  cases hTyInner
-  cases hOutInner
-  rcases HasType.letBind_inv_bridge hBodyInner with
-    ⟨Gamma2, Gamma3, tTmp, epsHandle, epsRet, slotTmp, hHandle, _hRet, _hOut⟩
-  rcases HasType.handle_inv_strong_bridge hHandle with
-    ⟨GammaAdj, epsAdj, hAdj, _hOpsIn, _hClsIn, _hCover, _hClauses, _hSub⟩
-  exact adjointExpandGapCounterexample_gen
-    (Sigma := Sigma)
-    (x := adjointExpandGapGradX)
-    (gs := adjointExpandGapGradSeed)
-    (n := adjointExpandGapGradCounter)
-    (t := tTmp)
-    (eps := epsAdj)
-    (Gamma_out := GammaAdj)
-    adjointExpandGapGradSeed_ne_x
-    hAdj
+    HasType [] Sigma [] adjointExpandGapGradReduct adjointExpandGapGradType [] [] := by
+  let epsAdj : EffectRow := EffectRow.union [EffectLabel.accum] ([] : EffectRow)
+  let epsHandle : EffectRow := EffectRow.removeOps epsAdj [EffectLabel.accum]
+  have hAdj :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+        Typ.unit
+        epsAdj
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx) := by
+    simpa [epsAdj] using
+      (adjointExpandGapAdjoint_typed_gen
+        (Sigma := Sigma)
+        (x := adjointExpandGapGradX)
+        (gs := adjointExpandGapGradSeed)
+        (n := adjointExpandGapGradCounter))
+  have hClauseSig : OpSigMatch EffectLabel.accum Typ.unit Typ.unit := by
+    simp [OpSigMatch, opArgType, opRetType]
+  have hVarK :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+        (Term.var "k")
+        (Typ.arrow Typ.unit Typ.unit epsHandle)
+        []
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", none)] : LinearCtx) := by
+    simpa [List.append_assoc, epsHandle] using
+      (HasType.var [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit)] : LinearCtx)
+        ([] : LinearCtx)
+        "k"
+        (Typ.arrow Typ.unit Typ.unit epsHandle))
+  have hVarP :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", none)] : LinearCtx)
+        (Term.var "p")
+        Typ.unit
+        []
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", none),
+          ("k", none)] : LinearCtx) := by
+    simpa [List.append_assoc] using
+      (HasType.var [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        ([("k", none)] : LinearCtx)
+        "p"
+        Typ.unit)
+  have hClauseBodyRaw :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+        adjointExpandGapGradClauseBody
+        Typ.unit
+        (EffectRow.union (EffectRow.union [] []) epsHandle)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", none),
+          ("k", none)] : LinearCtx) := by
+    simpa [adjointExpandGapGradClauseBody] using
+      (HasType.app [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", none)] : LinearCtx)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", none),
+          ("k", none)] : LinearCtx)
+        (Term.var "k")
+        (Term.var "p")
+        Typ.unit
+        Typ.unit
+        epsHandle
+        []
+        []
+        hVarK
+        hVarP)
+  have hClauseBodySub :
+      SubEffRow (EffectRow.union (EffectRow.union [] []) epsHandle) epsHandle := by
+    intro op hop
+    simpa [EffectRow.union, List.mem_filter] using hop
+  have hClauseBody :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", some Typ.unit),
+          ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+        adjointExpandGapGradClauseBody
+        Typ.unit
+        epsHandle
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          ("p", none),
+          ("k", none)] : LinearCtx) := by
+    exact HasType.subEff [] Sigma
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none),
+        ("p", some Typ.unit),
+        ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none),
+        ("p", none),
+        ("k", none)] : LinearCtx)
+      adjointExpandGapGradClauseBody
+      Typ.unit
+      (EffectRow.union (EffectRow.union [] []) epsHandle)
+      epsHandle
+      hClauseBodyRaw
+      hClauseBodySub
+  have hClausesNil :
+      ClausesTyped [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        Typ.unit
+        epsHandle
+        [] :=
+    ClausesTyped.nil [] Sigma
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none)] : LinearCtx)
+      Typ.unit
+      epsHandle
+  have hClauses :
+      ClausesTyped [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        Typ.unit
+        epsHandle
+        adjointExpandGapGradClauses := by
+    exact ClausesTyped.cons [] Sigma
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none)] : LinearCtx)
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none)] : LinearCtx)
+      Typ.unit
+      Typ.unit
+      Typ.unit
+      epsHandle
+      EffectLabel.accum
+      "p"
+      "k"
+      adjointExpandGapGradClauseBody
+      []
+      none
+      none
+      hClauseSig
+      hClauseBody
+      hClausesNil
+  have hHandleRaw :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.handle [EffectLabel.accum]
+          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+            (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+          adjointExpandGapGradClauses)
+        Typ.unit
+        epsHandle
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx) := by
+    refine HasType.handle [] Sigma
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none)] : LinearCtx)
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+        (adjointExpandGapGradSeed, none)] : LinearCtx)
+      (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+        (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+      adjointExpandGapGradClauses
+      Typ.unit
+      [EffectLabel.accum]
+      epsAdj
+      hAdj
+      ?_
+      ?_
+      ?_
+      hClauses
+    · intro op hop
+      simp [epsAdj] at hop ⊢
+      rcases hop with rfl
+      exact List.mem_append_left _ (by simp)
+    · intro cl hmem
+      simp [adjointExpandGapGradClauses] at hmem ⊢
+      rcases hmem with rfl
+      simp
+    · intro op hop
+      simp at hop
+      rcases hop with rfl
+      refine ⟨(EffectLabel.accum, "p", "k", adjointExpandGapGradClauseBody), ?_, rfl⟩
+      simp [adjointExpandGapGradClauses]
+  have hVarX :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none),
+          (adjointExpandGapGradTmp, some Typ.unit)] : LinearCtx)
+        (Term.var adjointExpandGapGradX)
+        (Typ.tensor DimList.empty)
+        []
+        ([(adjointExpandGapGradX, none),
+          (adjointExpandGapGradSeed, none),
+          (adjointExpandGapGradTmp, some Typ.unit)] : LinearCtx) := by
+    simpa [List.append_assoc] using
+      (HasType.var [] Sigma
+        ([] : LinearCtx)
+        ([(adjointExpandGapGradSeed, none),
+          (adjointExpandGapGradTmp, some Typ.unit)] : LinearCtx)
+        adjointExpandGapGradX
+        (Typ.tensor DimList.empty))
+  have hLet :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.letBind adjointExpandGapGradTmp
+          (Term.handle [EffectLabel.accum]
+            (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+              (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+            adjointExpandGapGradClauses)
+          (Term.var adjointExpandGapGradX))
+        (Typ.tensor DimList.empty)
+        (EffectRow.union epsHandle [])
+        ([(adjointExpandGapGradX, none),
+          (adjointExpandGapGradSeed, none)] : LinearCtx) := by
+    simpa [epsHandle, List.append_assoc] using
+      (HasType.letBind [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        ([(adjointExpandGapGradX, none),
+          (adjointExpandGapGradSeed, none)] : LinearCtx)
+        adjointExpandGapGradTmp
+        (Term.handle [EffectLabel.accum]
+          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+            (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+          adjointExpandGapGradClauses)
+        (Term.var adjointExpandGapGradX)
+        Typ.unit
+        (Typ.tensor DimList.empty)
+        epsHandle
+        []
+        (some Typ.unit)
+        hHandleRaw
+        hVarX)
+  have hAbsInner :
+      HasType [] Sigma
+        ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty))] : LinearCtx)
+        (Term.abs adjointExpandGapGradSeed (Typ.tensor DimList.empty)
+          (Term.letBind adjointExpandGapGradTmp
+            (Term.handle [EffectLabel.accum]
+              (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+                (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+              adjointExpandGapGradClauses)
+            (Term.var adjointExpandGapGradX)))
+        (Typ.arrow (Typ.tensor DimList.empty) (Typ.tensor DimList.empty) [])
+        []
+        ([(adjointExpandGapGradX, none)] : LinearCtx) := by
+    exact HasType.abs [] Sigma
+      ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty))] : LinearCtx)
+      ([(adjointExpandGapGradX, none)] : LinearCtx)
+      adjointExpandGapGradSeed
+      (Typ.tensor DimList.empty)
+      (Typ.tensor DimList.empty)
+      []
+      (Term.letBind adjointExpandGapGradTmp
+        (Term.handle [EffectLabel.accum]
+          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+            (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+          adjointExpandGapGradClauses)
+        (Term.var adjointExpandGapGradX))
+      none
+      hLet
+  unfold adjointExpandGapGradReduct adjointExpandGapGradType adjointExpandGapGradT
+  exact HasType.abs [] Sigma
+    ([] : LinearCtx)
+    ([] : LinearCtx)
+    adjointExpandGapGradX
+    (Typ.tensor DimList.empty)
+    (Typ.arrow (Typ.tensor DimList.empty) (Typ.tensor DimList.empty) [])
+    []
+    (Term.abs adjointExpandGapGradSeed (Typ.tensor DimList.empty)
+      (Term.letBind adjointExpandGapGradTmp
+        (Term.handle [EffectLabel.accum]
+          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+            (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
+          adjointExpandGapGradClauses)
+        (Term.var adjointExpandGapGradX)))
+    none
+    hAbsInner
 
-/-- Concrete witness that the current `E-Grad` / `adjointFrom` package
-    does not preserve typing: the source `grad` term is well-typed, it
-    takes one `tgrad` step, and the reduct is untypable for every store
-    typing. This is stronger than the earlier helper-local witness:
-    under the current Phase 1 structural `letBind` / `letpair`
-    recursion, the issue is no longer confined to an admitted internal
-    theorem shape. It reaches the actual reduction surface. -/
-theorem grad_preservation_false_witness :
+/-- Regression witness for the repaired Phase 1 `letBind` / `letpair`
+    routing: the same concrete `grad` / `expand` body that previously
+    produced an untypable `tgrad` reduct now steps to a reduct that is
+    typable for every store typing. This witnesses that the old bug was
+    the structural recursion target, not the concrete handler packaging
+    around `E-Grad`. -/
+theorem grad_preservation_expand_regression :
     HasType [] [] [] adjointExpandGapGradTerm adjointExpandGapGradType [] [] ∧
     Step ⟨([] : Store), adjointExpandGapGradTerm⟩
       ⟨([] : Store), adjointExpandGapGradReduct⟩ ∧
-    (∀ Sigma2, ¬ HasType [] Sigma2 [] adjointExpandGapGradReduct adjointExpandGapGradType [] []) := by
+    (∀ Sigma2, HasType [] Sigma2 [] adjointExpandGapGradReduct adjointExpandGapGradType [] []) := by
   refine ⟨adjointExpandGapGradTerm_typed, ?_, ?_⟩
   · simpa [adjointExpandGapGradTerm, adjointExpandGapGradReduct,
       adjointExpandGapGradX, adjointExpandGapGradT, adjointExpandGapGradSeed,
@@ -1107,7 +1374,7 @@ theorem grad_preservation_false_witness :
         (Step.tgrad ([] : Store) adjointExpandGapGradX
           adjointExpandGapGradT adjointExpandGapGradT adjointExpandGapBody)
   · intro Sigma2
-    exact adjointExpandGapGradReduct_untypable (Sigma := Sigma2)
+    exact adjointExpandGapGradReduct_typed (Sigma := Sigma2)
 
 /-- Counter-threaded public typing theorem for `adjointFrom`. This is
     the theorem preservation should use when the operational rule picks
@@ -1117,14 +1384,12 @@ theorem grad_preservation_false_witness :
     name (`freshName base m` for `m ≥ n` and `base ∈ adjointBases`)
     collides with a name already in `Γ ++ [(x, _), (gs, _)]`.
 
-    Current branch note: this statement is still admitted, and the
-    local `adjointExpandGapCounterexample` above shows why the present
-    theorem surface cannot be closed as-is under the Phase 1
-    structural `letBind` / `letpair` skeleton. The remaining proof debt
-    is therefore not “finish the existing induction,” but “replace this
-    theorem surface with one that tracks the source-side shape relation
-    the `expand` path actually needs,” while separately resolving the
-    `mul` tape/effect rebasing problem. -/
+    Current branch note: this statement is still admitted, but the old
+    concrete `letBind` / `letpair` routing bug is now repaired. The
+    remaining proof debt is theorem shape, not that concrete transform
+    choice: `expand` needs a stronger source-side invariant than the
+    current seed-polymorphic helper carries, while `mul` still needs the
+    operand rebasing/effect-row repair documented above. -/
 theorem adjointFrom_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
     (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)

@@ -1,6 +1,6 @@
 # Phase 2 Wave 2 Status — Preservation And Sorry Inventory
 
-Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, adding a concrete `expand` counterexample for the remaining adjoint theorem shape, and proving a typed `E-Grad` witness whose reduct is untypable under that admitted public surface.
+Snapshot on branch `chelis-proof` after restoring a green root build, closing named substitution, repairing the handler seed-threading transform, closing the executable `handle` typing branch in `AdjointTyping.lean`, fixing the concrete `letBind` / `letpair` adjoint routing bug, and proving a positive `E-Grad` regression showing the former `grad` / `expand` reduct is typable again under that repaired transform.
 
 ## Acceptance Oracle
 
@@ -17,8 +17,8 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - `AddDim.lean` is no longer the `tvmap` upstream blocker, and the earlier theorem-shape bug has been repaired by making `vmap`'s batch dimension explicit in both the named and DB syntax.
 - `AdjointTyping.lean`'s repaired `handle` branch is now typed.
 - `AdjointTyping.lean` now also contains:
-  - a concrete typed counterexample showing the current admitted `expand` theorem surface is false under the Phase 1 structural recursion
-  - a concrete typed `grad` term whose `tgrad` reduct is untypable for every store typing under that same admitted public surface
+  - a concrete typed regression showing the repaired `letBind` / `letpair` recursion fixes the old `grad` / `expand` routing bug
+  - the remaining admitted `expand` debt localized to the generic source-shape premise that the public theorem surface still does not quantify
 - The branch still contains 1 executable `sorry` on the main proof path:
   - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission, now reduced to the `mul` / `expand` adjoint cases
 
@@ -47,7 +47,7 @@ The current theorem-shape boundary is now explicit in Lean:
   - why unconditional runtime preservation is false
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
-- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the file contains a closed Lean witness that the current admitted public surface is too strong under the Phase 1 structural `letBind` / `letpair` recursion.
+- `AdjointTyping.lean` now also localizes the remaining `expand` blocker to theorem shape rather than proof search: the old concrete `letBind` / `letpair` routing bug is repaired, and the file now records the narrower generic gap instead.
 
 ## Remaining Critical Path
 
@@ -55,7 +55,7 @@ The current theorem-shape boundary is now explicit in Lean:
    The next theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The new deep-active two-step counterexample shows the final invariant must relate dormant handler clauses to the surrounding active context, not just recurse into clause bodies locally.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, but `tgrad` preservation is not honestly settled yet: Lean now contains a concrete typed `E-Grad` witness whose reduct is untypable under the current admitted public `adjointFrom` theorem surface. The next AD step is to replace that false public surface with the stronger source-shape relation it actually needs, while still separately resolving the remaining `mul` case.
+   The repaired `handle` branch is closed, and the old concrete `E-Grad` routing bug is repaired too, but `tgrad` preservation is still not honestly settled: the public `adjointFrom` theorem surface remains admitted, and its remaining blockers are now the generic `expand` source-shape premise plus the separate `mul` tape/effect-row case.
 
 ## Next Moves
 

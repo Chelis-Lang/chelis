@@ -35,7 +35,7 @@ The substitution lemma with linear context splitting. Always the most painful pa
 
 ## WS3.7 — `AdjointTyping.lean`
 
-The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. Separately, Lean now contains a concrete typed counterexample showing that the old seed-polymorphic private helper was too strong for `expand`: typing `sum gSeed d` requires a source-typing/dimension relation that the helper did not quantify. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
+The adjoint typing lemma (WS2.2) mechanized. The hardest standalone lemma in the formalization. Must show: if `e` is well-typed with `Diff` and linear use, then `adjoint(e)` is well-typed with `Accum` in the effect row. Case analysis on the six primitives. The `mul` case is still the main tape/rebasing obstacle. The old concrete `letBind` / `letpair` routing bug is repaired, and Lean now contains a positive regression for that `grad` / `expand` body. The remaining `expand` debt is the generic theorem-shape gap: typing `sum gSeed d` requires a source-typing/dimension relation that the current seed-polymorphic helper still does not quantify. Depends on WS3.5 (adjoint transformation) and WS3.2 (typing relation).
 
 ## WS3.8 — `AddDim.lean`
 
@@ -67,8 +67,8 @@ That premise is still not the final answer. The current branch now also shows:
 So the immediate remaining preservation work is:
 
 - settle the stronger cross-boundary handler-aware runtime invariant
-- the preservation file itself is syntactically closed on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest endpoint because it currently imports a public adjoint theorem surface Lean now falsifies with a concrete typed `E-Grad` witness
-- the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until that public surface is repaired
+- the preservation file itself is syntactically closed on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest endpoint because it still imports an admitted public adjoint theorem surface
+- the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until the generic `expand` surface and `mul` case are repaired
 
 ## WS3.11 — `DimSafety.lean`
 
