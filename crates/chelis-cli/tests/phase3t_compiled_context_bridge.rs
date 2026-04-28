@@ -40,7 +40,7 @@ fn make_minimal_reef_with_test(dir_name: &str) -> (tempfile::TempDir, std::path:
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.3.0"
+compiler = "=0.3.1"
 module_prefix = "Bridge"
 "#
         ),

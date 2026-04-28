@@ -3903,7 +3903,49 @@ fn infer_app(
     }
 
     let ret_tv = vg.fresh_type();
-    let expected_fn = Type::Fn(arg_tys.clone(), Box::new(ret_tv.clone()));
+
+    // Comparison-op tensor/scalar broadcast: when a comparison op
+    // (`cmplt`, `eq`, `neq`, `lt`, `gt`, `lte`, `gte`) is called with one
+    // tensor argument and one scalar argument of matching precision, the
+    // scalar is broadcast across the tensor at eval time. The polymorphic
+    // scheme `(α, α) → α` would otherwise reject the call because
+    // `tensor[D, p]` does not unify with `Prim(p)`. Rewrite the scalar's
+    // type to the tensor type for unification purposes only; the
+    // semantic post-check below still validates each original arg type.
+    //
+    // Ordered comparisons (`lt`, `gt`, `lte`, `gte`, `cmplt`) require
+    // matching numeric precision. `eq`/`neq` allow any matching precision
+    // (including `bool` and `string`).
+    let unify_arg_tys: Vec<Type> = if let Some(ref fname) = func_name
+        && builtins::COMPARISON_OPS.contains(&fname.as_str())
+        && arg_tys.len() == 2
+    {
+        let lhs_resolved = subst.apply(&arg_tys[0]);
+        let rhs_resolved = subst.apply(&arg_tys[1]);
+        let is_eq_family = matches!(fname.as_str(), "eq" | "neq");
+        let precisions_compatible = |tensor_prec: &Prim, scalar_prec: &Prim| -> bool {
+            tensor_prec == scalar_prec && (is_eq_family || tensor_prec.is_numeric())
+        };
+        match (&lhs_resolved, &rhs_resolved) {
+            (Type::Tensor(dims, tensor_prec), Type::Prim(scalar_prec))
+                if precisions_compatible(tensor_prec, scalar_prec) =>
+            {
+                let tensor_ty = Type::Tensor(dims.clone(), *tensor_prec);
+                vec![arg_tys[0].clone(), tensor_ty]
+            }
+            (Type::Prim(scalar_prec), Type::Tensor(dims, tensor_prec))
+                if precisions_compatible(tensor_prec, scalar_prec) =>
+            {
+                let tensor_ty = Type::Tensor(dims.clone(), *tensor_prec);
+                vec![tensor_ty, arg_tys[1].clone()]
+            }
+            _ => arg_tys.clone(),
+        }
+    } else {
+        arg_tys.clone()
+    };
+
+    let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
     const TENSOR_OPS: &[&str] = &[
         "add",

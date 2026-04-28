@@ -282,3 +282,152 @@ bad = to_tensor([true, 1.0])
                 .and(predicate::str::contains("\"score\": 1").not()),
         );
 }
+
+/// Coral upstream blocker (v0.2.5/v0.3.0): tensor-tensor comparison ops
+/// (`eq`/`neq`/`lt`/`gt`) landed in v0.2.5 but tensor-scalar broadcast was
+/// not extended at the same time, so `gt(tensor, scalar)` was rejected at
+/// type-check time with `type mismatch: tensor[D, f32] vs f32`. This fix
+/// extends the broadcast: when one arg is a tensor `T[D, p]` and the other
+/// is a matching-precision scalar `Prim(p)`, the comparison broadcasts the
+/// scalar element-wise and returns `tensor[D, bool]`. The same broadcast
+/// applies to `eq`/`neq`/`lt`/`gt`/`lte`/`gte`/`cmplt` and is symmetric
+/// (`gt(scalar, tensor)` works too).
+#[test]
+fn coral_comparison_ops_broadcast_tensor_scalar() {
+    let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
+def mk_ints() -> tensor[3, int64] = (to_tensor([cast(1, int64), cast(2, int64), cast(3, int64)]) : tensor[3, int64])
+def mk_bools() -> tensor[3, bool] = to_tensor([true, false, true])
+
+xs_print = mk_xs()
+gt_mask = gt(mk_xs(), 1.5)
+lt_mask = lt(mk_xs(), 2.5)
+eq_mask = eq(mk_xs(), 2.0)
+neq_mask = neq(mk_xs(), 2.0)
+gte_mask = gte(mk_xs(), 2.0)
+lte_mask = lte(mk_xs(), 2.0)
+cmplt_mask = cmplt(mk_xs(), 2.0)
+gt_left = gt(1.5, mk_xs())
+gt_ints = gt(mk_ints(), cast(1, int64))
+eq_bools = eq(mk_bools(), true)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"))
+        .stdout(predicate::str::contains("\"errors\": []"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        // gt(xs, 1.5): [1.0>1.5, 2.0>1.5, 3.0>1.5] = [F, T, T]
+        .stdout(predicate::str::contains(
+            "gt_mask = tensor(shape=[3], data=[0.0, 1.0, 1.0])",
+        ))
+        // lt(xs, 2.5): [F, T, F]... wait: [1.0<2.5, 2.0<2.5, 3.0<2.5] = [T,T,F]
+        .stdout(predicate::str::contains(
+            "lt_mask = tensor(shape=[3], data=[1.0, 1.0, 0.0])",
+        ))
+        // eq(xs, 2.0): [F, T, F]
+        .stdout(predicate::str::contains(
+            "eq_mask = tensor(shape=[3], data=[0.0, 1.0, 0.0])",
+        ))
+        // neq(xs, 2.0): [T, F, T]
+        .stdout(predicate::str::contains(
+            "neq_mask = tensor(shape=[3], data=[1.0, 0.0, 1.0])",
+        ))
+        // gte(xs, 2.0): [F, T, T]
+        .stdout(predicate::str::contains(
+            "gte_mask = tensor(shape=[3], data=[0.0, 1.0, 1.0])",
+        ))
+        // lte(xs, 2.0): [T, T, F]
+        .stdout(predicate::str::contains(
+            "lte_mask = tensor(shape=[3], data=[1.0, 1.0, 0.0])",
+        ))
+        // cmplt(xs, 2.0): [T, F, F]
+        .stdout(predicate::str::contains(
+            "cmplt_mask = tensor(shape=[3], data=[1.0, 0.0, 0.0])",
+        ))
+        // gt(1.5, xs): [1.5>1.0, 1.5>2.0, 1.5>3.0] = [T, F, F]
+        .stdout(predicate::str::contains(
+            "gt_left = tensor(shape=[3], data=[1.0, 0.0, 0.0])",
+        ))
+        // gt(ints, 1): [F, T, T]
+        .stdout(predicate::str::contains(
+            "gt_ints = tensor(shape=[3], data=[0.0, 1.0, 1.0])",
+        ))
+        // eq(bools, true): bool tensor [1,0,1] eq true = [T, F, T]
+        .stdout(predicate::str::contains(
+            "eq_bools = tensor(shape=[3], data=[1.0, 0.0, 1.0])",
+        ));
+}
+
+/// Negative parity for the comparison-op broadcast: mismatched precision
+/// (e.g. `tensor[3, f32]` vs `int64` scalar) must still be rejected, so a
+/// silent precision coercion can't sneak in. Ordered comparisons on bool
+/// tensors must also still error (bool ordering has no defined meaning;
+/// only `eq`/`neq` accept bool).
+#[test]
+fn coral_comparison_ops_reject_mismatched_precision() {
+    let (_dir, reef_home, app_pkg) = make_app("coral-cmp-mismatch");
+
+    // f32 tensor vs int64 scalar must fail.
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+xs = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
+bad = gt(xs, cast(1, int64))
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"errors\":")
+                .and(predicate::str::contains("\"score\": 1").not()),
+        );
+
+    // Ordered comparison on bool tensor must fail (bool isn't ordered).
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+bools = to_tensor([true, false, true])
+bad = gt(bools, true)
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"errors\":")
+                .and(predicate::str::contains("\"score\": 1").not()),
+        );
+}

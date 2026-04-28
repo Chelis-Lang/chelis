@@ -40,7 +40,7 @@ fn write_pkg(
 ) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     let mut manifest = format!(
-        "[package]\nname = \"{pkg_name}\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"{module_prefix}\"\n"
+        "[package]\nname = \"{pkg_name}\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"{module_prefix}\"\n"
     );
     if !deps.is_empty() {
         manifest.push_str("\n[dependencies]\n");
@@ -83,7 +83,7 @@ fn build_pkg(library_src: &str, main_src: &str) -> (TempDir, PathBuf) {
     );
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock");
     (dir, root)
@@ -624,7 +624,7 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     write_pkg(&mylib_a, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
     fs::write(
         root_a.join("reef.lock"),
-        "[package]\nname = \"appA\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"appA\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("lock A");
 
@@ -641,7 +641,7 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     write_pkg(&mylib_b, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
     fs::write(
         root_b.join("reef.lock"),
-        "[package]\nname = \"appB\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"appB\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("lock B");
 
@@ -870,7 +870,7 @@ fn multi_module_fixture() -> (TempDir, PathBuf) {
     );
     fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("write reef.lock");
     (dir, root)
@@ -1119,7 +1119,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
     );
     fs::write(
         root_a.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("lock A");
 
@@ -1145,7 +1145,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
     );
     fs::write(
         root_b.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
     )
     .expect("lock B");
 

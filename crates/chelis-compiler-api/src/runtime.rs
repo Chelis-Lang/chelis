@@ -2088,6 +2088,17 @@ fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeV
     }
 }
 
+/// Coerce a scalar `RuntimeValue` to its `f64` representation for
+/// comparison with a tensor element. Returns `None` for non-scalar values.
+fn scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
+    match value {
+        RuntimeValue::Int(value) => Some(*value as f64),
+        RuntimeValue::Float(value) => Some(*value),
+        RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
 fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(RuntimeValue::Int(lhs)), Some(RuntimeValue::Int(rhs))) => {
@@ -2108,6 +2119,17 @@ fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             tensor_compare_value(lhs, rhs, |a, b| a == b).map(RuntimeValue::Tensor)
         }
+        // Element-wise tensor-scalar equality: broadcast the scalar across
+        // every element. Mirrors the build-target lane and unblocks
+        // `is_nan_local`-style scalar comparisons against a tensor.
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
+            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
+        }
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
+            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
+        }
         other => Err(format!("eq/neq expect matching scalar args, got {other:?}")),
     }
 }
@@ -2127,6 +2149,18 @@ fn ordered_compare(
         // and unblocks the same downstream tensor-level boolean ops.
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             tensor_compare_value(lhs, rhs, cmp).map(RuntimeValue::Tensor)
+        }
+        // Element-wise tensor-scalar ordering: broadcast the scalar across
+        // every element. The result is a `tensor[D, bool]` mask.
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
+            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            tensor_compare_scalar(tensor, scalar_f, cmp).map(RuntimeValue::Tensor)
+        }
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
+            // `cmp(scalar, tensor[i])` — flip the comparator so the helper
+            // can keep using `cmp(tensor[i], scalar)` internally.
+            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            tensor_compare_scalar(tensor, scalar_f, |t, s| cmp(s, t)).map(RuntimeValue::Tensor)
         }
         other => Err(format!(
             "ordered comparison expects matching numeric args, got {other:?}"
@@ -2154,6 +2188,28 @@ fn tensor_compare_value(
         .collect::<Vec<_>>();
     Ok(RuntimeTensorValue {
         value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
+        precision: Prim::Bool,
+    })
+}
+
+/// Element-wise tensor-vs-scalar comparison. The scalar is broadcast across
+/// every element of the tensor and the result is a `tensor[D, bool]` mask
+/// with the same shape as the input tensor. The comparator is invoked as
+/// `cmp(tensor_element, scalar)`; callers passing the scalar as the lhs
+/// should pre-flip the comparator.
+fn tensor_compare_scalar(
+    tensor: &RuntimeTensorValue,
+    scalar: f64,
+    cmp: impl Fn(f64, f64) -> bool,
+) -> Result<RuntimeTensorValue, String> {
+    let data = tensor
+        .value
+        .data
+        .iter()
+        .map(|element| if cmp(*element, scalar) { 1.0 } else { 0.0 })
+        .collect::<Vec<_>>();
+    Ok(RuntimeTensorValue {
+        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
         precision: Prim::Bool,
     })
 }

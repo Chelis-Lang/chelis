@@ -861,7 +861,7 @@ mod tests {
         fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
         fs::write(
             root.join("reef.toml"),
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
         )
         .expect("write app reef.toml");
         fs::write(
@@ -871,7 +871,7 @@ mod tests {
         .expect("write main.ch");
         fs::write(
             root.join("mylib/reef.toml"),
-            "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\nmodule_prefix = \"Mylib\"\n",
+            "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"Mylib\"\n",
         )
         .expect("write mylib reef.toml");
         fs::write(
@@ -884,7 +884,7 @@ mod tests {
         // network.
         fs::write(
             root.join("reef.lock"),
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.0\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
         )
         .expect("write reef.lock");
         (dir, root)
