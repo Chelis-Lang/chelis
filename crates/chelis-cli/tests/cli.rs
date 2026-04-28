@@ -1786,15 +1786,18 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "embedding-app"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = { version = "0.1.0" }
+chelis-std = {{ version = "0.1.0" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -2742,15 +2745,18 @@ fn phase3a_reef_std_acceptance_oracle() {
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "demo-app"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = { version = "0.1.0" }
+chelis-std = {{ version = "0.1.0" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -2819,15 +2825,18 @@ fn reef_check_accepts_sig_only_shell_imports() {
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "sig-app"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = { version = "0.1.0" }
+chelis-std = {{ version = "0.1.0" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -2861,12 +2870,15 @@ fn reef_check_accepts_path_dependencies() {
 
     write_file(
         &dep_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Common"
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &dep_pkg.join("src/helper.ch"),
@@ -2880,15 +2892,18 @@ def shared(x: f32) -> f32 = x
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-dep = { path = "../dep" }
+dep = {{ path = "../dep" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -2921,12 +2936,15 @@ fn reef_check_rejects_tampered_registry_shell_exports() {
 
     write_file(
         &dep_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "dep"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Common"
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &dep_pkg.join("src/api.ch"),
@@ -2971,15 +2989,18 @@ def hidden(x: f32) -> f32 = x
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "app"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-dep = { version = "0.1.0" }
+dep = {{ version = "0.1.0" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &app_pkg.join("src/main.ch"),

@@ -25,6 +25,24 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
 }
 
+/// Build the standard `reef.toml` body for a phase-3g IO test app
+/// depending on `chelis-std = "0.1.0"`. The compiler pin auto-syncs with
+/// the workspace version via `chelis_compiler_api::COMPILER_VERSION`.
+fn app_reef_toml(name: &str) -> String {
+    format!(
+        r#"[package]
+name = "{name}"
+version = "0.1.0"
+compiler = "={ver}"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = {{ version = "0.1.0" }}
+"#,
+        ver = chelis_compiler_api::COMPILER_VERSION,
+    )
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst dir");
     for entry in fs::read_dir(src).expect("read dir") {
@@ -90,18 +108,7 @@ fn reef_std_io_module_checks_and_builds() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "io-app"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("io-app"));
     let dataset = surf_string_literal(data_path.to_str().unwrap());
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -164,18 +171,7 @@ fn reef_std_io_module_rejects_missing_export() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "io-app-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("io-app-bad"));
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -285,18 +281,7 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "json-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("json-bad"));
     let bad = surf_string_literal(bad_json.to_str().unwrap());
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -343,18 +328,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "json-try-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("json-try-bad"));
     let bad = surf_string_literal(bad_json.to_str().unwrap());
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -409,18 +383,7 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "csv-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("csv-bad"));
     let bad = surf_string_literal(bad_csv.to_str().unwrap());
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -467,18 +430,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "csv-try-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("csv-try-bad"));
     let bad = surf_string_literal(bad_csv.to_str().unwrap());
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -531,18 +483,7 @@ fn reef_std_parquet_module_resolves_and_type_checks() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "parquet-app"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("parquet-app"));
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -578,18 +519,7 @@ fn reef_std_parquet_module_rejects_missing_export() {
         .assert()
         .success();
 
-    write_file(
-        &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "parquet-bad"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
-    );
+    write_file(&app_pkg.join("reef.toml"), &app_reef_toml("parquet-bad"));
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -628,15 +558,7 @@ fn reef_std_parquet_write_resolves_and_type_checks() {
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "parquet-write-app"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
+        &app_reef_toml("parquet-write-app"),
     );
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -676,15 +598,7 @@ fn reef_std_parquet_module_builds_cleanly() {
 
     write_file(
         &app_pkg.join("reef.toml"),
-        r#"[package]
-name = "parquet-build-app"
-version = "0.1.0"
-compiler = "=0.3.1"
-module_prefix = "Demo"
-
-[dependencies]
-chelis-std = { version = "0.1.0" }
-"#,
+        &app_reef_toml("parquet-build-app"),
     );
     write_file(
         &app_pkg.join("src/main.ch"),

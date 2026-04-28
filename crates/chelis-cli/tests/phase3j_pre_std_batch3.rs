@@ -37,12 +37,15 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     // files under packages/chelis-std/src/**.
     write_file(
         &std_pkg.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "chelis-std"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Std"
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     );
     write_file(
         &std_pkg.join("src/nn/silu.ch"),
@@ -104,12 +107,13 @@ def rms_scale[n](x: tensor[n, f32], eps: f32) -> f32 = {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
 chelis-std = {{ version = "0.1.0" }}
-"#
+"#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
         ),
     );
     (dir, reef_home, app_pkg)

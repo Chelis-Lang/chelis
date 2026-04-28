@@ -29,9 +29,10 @@ fn make_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf) {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Smoke"
-"#
+"#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
         ),
     );
     // Reef requires at least one source file to resolve a module graph.
