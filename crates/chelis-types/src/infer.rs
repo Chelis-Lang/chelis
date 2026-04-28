@@ -4395,16 +4395,27 @@ fn infer_app(
                 }
             }
 
-            // Special case: comparison ops return tensor[D, bool]
+            // Special case: comparison ops return tensor[D, bool] when any
+            // argument is tensor-shaped. Comparison ops broadcast a scalar
+            // arg against a tensor arg (see the rewrite block above), so the
+            // result shape comes from whichever argument is the tensor —
+            // not necessarily the first one (issue #5: `gt(1.5, xs)` was
+            // returning `Prim(Bool)` instead of `tensor[D, bool]` because
+            // this override only looked at `arg_tys[0]`).
             if let Some(ref fname) = func_name
                 && builtins::COMPARISON_OPS.contains(&fname.as_str())
             {
-                // Try to extract dims from arg types
+                // Prefer any tensor-shaped arg as the dim source.
+                let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
+                    Type::Tensor(dims, _) => Some(dims),
+                    _ => None,
+                });
+                if let Some(dims) = tensor_dims {
+                    return Type::Tensor(dims, Prim::Bool);
+                }
+                // No tensor arg → scalar comparison, returns scalar bool.
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved_arg = subst.apply(first_arg);
-                    if let Type::Tensor(dims, _) = resolved_arg {
-                        return Type::Tensor(dims, Prim::Bool);
-                    }
                     if matches!(resolved_arg, Type::Prim(_)) {
                         return Type::Prim(Prim::Bool);
                     }

@@ -431,3 +431,43 @@ bad = gt(bools, true)
                 .and(predicate::str::contains("\"score\": 1").not()),
         );
 }
+
+/// Issue #5 regression: when a comparison op is used in `gt(scalar, tensor)`
+/// form inside a `def name -> tensor[D, bool] = ...` body, type inference
+/// must produce `tensor[D, bool]` (not `bool`) so the declared signature
+/// matches. v0.3.1's broadcast rewrite handled the unification, but the
+/// comparison-op return-type override at the post-unify site only inspected
+/// `arg_tys[0]`, so a leading scalar arg made the override return scalar
+/// `Prim(Bool)` and discard the tensor shape. The user-facing symptom was
+/// that a module containing both `gt(tensor, scalar)` and `gt(scalar, tensor)`
+/// with declared `tensor[N, bool]` signatures rejected the second form. The
+/// `gt(scalar, tensor)` form actually fails alone too with a declared
+/// tensor signature; the existing v0.2.5 broadcast test just hides this
+/// because it uses an untyped top-level binding (`gt_left = ...`) whose
+/// inferred type is never checked against any signature.
+#[test]
+fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
+    let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast-issue5");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
+def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
+def lt_right -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)
+def lt_left -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))
+def eq_right -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)
+def eq_left -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"))
+        .stdout(predicate::str::contains("\"errors\": []"));
+}

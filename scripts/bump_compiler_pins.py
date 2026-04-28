@@ -122,11 +122,13 @@ def bump_workspace_cargo_toml(version: str, dry_run: bool) -> FileChange | None:
             out.append(line)
             continue
         if in_section and stripped.startswith("version"):
-            m = re.match(r'(\s*version\s*=\s*")([^"]+)(".*)', line)
+            # `.*` does not match a trailing newline, so capture and re-emit
+            # the newline explicitly to preserve the original line ending.
+            m = re.match(r'(\s*version\s*=\s*")([^"]+)(".*?)(\r?\n?)\Z', line)
             if m is not None:
                 found_before = m.group(2)
                 if found_before != version:
-                    out.append(f"{m.group(1)}{version}{m.group(3)}")
+                    out.append(f"{m.group(1)}{version}{m.group(3)}{m.group(4)}")
                     continue
         out.append(line)
     if found_before is None:
