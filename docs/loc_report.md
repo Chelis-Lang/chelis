@@ -1,14 +1,14 @@
 # Lines of Code Report
 
-Generated: 2026-04-28 14:24 UTC
+Generated: 2026-04-28 16:24 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 144 | 69,699 | 4,017 | 26,245 | 99,961 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 145 | 69,759 | 4,024 | 26,269 | 100,052 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 27,929 | 200 | 668 | 28,797 | Generated runtime, headers |
 | JSON | 18 | 3,025 | 0 | 2,371 | 5,396 | Package metadata, test fixtures |
 | **Chelis Surf** (.ch) | **91** | **2,716** | **475** | **47** | **3,238** | **Examples, std library, test fixtures** |
-| Python | 19 | 2,186 | 246 | 713 | 3,145 | PyO3 bindings, tools, benchmarks |
+| Python | 20 | 2,230 | 263 | 729 | 3,222 | PyO3 bindings, tools, benchmarks |
 | TOML | 28 | 439 | 0 | 59 | 498 | Cargo/reef manifests |
 | YAML | 2 | 308 | 0 | 69 | 377 | CI workflows |
 | PEG Grammars (.pest) | 2 | 248 | 0 | 28 | 276 | Validator grammars (Surf + Deep) |
@@ -18,4 +18,4 @@ Generated: 2026-04-28 14:24 UTC
 | **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
 | Bash | 1 | 30 | 1 | 8 | 39 |  |
 | Markdown | 97 | 0 | 8,302 | 4,459 | 12,761 | Specs, design docs, plans |
-| **Total** | **425** | **107,121** | **13,298** | **34,740** | **155,159** | |
+| **Total** | **427** | **107,225** | **13,322** | **34,780** | **155,327** | |
