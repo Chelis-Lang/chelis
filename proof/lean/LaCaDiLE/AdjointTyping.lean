@@ -179,6 +179,56 @@ private theorem subEff_accum_into_grad (eps : EffectRow) :
   · apply List.mem_append_right
     simp [hmem]
 
+/-- Generic typing lemma for the unit-valued `adjointLeaf` skeleton. It
+    linearly consumes an arbitrary supported cotangent seed, then emits
+    `perform accum unit`, so the overall result is `unit` with exactly
+    the incoming seed effects plus `accum`. -/
+private theorem adjointLeaf_typed
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma_s Gamma_s' : LinearCtx)
+    (seedTy : Typ) (epsSeed : EffectRow) (n : Nat) (gSeed : Term)
+    (h_seed : HasType Delta Sigma Gamma_s gSeed seedTy epsSeed Gamma_s') :
+    HasType Delta Sigma Gamma_s
+      (adjointLeaf gSeed n)
+      Typ.unit
+      (EffectRow.union [EffectLabel.accum] epsSeed)
+      Gamma_s' := by
+  have hAccumSig : OpSigMatch EffectLabel.accum Typ.unit Typ.unit := by
+    simp [OpSigMatch, opArgType, opRetType]
+  have hPerform :
+      HasType Delta Sigma
+        (Gamma_s' ++ [(freshName "adjA" n, some seedTy)])
+        (Term.perform EffectLabel.accum Term.unit)
+        Typ.unit
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+        (Gamma_s' ++ [(freshName "adjA" n, some seedTy)]) := by
+    exact HasType.perform Delta Sigma
+      (Gamma_s' ++ [(freshName "adjA" n, some seedTy)])
+      (Gamma_s' ++ [(freshName "adjA" n, some seedTy)])
+      EffectLabel.accum Term.unit Typ.unit Typ.unit []
+      (HasType.unit Delta Sigma _)
+      hAccumSig
+  have hLet :
+      HasType Delta Sigma Gamma_s
+        (adjointLeaf gSeed n)
+        Typ.unit
+        (EffectRow.union epsSeed
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+        Gamma_s' := by
+    simpa [adjointLeaf] using
+      (HasType.letBind Delta Sigma Gamma_s Gamma_s' Gamma_s'
+        (freshName "adjA" n) gSeed
+        (Term.perform EffectLabel.accum Term.unit)
+        seedTy Typ.unit epsSeed
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+        (some seedTy) h_seed hPerform)
+  exact HasType.subEff Delta Sigma Gamma_s Gamma_s'
+    (adjointLeaf gSeed n) Typ.unit
+    (EffectRow.union epsSeed
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow)))
+    (EffectRow.union [EffectLabel.accum] epsSeed)
+    hLet
+    (subEff_seed_accum epsSeed)
+
 /-- Zero cotangent seeds are well-typed in any linear context at the
     structural cotangent type chosen by `AdjointTransform`. -/
 private theorem zeroCotangent_typed
@@ -204,6 +254,286 @@ private theorem zeroCotangent_typed
   | Typ.tyVar _ =>
       by simpa [zeroCotangent, cotangentType] using
         (HasType.unit Delta Sigma Gamma)
+
+/-- CPS typing lemma for `splitCotangentSeedFrom` on pure seeds. This
+    is the internal bridge needed by the typed clause transform:
+    callers supply the typing proof for the continuation at the split
+    point, and the theorem reconstructs the surrounding seed split. -/
+private theorem splitCotangentSeedFrom_typed
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    (Gamma_s Gamma_s' : LinearCtx)
+    (t : Typ) (gSeed : Term) (n : Nat)
+    (k : Nat → Term → Term → Term)
+    (epsK : EffectRow) (Gamma_out : LinearCtx)
+    (h_seed : HasType Delta Sigma Gamma_s gSeed (cotangentType t) [] Gamma_s')
+    (h_k :
+      match t with
+      | Typ.tensor ds =>
+          ∃ slotA slotB,
+            HasType Delta Sigma
+              (Gamma_s' ++
+                [(freshName "gA" n, some (Typ.tensor ds)),
+                 (freshName "gB" n, some (Typ.tensor ds))])
+              (k (n + 2)
+                (Term.var (freshName "gA" n))
+                (Term.var (freshName "gB" n)))
+              Typ.unit
+              epsK
+              (Gamma_out ++
+                [(freshName "gA" n, slotA),
+                 (freshName "gB" n, slotB)])
+      | Typ.pair t1 t2 =>
+          ∃ slotA slotB,
+            HasType Delta Sigma
+              (Gamma_s' ++
+                [(freshName "gA" n, some (cotangentType t1)),
+                 (freshName "gB" n, some (cotangentType t2))])
+              (splitCotangentSeedFrom t1 (Term.var (freshName "gA" n)) (n + 2)
+                (fun n' gA1 gA2 =>
+                  splitCotangentSeedFrom t2 (Term.var (freshName "gB" n)) n'
+                    (fun n'' gB1 gB2 =>
+                      k n''
+                        (Term.pair gA1 gB1)
+                        (Term.pair gA2 gB2))))
+              Typ.unit
+              epsK
+              (Gamma_out ++
+                [(freshName "gA" n, slotA),
+                 (freshName "gB" n, slotB)])
+      | Typ.unit =>
+          HasType Delta Sigma Gamma_s
+            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out
+      | Typ.arrow _ _ _ =>
+          HasType Delta Sigma Gamma_s
+            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out
+      | Typ.tyVar _ =>
+          HasType Delta Sigma Gamma_s
+            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out) :
+    HasType Delta Sigma Gamma_s
+      (splitCotangentSeedFrom t gSeed n k)
+      Typ.unit
+      epsK
+      Gamma_out := by
+  cases t with
+  | tensor ds =>
+      rcases h_k with ⟨slotA, slotB, hBody⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letpair Delta Sigma Gamma_s Gamma_s' Gamma_out
+          (freshName "gA" n) (freshName "gB" n)
+          (Term.copy gSeed)
+          (k (n + 2)
+            (Term.var (freshName "gA" n))
+            (Term.var (freshName "gB" n)))
+          (Typ.tensor ds) (Typ.tensor ds) Typ.unit
+          []
+          epsK
+          slotA slotB
+          (HasType.copy Delta Sigma Gamma_s Gamma_s' gSeed ds [] h_seed)
+          hBody)
+  | pair t1 t2 =>
+      rcases h_k with ⟨slotA, slotB, hBody⟩
+      simpa [splitCotangentSeedFrom, cotangentType] using
+        (HasType.letpair Delta Sigma Gamma_s Gamma_s' Gamma_out
+          (freshName "gA" n) (freshName "gB" n)
+          gSeed
+          (splitCotangentSeedFrom t1 (Term.var (freshName "gA" n)) (n + 2)
+            (fun n' gA1 gA2 =>
+              splitCotangentSeedFrom t2 (Term.var (freshName "gB" n)) n'
+                (fun n'' gB1 gB2 =>
+                  k n''
+                    (Term.pair gA1 gB1)
+                    (Term.pair gA2 gB2))))
+          (cotangentType t1) (cotangentType t2) Typ.unit
+          []
+          epsK
+          slotA slotB
+          h_seed
+          hBody)
+  | unit =>
+      simpa [splitCotangentSeedFrom] using h_k
+  | arrow _ _ _ =>
+      simpa [splitCotangentSeedFrom] using h_k
+  | tyVar _ =>
+      simpa [splitCotangentSeedFrom] using h_k
+
+/-- On quotient-based dimension multisets, re-inserting an erased member
+    recovers the original multiset. This is the key shape fact for the
+    typed `sum` adjoint branch. -/
+private theorem ins_rem_eq_of_mem
+    {ds : DimList} {d : Dim}
+    (h : d ∈ ds) :
+    ins (rem ds d) d = ds := by
+  refine Quotient.inductionOn ds ?_ h
+  intro l hmem
+  have hmem' : d ∈ l := by
+    simpa [DimList.mem] using hmem
+  show Quotient.mk ListDimSetoid (d :: l.erase d) = Quotient.mk ListDimSetoid l
+  exact Quotient.sound (s := ListDimSetoid) (List.perm_cons_erase hmem').symm
+
+/-- Erasing the freshly inserted dimension cancels propositionally on the
+    permutation quotient. This is the companion fact for `expand`. -/
+private theorem rem_ins_eq
+    {ds : DimList} {d : Dim} :
+    rem (ins ds d) d = ds := by
+  refine Quotient.inductionOn ds ?_
+  intro l
+  show Quotient.mk ListDimSetoid ((d :: l).erase d) = Quotient.mk ListDimSetoid l
+  simp [rem, ins, DimList.erase, DimList.cons, List.erase_cons]
+
+mutual
+
+/-- Structural type-shape witness for `adjointTypedFrom`. This records
+    exactly the local result-type information the typed transform needs
+    to avoid falling back to the legacy tensor-only surface. The only
+    constructor carrying extra typing payload is `mul`, where the
+    transform embeds the source operands directly via `copy e1` / `copy e2`.
+    Everything else is syntax-directed. -/
+inductive AdjointTypedShape (Delta : CapCtx) (Sigma : StoreTyp) : Typ → Term → Prop
+  | var {t : Typ} {x : String} :
+      AdjointTypedShape Delta Sigma t (Term.var x)
+  | const {t : Typ} {v : Float} {ds : DimList} :
+      AdjointTypedShape Delta Sigma t (Term.const v ds)
+  | unit {t : Typ} :
+      AdjointTypedShape Delta Sigma t Term.unit
+  | loc {t : Typ} {ell : Nat} :
+      AdjointTypedShape Delta Sigma t (Term.loc ell)
+  | letBind {t : Typ} {x : String} {e1 e2 : Term} :
+      AdjointTypedShape Delta Sigma t e2 →
+      AdjointTypedShape Delta Sigma t (Term.letBind x e1 e2)
+  | letpair {t : Typ} {x y : String} {e1 e2 : Term} :
+      AdjointTypedShape Delta Sigma t e2 →
+      AdjointTypedShape Delta Sigma t (Term.letpair x y e1 e2)
+  | add {ds : DimList} {e1 e2 : Term} :
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e1 →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e2 →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) (Term.add e1 e2)
+  | mul {ds : DimList} {e1 e2 : Term} :
+      (∃ Γ1 Γ2 Γ3 eps1 eps2,
+         HasType Delta Sigma Γ1 e1 (Typ.tensor ds) eps1 Γ2 ∧
+         HasType Delta Sigma Γ2 e2 (Typ.tensor ds) eps2 Γ3) →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e1 →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e2 →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) (Term.mul e1 e2)
+  | sum {ds : DimList} {d : Dim} {e : Term} :
+      d ∈ ds →
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e →
+      AdjointTypedShape Delta Sigma (Typ.tensor (rem ds d)) (Term.sum e d)
+  | expand {ds : DimList} {d : Dim} {e : Term} :
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e →
+      AdjointTypedShape Delta Sigma (Typ.tensor (ins ds d)) (Term.expand e d)
+  | copy {ds : DimList} {e : Term} :
+      AdjointTypedShape Delta Sigma (Typ.tensor ds) e →
+      AdjointTypedShape Delta Sigma (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) (Term.copy e)
+  | pair {t1 t2 : Typ} {e1 e2 : Term} :
+      AdjointTypedShape Delta Sigma t1 e1 →
+      AdjointTypedShape Delta Sigma t2 e2 →
+      AdjointTypedShape Delta Sigma (Typ.pair t1 t2) (Term.pair e1 e2)
+  | fst {t1 t2 : Typ} {e : Term} :
+      AdjointTypedShape Delta Sigma (Typ.pair t1 t2) e →
+      AdjointTypedShape Delta Sigma t1 (Term.fst t2 e)
+  | snd {t1 t2 : Typ} {e : Term} :
+      AdjointTypedShape Delta Sigma (Typ.pair t1 t2) e →
+      AdjointTypedShape Delta Sigma t2 (Term.snd t1 e)
+  | handle {t : Typ} {epsH : EffectRow} {body : Term}
+      {clauses : List (EffectLabel × String × String × Term)} :
+      AdjointTypedShape Delta Sigma t body →
+      AdjointTypedClausesShape Delta Sigma t clauses →
+      AdjointTypedShape Delta Sigma t (Term.handle epsH body clauses)
+  | perform {op : EffectLabel} {e : Term} :
+      AdjointTypedShape Delta Sigma (opArgType op) e →
+      AdjointTypedShape Delta Sigma Typ.unit (Term.perform op e)
+
+/-- Clause companion to `AdjointTypedShape`. Each handler clause body is
+    transformed against the handled result type. -/
+inductive AdjointTypedClausesShape
+    (Delta : CapCtx) (Sigma : StoreTyp) :
+    Typ → List (EffectLabel × String × String × Term) → Prop
+  | nil :
+      AdjointTypedClausesShape Delta Sigma t []
+  | cons {op : EffectLabel} {x k : String} {hb : Term}
+      {rest : List (EffectLabel × String × String × Term)} :
+      AdjointTypedShape Delta Sigma t hb →
+      AdjointTypedClausesShape Delta Sigma t rest →
+      AdjointTypedClausesShape Delta Sigma t ((op, x, k, hb) :: rest)
+
+end
+
+mutual
+
+/-- Extract the typed-transform shape witness from a source typing
+    derivation plus the supported-fragment premise required by `T-Grad`. -/
+private theorem adjointTypedShape_of_typed
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma1 Gamma2 : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma1 e t eps Gamma2)
+    (hSupp : AdjointSupported e) :
+    AdjointTypedShape Delta Sigma t e := by
+  induction h using HasType.rec
+    (motive_2 := fun Delta Sigma Gamma2 Gamma3 t epsR cls _hcls =>
+      AdjointSupportedClauses cls → AdjointTypedClausesShape Delta Sigma t cls) with
+  | var =>
+      exact .var
+  | unit =>
+      exact .unit
+  | fst _ _ _ _ e t1 t2 _ hBody ih =>
+      exact .fst (ih hSupp)
+  | snd _ _ _ _ e t1 t2 _ hBody ih =>
+      exact .snd (ih hSupp)
+  | const =>
+      exact .const
+  | tadd _ _ _ _ _ e1 e2 ds _ _ h1 h2 ih1 ih2 =>
+      rcases hSupp with ⟨hSupp1, hSupp2⟩
+      exact .add (ih1 hSupp1) (ih2 hSupp2)
+  | tmul _ _ _ _ _ e1 e2 ds _ _ h1 h2 ih1 ih2 =>
+      rcases hSupp with ⟨hSupp1, hSupp2⟩
+      exact .mul ⟨_, _, _, _, _, h1, h2⟩ (ih1 hSupp1) (ih2 hSupp2)
+  | tsum _ _ _ _ e ds d _ hBody hmem ih =>
+      exact .sum hmem (ih hSupp)
+  | texpand _ _ _ _ e ds d _ hBody ih =>
+      exact .expand (ih hSupp)
+  | uniformLike _ _ _ _ _ _ _ _ _ hBody ih =>
+      cases hSupp
+  | copy _ _ _ _ e ds _ hBody ih =>
+      exact .copy (ih hSupp)
+  | letBind _ _ _ _ _ _ e1 e2 _ _ _ _ _ h1 h2 ih1 ih2 =>
+      rcases hSupp with ⟨_hSupp1, hSupp2⟩
+      exact .letBind (ih2 hSupp2)
+  | letpair _ _ _ _ _ _ _ e1 e2 _ _ _ _ _ _ _ h1 h2 ih1 ih2 =>
+      rcases hSupp with ⟨_hSupp1, hSupp2⟩
+      exact .letpair (ih2 hSupp2)
+  | tpair _ _ _ _ _ e1 e2 _ _ _ _ h1 h2 ih1 ih2 =>
+      rcases hSupp with ⟨hSupp1, hSupp2⟩
+      exact .pair (ih1 hSupp1) (ih2 hSupp2)
+  | loc =>
+      exact .loc
+  | perform _ _ _ _ op e tArg tRet _ hBody hMatch ih =>
+      rcases hSupp with ⟨_hop, hSuppBody⟩
+      have hArgEq : tArg = opArgType op := hMatch.1
+      have hRetEq : tRet = Typ.unit := by
+        cases op <;> simpa [OpSigMatch, opRetType] using hMatch.2
+      cases hArgEq
+      cases hRetEq
+      exact .perform (ih hSuppBody)
+  | handle _ _ _ _ _ body clauses _ _ _ hBody _ _ _ hClauses ihBody ihClauses =>
+      rcases hSupp with ⟨hSuppBody, hSuppClauses⟩
+      exact .handle (ihBody hSuppBody) (ihClauses hSuppClauses)
+  | tgrad =>
+      cases hSupp
+  | tvmap =>
+      cases hSupp
+  | abs =>
+      cases hSupp
+  | app =>
+      cases hSupp
+  | subEff _ _ _ _ _ _ _ _ hBody _ ih =>
+      exact ih hSupp
+  | nil _ _ _ _ _ hSupp =>
+      exact AdjointTypedClausesShape.nil
+  | cons _ _ _ _ _ _ _ _ _ _ _ hb rest _ _ hMatch hBody hRest ihBody ihRest hSupp =>
+      rcases hSupp with ⟨hSuppBody, hSuppRest⟩
+      exact AdjointTypedClausesShape.cons (ihBody hSuppBody) (ihRest hSuppRest)
+
+end
 
 /-- A pair term can never type-check at a tensor result type. Used by
     the structured-seed counterexample below. -/
@@ -1163,7 +1493,7 @@ private def adjointExpandGapGradReduct : Term :=
     (Term.abs adjointExpandGapGradSeed adjointExpandGapGradT
       (Term.letBind adjointExpandGapGradTmp
         (Term.handle [EffectLabel.accum]
-          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
             (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
           adjointExpandGapGradClauses)
         (Term.var adjointExpandGapGradX)))
@@ -1186,8 +1516,13 @@ private theorem adjointExpandGapGradTerm_typed
     HasType [] Sigma [] adjointExpandGapGradTerm adjointExpandGapGradType [] [] := by
   unfold adjointExpandGapGradTerm adjointExpandGapGradType adjointExpandGapGradT
   exact HasType.tgrad [] Sigma [] "x" DimList.empty DimList.empty adjointExpandGapBody []
-    (some (Typ.tensor DimList.empty)) adjointExpandGapBody_typed (by
-      simp [subsetEffRow, DiffCompat])
+    (some (Typ.tensor DimList.empty))
+    adjointExpandGapBody_typed
+    (by simp [subsetEffRow, DiffCompat])
+    (by simp [AdjointSupported, adjointExpandGapBody])
+    (by
+      intro z t hz
+      simp [adjointExpandGapBody, freeVars] at hz)
 
 private theorem adjointExpandGapGradReduct_typed
     {Sigma : StoreTyp} :
@@ -1198,13 +1533,13 @@ private theorem adjointExpandGapGradReduct_typed
       HasType [] Sigma
         ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
           (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
-        (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+        (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
           (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
         Typ.unit
         epsAdj
         ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
           (adjointExpandGapGradSeed, none)] : LinearCtx) := by
-    simpa [epsAdj] using
+    simpa [epsAdj, adjointExpandGapGradT, adjointTypedFrom, adjointExpandGapBody, adjointFrom] using
       (adjointExpandGapAdjoint_typed_gen
         (Sigma := Sigma)
         (x := adjointExpandGapGradX)
@@ -1368,7 +1703,7 @@ private theorem adjointExpandGapGradReduct_typed
         ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
           (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
         (Term.handle [EffectLabel.accum]
-          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
             (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
           adjointExpandGapGradClauses)
         Typ.unit
@@ -1382,7 +1717,7 @@ private theorem adjointExpandGapGradReduct_typed
         (adjointExpandGapGradSeed, none)] : LinearCtx)
       ([(adjointExpandGapGradX, some (Typ.tensor DimList.empty)),
         (adjointExpandGapGradSeed, none)] : LinearCtx)
-      (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+      (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
         (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
       adjointExpandGapGradClauses
       Typ.unit
@@ -1430,7 +1765,7 @@ private theorem adjointExpandGapGradReduct_typed
           (adjointExpandGapGradSeed, some (Typ.tensor DimList.empty))] : LinearCtx)
         (Term.letBind adjointExpandGapGradTmp
           (Term.handle [EffectLabel.accum]
-            (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+            (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
               (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
             adjointExpandGapGradClauses)
           (Term.var adjointExpandGapGradX))
@@ -1448,7 +1783,7 @@ private theorem adjointExpandGapGradReduct_typed
           (adjointExpandGapGradSeed, none)] : LinearCtx)
         adjointExpandGapGradTmp
         (Term.handle [EffectLabel.accum]
-          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
             (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
           adjointExpandGapGradClauses)
         (Term.var adjointExpandGapGradX)
@@ -1465,7 +1800,7 @@ private theorem adjointExpandGapGradReduct_typed
         (Term.abs adjointExpandGapGradSeed (Typ.tensor DimList.empty)
           (Term.letBind adjointExpandGapGradTmp
             (Term.handle [EffectLabel.accum]
-              (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+              (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
                 (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
               adjointExpandGapGradClauses)
             (Term.var adjointExpandGapGradX)))
@@ -1481,7 +1816,7 @@ private theorem adjointExpandGapGradReduct_typed
       []
       (Term.letBind adjointExpandGapGradTmp
         (Term.handle [EffectLabel.accum]
-          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
             (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
           adjointExpandGapGradClauses)
         (Term.var adjointExpandGapGradX))
@@ -1498,7 +1833,7 @@ private theorem adjointExpandGapGradReduct_typed
     (Term.abs adjointExpandGapGradSeed (Typ.tensor DimList.empty)
       (Term.letBind adjointExpandGapGradTmp
         (Term.handle [EffectLabel.accum]
-          (adjointFrom adjointExpandGapBody adjointExpandGapGradX
+          (adjointTypedFrom adjointExpandGapBody adjointExpandGapGradT adjointExpandGapGradX
             (Term.var adjointExpandGapGradSeed) adjointExpandGapGradCounter)
           adjointExpandGapGradClauses)
         (Term.var adjointExpandGapGradX)))
@@ -1523,7 +1858,8 @@ theorem grad_preservation_expand_regression :
       adjointExpandGapGradClauses, adjointExpandGapGradClauseBody]
       using
         (Step.tgrad ([] : Store) adjointExpandGapGradX
-          adjointExpandGapGradT adjointExpandGapGradT adjointExpandGapBody)
+          adjointExpandGapGradT adjointExpandGapGradT adjointExpandGapBody
+          (by simp [AdjointSupported, adjointExpandGapBody]))
   · intro Sigma2
     exact adjointExpandGapGradReduct_typed (Sigma := Sigma2)
 
@@ -2299,5 +2635,52 @@ theorem adjoint_preserves_typing
   simpa [adjoint] using
     (adjointFrom_preserves_typing Delta Sigma Gamma
       x gs ds dsOut e eps 0 slot h_e h_compat h_fresh_full h_fresh_small)
+
+/-- Typed public surface for the staged adjoint transform. This is the
+    theorem `T-Grad` now needs because the operational reduct uses
+    `adjointTypedFrom`, not the legacy `adjointFrom` shim. -/
+theorem adjointTypedFrom_preserves_typing
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
+    (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
+    (n : Nat) (slot : Option Typ)
+    (_h_e : HasType (Capability.diff :: Delta) Sigma
+                    (Gamma ++ [(x, some (Typ.tensor ds))])
+                    e (Typ.tensor dsOut) eps
+                    (Gamma ++ [(x, slot)]))
+    (_h_compat : subsetEffRow eps DiffCompat = true)
+    (_h_supp : AdjointSupported e)
+    (_h_fresh_full : AdjointNamesFresh n
+        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
+    (_h_fresh_small : AdjointNamesFresh n (Gamma ++ [(x, some (Typ.tensor ds))])) :
+    HasType Delta Sigma
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
+            (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
+            Typ.unit
+            (EffectRow.union eps [EffectLabel.accum])
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
+  sorry
+
+theorem adjointTyped_preserves_typing
+    (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
+    (x gs : String) (ds dsOut : DimList) (e : Term) (eps : EffectRow)
+    (slot : Option Typ)
+    (h_e : HasType (Capability.diff :: Delta) Sigma
+                   (Gamma ++ [(x, some (Typ.tensor ds))])
+                   e (Typ.tensor dsOut) eps
+                   (Gamma ++ [(x, slot)]))
+    (h_compat : subsetEffRow eps DiffCompat = true)
+    (h_supp : AdjointSupported e)
+    (h_fresh_full : AdjointNamesFresh 0
+        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
+    (h_fresh_small : AdjointNamesFresh 0 (Gamma ++ [(x, some (Typ.tensor ds))])) :
+    HasType Delta Sigma
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
+            (adjointTyped e (Typ.tensor dsOut) x (Term.var gs))
+            Typ.unit
+            (EffectRow.union eps [EffectLabel.accum])
+            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
+  simpa [adjointTyped] using
+    (adjointTypedFrom_preserves_typing Delta Sigma Gamma
+      x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_fresh_full h_fresh_small)
 
 end LaCaDiLE

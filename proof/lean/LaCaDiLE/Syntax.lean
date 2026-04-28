@@ -1364,6 +1364,217 @@ proof will need something in this shape. -/
 def linearCtxDom (G : LinearCtx) : List String :=
   G.map Prod.fst
 
+/-- Rightmost tombstone-aware lookup in a linear context. This matches
+    the operational interpretation of the tail as the innermost live
+    binder: later entries shadow earlier ones, including when the later
+    entry is a tombstone. -/
+def lookupLinearCtx : LinearCtx → String → Option Typ
+  | [], _ => none
+  | (y, slot) :: rest, x =>
+      match lookupLinearCtx rest x with
+      | some t => some t
+      | none => if x = y then slot else none
+
+theorem lookupLinearCtx_append (pref tail : LinearCtx) (x : String) :
+    lookupLinearCtx (pref ++ tail) x =
+      match lookupLinearCtx tail x with
+      | some t => some t
+      | none => lookupLinearCtx pref x := by
+  induction pref with
+  | nil =>
+      cases htail : lookupLinearCtx tail x with
+      | none =>
+          simp [lookupLinearCtx, htail]
+      | some t =>
+          simp [lookupLinearCtx, htail]
+  | cons hd tl ih =>
+      cases hd with
+      | mk y slot =>
+          cases htail : lookupLinearCtx tail x with
+          | none =>
+              simp [lookupLinearCtx, ih, htail]
+          | some t =>
+              simp [lookupLinearCtx, ih, htail]
+
+theorem lookupLinearCtx_append_left_of_some
+    {pref tail : LinearCtx} {x : String} {t : Typ}
+    (h : lookupLinearCtx tail x = some t) :
+    lookupLinearCtx (pref ++ tail) x = some t := by
+  rw [lookupLinearCtx_append]
+  simp [h]
+
+theorem lookupLinearCtx_some_of_mem_live
+    {Γ : LinearCtx} {x : String} {t : Typ}
+    (hMem : (x, some t) ∈ Γ) :
+    ∃ t', lookupLinearCtx Γ x = some t' := by
+  induction Γ with
+  | nil =>
+      cases hMem
+  | cons hd tl ih =>
+      cases hd with
+      | mk y slot =>
+          simp at hMem
+          rcases hMem with hHead | hTail
+          · rcases hHead with ⟨rfl, rfl⟩
+            cases htl : lookupLinearCtx tl x with
+            | none =>
+                exact ⟨t, by simp [lookupLinearCtx, htl]⟩
+            | some t' =>
+                exact ⟨t', by simp [lookupLinearCtx, htl]⟩
+          · rcases ih hTail with ⟨t', hLook⟩
+            exact ⟨t', lookupLinearCtx_append_left_of_some (pref := [(y, slot)]) hLook⟩
+
+/-! ## Adjoint support fragment
+
+These predicates are syntax-level side conditions for the current typed
+adjoint transform. They live here, rather than in `AdjointTransform`,
+so both `Typing` and the transform/theorem files can depend on them
+without creating an import cycle. -/
+
+mutual
+
+/-- Syntax-only domain predicate for the currently supported adjoint
+    transform fragment. This is the first-order fragment the typed
+    transform actually implements: product structure, primitive tensor
+    operators, handlers, and `perform` of differentiation-compatible
+    effects are allowed; higher-order / staged constructs whose current
+    transform equations are still placeholders are excluded. -/
+def AdjointSupported : Term → Prop
+  | Term.var _ => True
+  | Term.const _ _ => True
+  | Term.unit => True
+  | Term.loc _ => True
+  | Term.add e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.mul e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.sum e _ => AdjointSupported e
+  | Term.expand e _ => AdjointSupported e
+  | Term.copy e => AdjointSupported e
+  | Term.letBind _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.letpair _ _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.pair e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
+  | Term.fst _ e => AdjointSupported e
+  | Term.snd _ e => AdjointSupported e
+  | Term.handle _ body clauses =>
+      AdjointSupported body ∧ AdjointSupportedClauses clauses
+  | Term.perform op e => op ∈ DiffCompat ∧ AdjointSupported e
+  | Term.abs _ _ _ => False
+  | Term.app _ _ => False
+  | Term.uniformLike _ _ _ => False
+  | Term.grad _ _ _ _ => False
+  | Term.vmap _ _ _ _ => False
+
+/-- Clause-list companion to `AdjointSupported`. -/
+def AdjointSupportedClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, _, _, hb) :: rest =>
+      AdjointSupported hb ∧ AdjointSupportedClauses rest
+
+end
+
+/-- The fragment of source/result types whose cotangent seeds are
+    currently represented explicitly by the typed adjoint transform. -/
+def AdjointTypeSupported : Typ → Prop
+  | Typ.tensor _ => True
+  | Typ.pair t1 t2 => AdjointTypeSupported t1 ∧ AdjointTypeSupported t2
+  | Typ.unit => True
+  | Typ.arrow _ _ _ => False
+  | Typ.tyVar _ => False
+
+/-- Every live entry in the linear context lies in the currently
+    supported first-order adjoint fragment. Tombstones are ignored. -/
+def AdjointCtxSupported : LinearCtx → Prop
+  | [] => True
+  | (_, none) :: rest => AdjointCtxSupported rest
+  | (_, some t) :: rest => AdjointTypeSupported t ∧ AdjointCtxSupported rest
+
+/-- Successful rightmost lookup in a supported context returns a
+    supported first-order type. -/
+theorem adjointCtxSupported_lookup
+    {Γ : LinearCtx} {x : String} {t : Typ}
+    (h : AdjointCtxSupported Γ)
+    (hLook : lookupLinearCtx Γ x = some t) :
+    AdjointTypeSupported t := by
+  let rec go :
+      ∀ (Γ : LinearCtx), AdjointCtxSupported Γ →
+        ∀ {x : String} {t : Typ},
+          lookupLinearCtx Γ x = some t →
+          AdjointTypeSupported t
+    | [], _, _, _, hLook => by
+        simp [lookupLinearCtx] at hLook
+    | (y, none) :: tl, h, x, t, hLook => by
+        simp [AdjointCtxSupported] at h
+        cases htl : lookupLinearCtx tl x with
+        | none =>
+            simp [lookupLinearCtx, htl] at hLook
+        | some t' =>
+            simp [lookupLinearCtx, htl] at hLook
+            cases hLook
+            exact go tl h htl
+    | (y, some t0) :: tl, h, x, t, hLook => by
+        simp [AdjointCtxSupported] at h
+        cases htl : lookupLinearCtx tl x with
+        | none =>
+            simp [lookupLinearCtx, htl] at hLook
+            rcases hLook with ⟨rfl, rfl⟩
+            exact h.1
+        | some t' =>
+            simp [lookupLinearCtx, htl] at hLook
+            cases hLook
+            exact go tl h.2 htl
+  exact go Γ h hLook
+
+/-- A successful rightmost lookup exposes a matching live binding split
+    of the context, together with the fact that the tail to its right no
+    longer contains a live binding for the same name. -/
+theorem lookupLinearCtx_some_split
+    {Γ : LinearCtx} {x : String} {t : Typ}
+    (h : lookupLinearCtx Γ x = some t) :
+    ∃ pre post,
+      Γ = pre ++ [(x, some t)] ++ post ∧
+      lookupLinearCtx post x = none := by
+  induction Γ with
+  | nil =>
+      simp [lookupLinearCtx] at h
+  | cons hd tl ih =>
+      cases hd with
+      | mk y slot =>
+          cases htail : lookupLinearCtx tl x with
+          | none =>
+              cases slot with
+              | none =>
+                  simp [lookupLinearCtx, htail] at h
+              | some t0 =>
+                  simp [lookupLinearCtx, htail] at h
+                  rcases h with ⟨rfl, rfl⟩
+                  exact ⟨[], tl, by simp, by simpa [lookupLinearCtx] using htail⟩
+          | some t' =>
+              simp [lookupLinearCtx, htail] at h
+              cases h
+              rcases ih htail with ⟨pre, post, hEq, hPost⟩
+              exact ⟨(y, slot) :: pre, post, by simp [hEq], hPost⟩
+
+/-- Body-local support side condition for `grad`: every outer live
+    binding that the body actually mentions, when resolved by the
+    rightmost binder lookup, lies in the supported first-order
+    fragment. This is weaker than `AdjointCtxSupported Γ`, so it
+    survives weakening by fresh unused variables while still ruling out
+    substitutions that would inject unsupported values into the AD
+    fragment. -/
+def AdjointFreeCtxSupported (Γ : LinearCtx) (e : Term) : Prop :=
+  ∀ z t,
+    z ∈ freeVars e →
+    lookupLinearCtx Γ z = some t →
+    AdjointTypeSupported t
+
+/-- Full context support implies the body-local support premise. -/
+theorem adjointFreeCtxSupported_of_ctxSupported
+    {Γ : LinearCtx} {e : Term}
+    (h : AdjointCtxSupported Γ) :
+    AdjointFreeCtxSupported Γ e := by
+  intro z t _hz hlook
+  exact adjointCtxSupported_lookup h hlook
+
 /-- Linear-context names are pairwise distinct. This is the scoping
     well-formedness predicate the TranslationDB bridge needs in order to
     align lexical named substitution with positional DB substitution. -/

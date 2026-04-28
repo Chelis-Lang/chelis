@@ -2794,7 +2794,7 @@ theorem transport_typing_lexical
           rcases hCover op hop with ⟨cl, hcl, hEqOp⟩
           rcases eraseClauses_exists_of_mem_named hEraseClauses hcl with ⟨hbDB, hmemDB⟩
           exact ⟨(op, hbDB), by simpa [hEqOp] using hmemDB, rfl⟩
-  | tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub ih =>
+  | tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub _hSupp _hCtxSupp ih =>
       intro hlex
       rcases ih (lexical_grad_body hlex) with ⟨bodyDB, hEraseBody, hTyBody⟩
       have hEraseBody' :
@@ -3874,13 +3874,16 @@ theorem preservation_beta_via_db
   have hClosed : Closed v := has_type_closed_term_of_closed_input hArg
   have hArgNil : HasType [] Sigma [] v tArg [] [] :=
     HasType.value_eff_polymorphic_bridge hArg hv []
+  have hArgSupported :
+      AdjointTypeSupported tArg → AdjointSupported v :=
+    adjointSupported_of_typed_value hArgNil hv
   have hFreshBody : ∀ y, y ∈ boundVars body → y ∉ boundVars v := by
     intro y hy
     have hyAbs : y ∈ boundVars (Term.abs x tArg body) := by
       simp [boundVars, hy]
     exact hAbsV y hyAbs
   rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
-      x tArg tRet epsBody body v hBody hLexBody hArgNil hClosed with
+      x tArg tRet epsBody body v hBody hLexBody hArgNil hArgSupported hClosed with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -3912,8 +3915,11 @@ theorem preservation_letBind_via_db
   have hClosed : Closed v := has_type_closed_term_of_closed_input hVal
   have hValNil : HasType [] Sigma [] v t1 [] [] :=
     HasType.value_eff_polymorphic_bridge hVal hv []
+  have hValSupported :
+      AdjointTypeSupported t1 → AdjointSupported v :=
+    adjointSupported_of_typed_value hValNil hv
   rcases subst_preserves_typing_lexical [] Sigma [] [(x, slot)]
-      x t1 t epsBody body v hBody hLexBody hValNil hClosed with
+      x t1 t epsBody body v hBody hLexBody hValNil hValSupported hClosed with
     ⟨GammaSub, hSubst⟩
   have hGammaSub : GammaSub = [] := has_type_closed_output_of_closed_input hSubst
   subst hGammaSub
@@ -3947,6 +3953,12 @@ theorem preservation_letpair_via_db
     HasType.value_eff_polymorphic_bridge hV1 hv1 []
   have hV2Nil : HasType [] Sigma [] v2 t2 [] [] :=
     HasType.value_eff_polymorphic_bridge hV2 hv2 []
+  have hV1Supported :
+      AdjointTypeSupported t1 → AdjointSupported v1 :=
+    adjointSupported_of_typed_value hV1Nil hv1
+  have hV2Supported :
+      AdjointTypeSupported t2 → AdjointSupported v2 :=
+    adjointSupported_of_typed_value hV2Nil hv2
   have hxy : x ≠ y := wellScoped_letpair_names_ne h_scope
   have hscopeNodup :
       (x :: y :: (boundVars v1 ++ boundVars v2 ++ boundVars body)).Nodup := by
@@ -3995,11 +4007,11 @@ theorem preservation_letpair_via_db
       ∀ z, z ∈ boundVars (subst body v2 y) → z ∉ boundVars v1 :=
     subst_bound_fresh body v2 v1 y hFreshBodyV1 hV2FreshV1
   rcases subst_preserves_typing_lexical [] Sigma [(x, some t1)] [(x, slotX), (y, slotY)]
-      y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Closed with
+      y t2 t epsBody body v2 hBody hLexBody hV2Nil hV2Supported hV2Closed with
     ⟨GammaAfterY, hAfterY⟩
   rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterY
       x t1 t epsBody (subst body v2 y) v1
-      hAfterY hAfterYNodup hAfterYCtxFresh hV1Nil hV1Closed with
+      hAfterY hAfterYNodup hAfterYCtxFresh hV1Nil hV1Supported hV1Closed with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal
@@ -4084,6 +4096,17 @@ theorem preservation_handleOpDirect_via_db
       (Term.var y) none hIdBody
   have hIdClosed : Closed idCont := by
     simpa [idCont] using (directIdCont_closed (epsH := epsH) (op := op) (v := v) (clauses := clauses) (tRet := tRet))
+  have hIdVal : IsValue idCont := by
+    simpa [idCont, directIdCont] using
+      (IsValue.abs (directIdContName epsH op v clauses) tRet
+        (Term.var (directIdContName epsH op v clauses)))
+  have hVSupported :
+      AdjointTypeSupported tArgV → AdjointSupported v :=
+    adjointSupported_of_typed_value hVNil hv
+  have hIdSupported :
+      AdjointTypeSupported (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) →
+        AdjointSupported idCont :=
+    adjointSupported_of_typed_value hIdAbs hIdVal
   have hLexBody : LexicallyScoped
       ([(x, some tArgV)] ++ [(k, some (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)))]) hb :=
     lexical_handle_clause
@@ -4151,12 +4174,12 @@ theorem preservation_handleOpDirect_via_db
   rcases subst_preserves_typing_lexical [] Sigma [(x, some tArgV)] [(x, slotX), (k, slotK)]
       k (Typ.arrow tRet tRet (EffectRow.removeOps epsB epsH)) tRet
       (EffectRow.removeOps epsB epsH) hb
-      idCont hBody hLexBody hIdAbs hIdClosed with
+      idCont hBody hLexBody hIdAbs hIdSupported hIdClosed with
     ⟨GammaAfterK, hAfterK⟩
   rcases subst_preserves_typing_ctx_fresh [] Sigma [] GammaAfterK
       x tArgV tRet (EffectRow.removeOps epsB epsH)
       (subst hb idCont k) v
-      hAfterK hAfterKNodup hAfterKCtxFresh hVNil hClosedV with
+      hAfterK hAfterKNodup hAfterKCtxFresh hVNil hVSupported hClosedV with
     ⟨GammaFinal, hFinal⟩
   have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
   subst hGammaFinal

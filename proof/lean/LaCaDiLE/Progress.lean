@@ -576,7 +576,9 @@ theorem progress_aux
          Term.loc (storeFreshLoc sigma),
          Step.tconst sigma v ds (storeFreshLoc sigma) rfl⟩)
   | grad x tv tOut body =>
-      exact Or.inr (Or.inl ⟨sigma, _, Step.tgrad sigma x tv tOut body⟩)
+      rcases HasType.grad_inv h with
+        ⟨_, _, _, _, _, _, _, _, _, hSupp, _, _⟩
+      exact Or.inr (Or.inl ⟨sigma, _, Step.tgrad sigma x tv tOut body hSupp⟩)
   | vmap x tv d body =>
       exact Or.inr (Or.inl ⟨sigma, _, Step.tvmap sigma x tv d body⟩)
   | pair e1 e2 =>

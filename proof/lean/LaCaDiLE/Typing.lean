@@ -280,6 +280,8 @@ inductive HasType : CapCtx → StoreTyp → LinearCtx → Term → Typ → Effec
               (Gamma ++ [(x, some (Typ.tensor ds))]) e (Typ.tensor dsOut) eps
               (Gamma ++ [(x, slot)]) →
       subsetEffRow eps DiffCompat = true →
+      AdjointSupported e →
+      AdjointFreeCtxSupported (Gamma ++ [(x, some (Typ.tensor ds))]) e →
       HasType Delta Sigma Gamma
               (Term.grad x (Typ.tensor ds) (Typ.tensor dsOut) e)
               (Typ.arrow
@@ -877,6 +879,70 @@ private theorem mem_dom_of_mem_append_pair_ne
         exact hne_y hz
       · exact False.elim hz
 
+private theorem lookupLinearCtx_append_singleton_ne_of_some
+    {Gamma : LinearCtx} {z x : String} {slot : Option Typ} {t : Typ}
+    (hne : z ≠ x)
+    (hLook : lookupLinearCtx (Gamma ++ ([(x, slot)] : LinearCtx)) z = some t) :
+    lookupLinearCtx Gamma z = some t := by
+  rw [lookupLinearCtx_append] at hLook
+  have hLast : lookupLinearCtx ([(x, slot)] : LinearCtx) z = none := by
+    simp [lookupLinearCtx, hne]
+  simpa [hLast] using hLook
+
+private theorem lookupLinearCtx_append_pair_ne_of_some
+    {Gamma : LinearCtx} {z x y : String}
+    {slotX slotY : Option Typ} {t : Typ}
+    (hne_x : z ≠ x) (hne_y : z ≠ y)
+    (hLook : lookupLinearCtx (Gamma ++ ([(x, slotX), (y, slotY)] : LinearCtx)) z = some t) :
+    lookupLinearCtx Gamma z = some t := by
+  have hMid :
+      lookupLinearCtx ((Gamma ++ [(x, slotX)]) ++ ([(y, slotY)] : LinearCtx)) z = some t := by
+    simpa [List.append_assoc] using hLook
+  have hMid' : lookupLinearCtx (Gamma ++ ([(x, slotX)] : LinearCtx)) z = some t :=
+    lookupLinearCtx_append_singleton_ne_of_some (Gamma := Gamma ++ [(x, slotX)])
+      (x := y) (z := z) hne_y hMid
+  exact lookupLinearCtx_append_singleton_ne_of_some (Gamma := Gamma)
+    (x := x) (z := z) hne_x hMid'
+
+theorem slotSub_lookup_some
+    {out inp : LinearCtx}
+    (h : SlotSub out inp)
+    {x : String} {t : Typ}
+    (hLook : lookupLinearCtx out x = some t) :
+    ∃ t', lookupLinearCtx inp x = some t' := by
+  induction out generalizing inp x t with
+  | nil =>
+      cases inp <;> simp [SlotSub, lookupLinearCtx] at h hLook
+  | cons outHd outs ih =>
+      cases inp with
+      | nil =>
+          cases h
+      | cons inpHd inps =>
+          cases outHd with
+          | mk xOut outSlot =>
+              cases inpHd with
+              | mk xIn inSlot =>
+                  rcases h with ⟨hName, hSlot, hTail⟩
+                  cases hName
+                  cases hOuts : lookupLinearCtx outs x with
+                  | some tOut =>
+                      rcases ih hTail (x := x) (t := tOut) hOuts with ⟨tIn, hIn⟩
+                      exact ⟨tIn, by simp [lookupLinearCtx, hOuts, hIn]⟩
+                  | none =>
+                      by_cases hx : x = xOut
+                      · subst x
+                        cases hSlot with
+                        | inl hNone =>
+                            simp [lookupLinearCtx, hOuts, hNone] at hLook
+                        | inr hEqSlot =>
+                            have hInSlot : inSlot = some t := by
+                              simpa [lookupLinearCtx, hOuts, hEqSlot] using hLook
+                            have hMem : (xOut, some t) ∈ (xOut, inSlot) :: inps := by
+                              simpa [hInSlot] using List.mem_cons_self (xOut, some t) inps
+                            exact lookupLinearCtx_some_of_mem_live
+                              (Γ := (xOut, inSlot) :: inps) (x := xOut) (t := t) hMem
+                      · simp [lookupLinearCtx, hOuts, hx] at hLook
+
 mutual
 
 def has_type_free_vars_aux
@@ -975,7 +1041,7 @@ def has_type_free_vars_aux
       rcases hz with hz | hz
       · exact has_type_free_vars_aux hBody z hz
       · exact has_type_linear_shrinks hBody z (clauses_typed_free_vars_aux hClauses z hz)
-  | HasType.tgrad _ _ Γ x ds _ _ _ _ hBody _ =>
+  | HasType.tgrad _ _ Γ x ds _ _ _ _ hBody _ _ _ =>
       intro z hz
       simp [freeVars] at hz
       have hz_ctx :
@@ -1014,6 +1080,142 @@ def clauses_typed_free_vars_aux
           has_type_free_vars_aux hBody z hz.1
         exact mem_dom_of_mem_append_pair_ne hz_ctx hz.2.1 hz.2.2
       · exact clauses_typed_free_vars_aux hRest z hz
+
+end
+
+mutual
+
+def has_type_free_lookup_aux
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma') :
+    ∀ z, z ∈ freeVars e → ∃ tz, lookupLinearCtx Gamma z = some tz := by
+  match h with
+  | HasType.var _ _ Γpre Γpost x t =>
+      intro z hz
+      simp [freeVars] at hz
+      subst z
+      exact lookupLinearCtx_some_of_mem_live
+        (Γ := Γpre ++ [(x, some t)] ++ Γpost) (x := x) (t := t) (by simp)
+  | HasType.unit _ _ _ =>
+      intro z hz
+      simp [freeVars] at hz
+  | HasType.abs _ _ Γ1 _ x t1 _ _ body _ hBody =>
+      intro z hz
+      have hz' : z ∈ freeVars body ∧ z ≠ x := by
+        simpa [freeVars] using hz
+      rcases has_type_free_lookup_aux hBody z hz'.1 with ⟨tz, hLook⟩
+      exact ⟨tz, lookupLinearCtx_append_singleton_ne_of_some hz'.2 hLook⟩
+  | HasType.app _ _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz with ⟨tz, hLook⟩
+        exact slotSub_lookup_some (has_type_slotSub h1) hLook
+  | HasType.letBind _ _ _ _ _ x _ _ t1 _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz.1 with ⟨tz, hLook⟩
+        have hLookΓ2 : lookupLinearCtx _ z = some tz :=
+          lookupLinearCtx_append_singleton_ne_of_some hz.2 hLook
+        exact slotSub_lookup_some (has_type_slotSub h1) hLookΓ2
+  | HasType.copy _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.letpair _ _ _ _ _ x y _ _ _ _ _ _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz.1 with ⟨tz, hLook⟩
+        have hLookΓ2 : lookupLinearCtx _ z = some tz :=
+          lookupLinearCtx_append_pair_ne_of_some hz.2.1 hz.2.2 hLook
+        exact slotSub_lookup_some (has_type_slotSub h1) hLookΓ2
+  | HasType.tpair _ _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz with ⟨tz, hLook⟩
+        exact slotSub_lookup_some (has_type_slotSub h1) hLook
+  | HasType.fst _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.snd _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.const _ _ _ _ _ =>
+      intro z hz
+      simp [freeVars] at hz
+  | HasType.tadd _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz with ⟨tz, hLook⟩
+        exact slotSub_lookup_some (has_type_slotSub h1) hLook
+  | HasType.tmul _ _ _ _ _ _ _ _ _ _ h1 h2 =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux h1 z hz
+      · rcases has_type_free_lookup_aux h2 z hz with ⟨tz, hLook⟩
+        exact slotSub_lookup_some (has_type_slotSub h1) hLook
+  | HasType.tsum _ _ _ _ _ _ _ _ hBody _ =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.texpand _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.uniformLike _ _ _ _ _ _ _ _ _ hBody =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.perform _ _ _ _ _ _ _ _ _ hBody _ =>
+      intro z hz
+      simpa [freeVars] using has_type_free_lookup_aux hBody z hz
+  | HasType.handle _ _ _ _ _ _ _ _ _ _ hBody _ _ _ hClauses =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases hz with hz | hz
+      · exact has_type_free_lookup_aux hBody z hz
+      · rcases clauses_typed_free_lookup_aux hClauses z hz with ⟨tz, hLook⟩
+        exact slotSub_lookup_some (has_type_slotSub hBody) hLook
+  | HasType.tgrad _ _ Γ x ds _ _ _ _ hBody _ _ _ =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases has_type_free_lookup_aux hBody z hz.1 with ⟨tz, hLook⟩
+      exact ⟨tz, lookupLinearCtx_append_singleton_ne_of_some hz.2 hLook⟩
+  | HasType.tvmap _ _ Γ x t1 _ _ _ _ _ hBody =>
+      intro z hz
+      simp [freeVars] at hz
+      rcases has_type_free_lookup_aux hBody z hz.1 with ⟨tz, hLook⟩
+      exact ⟨tz, lookupLinearCtx_append_singleton_ne_of_some hz.2 hLook⟩
+  | HasType.loc _ _ _ _ _ _ =>
+      intro z hz
+      simp [freeVars] at hz
+  | HasType.subEff _ _ _ _ _ _ _ _ hBody _ =>
+      exact has_type_free_lookup_aux hBody
+
+def clauses_typed_free_lookup_aux
+    {Delta : CapCtx} {Sigma : StoreTyp}
+    {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) :
+    ∀ z, z ∈ freeVarsClauses cls → ∃ tz, lookupLinearCtx Gamma2 z = some tz := by
+  match h with
+  | ClausesTyped.nil _ _ _ _ _ =>
+      intro z hz
+      simp [freeVarsClauses] at hz
+  | ClausesTyped.cons _ _ Γ2 _ t tArg tRet epsR op x k _ _ _ _ hMatch hBody hRest =>
+      intro z hz
+      simp [freeVarsClauses] at hz
+      rcases hz with hz | hz
+      · rcases has_type_free_lookup_aux hBody z hz.1 with ⟨tz, hLook⟩
+        exact ⟨tz, lookupLinearCtx_append_pair_ne_of_some hz.2.1 hz.2.2 hLook⟩
+      · exact clauses_typed_free_lookup_aux hRest z hz
 
 end
 
@@ -1219,14 +1421,30 @@ theorem hasType_prefix_weaken
       hCover hcls ih_body ih_clauses =>
       exact HasType.handle Δ_ S_ (outer ++ Γ1) (outer ++ Γ2) (outer ++ Γ3)
         body clauses t_ epsH epsB ih_body hSubsH hClsH hCover ih_clauses
-  | tgrad Δ_ S_ Γ_ x ds dsOut body ep slot hbody hsub_eff ih =>
+  | tgrad Δ_ S_ Γ_ x ds dsOut body ep slot hbody hsub_eff hSupp hCtxSupp ih =>
       have ih' :
           HasType (Capability.diff :: Δ_) S_
             ((outer ++ Γ_) ++ [(x, some (Typ.tensor ds))])
             body (Typ.tensor dsOut) ep
             ((outer ++ Γ_) ++ [(x, slot)]) := by
         simpa [List.append_assoc] using ih
-      exact HasType.tgrad Δ_ S_ (outer ++ Γ_) x ds dsOut body ep slot ih' hsub_eff
+      have hCtxSupp' :
+          AdjointFreeCtxSupported ((outer ++ Γ_) ++ [(x, some (Typ.tensor ds))]) body := by
+        intro z t hz hLook
+        rcases has_type_free_lookup_aux hbody z hz with ⟨tz, hInnerLook⟩
+        have hPrefInner :
+            lookupLinearCtx (outer ++ (Γ_ ++ [(x, some (Typ.tensor ds))])) z = some tz :=
+          lookupLinearCtx_append_left_of_some (pref := outer) hInnerLook
+        have hLook' :
+            lookupLinearCtx (outer ++ (Γ_ ++ [(x, some (Typ.tensor ds))])) z = some t := by
+          simpa [List.append_assoc] using hLook
+        have hEq : tz = t := by
+          rw [hLook'] at hPrefInner
+          cases hPrefInner
+          rfl
+        simpa [hEq] using hCtxSupp z tz hz hInnerLook
+      exact HasType.tgrad Δ_ S_ (outer ++ Γ_) x ds dsOut body ep slot
+        ih' hsub_eff hSupp hCtxSupp'
   | tvmap Δ_ S_ Γ_ x t1 t2 body ep d slot hbody ih =>
       have ih' :
           HasType Δ_ S_ ((outer ++ Γ_) ++ [(x, some t1)]) body t2 ep

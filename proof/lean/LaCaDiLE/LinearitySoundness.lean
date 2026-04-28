@@ -168,7 +168,8 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
                   (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses))))
                 clauses)) kVar⟩
   | tgrad
-      (sigma : Store) (x : String) (tv tOut : Typ) (body : Term) :
+      (sigma : Store) (x : String) (tv tOut : Typ) (body : Term)
+      (hSupp : AdjointSupported body) :
       HandlerAwareRuntimeDebt
         ⟨sigma, Term.grad x tv tOut body⟩
         ⟨sigma,
@@ -176,7 +177,7 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
             (Term.abs (gradSeedName x body) tOut
               (Term.letBind (gradResultName x body)
                 (Term.handle [EffectLabel.accum]
-                  (adjointFrom body x (Term.var (gradSeedName x body))
+                  (adjointTypedFrom body tOut x (Term.var (gradSeedName x body))
                     (gradAdjointCounter x (gradSeedName x body) body))
                   [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
                 (Term.var x)))⟩
@@ -300,9 +301,9 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
       exact Or.inr
         (HandlerAwareRuntimeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
           hv hsig hmem hop hEs)
-  | tgrad sigma x tv tOut body =>
+  | tgrad sigma x tv tOut body hSupp =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body)
+      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
       intro _h
       exact Or.inr (HandlerAwareRuntimeDebt.tvmap sigma x tv d body)

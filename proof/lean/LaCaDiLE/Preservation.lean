@@ -644,7 +644,7 @@ private theorem hasType_store_live_on_locRefs
       simpa [locRefs] using ih h_wf
   | perform Δ_ _ Γ1 Γ2 op e0 tArg tRet ep _h hM ih =>
       simpa [locRefs] using ih h_wf
-  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsubEff ih =>
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsubEff _hSupp _hCtxSupp ih =>
       simpa [locRefs] using ih h_wf
   | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
       simpa [locRefs] using ih h_wf
@@ -962,8 +962,9 @@ theorem hasType_store_weaken
            hCover _hcls ih_body ih_clauses =>
       exact HasType.handle Δ_ Sigma' Γ1 Γ2 Γ3 body clauses t_ epsH epsB
         (ih_body hsub) hSubsH hClsH hCover (ih_clauses hsub)
-  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff ih =>
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff hSupp hCtxSupp ih =>
       exact HasType.tgrad Δ_ Sigma' Γ_ x ds dsOut body ep slot (ih hsub) hsub_eff
+        hSupp hCtxSupp
   | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
       exact HasType.tvmap Δ_ Sigma' Γ_ x t1 t2 body ep d slot (ih hsub)
   | loc Δ_ _ Γ_ ell tv hlook =>
@@ -1051,9 +1052,9 @@ theorem hasType_store_weaken_on_locRefs
         (ih_body (StoreTypOn.append_left (by simpa [locRefs] using hsub)))
         hSubsH hClsH hCover
         (ih_clauses (StoreTypOn.append_right (by simpa [locRefs] using hsub)))
-  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff ih =>
+  | tgrad Δ_ _ Γ_ x ds dsOut body ep slot _h hsub_eff hSupp hCtxSupp ih =>
       exact HasType.tgrad Δ_ Sigma' Γ_ x ds dsOut body ep slot
-        (ih (by simpa [locRefs] using hsub)) hsub_eff
+        (ih (by simpa [locRefs] using hsub)) hsub_eff hSupp hCtxSupp
   | tvmap Δ_ _ Γ_ x t1 t2 body ep d slot _h ih =>
       exact HasType.tvmap Δ_ Sigma' Γ_ x t1 t2 body ep d slot
         (ih (by simpa [locRefs] using hsub))
@@ -1526,18 +1527,20 @@ theorem HasType.grad_inv
       t = Typ.arrow (Typ.tensor ds)
             (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody) [] ∧
       subsetEffRow epsBody DiffCompat = true ∧
+      AdjointSupported body ∧
+      AdjointFreeCtxSupported (Gamma1 ++ [(x, some (Typ.tensor ds))]) body ∧
       HasType (Capability.diff :: Delta) Sigma
         (Gamma1 ++ [(x, some (Typ.tensor ds))]) body (Typ.tensor dsOut) epsBody
         (Gamma2 ++ [(x, slot)]) := by
   generalize heq : Term.grad x tArg tOut body = e_in at h
   induction h using HasType.rec
     (motive_2 := fun _ _ _ _ _ _ _ _ => True) with
-  | tgrad Delta Sigma Gamma x' ds dsOut body' epsBody slot hBody hsub =>
+  | tgrad Delta Sigma Gamma x' ds dsOut body' epsBody slot hBody hsub hSupp hCtxSupp =>
       cases heq
-      exact ⟨rfl, ds, dsOut, epsBody, slot, rfl, rfl, rfl, hsub, hBody⟩
+      exact ⟨rfl, ds, dsOut, epsBody, slot, rfl, rfl, rfl, hsub, hSupp, hCtxSupp, hBody⟩
   | subEff Delta Sigma Gamma Gamma' e t' eps0 eps1 hInner hSub ih =>
-      obtain ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hBody⟩ := ih heq
-      exact ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hBody⟩
+      obtain ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hSupp, hCtxSupp, hBody⟩ := ih heq
+      exact ⟨hGamma, ds, dsOut, epsBody, slot, htArg, htOut, ht, hDiff, hSupp, hCtxSupp, hBody⟩
   | _ => (try cases heq) <;>
          first | exact True.intro | (exfalso; contradiction)
 
@@ -5352,6 +5355,9 @@ private theorem preservation_aux
             (tx := tArgV)
             (tk := Typ.arrow tRet t (EffectRow.removeOps epsB epsH))
             (lexical_nil h_scope) hmem
+        have hVSupported :
+            AdjointTypeSupported tArgV → AdjointSupported v :=
+          adjointSupported_of_typed_value hVNil hv
         have hSuffixFreshV :
             ∀ z,
               z ∈ linearCtxDom
@@ -5369,7 +5375,7 @@ private theorem preservation_aux
               [(xVar, slotX), (kVar, slotK)]
               xVar tArgV t (EffectRow.removeOps epsB epsH)
               hb v
-              hBody hLexBody hVNil hClosedV hSuffixFreshV with
+              hBody hLexBody hVNil hVSupported hClosedV hSuffixFreshV with
           ⟨GammaAfterXPre, slotAfterX, GammaAfterXPost,
             hAfterXOut, hAfterXPreSub, _hAfterXSlot, _hAfterXPostSub, hAfterX⟩
         have hAfterXPreNil : GammaAfterXPre = [] := by
@@ -5427,7 +5433,10 @@ private theorem preservation_aux
               (subst hb v xVar)
               (Term.abs y tRet
                 (Term.handle epsH (plug E (Term.var y)) clauses))
-              hAfterX hAfterKNodup hAfterKCtxFresh hK0 hKClosed with
+              hAfterX hAfterKNodup hAfterKCtxFresh hK0
+              (adjointSupported_of_typed_value hK0
+                (IsValue.abs y tRet (Term.handle epsH (plug E (Term.var y)) clauses)))
+              hKClosed with
           ⟨GammaFinal, hFinal⟩
         have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
         subst hGammaFinal
@@ -5507,6 +5516,9 @@ private theorem preservation_aux
             (tx := tArgV)
             (tk := Typ.arrow tRet t (EffectRow.removeOps epsB epsH))
             (lexical_nil h_scope) hmem
+        have hVSupported :
+            AdjointTypeSupported tArgV → AdjointSupported v :=
+          adjointSupported_of_typed_value hVNil hv
         have hSuffixFreshV :
             ∀ z,
               z ∈ linearCtxDom
@@ -5524,7 +5536,7 @@ private theorem preservation_aux
               [(xVar, slotX), (kVar, slotK)]
               xVar tArgV t (EffectRow.removeOps epsB epsH)
               hb v
-              hBody hLexBody hVNil hClosedV hSuffixFreshV with
+              hBody hLexBody hVNil hVSupported hClosedV hSuffixFreshV with
           ⟨GammaAfterXPre, slotAfterX, GammaAfterXPost,
             hAfterXOut, hAfterXPreSub, _hAfterXSlot, _hAfterXPostSub, hAfterX⟩
         have hAfterXPreNil : GammaAfterXPre = [] := by
@@ -5582,7 +5594,10 @@ private theorem preservation_aux
               (subst hb v xVar)
               (Term.abs y tRet
                 (Term.handle epsH (multiPlug Es (Term.var y)) clauses))
-              hAfterX hAfterKNodup hAfterKCtxFresh hK0 hKClosed with
+              hAfterX hAfterKNodup hAfterKCtxFresh hK0
+              (adjointSupported_of_typed_value hK0
+                (IsValue.abs y tRet (Term.handle epsH (multiPlug Es (Term.var y)) clauses)))
+              hKClosed with
           ⟨GammaFinal, hFinal⟩
         have hGammaFinal : GammaFinal = [] := has_type_closed_output_of_closed_input hFinal
         subst hGammaFinal
@@ -5592,7 +5607,8 @@ private theorem preservation_aux
   | tgrad s x tv tOut body =>
       intro locs _hsep _hlinear t eps h_typ _h_scope
       rcases HasType.grad_inv h_typ with
-        ⟨_hGamma, ds, dsOut, epsBody, slot, hTv, hTOut, hT, hDiffCompat, hBody⟩
+        ⟨_hGamma, ds, dsOut, epsBody, slot, hTv, hTOut, hT, hDiffCompat, hSupp,
+          hCtxSupp, hBody⟩
       subst tv
       subst tOut
       subst t
@@ -5630,15 +5646,16 @@ private theorem preservation_aux
         apply adjointNamesFresh_of_length_bound
         have hSmallLen : maxStringLength [x] < n := Nat.lt_of_le_of_lt hxle hFullLen
         simpa [linearCtxDom, n, gs, gradAdjointCounter] using hSmallLen
+      let adjBody := adjointTypedFrom body (Typ.tensor dsOut) x (Term.var gs) n
       have hAdj :
           HasType [] Sigma
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
-            (adjointFrom body x (Term.var gs) n)
+            adjBody
             Typ.unit
             epsAdj
             ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx) := by
-        exact adjointFrom_preserves_typing [] Sigma [] x gs ds dsOut body epsBody n slot
-          hBody hDiffCompat hFreshFull hFreshSmall
+        exact adjointTypedFrom_preserves_typing [] Sigma [] x gs ds dsOut body epsBody n slot
+          hBody hDiffCompat hSupp hFreshFull hFreshSmall
       have hClauseSig : OpSigMatch EffectLabel.accum Typ.unit Typ.unit := by
         simp [OpSigMatch, opArgType, opRetType]
       have hVarK :
@@ -5736,7 +5753,7 @@ private theorem preservation_aux
           HasType [] Sigma
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
             (Term.handle [EffectLabel.accum]
-              (adjointFrom body x (Term.var gs) n)
+              adjBody
               clauses)
             Typ.unit
             epsHandle
@@ -5745,7 +5762,7 @@ private theorem preservation_aux
           ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
           ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
           ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
-          (adjointFrom body x (Term.var gs) n)
+          adjBody
           clauses
           Typ.unit
           [EffectLabel.accum]
@@ -5788,7 +5805,7 @@ private theorem preservation_aux
           HasType [] Sigma
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
             (Term.handle [EffectLabel.accum]
-              (adjointFrom body x (Term.var gs) n)
+              adjBody
               clauses)
             Typ.unit
             epsBody
@@ -5819,7 +5836,7 @@ private theorem preservation_aux
             ([(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))] : LinearCtx)
             (Term.letBind tmp
               (Term.handle [EffectLabel.accum]
-                (adjointFrom body x (Term.var gs) n)
+                adjBody
                 clauses)
               (Term.var x))
             (Typ.tensor ds)
@@ -5832,7 +5849,7 @@ private theorem preservation_aux
             ([(x, none), (gs, none)] : LinearCtx)
             tmp
             (Term.handle [EffectLabel.accum]
-              (adjointFrom body x (Term.var gs) n)
+              adjBody
               clauses)
             (Term.var x)
             Typ.unit
@@ -5848,7 +5865,7 @@ private theorem preservation_aux
             (Term.abs gs (Typ.tensor dsOut)
               (Term.letBind tmp
                 (Term.handle [EffectLabel.accum]
-                  (adjointFrom body x (Term.var gs) n)
+                  adjBody
                   clauses)
                 (Term.var x)))
             (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
@@ -5870,7 +5887,7 @@ private theorem preservation_aux
               (Term.abs gs (Typ.tensor dsOut)
                 (Term.letBind tmp
                   (Term.handle [EffectLabel.accum]
-                    (adjointFrom body x (Term.var gs) n)
+                    adjBody
                     clauses)
                   (Term.var x))))
             (Typ.arrow

@@ -13,6 +13,7 @@
 import LaCaDiLE.Syntax
 import LaCaDiLE.Store
 import LaCaDiLE.Typing
+import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
 
@@ -37,6 +38,87 @@ theorem addDimCtx_singleton (d : Dim) (x : String) (ot : Option Typ) :
 
 @[simp] theorem addDimCtx_singleton_none (d : Dim) (x : String) :
     addDimCtx d [(x, none)] = [(x, none)] := rfl
+
+theorem lookupLinearCtx_addDimCtx (d : Dim) :
+    ∀ (Gamma : LinearCtx) (x : String),
+      lookupLinearCtx (addDimCtx d Gamma) x =
+        Option.map (addDim d) (lookupLinearCtx Gamma x)
+  | [], x => by
+      simp [lookupLinearCtx, addDimCtx]
+  | (y, slot) :: rest, x => by
+      simp [addDimCtx_cons, lookupLinearCtx]
+      rw [lookupLinearCtx_addDimCtx d rest x]
+      cases hRest : lookupLinearCtx rest x with
+      | none =>
+          by_cases hxy : x = y
+          · simp [hRest, hxy]
+          · simp [hRest, hxy]
+      | some t =>
+          simp [hRest, lookupLinearCtx]
+
+mutual
+
+theorem freeVars_addDimTerm (d : Dim) :
+    ∀ e : Term, freeVars (addDimTerm d e) = freeVars e
+  | Term.var x => by simp [addDimTerm, freeVars]
+  | Term.const v ds => by simp [addDimTerm, freeVars]
+  | Term.unit => by simp [addDimTerm, freeVars]
+  | Term.abs x t body => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d body]
+  | Term.app e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.letBind x e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.copy e => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.letpair x y e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.fst _ e => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.snd _ e => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.loc ell => by simp [addDimTerm, freeVars]
+  | Term.add e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d e1, freeVars_addDimTerm d e2]
+  | Term.sum e dInner => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.expand e dInner => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.uniformLike e lo hi => by
+      simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+  | Term.grad x t tOut body => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d body]
+  | Term.vmap x t dMap body => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d body]
+  | Term.handle eps body clauses => by
+      simp [addDimTerm, freeVars, freeVars_addDimTerm d body, freeVarsClauses_addDimClauses d clauses]
+  | Term.perform op e => by simpa [addDimTerm, freeVars] using freeVars_addDimTerm d e
+
+theorem freeVarsClauses_addDimClauses (d : Dim) :
+    ∀ clauses : List (EffectLabel × String × String × Term),
+      freeVarsClauses (addDimClauses d clauses) = freeVarsClauses clauses
+  | [] => by simp [addDimClauses, freeVarsClauses]
+  | (op, x, k, hb) :: rest => by
+      simp [addDimClauses, freeVarsClauses, freeVars_addDimTerm d hb,
+        freeVarsClauses_addDimClauses d rest]
+
+end
+
+theorem adjointFreeCtxSupported_addDimCtx
+    (d : Dim) {Gamma : LinearCtx} {e : Term}
+    (h : AdjointFreeCtxSupported Gamma e) :
+    AdjointFreeCtxSupported (addDimCtx d Gamma) (addDimTerm d e) := by
+  intro z t hz hLook
+  have hz' : z ∈ freeVars e := by
+    simpa [freeVars_addDimTerm d e] using hz
+  have hMap := lookupLinearCtx_addDimCtx d Gamma z
+  rw [hMap] at hLook
+  cases hOrig : lookupLinearCtx Gamma z with
+  | none =>
+      simp [hOrig] at hLook
+  | some t0 =>
+      simp [hOrig] at hLook
+      cases hLook
+      exact adjointTypeSupported_addDim d t0 (h z t0 hz' hOrig)
 
 -- addDimCtx_filter_name removed: LinearCtx refactor to Option Typ
 -- uses tombstone/tail-stripping instead of filtering.
@@ -329,7 +411,7 @@ theorem addDim_preserves_typing
         rcases hClauseCov clauses cl0 hcl0 with ⟨cl, hcl, heq2⟩
         exact ⟨cl, hcl, heq2.trans heq⟩)
       ihCT
-  | tgrad Delta Sigma Gamma x ds dsOut e eps slot _h hsub ih =>
+  | tgrad Delta Sigma Gamma x ds dsOut e eps slot _h hsub hSupp hCtxSupp ih =>
     simp [addDimTerm, addDim]
     have ih' : HasType (Capability.diff :: Delta) (addDimStoreTyp d Sigma)
         (addDimCtx d Gamma ++ [(x, some (Typ.tensor (DimList.cons d ds)))]) (addDimTerm d e)
@@ -338,9 +420,18 @@ theorem addDim_preserves_typing
       have := ih
       simp only [addDimCtx_append, addDimCtx_singleton, addDim] at this
       exact this
+    have hSupp' : AdjointSupported (addDimTerm d e) :=
+      adjointSupported_addDimTerm d e hSupp
+    have hCtxSupp' :
+        AdjointFreeCtxSupported
+          (addDimCtx d Gamma ++ [(x, some (Typ.tensor (DimList.cons d ds)))])
+          (addDimTerm d e) := by
+      simpa [addDimCtx_append, addDimCtx_singleton, addDim] using
+        (adjointFreeCtxSupported_addDimCtx d
+          (Gamma := Gamma ++ [(x, some (Typ.tensor ds))]) (e := e) hCtxSupp)
     exact HasType.tgrad Delta (addDimStoreTyp d Sigma) (addDimCtx d Gamma)
       x (DimList.cons d ds) (DimList.cons d dsOut) (addDimTerm d e) eps
-      (slot.map (addDim d)) ih' hsub
+      (slot.map (addDim d)) ih' hsub hSupp' hCtxSupp'
   | loc Delta Sigma Gamma ell t hlook =>
     -- Wave 2: closed via addDimStoreTyp_lookup. The store typing in
     -- the output is lifted via addDimStoreTyp, so the looked-up type

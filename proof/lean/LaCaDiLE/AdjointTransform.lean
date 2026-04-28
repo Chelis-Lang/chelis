@@ -104,22 +104,6 @@ def zeroCotangent : Typ → Term
   | Typ.arrow _ _ _     => Term.unit
   | Typ.tyVar _         => Term.unit
 
-/-- The fragment of source/result types whose cotangent seeds are
-    currently represented explicitly by the typed adjoint transform. -/
-def AdjointTypeSupported : Typ → Prop
-  | Typ.tensor _ => True
-  | Typ.pair t1 t2 => AdjointTypeSupported t1 ∧ AdjointTypeSupported t2
-  | Typ.unit => True
-  | Typ.arrow _ _ _ => False
-  | Typ.tyVar _ => False
-
-/-- Every live entry in the linear context lies in the currently
-    supported first-order adjoint fragment. Tombstones are ignored. -/
-def AdjointCtxSupported : LinearCtx → Prop
-  | [] => True
-  | (_, none) :: rest => AdjointCtxSupported rest
-  | (_, some t) :: rest => AdjointTypeSupported t ∧ AdjointCtxSupported rest
-
 /-- Split a cotangent seed for primal type `t` into two cotangent seeds
     of type `cotangentType t`. Tensor leaves use `copy`; product
     cotangents recurse structurally; currently non-differentiable leaves
@@ -155,47 +139,6 @@ decreasing_by
   all_goals
     simp_wf
     omega
-
-mutual
-
-/-- Syntax-only domain predicate for the currently supported adjoint
-    transform fragment. This is the first-order fragment the typed
-    transform actually implements: product structure, primitive tensor
-    operators, handlers, and `perform` of differentiation-compatible
-    effects are allowed; higher-order / staged constructs whose current
-    transform equations are still placeholders are excluded. -/
-def AdjointSupported : Term → Prop
-  | Term.var _ => True
-  | Term.const _ _ => True
-  | Term.unit => True
-  | Term.loc _ => True
-  | Term.add e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
-  | Term.mul e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
-  | Term.sum e _ => AdjointSupported e
-  | Term.expand e _ => AdjointSupported e
-  | Term.copy e => AdjointSupported e
-  | Term.letBind _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
-  | Term.letpair _ _ e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
-  | Term.pair e1 e2 => AdjointSupported e1 ∧ AdjointSupported e2
-  | Term.fst _ e => AdjointSupported e
-  | Term.snd _ e => AdjointSupported e
-  | Term.handle _ body clauses =>
-      AdjointSupported body ∧ AdjointSupportedClauses clauses
-  | Term.perform op e => op ∈ DiffCompat ∧ AdjointSupported e
-  | Term.abs _ _ _ => False
-  | Term.app _ _ => False
-  | Term.uniformLike _ _ _ => False
-  | Term.grad _ _ _ _ => False
-  | Term.vmap _ _ _ _ => False
-
-/-- Clause-list companion to `AdjointSupported`. -/
-def AdjointSupportedClauses :
-    List (EffectLabel × String × String × Term) → Prop
-  | [] => True
-  | (_, _, _, hb) :: rest =>
-      AdjointSupported hb ∧ AdjointSupportedClauses rest
-
-end
 
 mutual
 

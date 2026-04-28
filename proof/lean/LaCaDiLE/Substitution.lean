@@ -182,6 +182,188 @@ end
 
 mutual
 
+/-- A free variable surviving substitution by a closed term must come
+    from the original term, and it cannot be the substituted name. -/
+private theorem mem_freeVars_subst_closed
+    (e v : Term) (x z : String)
+    (hClosed : Closed v)
+    (hmem : z ∈ freeVars (subst e v x)) :
+    z ∈ freeVars e ∧ z ≠ x := by
+  match e with
+  | Term.var y =>
+      by_cases hy : y = x
+      · have hfree : freeVars v = [] := hClosed
+        have hcontra : False := by
+          simpa [subst, hy, hfree] using hmem
+        exact False.elim hcontra
+      · have hzy : z = y := by
+          simpa [subst, hy, freeVars] using hmem
+        subst z
+        exact ⟨by simp [freeVars], hy⟩
+  | Term.abs y t body =>
+      by_cases hy : y = x
+      · simpa [subst, hy, freeVars] using hmem
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with ⟨hzBodySubst, hzy⟩
+        rcases mem_freeVars_subst_closed body v x z hClosed hzBodySubst with ⟨hzBody, hzx⟩
+        exact ⟨by simp [freeVars, hzBody, hzy], hzx⟩
+  | Term.app e1 e2 =>
+      simp [subst, freeVars] at hmem
+      rcases hmem with hmem | hmem
+      · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+      · rcases mem_freeVars_subst_closed e2 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.letBind y e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with hmem | ⟨hzBody, hzx⟩
+        · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+          exact ⟨by simp [freeVars, hy, hz], hzx⟩
+        · exact ⟨by simp [freeVars, hy, hzBody, hzx], hzx⟩
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with hmem | ⟨hzBodySubst, hzy⟩
+        · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+          exact ⟨by simp [freeVars, hy, hz], hzx⟩
+        · rcases mem_freeVars_subst_closed e2 v x z hClosed hzBodySubst with ⟨hzBody, hzx⟩
+          exact ⟨by simp [freeVars, hy, hzBody, hzy], hzx⟩
+  | Term.copy e =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.letpair y k e1 e2 =>
+      by_cases hy : y = x
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with hmem | ⟨hzBody, hzx, hzk⟩
+        · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+          exact ⟨by simp [freeVars, hy, hz], hzx⟩
+        · exact ⟨by simp [freeVars, hy, hzBody, hzx, hzk], hzx⟩
+      · by_cases hk : k = x
+        · simp [subst, hy, hk, freeVars] at hmem
+          rcases hmem with hmem | ⟨hzBody, hzy, hzx⟩
+          · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+            exact ⟨by simp [freeVars, hy, hk, hz], hzx⟩
+          · exact ⟨by simp [freeVars, hy, hk, hzBody, hzy, hzx], hzx⟩
+        · simp [subst, hy, hk, freeVars] at hmem
+          rcases hmem with hmem | ⟨hzBodySubst, hzy, hzk⟩
+          · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+            exact ⟨by simp [freeVars, hy, hk, hz], hzx⟩
+          · rcases mem_freeVars_subst_closed e2 v x z hClosed hzBodySubst with ⟨hzBody, hzx⟩
+            exact ⟨by simp [freeVars, hy, hk, hzBody, hzy, hzk], hzx⟩
+  | Term.pair e1 e2 =>
+      simp [subst, freeVars] at hmem
+      rcases hmem with hmem | hmem
+      · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+      · rcases mem_freeVars_subst_closed e2 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.fst tRight e =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.snd tLeft e =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.const _ _ =>
+      simp [subst, freeVars] at hmem
+  | Term.add e1 e2 =>
+      simp [subst, freeVars] at hmem
+      rcases hmem with hmem | hmem
+      · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+      · rcases mem_freeVars_subst_closed e2 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.mul e1 e2 =>
+      simp [subst, freeVars] at hmem
+      rcases hmem with hmem | hmem
+      · rcases mem_freeVars_subst_closed e1 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+      · rcases mem_freeVars_subst_closed e2 v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.sum e d =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.expand e d =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.uniformLike e lo hi =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.grad y t tOut body =>
+      by_cases hy : y = x
+      · simpa [subst, hy, freeVars] using hmem
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with ⟨hzBodySubst, hzy⟩
+        rcases mem_freeVars_subst_closed body v x z hClosed hzBodySubst with ⟨hzBody, hzx⟩
+        exact ⟨by simp [freeVars, hy, hzBody, hzy], hzx⟩
+  | Term.vmap y t d body =>
+      by_cases hy : y = x
+      · simpa [subst, hy, freeVars] using hmem
+      · simp [subst, hy, freeVars] at hmem
+        rcases hmem with ⟨hzBodySubst, hzy⟩
+        rcases mem_freeVars_subst_closed body v x z hClosed hzBodySubst with ⟨hzBody, hzx⟩
+        exact ⟨by simp [freeVars, hy, hzBody, hzy], hzx⟩
+  | Term.handle epsH body clauses =>
+      simp [subst, freeVars] at hmem
+      rcases hmem with hmem | hmem
+      · rcases mem_freeVars_subst_closed body v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+      · rcases mem_freeVarsClauses_subst_closed clauses v x z hClosed hmem with ⟨hz, hzx⟩
+        exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.perform op e =>
+      have hmem' : z ∈ freeVars (subst e v x) := by
+        simpa [subst, freeVars] using hmem
+      rcases mem_freeVars_subst_closed e v x z hClosed hmem' with ⟨hz, hzx⟩
+      exact ⟨by simp [freeVars, hz], hzx⟩
+  | Term.unit =>
+      simp [subst, freeVars] at hmem
+  | Term.loc _ =>
+      simp [subst, freeVars] at hmem
+
+/-- Clause-list companion to `mem_freeVars_subst_closed`. -/
+private theorem mem_freeVarsClauses_subst_closed
+    (clauses : List (EffectLabel × String × String × Term))
+    (v : Term) (x z : String)
+    (hClosed : Closed v)
+    (hmem : z ∈ freeVarsClauses (substClauses clauses v x)) :
+    z ∈ freeVarsClauses clauses ∧ z ≠ x := by
+  match clauses with
+  | [] =>
+      simp [substClauses, freeVarsClauses] at hmem
+  | (op, y, k, hb) :: rest =>
+      by_cases hy : y = x
+      · simp [substClauses, hy, freeVarsClauses] at hmem
+        rcases hmem with ⟨hzHead, hzx, hzk⟩ | hmem
+        · exact ⟨by simp [freeVarsClauses, hy, hzHead, hzx, hzk], hzx⟩
+        · rcases mem_freeVarsClauses_subst_closed rest v x z hClosed hmem with ⟨hzRest, hzx⟩
+          exact ⟨by simp [freeVarsClauses, hy, hzRest], hzx⟩
+      · by_cases hk : k = x
+        · simp [substClauses, hy, hk, freeVarsClauses] at hmem
+          rcases hmem with ⟨hzHead, hzy, hzx⟩ | hmem
+          · exact ⟨by simp [freeVarsClauses, hy, hk, hzHead, hzy, hzx], hzx⟩
+          · rcases mem_freeVarsClauses_subst_closed rest v x z hClosed hmem with ⟨hzRest, hzx⟩
+            exact ⟨by simp [freeVarsClauses, hy, hk, hzRest], hzx⟩
+        · simp [substClauses, hy, hk, freeVarsClauses] at hmem
+          rcases hmem with ⟨hzHeadSubst, hzy, hzk⟩ | hmem
+          · rcases mem_freeVars_subst_closed hb v x z hClosed hzHeadSubst with ⟨hzHead, hzx⟩
+            exact ⟨by simp [freeVarsClauses, hy, hk, hzHead, hzy, hzk], hzx⟩
+          · rcases mem_freeVarsClauses_subst_closed rest v x z hClosed hmem with ⟨hzRest, hzx⟩
+            exact ⟨by simp [freeVarsClauses, hy, hk, hzRest], hzx⟩
+
+end
+
+mutual
+
 /-- The supported adjoint fragment is closed under named substitution
     when the substituted term is itself in the fragment. This is the
     syntax-side half of the eventual `T-Grad` support premise: any
@@ -988,6 +1170,105 @@ theorem insertBeforeSuffix_var_left
               prePre ++ [entry] ++ preSuf := by
             simpa [hsplit, hprelen] using insertBeforeSuffix_eq_split prePre preSuf entry
           simp [htail, List.append_assoc]
+
+private theorem lookupLinearCtx_append_singleton_ne_of_some
+    {Gamma : LinearCtx} {z x : String} {slot : Option Typ} {t : Typ}
+    (hne : z ≠ x)
+    (hLook : lookupLinearCtx (Gamma ++ ([(x, slot)] : LinearCtx)) z = some t) :
+    lookupLinearCtx Gamma z = some t := by
+  rw [lookupLinearCtx_append] at hLook
+  have hLast : lookupLinearCtx ([(x, slot)] : LinearCtx) z = none := by
+    simp [lookupLinearCtx, hne]
+  simpa [hLast] using hLook
+
+private theorem lookupLinearCtx_insert_middle_ne_of_some
+    {GammaPre suffix : LinearCtx} {z x : String} {slot : Option Typ} {t : Typ}
+    (hne : z ≠ x)
+    (hLook : lookupLinearCtx (GammaPre ++ suffix) z = some t) :
+    lookupLinearCtx (GammaPre ++ [(x, slot)] ++ suffix) z = some t := by
+  rw [lookupLinearCtx_append] at hLook ⊢
+  cases hSuf : lookupLinearCtx suffix z with
+  | some tSuf =>
+      have htEq : tSuf = t := by
+        rw [hSuf] at hLook
+        cases hLook
+        rfl
+      simp [hSuf, htEq]
+  | none =>
+      have hPref : lookupLinearCtx GammaPre z = some t := by
+        simpa [hSuf] using hLook
+      have hHeadNone : lookupLinearCtx ([(x, slot)] : LinearCtx) z = none := by
+        simp [lookupLinearCtx, hne]
+      simp [lookupLinearCtx_append, hHeadNone, hPref]
+
+private theorem lookupLinearCtx_insertBeforeSuffix_of_some
+    {Gamma : LinearCtx} {j : Nat} {entry : String × Option Typ}
+    {z : String} {t : Typ}
+    (hj : j ≤ Gamma.length)
+    (hne : z ≠ entry.1)
+    (hLook : lookupLinearCtx Gamma z = some t) :
+    lookupLinearCtx (insertBeforeSuffix Gamma j entry) z = some t := by
+  let GammaPre := Gamma.take (Gamma.length - j)
+  let GammaPost := Gamma.drop (Gamma.length - j)
+  have hsplit : Gamma = GammaPre ++ GammaPost := by
+    simp [GammaPre, GammaPost, List.take_append_drop]
+  have hlen : GammaPost.length = j := by
+    simp [GammaPost]
+    omega
+  have hIns :
+      insertBeforeSuffix Gamma j entry = GammaPre ++ [entry] ++ GammaPost := by
+    have hIns' := insertBeforeSuffix_eq_split GammaPre GammaPost entry
+    rw [← hsplit, hlen] at hIns'
+    exact hIns'
+  have hLook' : lookupLinearCtx (GammaPre ++ GammaPost) z = some t := by
+    simpa [hsplit] using hLook
+  rw [hIns]
+  exact lookupLinearCtx_insert_middle_ne_of_some (GammaPre := GammaPre) (suffix := GammaPost)
+    hne hLook'
+
+private theorem lookupLinearCtx_eq_none_of_not_mem
+    {Gamma : LinearCtx} {x : String}
+    (h : x ∉ linearCtxDom Gamma) :
+    lookupLinearCtx Gamma x = none := by
+  cases hLook : lookupLinearCtx Gamma x with
+  | none =>
+      rfl
+  | some t =>
+      exfalso
+      rcases lookupLinearCtx_some_split hLook with ⟨pre, post, hEq, _hPost⟩
+      apply h
+      simp [hEq, linearCtxDom]
+
+private theorem lookupLinearCtx_middle_singleton_some_of_fresh
+    {GammaPre suffix : LinearCtx} {x y : String}
+    {slotX slotY : Option Typ} {t : Typ}
+    (hxPre : x ∉ linearCtxDom GammaPre)
+    (hxSuf : x ∉ linearCtxDom suffix)
+    (hxy : x ≠ y)
+    (hLook : lookupLinearCtx (GammaPre ++ [(x, slotX)] ++ suffix ++ [(y, slotY)]) x = some t) :
+    slotX = some t := by
+  have hLook' :
+      lookupLinearCtx (GammaPre ++ [(x, slotX)] ++ (suffix ++ [(y, slotY)])) x = some t := by
+    simpa [List.append_assoc] using hLook
+  rw [lookupLinearCtx_append] at hLook'
+  have hTailNone : lookupLinearCtx (suffix ++ [(y, slotY)]) x = none := by
+    rw [lookupLinearCtx_append]
+    have hSufNone : lookupLinearCtx suffix x = none :=
+      lookupLinearCtx_eq_none_of_not_mem hxSuf
+    have hLastNone : lookupLinearCtx ([(y, slotY)] : LinearCtx) x = none := by
+      simp [lookupLinearCtx, hxy]
+    simp [hSufNone, hLastNone]
+  rw [hTailNone] at hLook'
+  rw [lookupLinearCtx_append] at hLook'
+  have hPreNone : lookupLinearCtx GammaPre x = none :=
+    lookupLinearCtx_eq_none_of_not_mem hxPre
+  rw [hPreNone] at hLook'
+  cases slotX with
+  | none =>
+      simp [lookupLinearCtx] at hLook'
+  | some val =>
+      simp [lookupLinearCtx] at hLook'
+      simpa [hLook']
 
 /-! ### Freshness extraction helpers
 
@@ -2139,9 +2420,9 @@ private theorem hasType_cap_weaken_diff
         body clauses t epsH epsB
         (hasType_cap_weaken_diff hBody) hOpsIn hClsIn hCover
         (clausesTyped_cap_weaken_diff hClauses)
-  | HasType.tgrad Delta Sigma Gamma x ds dsOut e eps slot hBody hsub =>
+  | HasType.tgrad Delta Sigma Gamma x ds dsOut e eps slot hBody hsub hSupp hCtxSupp =>
       exact HasType.tgrad (Capability.diff :: Delta) Sigma Gamma x ds dsOut e eps slot
-        (hasType_cap_weaken_diff hBody) hsub
+        (hasType_cap_weaken_diff hBody) hsub hSupp hCtxSupp
   | HasType.tvmap Delta Sigma Gamma x t1 t2 e eps d slot hBody =>
       exact HasType.tvmap (Capability.diff :: Delta) Sigma Gamma x t1 t2 e eps d slot
         (hasType_cap_weaken_diff hBody)
@@ -2420,7 +2701,7 @@ private theorem weakening_beforeSuffix
         (insertBeforeSuffix Gamma2 j (y, slot_y))
         (insertBeforeSuffix Gamma3 j (y, slot_y))
         body clauses t epsH epsB hBody' hOpsIn hClsIn hCover hClauses'
-  | HasType.tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub =>
+  | HasType.tgrad Delta Sigma Gamma x ds dsOut body eps slot hBody hsub hSupp hCtxSupp =>
       intro j hj hdom hfresh
       rcases freshInTerm_grad hfresh with
         ⟨hyx, hfreshBody⟩
@@ -2435,10 +2716,40 @@ private theorem weakening_beforeSuffix
             body (Typ.tensor dsOut) eps
             (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, slot)]) := by
         simpa using hBody'
+      have hCtxSupp' :
+          AdjointFreeCtxSupported
+            (insertBeforeSuffix (Gamma ++ [(x, some (Typ.tensor ds))]) (j + 1) (y, slot_y))
+            body := by
+        intro z t hz hLook
+        have hzy : z ≠ y := by
+          intro hEq
+          subst z
+          exact hfreshBody.1 (by simpa using hz)
+        rcases has_type_free_lookup_aux hBody z hz with ⟨tz, hInnerLook⟩
+        have hInsertedLook :
+            lookupLinearCtx
+              (insertBeforeSuffix (Gamma ++ [(x, some (Typ.tensor ds))]) (j + 1) (y, slot_y))
+              z = some tz :=
+          lookupLinearCtx_insertBeforeSuffix_of_some
+            (Gamma := Gamma ++ [(x, some (Typ.tensor ds))])
+            (j := j + 1)
+            (entry := (y, slot_y))
+            (by simpa [List.length_append] using hj)
+            hzy hInnerLook
+        have htEq : tz = t := by
+          rw [hLook] at hInsertedLook
+          cases hInsertedLook
+          rfl
+        simpa [htEq] using hCtxSupp z tz hz hInnerLook
+      have hCtxSupp'' :
+          AdjointFreeCtxSupported
+            (insertBeforeSuffix Gamma j (y, slot_y) ++ [(x, some (Typ.tensor ds))])
+            body := by
+        simpa [insertBeforeSuffix_append_singleton] using hCtxSupp'
       simpa using
         (HasType.tgrad Delta Sigma
           (insertBeforeSuffix Gamma j (y, slot_y))
-          x ds dsOut body eps slot hBody'' hsub)
+          x ds dsOut body eps slot hBody'' hsub hSupp hCtxSupp'')
   | HasType.tvmap Delta Sigma Gamma x t1 t2 body eps d slot hBody =>
       intro j hj hdom hfresh
       rcases freshInTerm_vmap hfresh with
@@ -2867,6 +3178,8 @@ private theorem subst_preserves_typing_ctx_fresh_core
     (x : String) (t1 : Typ)
     {v : Term}
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
+    (h_closed : Closed v)
     {Gamma : LinearCtx} {e : Term} {t2 : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
     (h : HasType Delta Sigma Gamma e t2 eps GammaOut) :
     ∀ (GammaPre suffix : LinearCtx) (slotX : Option Typ),
@@ -3516,7 +3829,7 @@ private theorem subst_preserves_typing_ctx_fresh_core
             (GammaPre ++ suffix) (midPre ++ midPost) (outPre ++ outPost)
             (subst body v x) (substClauses clauses v x) t epsH epsB
             hTyBody hOpsIn hClsInSub hCoverSub hTyClauses')
-    | tgrad Delta Sigma Gamma y ds dsOut body eps slot hBody hsub ih =>
+    | tgrad Delta Sigma Gamma y ds dsOut body eps slot hBody hsub hSupp hCtxSupp ih =>
         intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hxy : x ≠ y := by
           intro hxy
@@ -3538,6 +3851,11 @@ private theorem subst_preserves_typing_ctx_fresh_core
           exact h_bound_fresh z (by simp [boundVars, hz])
         have h_v_diff : HasType (Capability.diff :: Delta) Sigma [] v t1 [] [] :=
           hasType_cap_weaken_diff h_v
+        have hslotLive : slotX = none ∨ slotX = some t1 :=
+          slotSub_middle_cases_of_fresh
+            (GammaPre := GammaPre) (suffix := suffix)
+            (x := x) (slotX := slotX) (t1 := t1)
+            (by simpa [hEq] using h_live) hxPre hxSuf
         have hLiveBody :
             SlotSub (Gamma ++ [(y, some (Typ.tensor ds))])
               (GammaPre ++ [(x, some t1)] ++ (suffix ++ [(y, some (Typ.tensor ds))])) := by
@@ -3582,13 +3900,53 @@ private theorem subst_preserves_typing_ctx_fresh_core
               (subst body v x) (Typ.tensor dsOut) eps
               ((GammaPre ++ suffix) ++ [(y, slot)]) := by
           simpa [hPostEq, List.append_assoc] using hTy
+        have hSuppBodySubst : AdjointSupported (subst body v x) := by
+          by_cases hxBody : x ∈ freeVars body
+          · rcases has_type_free_lookup_aux hBody x hxBody with ⟨tx, hLookX⟩
+            have hSlotXSome :
+                slotX = some tx :=
+              lookupLinearCtx_middle_singleton_some_of_fresh
+                (GammaPre := GammaPre) (suffix := suffix)
+                (x := x) (y := y) (slotX := slotX) (slotY := some (Typ.tensor ds))
+                hxPre hxSuf hxy (by simpa [hEq, List.append_assoc] using hLookX)
+            have ht1_supported : AdjointTypeSupported t1 := by
+              rcases hslotLive with hDead | hLive
+              · rw [hDead] at hSlotXSome
+                cases hSlotXSome
+              · have htx : tx = t1 := by
+                  rw [hLive] at hSlotXSome
+                  injection hSlotXSome with htx
+                  exact htx.symm
+                simpa [htx] using hCtxSupp x tx hxBody hLookX
+            exact adjointSupported_subst body v x hSupp (h_v_supported ht1_supported)
+          · rw [subst_notFree body v x hxBody]
+            exact hSupp
+        have hCtxSuppBodySubst :
+            AdjointFreeCtxSupported ((GammaPre ++ suffix) ++ [(y, some (Typ.tensor ds))])
+              (subst body v x) := by
+          intro z t hz hLook
+          rcases mem_freeVars_subst_closed body v x z h_closed hz with ⟨hzBody, hzx⟩
+          have hLook' :
+              lookupLinearCtx (GammaPre ++ (suffix ++ [(y, some (Typ.tensor ds))])) z = some t := by
+            simpa [List.append_assoc] using hLook
+          have hLookOrig' :
+              lookupLinearCtx
+                (GammaPre ++ [(x, slotX)] ++ (suffix ++ [(y, some (Typ.tensor ds))])) z = some t := by
+            exact lookupLinearCtx_insert_middle_ne_of_some
+              (GammaPre := GammaPre)
+              (suffix := suffix ++ [(y, some (Typ.tensor ds))])
+              (x := x) (z := z) (slot := slotX) hzx hLook'
+          have hLookOrig :
+              lookupLinearCtx (Gamma ++ [(y, some (Typ.tensor ds))]) z = some t := by
+            simpa [hEq, List.append_assoc] using hLookOrig'
+          exact hCtxSupp z t hzBody hLookOrig
         refine ⟨GammaPre, slotX, suffix, ?_, slotSub_refl GammaPre, ?_, slotSub_refl suffix, ?_⟩
         · simpa [hEq, List.append_assoc]
         · exact slotSub_middle_cases_of_fresh (by simpa [hEq] using h_live) hxPre hxSuf
         · simpa [subst, hyx, List.append_assoc] using
             (HasType.tgrad Delta Sigma
               (GammaPre ++ suffix)
-              y ds dsOut (subst body v x) eps slot hTyBody hsub)
+              y ds dsOut (subst body v x) eps slot hTyBody hsub hSuppBodySubst hCtxSuppBodySubst)
     | tvmap Delta Sigma Gamma y tArg tRes body eps d slot hBody ih =>
         intro GammaPre suffix slotX FreshName hFreshX hEq h_live hxPre hxSuf h_ctx_fresh h_suffix_fresh h_bound_fresh
         have hxy : x ≠ y := by
@@ -3824,7 +4182,8 @@ private theorem subst_preserves_typing_ctx_fresh_aux
     (h_nodup : NoDupNames (GammaPre ++ [(x, slotX)] ++ suffix))
     (h_ctx_fresh : ∀ y, y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix) → y ∉ boundVars e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
-    (_h_closed : Closed v)
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
+    (h_closed : Closed v)
     (h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ freeVars v)
     (h_bound_fresh : ∀ y, y ∈ boundVars e → y ∉ freeVars v) :
     CtxFreshSubstResult Delta Sigma x t1
@@ -3839,7 +4198,7 @@ private theorem subst_preserves_typing_ctx_fresh_aux
       simpa [NoDupNames, linearCtxDom] using h_nodup
     exact noDupNames_middle_fresh_suffix (GammaPre := GammaPre) (GammaPost := suffix)
       (x := x) (t := t1) hndSome
-  exact subst_preserves_typing_ctx_fresh_core Delta Sigma x t1 h_v h_e
+  exact subst_preserves_typing_ctx_fresh_core Delta Sigma x t1 h_v h_v_supported h_closed h_e
     GammaPre suffix slotX
     (fun y => y ∈ linearCtxDom (GammaPre ++ [(x, slotX)] ++ suffix))
     (by simp [linearCtxDom])
@@ -3861,6 +4220,7 @@ theorem subst_preserves_typing_ctx_fresh_suffix
     (h_nodup : NoDupNames (GammaPre ++ [(x, some t1)] ++ suffix))
     (h_ctx_fresh : ∀ y, y ∈ linearCtxDom (GammaPre ++ [(x, some t1)] ++ suffix) → y ∉ boundVars e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
     (h_closed : Closed v)
     (h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ freeVars v) :
     ∃ GammaOutPre slotOut GammaOutPost,
@@ -3874,18 +4234,18 @@ theorem subst_preserves_typing_ctx_fresh_suffix
     subst_preserves_typing_ctx_fresh_aux
       Delta Sigma x t1
       (GammaPre := GammaPre) (suffix := suffix) (GammaOut := GammaOut)
-      (slotX := some t1) (e := e) (v := v) (t2 := t2) (eps := eps)
-      (by simpa using h_e)
-      (slotSub_refl (GammaPre ++ [(x, some t1)] ++ suffix))
-      (by simpa using h_nodup)
-      (by simpa using h_ctx_fresh)
-      h_v h_closed
-      h_suffix_fresh
-      (by
-        intro y hy
-        have hfree : freeVars v = [] := by
-          simpa [Closed] using h_closed
-        simpa [hfree])
+        (slotX := some t1) (e := e) (v := v) (t2 := t2) (eps := eps)
+        (by simpa using h_e)
+        (slotSub_refl (GammaPre ++ [(x, some t1)] ++ suffix))
+        (by simpa using h_nodup)
+        (by simpa using h_ctx_fresh)
+        h_v h_v_supported h_closed
+        h_suffix_fresh
+        (by
+          intro y hy
+          have hfree : freeVars v = [] := by
+            simpa [Closed] using h_closed
+          simpa [hfree])
 
 /-- Lexical wrapper around `subst_preserves_typing_ctx_fresh_suffix`.
 
@@ -3901,6 +4261,7 @@ theorem subst_preserves_typing_lexical_suffix
     (h_e : HasType Delta Sigma (GammaPre ++ [(x, some t1)] ++ suffix) e t2 eps GammaOut)
     (h_lex : LexicallyScoped (GammaPre ++ [(x, some t1)] ++ suffix) e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
     (h_closed : Closed v)
     (h_suffix_fresh : ∀ y, y ∈ linearCtxDom suffix → y ∉ freeVars v) :
     ∃ GammaOutPre slotOut GammaOutPost,
@@ -3913,7 +4274,7 @@ theorem subst_preserves_typing_lexical_suffix
   rcases h_lex with ⟨h_nodup, h_ctx_fresh, _hws⟩
   exact subst_preserves_typing_ctx_fresh_suffix
     Delta Sigma GammaPre suffix GammaOut x t1 t2 eps e v
-    h_e h_nodup h_ctx_fresh h_v h_closed h_suffix_fresh
+    h_e h_nodup h_ctx_fresh h_v h_v_supported h_closed h_suffix_fresh
 
 /-- Honest named substitution theorem for the non-captured context-fresh
     case.
@@ -3932,6 +4293,7 @@ theorem subst_preserves_typing_ctx_fresh
     (h_nodup : NoDupNames (Gamma1 ++ [(x, some t1)]))
     (h_ctx_fresh : ∀ y, y ∈ linearCtxDom (Gamma1 ++ [(x, some t1)]) → y ∉ boundVars e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
     (h_closed : Closed v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
@@ -3944,7 +4306,7 @@ theorem subst_preserves_typing_ctx_fresh
         (slotSub_refl (Gamma1 ++ [(x, some t1)] ++ ([] : LinearCtx)))
         (by simpa using h_nodup)
         (by simpa using h_ctx_fresh)
-        h_v h_closed
+        h_v h_v_supported h_closed
         (by
           intro y hy
           simp [linearCtxDom] at hy)
@@ -3971,13 +4333,14 @@ theorem subst_preserves_typing_lexical
     (h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
     (h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
     (h_closed : Closed v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
   rcases h_lex with ⟨h_nodup, h_ctx_fresh, _hws⟩
   exact subst_preserves_typing_ctx_fresh
     Delta Sigma Gamma1 Gamma2 x t1 t2 eps e v
-    h_e h_nodup h_ctx_fresh h_v h_closed
+    h_e h_nodup h_ctx_fresh h_v h_v_supported h_closed
 
 /-- Honest public substitution theorem.
 
@@ -3992,11 +4355,12 @@ theorem subst_preserves_typing
     (h_e : HasType Delta Sigma (Gamma1 ++ [(x, some t1)]) e t2 eps Gamma2)
     (h_lex : LexicallyScoped (Gamma1 ++ [(x, some t1)]) e)
     (h_v : HasType Delta Sigma [] v t1 [] [])
+    (h_v_supported : AdjointTypeSupported t1 → AdjointSupported v)
     (h_closed : Closed v) :
     ∃ Gamma2' : LinearCtx,
       HasType Delta Sigma Gamma1 (subst e v x) t2 eps Gamma2' := by
   exact subst_preserves_typing_lexical
     Delta Sigma Gamma1 Gamma2 x t1 t2 eps e v
-    h_e h_lex h_v h_closed
+    h_e h_lex h_v h_v_supported h_closed
 
 end LaCaDiLE

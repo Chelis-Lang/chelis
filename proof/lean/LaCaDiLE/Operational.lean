@@ -2276,14 +2276,15 @@ inductive Step : Config → Config → Prop
   -- The handler clause body `app (var k) (var p)` is still a round-3
   -- skeleton placeholder for the real `update_origin_buffer(p)` routing.
   | tgrad
-      (sigma : Store) (x : String) (t tOut : Typ) (e : Term) :
+      (sigma : Store) (x : String) (t tOut : Typ) (e : Term)
+      (hSupp : AdjointSupported e) :
       Step ⟨sigma, Term.grad x t tOut e⟩
            ⟨sigma,
             Term.abs x t
               (Term.abs (gradSeedName x e) tOut
                 (Term.letBind (gradResultName x e)
                   (Term.handle [EffectLabel.accum]
-                    (adjointFrom e x (Term.var (gradSeedName x e))
+                    (adjointTypedFrom e tOut x (Term.var (gradSeedName x e))
                       (gradAdjointCounter x (gradSeedName x e) e))
                     [(EffectLabel.accum, "p", "k",
                       Term.app (Term.var "k") (Term.var "p"))])
