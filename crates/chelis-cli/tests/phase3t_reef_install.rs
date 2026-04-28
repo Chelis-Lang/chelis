@@ -131,15 +131,18 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
     fs::create_dir_all(app.join("src")).expect("mkdir downstream/src");
     fs::write(
         app.join("reef.toml"),
-        r#"[package]
+        format!(
+            r#"[package]
 name = "downstream"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = { version = "0.1.0" }
+chelis-std = {{ version = "0.1.0" }}
 "#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
+        ),
     )
     .expect("write reef.toml");
     fs::write(

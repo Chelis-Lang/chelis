@@ -40,9 +40,10 @@ fn make_minimal_reef_with_test(dir_name: &str) -> (tempfile::TempDir, std::path:
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Bridge"
-"#
+"#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
         ),
     )
     .expect("write reef.toml");

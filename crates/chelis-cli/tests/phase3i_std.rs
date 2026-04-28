@@ -11,7 +11,7 @@ use std::process::Command as StdCommand;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{copy_dir_recursive, make_app, package_std, write_file};
+use common::{COMPILER_VERSION, copy_dir_recursive, make_app, package_std, write_file};
 use tempfile::tempdir;
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
@@ -666,13 +666,14 @@ fn reef_std_generate_is_lowered_through_host_lane() {
             r#"[package]
 name = "phase3i-generate-lowering"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ path = "{}" }}
+chelis-std = {{ path = "{path}" }}
 "#,
-            std_pkg.display()
+            ver = COMPILER_VERSION,
+            path = std_pkg.display(),
         ),
     );
     write_file(

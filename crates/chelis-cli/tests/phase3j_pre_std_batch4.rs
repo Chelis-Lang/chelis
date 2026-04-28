@@ -84,12 +84,13 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
             r#"[package]
 name = "{dir_name}"
 version = "0.1.0"
-compiler = "=0.3.1"
+compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
 chelis-std = {{ version = "0.1.0" }}
-"#
+"#,
+            ver = chelis_compiler_api::COMPILER_VERSION,
         ),
     );
     (dir, reef_home, app_pkg)

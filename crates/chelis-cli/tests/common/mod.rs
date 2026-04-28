@@ -45,10 +45,10 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tempfile::{TempDir, tempdir};
 
-/// Pinned compiler version for fixture `reef.toml` files. Bump in lockstep
-/// with the workspace version so the fixtures match the chelis binary
-/// they invoke.
-pub const COMPILER_VERSION: &str = "0.3.1";
+/// Pinned compiler version for fixture `reef.toml` files. Re-exported from
+/// `chelis_compiler_api::COMPILER_VERSION`, which uses `env!("CARGO_PKG_VERSION")`
+/// and therefore auto-syncs with `workspace.package.version` on bumps.
+pub use chelis_compiler_api::COMPILER_VERSION;
 
 pub fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

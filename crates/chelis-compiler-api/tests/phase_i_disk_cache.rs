@@ -24,8 +24,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chelis_compiler_api::schema::EvaluatedRoot;
-use chelis_compiler_api::{CacheError, CompiledContext, compile_reef_context, eval_in_context};
+use chelis_compiler_api::{
+    COMPILER_VERSION, CacheError, CompiledContext, compile_reef_context, eval_in_context,
+};
 use tempfile::TempDir;
+
+/// `myapp/reef.toml` body with a path-dep on `./mylib`. Compiler pin
+/// auto-syncs with the workspace via `COMPILER_VERSION`.
+fn app_reef_toml() -> String {
+    format!(
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n",
+    )
+}
+
+/// `mylib/reef.toml` body. Compiler pin auto-syncs.
+fn mylib_reef_toml() -> String {
+    format!(
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Mylib\"\n",
+    )
+}
+
+/// `myapp/reef.lock` body with the lockfile fast-path entry for `mylib`.
+/// Compiler pin auto-syncs.
+fn app_reef_lock() -> String {
+    format!(
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+    )
+}
 
 /// Tempdir-backed fixture mirroring the Phase G `library_fixture`: an
 /// `App` root package with a `Mylib.Math` path-dep that exports a small
@@ -37,22 +62,14 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
 
-    fs::write(
-        root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
-    )
-    .expect("write app reef.toml");
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
         "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
 
-    fs::write(
-        root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"Mylib\"\n",
-    )
-    .expect("write mylib reef.toml");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add, double, square)\n\n\
@@ -62,11 +79,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     )
     .expect("write math.ch");
 
-    fs::write(
-        root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("write reef.lock");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
     (dir, root)
 }
 
@@ -399,22 +412,14 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
 
-    fs::write(
-        root.join("reef.toml"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = { path = \"./mylib\" }\n",
-    )
-    .expect("write app reef.toml alt");
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml alt");
     fs::write(
         root.join("src/main.ch"),
         "module App.Main\n\ndef placeholder_alt -> int32 = cast(1, int32)\n",
     )
     .expect("write main.ch alt");
 
-    fs::write(
-        root.join("mylib/reef.toml"),
-        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"Mylib\"\n",
-    )
-    .expect("write mylib reef.toml alt");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml alt");
     fs::write(
         root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add)\n\n\
@@ -422,11 +427,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     )
     .expect("write math.ch alt");
 
-    fs::write(
-        root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("write reef.lock alt");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock alt");
     (dir, root)
 }
 

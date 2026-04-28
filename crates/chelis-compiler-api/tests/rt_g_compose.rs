@@ -25,11 +25,20 @@ use std::time::Instant;
 use chelis_compiler_api::compiler::{eval, prepare_eval};
 use chelis_compiler_api::schema::{EvalRequest, EvaluatedRoot, SourceKind};
 use chelis_compiler_api::{
-    CompiledContext, check_in_context, compile_reef_context, eval_in_context, eval_many_in_context,
+    COMPILER_VERSION, CompiledContext, check_in_context, compile_reef_context, eval_in_context,
+    eval_many_in_context,
 };
 use tempfile::TempDir;
 
 // ─── Shared fixture helpers ──────────────────────────────────────────────
+
+/// `<pkg_name>/reef.lock` body for an app with one path-dep on `mylib`.
+/// Compiler pin auto-syncs with the workspace via `COMPILER_VERSION`.
+fn app_reef_lock(pkg_name: &str) -> String {
+    format!(
+        "[package]\nname = \"{pkg_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
+    )
+}
 
 fn write_pkg(
     root: &Path,
@@ -40,7 +49,7 @@ fn write_pkg(
 ) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     let mut manifest = format!(
-        "[package]\nname = \"{pkg_name}\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\nmodule_prefix = \"{module_prefix}\"\n"
+        "[package]\nname = \"{pkg_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{module_prefix}\"\n"
     );
     if !deps.is_empty() {
         manifest.push_str("\n[dependencies]\n");
@@ -81,11 +90,7 @@ fn build_pkg(library_src: &str, main_src: &str) -> (TempDir, PathBuf) {
         &[("src/math.ch", library_src)],
         &[],
     );
-    fs::write(
-        root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("write reef.lock");
+    fs::write(root.join("reef.lock"), app_reef_lock("myapp")).expect("write reef.lock");
     (dir, root)
 }
 
@@ -622,11 +627,7 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     );
     let mylib_a = root_a.join("mylib");
     write_pkg(&mylib_a, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
-    fs::write(
-        root_a.join("reef.lock"),
-        "[package]\nname = \"appA\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("lock A");
+    fs::write(root_a.join("reef.lock"), app_reef_lock("appA")).expect("lock A");
 
     let dir_b = TempDir::new().expect("tempdir B");
     let root_b = dir_b.path().join("appB");
@@ -639,11 +640,7 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     );
     let mylib_b = root_b.join("mylib");
     write_pkg(&mylib_b, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
-    fs::write(
-        root_b.join("reef.lock"),
-        "[package]\nname = \"appB\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("lock B");
+    fs::write(root_b.join("reef.lock"), app_reef_lock("appB")).expect("lock B");
 
     let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx A");
     let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx B");
@@ -868,11 +865,7 @@ fn multi_module_fixture() -> (TempDir, PathBuf) {
         ],
         &[],
     );
-    fs::write(
-        root.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("write reef.lock");
+    fs::write(root.join("reef.lock"), app_reef_lock("myapp")).expect("write reef.lock");
     (dir, root)
 }
 
@@ -1117,11 +1110,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
         )],
         &[],
     );
-    fs::write(
-        root_a.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("lock A");
+    fs::write(root_a.join("reef.lock"), app_reef_lock("myapp")).expect("lock A");
 
     let dir_b = TempDir::new().expect("tempdir B");
     let root_b = dir_b.path().join("myapp");
@@ -1143,11 +1132,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
         )],
         &[],
     );
-    fs::write(
-        root_b.join("reef.lock"),
-        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"=0.3.1\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n",
-    )
-    .expect("lock B");
+    fs::write(root_b.join("reef.lock"), app_reef_lock("myapp")).expect("lock B");
 
     let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx A");
     let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx B");
