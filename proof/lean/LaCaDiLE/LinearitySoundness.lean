@@ -318,9 +318,9 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
       | hole =>
           have hInner : HandlerAwareRuntimeLinear e := by
             simpa [plug] using h
-          rcases ih hInner with hInner' | _hDebt
+          rcases ih hInner with hInner' | hDebt
           · exact Or.inl (by simpa [plug] using hInner')
-          · exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' EvalCtx.hole e e' h_inner)
+          · exact Or.inr hDebt
       | appL e2 =>
           exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
       | appR v1 =>
@@ -626,7 +626,7 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
       intro h
       rcases runtimeSafeConfig_plug (sigma := sigma) (E := E) (e := e) h with
         ⟨hInner, hCtx⟩
-      rcases ih hInner with hInner' | _hDebt
+      rcases ih hInner with hInner' | hDebt
       · cases E with
         | hole =>
             exact Or.inl (by simpa [plug] using hInner')
@@ -753,7 +753,56 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
             have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.perform op) := by
               simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
-      · exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' E e e' h_inner)
+      · cases E with
+        | hole =>
+            exact Or.inr hDebt
+        | appL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+        | appR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+        | letBind x e2 =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+        | copy =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
+        | letpair x y e2 =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+        | pairL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+        | pairR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+        | fst tRight =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
+        | snd tLeft =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
+        | addL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+        | addR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+        | mulL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+        | mulR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+        | sum d =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
+        | expand d =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
+        | uniformLike lo hi =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma'
+                (EvalCtx.uniformLike lo hi) e e' h_inner)
+        | handle epsH clauses =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma'
+                (EvalCtx.handle epsH clauses) e e' h_inner)
+        | perform op =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
 
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)
