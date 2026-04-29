@@ -502,7 +502,10 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
         exact hne hEq.symm
       have hInner : RuntimeSafeConfig ⟨storeExtend sigma ellNew w, Term.loc ell⟩ := by
         have hkeep : storeLookup (storeExtend sigma ellNew w) ell = some w := by
-          simpa [storeLookup, storeExtend, hne] using hlook
+          unfold storeLookup storeExtend
+          simp only [List.find?, hne', decide_false, Bool.false_eq_true, ite_false,
+            Option.map]
+          exact hlook
         exact runtimeSafeConfig_loc hkeep
       have hCtx : RuntimeSafeCtx (storeExtend sigma ellNew w) (EvalCtx.pairL (Term.loc ellNew)) := by
         have hnew : storeLookup (storeExtend sigma ellNew w) ellNew = some w := by
