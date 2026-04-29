@@ -2771,6 +2771,27 @@ theorem runtimeSafeConfig_ctx
     RuntimeSafeConfig ⟨sigma, plug E e⟩ := by
   simpa [RuntimeSafeConfig] using runtimeSafe_ctx hCtx h hPlug
 
+/-- Chain-shaped reassembly for term-level runtime safety. This is the
+    multi-frame analogue of `runtimeSafe_ctx`: once the chain-side
+    store-liveness obligations hold and the overall plugged term
+    satisfies the handler/substitution surface, runtime safety follows. -/
+theorem runtimeSafe_chain
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (hEs : RuntimeSafeChain sigma Es)
+    (h : RuntimeSafe sigma e)
+    (hPlug : SubstAwareHandlerRuntimeLinear (multiPlug Es e)) :
+    RuntimeSafe sigma (multiPlug Es e) := by
+  exact ⟨hPlug, storeLiveLocRefs_multiPlug_of hEs.2 h.2⟩
+
+/-- Configuration wrapper for `runtimeSafe_chain`. -/
+theorem runtimeSafeConfig_chain
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (hEs : RuntimeSafeChain sigma Es)
+    (h : RuntimeSafeConfig ⟨sigma, e⟩)
+    (hPlug : SubstAwareHandlerRuntimeLinear (multiPlug Es e)) :
+    RuntimeSafeConfig ⟨sigma, multiPlug Es e⟩ := by
+  simpa [RuntimeSafeConfig] using runtimeSafe_chain hEs h hPlug
+
 /-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
     context `E` is not itself a `handle` whose effect row catches `op`.
     Because `EvalCtx` is a one-step (non-recursive) context, this is a

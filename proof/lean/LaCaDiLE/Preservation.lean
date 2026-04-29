@@ -650,6 +650,75 @@ theorem storeLiveCtxLocRefs_of_storeTypOn
   simpa [StoreLiveCtxLocRefs, StoreLiveOn] using
     (storeLiveOn_of_storeTypOn (locs := ctxLocRefs E) hLive h_wf h_wf' hOn)
 
+theorem storeLiveChainLocRefs_of_storeTypOn
+    {sigma sigma' : Store} {Es : EvalCtxChain}
+    {Sigma Sigma' : StoreTyp}
+    (hLive : StoreLiveChainLocRefs sigma Es)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (chainLocRefs Es) Sigma Sigma') :
+    StoreLiveChainLocRefs sigma' Es := by
+  simpa [StoreLiveChainLocRefs, StoreLiveOn] using
+    (storeLiveOn_of_storeTypOn (locs := chainLocRefs Es) hLive h_wf h_wf' hOn)
+
+/-- Transport `RuntimeSafeCtx` across store-typing agreement on the
+    frame's explicit location references. The deep-active component is
+    syntactic, so only the store-liveness side changes here. -/
+theorem runtimeSafeCtx_of_storeTypOn
+    {sigma sigma' : Store} {E : EvalCtx}
+    {Sigma Sigma' : StoreTyp}
+    (hCtx : RuntimeSafeCtx sigma E)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (ctxLocRefs E) Sigma Sigma') :
+    RuntimeSafeCtx sigma' E := by
+  exact ⟨hCtx.1, storeLiveCtxLocRefs_of_storeTypOn hCtx.2 h_wf h_wf' hOn⟩
+
+/-- Chain analogue of `runtimeSafeCtx_of_storeTypOn`. -/
+theorem runtimeSafeChain_of_storeTypOn
+    {sigma sigma' : Store} {Es : EvalCtxChain}
+    {Sigma Sigma' : StoreTyp}
+    (hEs : RuntimeSafeChain sigma Es)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (chainLocRefs Es) Sigma Sigma') :
+    RuntimeSafeChain sigma' Es := by
+  exact ⟨hEs.1, storeLiveChainLocRefs_of_storeTypOn hEs.2 h_wf h_wf' hOn⟩
+
+/-- Honest config-level replugging for the current runtime-safety
+    surface once the target store still agrees on the frame's explicit
+    location references. -/
+theorem runtimeSafeConfig_ctx_of_storeTypOn
+    {sigma sigma' : Store} {Sigma Sigma' : StoreTyp}
+    {E : EvalCtx} {e e' : Term}
+    (hSafe : RuntimeSafeConfig ⟨sigma, plug E e⟩)
+    (hInner : RuntimeSafeConfig ⟨sigma', e'⟩)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (ctxLocRefs E) Sigma Sigma')
+    (hPlug : SubstAwareHandlerRuntimeLinear (plug E e')) :
+    RuntimeSafeConfig ⟨sigma', plug E e'⟩ := by
+  have hCtx : RuntimeSafeCtx sigma E :=
+    (runtimeSafeConfig_plug (sigma := sigma) (E := E) (e := e) hSafe).2
+  exact runtimeSafeConfig_ctx
+    (runtimeSafeCtx_of_storeTypOn hCtx h_wf h_wf' hOn) hInner hPlug
+
+/-- Chain-shaped analogue of `runtimeSafeConfig_ctx_of_storeTypOn`. -/
+theorem runtimeSafeConfig_multiPlug_of_storeTypOn
+    {sigma sigma' : Store} {Sigma Sigma' : StoreTyp}
+    {Es : EvalCtxChain} {e e' : Term}
+    (hSafe : RuntimeSafeConfig ⟨sigma, multiPlug Es e⟩)
+    (hInner : RuntimeSafeConfig ⟨sigma', e'⟩)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (chainLocRefs Es) Sigma Sigma')
+    (hPlug : SubstAwareHandlerRuntimeLinear (multiPlug Es e')) :
+    RuntimeSafeConfig ⟨sigma', multiPlug Es e'⟩ := by
+  have hEs : RuntimeSafeChain sigma Es :=
+    (runtimeSafeConfig_multiPlug (sigma := sigma) (Es := Es) (e := e) hSafe).2
+  exact runtimeSafeConfig_chain
+    (runtimeSafeChain_of_storeTypOn hEs h_wf h_wf' hOn) hInner hPlug
+
 private theorem hasType_store_live_on_locRefs
     {sigma : Store}
     {Delta : CapCtx} {Sigma : StoreTyp}
