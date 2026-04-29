@@ -4208,6 +4208,107 @@ theorem runtimeSafeConfig_ctx_fresh_blocks_counterexample :
   simpa [RuntimeSafeConfig, RuntimeSafe] using
     storeAwareSubstHandlerRuntimeLinear_ctx_fresh_blocks_counterexample
 
+private def runtimeSafeCtxDormantClauseCounterInnerBody : Term :=
+  Term.handle [] Term.unit
+    [(EffectLabel.accum, "x", "k", Term.loc 1)]
+
+private def runtimeSafeCtxDormantClauseCounterSibling : Term :=
+  Term.abs "z" Typ.unit runtimeSafeCtxDormantClauseCounterInnerBody
+
+private def runtimeSafeCtxDormantClauseCounterTerm : Term :=
+  Term.pair
+    (Term.add (Term.loc 1) (Term.loc 2))
+    runtimeSafeCtxDormantClauseCounterSibling
+
+private def runtimeSafeCtxDormantClauseCounterTerm' : Term :=
+  Term.pair
+    (Term.loc 3)
+    runtimeSafeCtxDormantClauseCounterSibling
+
+/-- `RuntimeSafeCtx` is still only an extracted necessary condition for
+    contextual runtime-safety reassembly. A sibling lambda can hide a
+    handler-clause location from both the active and one-step exposure
+    surfaces, so the source config and the inner post-step config are
+    runtime-safe while the replugged result is not after a consuming
+    numeric step removes that dormant sibling location from the store. -/
+theorem runtimeSafeConfig_ctx_dormant_clause_counterexample :
+    RuntimeSafeConfig
+      ⟨ctxCounterSigma, runtimeSafeCtxDormantClauseCounterTerm⟩ ∧
+    RuntimeSafeCtx ctxCounterSigma
+      (EvalCtx.pairL runtimeSafeCtxDormantClauseCounterSibling) ∧
+    Step
+      ⟨ctxCounterSigma, Term.add (Term.loc 1) (Term.loc 2)⟩
+      ⟨[(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)], Term.loc 3⟩ ∧
+    RuntimeSafeConfig
+      ⟨[(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)], Term.loc 3⟩ ∧
+    Step
+      ⟨ctxCounterSigma, runtimeSafeCtxDormantClauseCounterTerm⟩
+      ⟨[(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)],
+        runtimeSafeCtxDormantClauseCounterTerm'⟩ ∧
+    ¬ RuntimeSafeConfig
+      ⟨[(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)],
+        runtimeSafeCtxDormantClauseCounterTerm'⟩ := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses, ctxCounterSigma, storeLookup, List.find?,
+      runtimeSafeCtxDormantClauseCounterTerm,
+      runtimeSafeCtxDormantClauseCounterSibling,
+      runtimeSafeCtxDormantClauseCounterInnerBody]
+  · refine ⟨?_, ?_⟩
+    · simp [RuntimeSafeCtx, DeepActiveCtx, DeepActiveRuntimeLinear,
+        DeepActiveRuntimeLinearClauses, ActiveRuntimeLinear,
+        activeLocRefs, activeLocRefsClauses,
+        runtimeSafeCtxDormantClauseCounterSibling,
+        runtimeSafeCtxDormantClauseCounterInnerBody]
+    · intro ell hmem
+      simp [StoreLiveCtxLocRefs, ctxLocRefs, locRefs, locRefsClauses,
+        runtimeSafeCtxDormantClauseCounterSibling,
+        runtimeSafeCtxDormantClauseCounterInnerBody] at hmem ⊢
+      rcases hmem with rfl
+      simp [ctxCounterSigma, storeLookup, List.find?]
+  · simpa [ctxCounterSigma, ctxCounterTensor, storeLookup, storeRemove, storeExtend, List.find?] using
+      (Step.tadd ctxCounterSigma 1 2 3 ctxCounterTensor ctxCounterTensor
+        (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+        (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+        (by simp [ctxCounterSigma, storeFreshLoc]))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, SubstAwareRuntimeLinear,
+      locRefs, storeLookup, List.find?]
+  · simpa [runtimeSafeCtxDormantClauseCounterTerm,
+      runtimeSafeCtxDormantClauseCounterTerm', plug] using
+      (Step.ctx ctxCounterSigma
+        [(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)]
+        (EvalCtx.pairL runtimeSafeCtxDormantClauseCounterSibling)
+        (Term.add (Term.loc 1) (Term.loc 2))
+        (Term.loc 3)
+        (by
+          simpa [ctxCounterSigma, ctxCounterTensor, storeLookup, storeRemove,
+            storeExtend, List.find?] using
+            (Step.tadd ctxCounterSigma 1 2 3 ctxCounterTensor ctxCounterTensor
+              (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+              (by simp [ctxCounterSigma, ctxCounterTensor, storeLookup, List.find?])
+              (by simp [ctxCounterSigma, storeFreshLoc]))))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses, storeLookup, List.find?,
+      runtimeSafeCtxDormantClauseCounterTerm',
+      runtimeSafeCtxDormantClauseCounterSibling,
+      runtimeSafeCtxDormantClauseCounterInnerBody]
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :

@@ -461,7 +461,11 @@ private theorem runtimeSafeConfig_pair_right
 /-- First honest config-level one-step theorem for the runtime-safety
     sidecar. This closes the store-safe head rules and the unary
     context frames, while leaving the remaining substitution, handler,
-    AD, and sibling-interaction cases as explicit `RuntimeSafeDebt`. -/
+    AD, and sibling-interaction cases as explicit `RuntimeSafeDebt`.
+    The unresolved `ctx` surface is now known to include dormant frame
+    locations that are invisible to the active/step footprints but
+    still required by `StoreLiveCtxLocRefs`, so those cases cannot be
+    folded back into the theorem without a stronger frame premise. -/
 theorem runtimeSafeConfig_step_or_debt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :
