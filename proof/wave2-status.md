@@ -31,8 +31,9 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
 - Lean now contains both current AD counterexample classes:
   - a handled product-seed counterexample showing that the legacy public `adjointFrom` theorem surface is still false: `handle` still routes through the tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
   - a higher-order counterexample showing that unrestricted `adjointTypedFrom` is also false on raw terms, because the typed transform still needs an explicit supported-fragment premise to exclude `abs` / `app` / nested `grad` / nested `vmap`
+  - a concrete `mul` context-gap counterexample showing that the current private typed helper is false on arbitrary seed-only contexts, because the transformed `mul` term replays raw source operands and therefore needs source-context information in the theorem statement
 - The branch still contains 1 executable `sorry` on the main proof path:
-  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission; the next AD repair is to move the public theorem surface from `adjointFrom` to `adjointTypedFrom` / `adjointTypedClausesFrom`, add the supported-fragment premises, then close the typed helper and the separate `mul` case
+  - `LaCaDiLE/AdjointTyping.lean`: one consolidated catch-all admission; the next AD repair is to restate the private/public typed theorem surface on a source-typed supported domain, move the public theorem from `adjointFrom` to `adjointTypedFrom` / `adjointTypedClausesFrom`, and then close the remaining local `mul` case
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -70,11 +71,11 @@ The current theorem-shape boundary is now explicit in Lean:
    The next public theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The branch now names the stronger candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` already proves a partial one-step `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary. The remaining work is to close the explicit beta/direct-handler/context-freshness debt with the right typing and store-side side conditions so preservation can iterate honestly.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the AD surface still has two theorem-shape blockers: the legacy `adjointFrom` surface is false for handled product seeds, and unrestricted `adjointTypedFrom` is false for higher-order bodies. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
+   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the AD surface still has three theorem-shape blockers: the legacy `adjointFrom` surface is false for handled product seeds, unrestricted `adjointTypedFrom` is false for higher-order bodies, and the current private typed helper is false on arbitrary seed-only contexts because `mul` replays raw source operands. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
+   - restate the private helper on a source-typed supported domain
    - switch the public theorem surface and downstream `tgrad` plumbing to `adjointTypedFrom` / `adjointTypedClausesFrom`
    - thread the supported-fragment premises through typing, substitution, and stepping
-   - reprove the private typing helper on that honest typed-and-supported domain
-   - separately, solve the `mul` tape/effect-row case
+   - separately, solve the remaining local `mul` tape/effect-row case
 
 ## Next Moves
 

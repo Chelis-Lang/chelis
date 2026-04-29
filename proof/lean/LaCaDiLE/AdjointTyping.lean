@@ -1725,6 +1725,111 @@ theorem adjoint_handle_product_seed_counterexample :
     obtain ⟨ds, _hteq, hPairAsTensor⟩ := hasType_copy_inv hCopy
     exact hasType_pair_tensor_absurd hPairAsTensor
 
+private def adjointMulCtxGapX : String :=
+  freshName "x" 0
+
+private def adjointMulCtxGapT : Typ :=
+  Typ.tensor DimList.empty
+
+private def adjointMulCtxGapBody : Term :=
+  Term.mul (Term.var adjointMulCtxGapX) (Term.const 0 DimList.empty)
+
+private theorem adjointMulCtxGapShape
+    {Sigma : StoreTyp} :
+    AdjointTypedShape (Capability.diff :: []) Sigma
+      adjointMulCtxGapT
+      adjointMulCtxGapBody := by
+  refine .mul ?_ .var .const
+  refine ⟨[(adjointMulCtxGapX, some adjointMulCtxGapT)],
+    [(adjointMulCtxGapX, none)],
+    [(adjointMulCtxGapX, none)],
+    [], [], ?_, ?_⟩
+  · simpa [adjointMulCtxGapX, adjointMulCtxGapT, List.append_assoc] using
+      (HasType.var (Capability.diff :: []) Sigma
+        ([] : LinearCtx)
+        ([] : LinearCtx)
+        adjointMulCtxGapX
+        adjointMulCtxGapT)
+  · simpa [adjointMulCtxGapT] using
+      (HasType.const (Capability.diff :: []) Sigma
+        ([(adjointMulCtxGapX, none)] : LinearCtx)
+        0
+        DimList.empty)
+
+/-- The current private helper theorem shape for `adjointTypedFrom`
+    cannot be right for `mul`: it quantifies over arbitrary seed
+    contexts, but the generated term replays raw source operands via
+    `copy e1` / `copy e2`. Even the tiny body `mul (var x) (const 0)`
+    fails if the seed context omits `x`. -/
+theorem adjointTyped_mul_ctx_counterexample :
+    (∀ Sigma,
+      AdjointTypedShape (Capability.diff :: []) Sigma
+        adjointMulCtxGapT
+        adjointMulCtxGapBody) ∧
+    (∀ Sigma, ¬ HasType [] Sigma []
+      (adjointTypedFrom adjointMulCtxGapBody
+        adjointMulCtxGapT
+        adjointMulCtxGapX
+        (Term.const 0 DimList.empty)
+        0)
+      Typ.unit
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+      []) := by
+  refine ⟨?_, ?_⟩
+  · intro Sigma
+    exact adjointMulCtxGapShape (Sigma := Sigma)
+  · intro Sigma
+    intro hAdj
+    simp [adjointMulCtxGapBody, adjointMulCtxGapT, adjointMulCtxGapX,
+      adjointTypedFrom, splitCotangentSeedFrom] at hAdj
+    rcases hasType_letpair_inv hAdj with
+      ⟨Gamma2, Gamma3, t1, t2, _eps1, _eps2, slotGA, slotGB,
+        hCopySeed, hAfterSeed, hOut⟩
+    obtain ⟨dsSeed, _hSeedTy, hSeedConst⟩ := hasType_copy_inv hCopySeed
+    have hGamma2Nil : Gamma2 = [] := has_type_closed_output_of_closed_input hSeedConst
+    subst hGamma2Nil
+    rcases hasType_letpair_inv hAfterSeed with
+      ⟨Gamma2', Gamma3', tA, tATape, _epsA, _epsRest, slotA, slotATape,
+        hCopyX, _hRest, hOut2⟩
+    obtain ⟨dsX, _hCopyTy, hVarX⟩ := hasType_copy_inv hCopyX
+    rcases hasType_var_ctx_inv hVarX with
+      ⟨GammaPre, GammaPost, hIn, _hOutVar⟩
+    have hxIn :
+        adjointMulCtxGapX ∈
+          linearCtxDom
+            ([(freshName "gA" 0, some t1),
+              (freshName "gB" 0, some t2)] : LinearCtx) := by
+      have hIn' :
+          ([(freshName "gA" 0, some t1),
+            (freshName "gB" 0, some t2)] : LinearCtx) =
+            GammaPre ++ [(adjointMulCtxGapX, some (Typ.tensor dsX))] ++ GammaPost := by
+        simpa using hIn
+      have :
+          adjointMulCtxGapX ∈
+            linearCtxDom
+              (GammaPre ++ [(adjointMulCtxGapX, some (Typ.tensor dsX))] ++ GammaPost) := by
+        simp [linearCtxDom]
+      rw [hIn']
+      exact this
+    have hNoHashX : NoHash "x" := by
+      show '#' ∉ ("x" : String).toList
+      decide
+    have hNoHashGA : NoHash "gA" := by
+      show '#' ∉ ("gA" : String).toList
+      decide
+    have hNoHashGB : NoHash "gB" := by
+      show '#' ∉ ("gB" : String).toList
+      decide
+    have hxNeGA :
+        adjointMulCtxGapX ≠ freshName "gA" 0 := by
+      simpa [adjointMulCtxGapX] using
+        (freshName_ne_of_base_ne "x" "gA" 0 0 hNoHashX hNoHashGA (by decide))
+    have hxNeGB :
+        adjointMulCtxGapX ≠ freshName "gB" 0 := by
+      simpa [adjointMulCtxGapX] using
+        (freshName_ne_of_base_ne "x" "gB" 0 0 hNoHashX hNoHashGB (by decide))
+    simp [linearCtxDom, hxNeGA, hxNeGB] at hxIn
+
 /- The legacy `adjointFrom` theorem family was removed from the live
    proof surface once handled product-seed counterexamples showed that
    its tensor-only clause threading is false. `Preservation` now uses
