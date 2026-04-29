@@ -1830,6 +1830,174 @@ theorem adjointTyped_mul_ctx_counterexample :
         (freshName_ne_of_base_ne "x" "gB" 0 0 hNoHashX hNoHashGB (by decide))
     simp [linearCtxDom, hxNeGA, hxNeGB] at hxIn
 
+private theorem adjointMulPublic_seed_var_inv
+    {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    (h : HasType [] Sigma
+      ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+        ("gs", some adjointMulCtxGapT)] : LinearCtx)
+      (Term.var "gs")
+      t
+      eps
+      GammaOut) :
+    t = adjointMulCtxGapT ∧
+      GammaOut =
+        ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+          ("gs", none)] : LinearCtx) := by
+  obtain ⟨GammaPre, GammaPost, hCtx, hOut⟩ := hasType_var_ctx_inv h
+  cases GammaPre with
+  | nil =>
+      have : False := by
+        simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+      exact this.elim
+  | cons a GammaPre =>
+      cases GammaPre with
+      | nil =>
+          cases GammaPost with
+          | nil =>
+              simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at hCtx
+              rcases hCtx with ⟨rfl, rfl⟩
+              exact ⟨rfl, by
+                simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hOut⟩
+          | cons b GammaPost =>
+              have : False := by
+                simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+              exact this.elim
+      | cons b GammaPre =>
+          have : False := by
+            simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+          exact this.elim
+
+private theorem adjointMulPublic_copy_x_var_inv
+    {Sigma : StoreTyp} {t : Typ} {eps : EffectRow} {GammaOut : LinearCtx}
+    {t1 t2 : Typ}
+    (h : HasType [] Sigma
+      ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+        ("gs", none),
+        (freshName "gA" 0, some t1),
+        (freshName "gB" 0, some t2)] : LinearCtx)
+      (Term.var adjointMulCtxGapX)
+      t
+      eps
+      GammaOut) :
+    t = adjointMulCtxGapT ∧
+      GammaOut =
+        ([(adjointMulCtxGapX, none),
+          ("gs", none),
+          (freshName "gA" 0, some t1),
+          (freshName "gB" 0, some t2)] : LinearCtx) := by
+  obtain ⟨GammaPre, GammaPost, hCtx, hOut⟩ := hasType_var_ctx_inv h
+  cases GammaPre with
+  | nil =>
+      cases GammaPost with
+      | nil =>
+          have : False := by
+            simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+          exact this.elim
+      | cons a GammaPost =>
+          cases GammaPost with
+          | nil =>
+              have : False := by
+                simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+              exact this.elim
+          | cons b GammaPost =>
+              cases GammaPost with
+              | nil =>
+                  have : False := by
+                    simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+                  exact this.elim
+              | cons c GammaPost =>
+                  cases GammaPost with
+                  | nil =>
+                      simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at hCtx
+                      rcases hCtx with ⟨rfl, rfl, rfl, rfl⟩
+                      exact ⟨rfl, by
+                        simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hOut⟩
+                  | cons d GammaPost =>
+                      have : False := by
+                        simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+                      exact this.elim
+  | cons a GammaPre =>
+      cases GammaPre with
+      | nil =>
+          have : False := by
+            simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+          exact this.elim
+      | cons b GammaPre =>
+          cases GammaPre with
+          | nil =>
+              have : False := by
+                simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+              exact this.elim
+          | cons c GammaPre =>
+              cases GammaPre with
+              | nil =>
+                  have : False := by
+                    simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+                  exact this.elim
+              | cons d GammaPre =>
+                  have : False := by
+                    simpa [adjointMulCtxGapX, adjointMulCtxGapT, freshName] using hCtx
+                  exact this.elim
+
+/-- The current public typed theorem target for `adjointTypedFrom`
+    cannot be right for `mul`: even on the real `grad`-style input
+    context `x, gs`, the transformed term replays `copy x` and therefore
+    cannot leave `x` live on output. -/
+theorem adjointTyped_mul_output_counterexample :
+    ∀ Sigma, ¬ HasType [] Sigma
+      ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+        ("gs", some adjointMulCtxGapT)] : LinearCtx)
+      (adjointTypedFrom adjointMulCtxGapBody
+        adjointMulCtxGapT
+        adjointMulCtxGapX
+        (Term.var "gs")
+        0)
+      Typ.unit
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+      ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+        ("gs", none)] : LinearCtx) := by
+  intro Sigma
+  intro hAdj
+  simp [adjointMulCtxGapBody, adjointMulCtxGapT, adjointMulCtxGapX,
+    adjointTypedFrom, splitCotangentSeedFrom] at hAdj
+  rcases hasType_letpair_inv hAdj with
+    ⟨Gamma2, Gamma3, t1, t2, _eps1, _eps2, slotGA, slotGB,
+      hCopySeed, hAfterSeed, hOut⟩
+  obtain ⟨_dsSeed, _hSeedTy, hVarSeed⟩ := hasType_copy_inv hCopySeed
+  have hGamma2 :
+      Gamma2 =
+        ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+          ("gs", none)] : LinearCtx) := by
+    obtain ⟨hTySeed, hOutSeed⟩ := adjointMulPublic_seed_var_inv (Sigma := Sigma) hVarSeed
+    cases hTySeed
+    exact hOutSeed
+  subst hGamma2
+  rcases hasType_letpair_inv hAfterSeed with
+    ⟨Gamma2', Gamma3', tA, tATape, _epsA, _epsRest, slotA, slotATape,
+      hCopyX, hRest, hOut2⟩
+  obtain ⟨_dsX, _hCopyTy, hVarX⟩ := hasType_copy_inv hCopyX
+  have hGamma2' :
+      Gamma2' =
+        ([(adjointMulCtxGapX, none),
+          ("gs", none),
+          (freshName "gA" 0, some t1),
+          (freshName "gB" 0, some t2)] : LinearCtx) := by
+    obtain ⟨hTyX, hOutX⟩ :=
+      adjointMulPublic_copy_x_var_inv (Sigma := Sigma) (t1 := t1) (t2 := t2) hVarX
+    cases hTyX
+    exact hOutX
+  subst hGamma2'
+  have hLookupOut :
+      lookupLinearCtx
+        (Gamma3' ++
+          [(freshName "a" 2, slotA), (freshName "aTape" 2, slotATape)])
+        adjointMulCtxGapX = some adjointMulCtxGapT := by
+    rw [← hOut2, ← hOut]
+    simp [lookupLinearCtx, adjointMulCtxGapX, adjointMulCtxGapT, freshName]
+  have hSlotSubRest := has_type_slotSub hRest
+  obtain ⟨tIn, hLookupIn⟩ := slotSub_lookup_some hSlotSubRest hLookupOut
+  simp [lookupLinearCtx, adjointMulCtxGapX, adjointMulCtxGapT, freshName] at hLookupIn
+
 /- The legacy `adjointFrom` theorem family was removed from the live
    proof surface once handled product-seed counterexamples showed that
    its tensor-only clause threading is false. `Preservation` now uses

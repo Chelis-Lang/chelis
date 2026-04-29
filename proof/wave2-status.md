@@ -32,10 +32,11 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
   - a handled product-seed counterexample showing that the legacy public `adjointFrom` theorem surface is still false: `handle` still routes through the tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
   - a higher-order counterexample showing that unrestricted `adjointTypedFrom` is also false on raw terms, because the typed transform still needs an explicit supported-fragment premise to exclude `abs` / `app` / nested `grad` / nested `vmap`
   - a concrete `mul` context-gap counterexample showing that the current private typed helper is false on arbitrary seed-only contexts, because the transformed `mul` term replays raw source operands and therefore needs source-context information in the theorem statement
+  - a stronger public `mul` output counterexample showing that the current `adjointTypedFrom_preserves_typing` statement is itself false on the real `grad`-style input/output shape, because `copy x` tombstones `x` before the theorem's claimed output
 - The branch still contains 2 executable `sorry`s on the main proof path, both in `LaCaDiLE/AdjointTyping.lean`:
   - the `mul` branch of the private typed helper
   - the clause-list `cons` branch of the same helper
-  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom`; the next AD repair is to restate that admitted helper on a source-typed supported domain and then close the remaining `mul` and `cons` cases.
+  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom`, but the new public `mul` output witness means the next AD repair is not only “restate the admitted helper.” The `mul` replay/tape boundary or the public theorem's claimed output context must be redesigned first, then the helper can be restated on an honest source-typed supported domain and the remaining `mul` / `cons` cases can close.
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -74,9 +75,9 @@ The current theorem-shape boundary is now explicit in Lean:
    The next public theorem cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The branch now names the stronger candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` already proves a partial one-step `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary. The remaining work is to close the explicit beta/direct-handler/context-freshness debt with the right typing and store-side side conditions so preservation can iterate honestly.
 
 2. `AdjointTyping.lean`
-   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the AD surface still has three theorem-shape blockers: the legacy `adjointFrom` surface is false for handled product seeds, unrestricted `adjointTypedFrom` is false for higher-order bodies, and the current private typed helper is false on arbitrary seed-only contexts because `mul` replays raw source operands. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
-   - restate the admitted private helper on a source-typed supported domain
-   - keep the public typed theorem surface honest under those premises
+   The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. But the AD surface still has four theorem-shape blockers: the legacy `adjointFrom` surface is false for handled product seeds, unrestricted `adjointTypedFrom` is false for higher-order bodies, the current private typed helper is false on arbitrary seed-only contexts because `mul` replays raw source operands, and the current `adjointTypedFrom_preserves_typing` statement is false on the real `grad`-style `mul` output shape because `copy x` tombstones `x` before the claimed output. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
+   - redesign the `mul` replay/tape boundary or public output-context claim so the theorem surface is honest
+   - restate the admitted private typed helper on a source-typed supported domain
    - thread the supported-fragment premises through typing, substitution, and stepping
    - solve the remaining local `mul` and clause-list `cons` cases
 
@@ -84,4 +85,4 @@ The current theorem-shape boundary is now explicit in Lean:
 
 1. Refine and close the current `HandlerAwareRuntimeLinear` boundary, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for the remaining side conditions.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies and so it names the current handler-aware boundary honestly.
-3. Re-close the public AD surface against the now-updated transform domain by keeping it on `adjointTypedFrom` / `adjointTypedClausesFrom`, threading the supported-fragment premises through `T-Grad` / `E-Grad` / the public theorem, then reprove the private helper there, finish the remaining admitted `mul` and clause-list `cons` cases, and return to the AD-correctness wave.
+3. Re-close the public AD surface against the now-updated transform domain by keeping it on `adjointTypedFrom` / `adjointTypedClausesFrom`, redesigning the `mul` replay/tape boundary and public output-context claim so that surface is honest, threading the supported-fragment premises through `T-Grad` / `E-Grad` / the public theorem, then reproving the private helper there, finishing the remaining admitted `mul` and clause-list `cons` cases, and returning to the AD-correctness wave.
