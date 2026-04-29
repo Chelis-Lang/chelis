@@ -1293,6 +1293,33 @@ theorem handlerAwareRuntimeLinearClauses_deepActive :
 
 end
 
+/-- Every substitution-aware runtime term has a duplicate-free active
+    variable footprint at its root. -/
+theorem substAwareRuntimeLinear_activeNodup :
+    ∀ {e : Term}, SubstAwareRuntimeLinear e → (activeVarRefs e).Nodup
+  | Term.var _, _ => by simp [SubstAwareRuntimeLinear, activeVarRefs]
+  | Term.abs _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.app _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.letBind _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.copy _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.letpair _ _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.pair _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.fst _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.snd _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.unit, _ => by simp [SubstAwareRuntimeLinear, activeVarRefs]
+  | Term.const _ _, _ => by simp [SubstAwareRuntimeLinear, activeVarRefs]
+  | Term.add _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.mul _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.sum _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.expand _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.uniformLike _ _ _, h => by
+      simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.grad _ _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.vmap _ _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.handle _ _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.perform _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
+  | Term.loc _, _ => by simp [SubstAwareRuntimeLinear, activeVarRefs]
+
 /-- Every deep-active term has a duplicate-free active footprint at its
     root. -/
 theorem deepActiveRuntimeLinear_active

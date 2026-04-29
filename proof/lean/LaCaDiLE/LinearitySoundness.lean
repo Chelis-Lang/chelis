@@ -426,6 +426,306 @@ private theorem runtimeLinear_step_or_handlerAwareDebt
   exact handlerAwareRuntimeLinear_step_or_debt c1 c2 h_step
     (handlerAwareRuntimeLinear_of_runtimeLinear hRuntime)
 
+private theorem runtimeSafeConfig_loc
+    {sigma : Store} {ell : Loc} {w : TensorVal}
+    (hlook : storeLookup sigma ell = some w) :
+    RuntimeSafeConfig ⟨sigma, Term.loc ell⟩ := by
+  refine ⟨?_, ?_⟩
+  · simp [SubstAwareHandlerRuntimeLinear, HandlerAwareRuntimeLinear,
+      SubstAwareRuntimeLinear]
+  · intro ell' hmem
+    simp [locRefs] at hmem
+    subst ell'
+    rw [hlook]
+    rfl
+
+private theorem runtimeSafeConfig_pair_left
+    {sigma : Store} {e1 e2 : Term}
+    (h : RuntimeSafeConfig ⟨sigma, Term.pair e1 e2⟩) :
+    RuntimeSafeConfig ⟨sigma, e1⟩ := by
+  simpa [plug] using
+    (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.pairL e2) (e := e1)
+      (by simpa [plug] using h)).1
+
+private theorem runtimeSafeConfig_pair_right
+    {sigma : Store} {e1 e2 : Term}
+    (h : RuntimeSafeConfig ⟨sigma, Term.pair e1 e2⟩) :
+    RuntimeSafeConfig ⟨sigma, e2⟩ := by
+  simpa [plug] using
+    (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.pairR e1) (e := e2)
+      (by simpa [plug] using h)).1
+
+/-- First config-level step theorem for the runtime-safety sidecar.
+    This closes the store-safe head rules and the unary context frames,
+    while leaving the remaining substitution, handler, AD, and
+    sibling-interaction cases as explicit `HandlerAwareRuntimeDebt`. -/
+theorem runtimeSafeConfig_step_or_handlerAwareDebt
+    (c1 c2 : Config)
+    (h_step : Step c1 c2) :
+    RuntimeSafeConfig c1 →
+      RuntimeSafeConfig c2 ∨ HandlerAwareRuntimeDebt c1 c2 := by
+  induction h_step with
+  | beta sigma x t e v hv =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.beta sigma x t e v hv)
+  | letBind sigma x v e hv =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.letBind sigma x v e hv)
+  | letpair sigma x y v1 v2 e hv1 hv2 =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.letpair sigma x y v1 v2 e hv1 hv2)
+  | fst sigma tRight v1 v2 hv1 hv2 =>
+      intro h
+      exact Or.inl <| runtimeSafeConfig_pair_left <|
+        (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.fst tRight)
+          (e := Term.pair v1 v2) (by simpa [plug] using h)).1
+  | snd sigma tLeft v1 v2 hv1 hv2 =>
+      intro h
+      exact Or.inl <| runtimeSafeConfig_pair_right <|
+        (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.snd tLeft)
+          (e := Term.pair v1 v2) (by simpa [plug] using h)).1
+  | tconst sigma v ds ell hell =>
+      intro _h
+      subst ell
+      have hlook :
+          storeLookup (storeExtend sigma (storeFreshLoc sigma) ⟨ds, v⟩) (storeFreshLoc sigma) =
+            some ⟨ds, v⟩ := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl <| runtimeSafeConfig_loc hlook
+  | copy sigma ell ellNew w hlook hfresh =>
+      intro _h
+      have hne : ell ≠ ellNew := by
+        rw [hfresh]
+        exact storeFreshLoc_ne sigma ell (by rw [hlook]; rfl)
+      have hne' : ellNew ≠ ell := by
+        intro hEq
+        exact hne hEq.symm
+      have hInner : RuntimeSafeConfig ⟨storeExtend sigma ellNew w, Term.loc ell⟩ := by
+        have hkeep : storeLookup (storeExtend sigma ellNew w) ell = some w := by
+          simpa [storeLookup, storeExtend, hne] using hlook
+        exact runtimeSafeConfig_loc hkeep
+      have hCtx : RuntimeSafeCtx (storeExtend sigma ellNew w) (EvalCtx.pairL (Term.loc ellNew)) := by
+        have hnew : storeLookup (storeExtend sigma ellNew w) ellNew = some w := by
+          simp [storeLookup, storeExtend]
+        constructor
+        · simpa [DeepActiveCtx, DeepActiveRuntimeLinear, ActiveRuntimeLinear,
+            activeLocRefs]
+        · intro ell' hmem
+          simp [ctxLocRefs, locRefs] at hmem
+          subst ell'
+          rw [hnew]
+          rfl
+      have hPlug :
+          SubstAwareHandlerRuntimeLinear
+            (Term.pair (Term.loc ell) (Term.loc ellNew)) := by
+        simp [SubstAwareHandlerRuntimeLinear, HandlerAwareRuntimeLinear,
+          HandlerAwareRuntimeLinearClauses, SubstAwareRuntimeLinear,
+          SubstAwareRuntimeLinearClauses, ActiveRuntimeLinear,
+          activeLocRefs, activeLocRefsClauses,
+          StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+          activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+          LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+          hne, hne']
+      exact Or.inl <| runtimeSafeConfig_ctx hCtx hInner hPlug
+  | tadd sigma ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      intro _h
+      have hlook : storeLookup
+          (storeExtend (storeRemove (storeRemove sigma ell1) ell2) ellOut
+            (tensorOpPlaceholder w1 w2)) ellOut =
+          some (tensorOpPlaceholder w1 w2) := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl (runtimeSafeConfig_loc hlook)
+  | tmul sigma ell1 ell2 ellOut w1 w2 h1 h2 hfresh =>
+      intro _h
+      have hlook : storeLookup
+          (storeExtend (storeRemove (storeRemove sigma ell1) ell2) ellOut
+            (tensorOpPlaceholder w1 w2)) ellOut =
+          some (tensorOpPlaceholder w1 w2) := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl (runtimeSafeConfig_loc hlook)
+  | tsum sigma ell ellOut w d hlook hfresh =>
+      intro _h
+      have hlook' : storeLookup
+          (storeExtend (storeRemove sigma ell) ellOut { shape := rem w.shape d, data := w.data })
+          ellOut =
+          some { shape := rem w.shape d, data := w.data } := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl (runtimeSafeConfig_loc hlook')
+  | texpand sigma ell ellOut w d hlook hfresh =>
+      intro _h
+      have hlook' : storeLookup
+          (storeExtend (storeRemove sigma ell) ellOut { shape := ins w.shape d, data := w.data })
+          ellOut =
+          some { shape := ins w.shape d, data := w.data } := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl (runtimeSafeConfig_loc hlook')
+  | tuniformLike sigma ell ellOut w lo hi hlook hfresh =>
+      intro _h
+      have hlook' : storeLookup
+          (storeExtend (storeRemove sigma ell) ellOut { shape := w.shape, data := lo })
+          ellOut =
+          some { shape := w.shape, data := lo } := by
+        simp [storeLookup, storeExtend]
+      exact Or.inl (runtimeSafeConfig_loc hlook')
+  | handleRet sigma epsH v clauses hv =>
+      intro h
+      exact Or.inl <|
+        (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.handle epsH clauses)
+          (e := v) (by simpa [plug] using h)).1
+  | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
+          hv hsig hmem)
+  | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
+          hv hsig hmem hop hE)
+  | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
+      intro _h
+      exact Or.inr
+        (HandlerAwareRuntimeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
+          hv hsig hmem hop hEs)
+  | tgrad sigma x tv tOut body hSupp =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
+  | tvmap sigma x tv d body =>
+      intro _h
+      exact Or.inr (HandlerAwareRuntimeDebt.tvmap sigma x tv d body)
+  | ctx sigma sigma' E e e' h_inner ih =>
+      intro h
+      rcases runtimeSafeConfig_plug (sigma := sigma) (E := E) (e := e) h with
+        ⟨hInner, hCtx⟩
+      rcases ih hInner with hInner' | _hDebt
+      · cases E with
+        | hole =>
+            exact Or.inl (by simpa [plug] using hInner')
+        | appL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+        | appR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+        | letBind x e2 =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+        | copy =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug EvalCtx.copy e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' EvalCtx.copy := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | letpair x y e2 =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+        | pairL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+        | pairR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+        | fst tRight =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.fst tRight) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.fst tRight) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | snd tLeft =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.snd tLeft) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.snd tLeft) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | addL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+        | addR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+        | mulL e2 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+        | mulR v1 =>
+            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+        | sum d =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.sum d) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.sum d) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | expand d =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.expand d) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.expand d) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | uniformLike lo hi =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.uniformLike lo hi) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.uniformLike lo hi) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+        | handle epsH clauses =>
+            exact Or.inr
+              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.handle epsH clauses) e e' h_inner)
+        | perform op =>
+            have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.perform op) e') := by
+              rcases hInner'.1 with ⟨hHandler, hSubst⟩
+              exact ⟨by
+                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
+                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
+                by
+                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
+                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
+                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
+            have hCtx' : RuntimeSafeCtx sigma' (EvalCtx.perform op) := by
+              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
+            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+      · exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' E e e' h_inner)
+
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term)
