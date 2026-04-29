@@ -4067,6 +4067,86 @@ theorem runtimeSafeConfig_handleOpCtx_capture_counterexample :
       runtimeSafeHandleCtxCaptureCounterTerm',
       runtimeSafeHandleCtxCaptureCounterValue]
 
+private def runtimeSafeHandleCtxClosedCounterValue : Term :=
+  Term.abs "z" Typ.unit (Term.var "z")
+
+private def runtimeSafeHandleCtxClosedCounterBody : Term :=
+  Term.abs "z" Typ.unit (Term.pair (Term.var "x") (Term.var "z"))
+
+private def runtimeSafeHandleCtxClosedCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", runtimeSafeHandleCtxClosedCounterBody)]
+
+private def runtimeSafeHandleCtxClosedCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (plug EvalCtx.copy
+      (Term.perform EffectLabel.accum runtimeSafeHandleCtxClosedCounterValue))
+    runtimeSafeHandleCtxClosedCounterClauses
+
+private def runtimeSafeHandleCtxClosedCounterTerm' : Term :=
+  Term.abs "z" Typ.unit
+    (Term.pair runtimeSafeHandleCtxClosedCounterValue (Term.var "z"))
+
+/-- Closing the whole handled source is still not enough to recover a
+    generic config-level `handleOpCtx` theorem. The handled value here
+    is closed, but it carries a bound name that collides with a
+    clause-local binder after substitution, and the active-variable
+    runtime surface is intentionally name-based rather than
+    alpha-equivalence-aware. The next honest theorem shape therefore
+    needs a freshness premise stronger than `Closed` on the source
+    handle. -/
+theorem runtimeSafeConfig_handleOpCtx_closed_source_counterexample :
+    RuntimeSafeConfig ⟨([] : Store), runtimeSafeHandleCtxClosedCounterTerm⟩ ∧
+    Closed runtimeSafeHandleCtxClosedCounterTerm ∧
+    Step ⟨[], runtimeSafeHandleCtxClosedCounterTerm⟩
+      ⟨[], runtimeSafeHandleCtxClosedCounterTerm'⟩ ∧
+    ¬ RuntimeSafeConfig ⟨[], runtimeSafeHandleCtxClosedCounterTerm'⟩ := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleCtxClosedCounterTerm,
+      runtimeSafeHandleCtxClosedCounterClauses,
+      runtimeSafeHandleCtxClosedCounterBody,
+      runtimeSafeHandleCtxClosedCounterValue, plug]
+  · simp [Closed, freeVars, freeVarsClauses,
+      runtimeSafeHandleCtxClosedCounterTerm,
+      runtimeSafeHandleCtxClosedCounterClauses,
+      runtimeSafeHandleCtxClosedCounterBody,
+      runtimeSafeHandleCtxClosedCounterValue, plug]
+  · simpa [runtimeSafeHandleCtxClosedCounterTerm,
+      runtimeSafeHandleCtxClosedCounterTerm',
+      runtimeSafeHandleCtxClosedCounterClauses,
+      runtimeSafeHandleCtxClosedCounterBody,
+      runtimeSafeHandleCtxClosedCounterValue, plug, subst] using
+      (Step.handleOpCtx ([] : Store)
+        EffectLabel.accum runtimeSafeHandleCtxClosedCounterValue
+        [EffectLabel.accum] EvalCtx.copy
+        runtimeSafeHandleCtxClosedCounterClauses
+        "x" "k" runtimeSafeHandleCtxClosedCounterBody Typ.unit
+        (IsValue.abs "z" Typ.unit (Term.var "z"))
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [runtimeSafeHandleCtxClosedCounterClauses])
+        (by simp)
+        (by simp [EvalCtx.noHandleFor]))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleCtxClosedCounterTerm',
+      runtimeSafeHandleCtxClosedCounterValue]
+
 private def handlerAwareCtxFreshCounterTerm : Term :=
   Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
 
