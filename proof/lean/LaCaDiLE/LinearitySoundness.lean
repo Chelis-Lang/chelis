@@ -91,27 +91,28 @@ private theorem linearity_soundness_aux
       -- touch the store further.
       exact ih h_wf
 
-/-- Runtime-invariant cases that remain open after the handler-aware
-    footprint redesign. These are exactly the steps that still require
-    a dedicated substitution/context proof or depend on the unresolved
-    AD surface. -/
-private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
+/-- Runtime-safety cases that remain open after the store-aware
+    handler/substitution redesign. These are exactly the steps that
+    still require a dedicated substitution/context proof or depend on
+    the unresolved AD surface. This is the honest public residual
+    surface for the runtime track. -/
+inductive RuntimeSafeDebt : Config → Config → Prop
   | beta
       (sigma : Store) (x : String) (t : Typ) (e v : Term)
       (hv : IsValue v) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.app (Term.abs x t e) v⟩
         ⟨sigma, subst e v x⟩
   | letBind
       (sigma : Store) (x : String) (v e : Term)
       (hv : IsValue v) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.letBind x v e⟩
         ⟨sigma, subst e v x⟩
   | letpair
       (sigma : Store) (x y : String) (v1 v2 e : Term)
       (hv1 : IsValue v1) (hv2 : IsValue v2) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.letpair x y (Term.pair v1 v2) e⟩
         ⟨sigma, subst (subst e v1 x) v2 y⟩
   | handleOpDirect
@@ -122,7 +123,7 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
       (hv : IsValue v)
       (hsig : ∃ tArg, OpSigMatch op tArg tRet)
       (hmem : (op, x, k, handlerBody) ∈ clauses) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.handle epsH (Term.perform op v) clauses⟩
         ⟨sigma,
           subst (subst handlerBody v x)
@@ -137,7 +138,7 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
       (hmem : (op, xVar, kVar, hb) ∈ clauses)
       (hop : op ∈ epsH)
       (hE : EvalCtx.noHandleFor op E) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.handle epsH (plug E (Term.perform op v)) clauses⟩
         ⟨sigma,
           subst (subst hb v xVar)
@@ -157,7 +158,7 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
       (hmem : (op, xVar, kVar, hb) ∈ clauses)
       (hop : op ∈ epsH)
       (hEs : EvalCtxChain.noHandleFor op Es) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.handle epsH (multiPlug Es (Term.perform op v)) clauses⟩
         ⟨sigma,
           subst (subst hb v xVar)
@@ -170,7 +171,7 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
   | tgrad
       (sigma : Store) (x : String) (tv tOut : Typ) (body : Term)
       (hSupp : AdjointSupported body) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, Term.grad x tv tOut body⟩
         ⟨sigma,
           Term.abs x tv
@@ -181,15 +182,10 @@ private inductive HandlerAwareRuntimeDebt : Config → Config → Prop
                     (gradAdjointCounter x (gradSeedName x body) body))
                   [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
                 (Term.var x)))⟩
-  | tvmap
-      (sigma : Store) (x : String) (tv : Typ) (d : Dim) (body : Term) :
-      HandlerAwareRuntimeDebt
-        ⟨sigma, Term.vmap x tv d body⟩
-        ⟨sigma, Term.abs x (addDim d tv) (addDimTerm d body)⟩
   | ctx
       (sigma sigma' : Store) (E : EvalCtx) (e e' : Term)
       (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
-      HandlerAwareRuntimeDebt
+      RuntimeSafeDebt
         ⟨sigma, plug E e⟩
         ⟨sigma', plug E e'⟩
 
@@ -209,23 +205,23 @@ private theorem handlerAwareRuntimeLinear_active
 /-- One-step preservation boundary for the stronger handler-aware
     runtime invariant. The purely runtime/store-structural head rules
     are closed here; the remaining cases are reported explicitly as
-    `HandlerAwareRuntimeDebt` rather than being silently folded into the
+    `RuntimeSafeDebt` rather than being silently folded into the
     theorem statement. -/
 private theorem handlerAwareRuntimeLinear_step_or_debt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :
     HandlerAwareRuntimeLinear c1.term →
-      HandlerAwareRuntimeLinear c2.term ∨ HandlerAwareRuntimeDebt c1 c2 := by
+      HandlerAwareRuntimeLinear c2.term ∨ RuntimeSafeDebt c1 c2 := by
   induction h_step with
   | beta sigma x t e v hv =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.beta sigma x t e v hv)
+      exact Or.inr (RuntimeSafeDebt.beta sigma x t e v hv)
   | letBind sigma x v e hv =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.letBind sigma x v e hv)
+      exact Or.inr (RuntimeSafeDebt.letBind sigma x v e hv)
   | letpair sigma x y v1 v2 e hv1 hv2 =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.letpair sigma x y v1 v2 e hv1 hv2)
+      exact Or.inr (RuntimeSafeDebt.letpair sigma x y v1 v2 e hv1 hv2)
   | fst sigma tRight v1 v2 hv1 hv2 =>
       intro h
       rcases (by simpa [HandlerAwareRuntimeLinear] using h) with
@@ -289,21 +285,21 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
   | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
+        (RuntimeSafeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
           hv hsig hmem)
   | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
+        (RuntimeSafeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
           hv hsig hmem hop hE)
   | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
+        (RuntimeSafeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
           hv hsig hmem hop hEs)
   | tgrad sigma x tv tOut body hSupp =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
+      exact Or.inr (RuntimeSafeDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
       intro h
       rcases (by simpa [HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using h) with
@@ -322,12 +318,12 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
           · exact Or.inl (by simpa [plug] using hInner')
           · exact Or.inr hDebt
       | appL e2 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
       | appR v1 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
       | letBind x e2 =>
           exact Or.inr
-            (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+            (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
       | copy =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -336,14 +332,14 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
               simpa [HandlerAwareRuntimeLinear, plug, ActiveRuntimeLinear, activeLocRefs] using
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
-          · exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
+          · exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
       | letpair x y e2 =>
           exact Or.inr
-            (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+            (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
       | pairL e2 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
       | pairR v1 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
       | fst tRight =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -353,7 +349,7 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
       | snd tLeft =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -363,15 +359,15 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
       | addL e2 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
       | addR v1 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
       | mulL e2 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
       | mulR v1 =>
-          exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+          exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
       | sum d =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -381,7 +377,7 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
       | expand d =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -391,7 +387,7 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
       | uniformLike lo hi =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
             ⟨_hAct, hInner⟩
@@ -401,11 +397,11 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma'
+              (RuntimeSafeDebt.ctx sigma sigma'
                 (EvalCtx.uniformLike lo hi) e e' h_inner)
       | handle epsH clauses =>
           exact Or.inr
-            (HandlerAwareRuntimeDebt.ctx sigma sigma'
+            (RuntimeSafeDebt.ctx sigma sigma'
               (EvalCtx.handle epsH clauses) e e' h_inner)
       | perform op =>
           rcases (by simpa [HandlerAwareRuntimeLinear, plug] using h) with
@@ -416,17 +412,17 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
                 (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
                   ⟨handlerAwareRuntimeLinear_active hInner', hInner'⟩)
           · exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
 
 /-- Full-step entry point for the current runtime-invariant track.
     A globally runtime-linear source term is strong enough to enter the
     newer handler-aware surface in one step; the only remaining gaps are
     the explicitly classified debt constructors. -/
-private theorem runtimeLinear_step_or_handlerAwareDebt
+private theorem runtimeLinear_step_or_runtimeSafeDebt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :
     RuntimeLinear c1.term →
-      HandlerAwareRuntimeLinear c2.term ∨ HandlerAwareRuntimeDebt c1 c2 := by
+      HandlerAwareRuntimeLinear c2.term ∨ RuntimeSafeDebt c1 c2 := by
   intro hRuntime
   exact handlerAwareRuntimeLinear_step_or_debt c1 c2 h_step
     (handlerAwareRuntimeLinear_of_runtimeLinear hRuntime)
@@ -460,25 +456,25 @@ private theorem runtimeSafeConfig_pair_right
     (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.pairR e1) (e := e2)
       (by simpa [plug] using h)).1
 
-/-- First config-level step theorem for the runtime-safety sidecar.
-    This closes the store-safe head rules and the unary context frames,
-    while leaving the remaining substitution, handler, AD, and
-    sibling-interaction cases as explicit `HandlerAwareRuntimeDebt`. -/
-theorem runtimeSafeConfig_step_or_handlerAwareDebt
+/-- First honest config-level one-step theorem for the runtime-safety
+    sidecar. This closes the store-safe head rules and the unary
+    context frames, while leaving the remaining substitution, handler,
+    AD, and sibling-interaction cases as explicit `RuntimeSafeDebt`. -/
+theorem runtimeSafeConfig_step_or_debt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :
     RuntimeSafeConfig c1 →
-      RuntimeSafeConfig c2 ∨ HandlerAwareRuntimeDebt c1 c2 := by
+      RuntimeSafeConfig c2 ∨ RuntimeSafeDebt c1 c2 := by
   induction h_step with
   | beta sigma x t e v hv =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.beta sigma x t e v hv)
+      exact Or.inr (RuntimeSafeDebt.beta sigma x t e v hv)
   | letBind sigma x v e hv =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.letBind sigma x v e hv)
+      exact Or.inr (RuntimeSafeDebt.letBind sigma x v e hv)
   | letpair sigma x y v1 v2 e hv1 hv2 =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.letpair sigma x y v1 v2 e hv1 hv2)
+      exact Or.inr (RuntimeSafeDebt.letpair sigma x y v1 v2 e hv1 hv2)
   | fst sigma tRight v1 v2 hv1 hv2 =>
       intro h
       exact Or.inl <| runtimeSafeConfig_pair_left <|
@@ -583,21 +579,21 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
   | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
+        (RuntimeSafeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
           hv hsig hmem)
   | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
+        (RuntimeSafeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
           hv hsig hmem hop hE)
   | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
       intro _h
       exact Or.inr
-        (HandlerAwareRuntimeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
+        (RuntimeSafeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
           hv hsig hmem hop hEs)
   | tgrad sigma x tv tOut body hSupp =>
       intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
+      exact Or.inr (RuntimeSafeDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
       intro h
       rcases h with ⟨hSafe, hLive⟩
@@ -631,12 +627,12 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
         | hole =>
             exact Or.inl (by simpa [plug] using hInner')
         | appL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
         | appR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
         | letBind x e2 =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
         | copy =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug EvalCtx.copy e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -653,11 +649,11 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | letpair x y e2 =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
         | pairL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
         | pairR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
         | fst tRight =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.fst tRight) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -687,13 +683,13 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
               simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | addL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
         | addR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
         | mulL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
         | mulR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
         | sum d =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.sum d) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -738,7 +734,7 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | handle epsH clauses =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.handle epsH clauses) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.handle epsH clauses) e e' h_inner)
         | perform op =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.perform op) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -757,52 +753,52 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
         | hole =>
             exact Or.inr hDebt
         | appL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
         | appR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
         | letBind x e2 =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
         | copy =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
         | letpair x y e2 =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
         | pairL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
         | pairR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
         | fst tRight =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
         | snd tLeft =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
         | addL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
         | addR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
         | mulL e2 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
         | mulR v1 =>
-            exact Or.inr (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
         | sum d =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
         | expand d =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
         | uniformLike lo hi =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma'
+              (RuntimeSafeDebt.ctx sigma sigma'
                 (EvalCtx.uniformLike lo hi) e e' h_inner)
         | handle epsH clauses =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma'
+              (RuntimeSafeDebt.ctx sigma sigma'
                 (EvalCtx.handle epsH clauses) e e' h_inner)
         | perform op =>
             exact Or.inr
-              (HandlerAwareRuntimeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
+              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
 
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)

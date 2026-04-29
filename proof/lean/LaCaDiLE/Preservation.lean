@@ -3425,6 +3425,74 @@ theorem storeAwareSubstHandlerRuntimeLinear_handleOpCtx_repaired :
     rcases hmem with rfl
     simp [ctxCounterSigma, storeLookup, List.find?]
 
+/-- Public configuration-level wrapper for the repaired captured-handler
+    witness under the current store-aware runtime-safety surface. -/
+theorem runtimeSafeConfig_handleOpCtx_repaired :
+    RuntimeSafeConfig ⟨ctxCounterSigma, handleCtxCounterTerm⟩ ∧
+    Step ⟨ctxCounterSigma, handleCtxCounterTerm⟩
+      ⟨ctxCounterSigma, handleCtxCounterTerm'⟩ ∧
+    RuntimeSafeConfig ⟨ctxCounterSigma, handleCtxCounterTerm'⟩ := by
+  simpa [RuntimeSafeConfig, RuntimeSafe] using
+    storeAwareSubstHandlerRuntimeLinear_handleOpCtx_repaired
+
+/-- Chain-shaped wrapper for the same repaired captured-handler witness.
+    This is intentionally stated with `multiPlug` to match
+    `Step.handleOpCtxs`, even though for the singleton chain here the
+    underlying term coincides with `handleCtxCounterTerm`. -/
+theorem runtimeSafeConfig_handleOpCtxs_repaired :
+    RuntimeSafeConfig
+      ⟨ctxCounterSigma,
+        Term.handle [EffectLabel.accum]
+          (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+          handleCtxCounterClauses⟩ ∧
+    Step
+      ⟨ctxCounterSigma,
+        Term.handle [EffectLabel.accum]
+          (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+          handleCtxCounterClauses⟩
+      ⟨ctxCounterSigma,
+        subst (subst handleCtxCounterBody Term.unit "x")
+          (Term.abs
+            (capturedContName
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                handleCtxCounterClauses))
+            Typ.unit
+            (Term.handle [EffectLabel.accum]
+              (multiPlug [EvalCtx.copy]
+                (Term.var
+                  (capturedContName
+                    (Term.handle [EffectLabel.accum]
+                      (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                      handleCtxCounterClauses))))
+              handleCtxCounterClauses))
+          "k"⟩ ∧
+    RuntimeSafeConfig
+      ⟨ctxCounterSigma,
+        subst (subst handleCtxCounterBody Term.unit "x")
+          (Term.abs
+            (capturedContName
+              (Term.handle [EffectLabel.accum]
+                (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                handleCtxCounterClauses))
+            Typ.unit
+            (Term.handle [EffectLabel.accum]
+              (multiPlug [EvalCtx.copy]
+                (Term.var
+                  (capturedContName
+                    (Term.handle [EffectLabel.accum]
+                      (multiPlug [EvalCtx.copy] (Term.perform EffectLabel.accum Term.unit))
+                      handleCtxCounterClauses))))
+              handleCtxCounterClauses))
+          "k"⟩ := by
+  simpa [RuntimeSafeConfig, RuntimeSafe, handleCtxCounterTerm, handleCtxCounterTerm',
+      multiPlug] using
+    (show StoreAwareSubstHandlerRuntimeLinear ctxCounterSigma handleCtxCounterTerm ∧
+        Step ⟨ctxCounterSigma, handleCtxCounterTerm⟩
+          ⟨ctxCounterSigma, handleCtxCounterTerm'⟩ ∧
+        StoreAwareSubstHandlerRuntimeLinear ctxCounterSigma handleCtxCounterTerm' from
+      storeAwareSubstHandlerRuntimeLinear_handleOpCtx_repaired)
+
 private def handleDirectCounterBody : Term :=
   Term.letBind "z" (Term.pair (Term.loc 1) (Term.loc 1)) Term.unit
 
@@ -3832,6 +3900,23 @@ theorem substAwareHandlerRuntimeLinear_beta_subst_blocks_counterexample :
     ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
     handlerAwareBetaSubstCounterTerm, handlerAwareBetaSubstCounterBody]
 
+/-- The public config-level runtime-safety surface also rejects the raw
+    beta/substitution witness when the duplicated location is live in
+    the store: the blocker is the substitution-aware sidecar, not store
+    liveness. -/
+theorem runtimeSafeConfig_beta_subst_blocks_counterexample :
+    ¬ RuntimeSafeConfig ⟨ctxCounterSigma, handlerAwareBetaSubstCounterTerm⟩ := by
+  simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+    StoreLiveLocRefs, ctxCounterSigma, storeLookup, List.find?,
+    SubstAwareHandlerRuntimeLinear,
+    HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+    SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+    StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+    activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+    LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handlerAwareBetaSubstCounterTerm, handlerAwareBetaSubstCounterBody]
+
 private def handlerAwareHandleSubstCounterBody : Term :=
   Term.pair (Term.var "x") (Term.var "x")
 
@@ -3894,6 +3979,23 @@ theorem substAwareHandlerRuntimeLinear_handleOpDirect_subst_blocks_counterexampl
     handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
     handlerAwareHandleSubstCounterBody]
 
+/-- The config-level runtime-safety surface rejects the raw direct
+    handler substitution witness even when the handled location is live
+    in the store. -/
+theorem runtimeSafeConfig_handleOpDirect_subst_blocks_counterexample :
+    ¬ RuntimeSafeConfig ⟨ctxCounterSigma, handlerAwareHandleSubstCounterTerm⟩ := by
+  simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+    StoreLiveLocRefs, ctxCounterSigma, storeLookup, List.find?,
+    SubstAwareHandlerRuntimeLinear,
+    HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+    SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+    StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+    activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+    LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+    ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+    handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
+    handlerAwareHandleSubstCounterBody]
+
 private def handlerAwareCtxFreshCounterTerm : Term :=
   Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
 
@@ -3946,6 +4048,14 @@ theorem storeAwareSubstHandlerRuntimeLinear_ctx_fresh_blocks_counterexample :
     LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
     ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
     handlerAwareCtxFreshCounterTerm, locRefs, storeLookup, List.find?]
+
+/-- Public configuration-level wrapper for the stale-location context
+    witness: `RuntimeSafeConfig` rejects the term before the fresh
+    allocation step can collide with the sibling location mention. -/
+theorem runtimeSafeConfig_ctx_fresh_blocks_counterexample :
+    ¬ RuntimeSafeConfig ⟨([] : Store), handlerAwareCtxFreshCounterTerm⟩ := by
+  simpa [RuntimeSafeConfig, RuntimeSafe] using
+    storeAwareSubstHandlerRuntimeLinear_ctx_fresh_blocks_counterexample
 
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
