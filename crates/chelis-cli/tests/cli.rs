@@ -1917,15 +1917,35 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
 
     #[cfg(not(target_os = "macos"))]
     {
-        // Linux without the `sleef` feature selects MathLib::None and
-        // emits no `chelis_math.h` include. The include MUST NOT leak in
-        // unconditionally — that would force a useless dependency on
-        // platforms that don't need it.
-        assert!(
-            !main_c.contains("#include \"chelis_math.h\""),
-            "non-macOS host_emit should not include chelis_math.h \
-             when the inner emitter selected MathLib::None. Source:\n{main_c}"
-        );
+        // The `sleef` feature in chelis-backend-c is auto-detected at build
+        // time by `build.rs` via pkg-config (`libsleef` available → feature
+        // on, `MathLib::detect` returns `MathLib::Sleef`). Because the chelis
+        // binary is what's spawned here, the relevant feature state is the
+        // binary's, not this test crate's. We read it back from the
+        // generated code's SLEEF guard marker and assert the include
+        // invariant in both directions.
+        let on_sleef_path = main_c.contains("#ifdef CHELIS_HAS_SLEEF");
+        if on_sleef_path {
+            // SLEEF macros (`CHELIS_EXPF8`, ...) are declared in
+            // `chelis_math.h`; the include must accompany the SLEEF SIMD
+            // body or the compiler sees undeclared identifiers under
+            // `-DCHELIS_HAS_SLEEF`.
+            assert!(
+                main_c.contains("#include \"chelis_math.h\""),
+                "Linux SLEEF host_emit must include chelis_math.h to \
+                 declare CHELIS_EXPF8 and friends. Source:\n{main_c}"
+            );
+        } else {
+            // Linux without the `sleef` feature selects MathLib::None and
+            // emits no `chelis_math.h` include. The include MUST NOT leak
+            // in unconditionally — that would force a useless dependency
+            // on platforms that don't need it.
+            assert!(
+                !main_c.contains("#include \"chelis_math.h\""),
+                "non-macOS host_emit should not include chelis_math.h \
+                 when the inner emitter selected MathLib::None. Source:\n{main_c}"
+            );
+        }
     }
 }
 
