@@ -3996,6 +3996,77 @@ theorem runtimeSafeConfig_handleOpDirect_subst_blocks_counterexample :
     handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
     handlerAwareHandleSubstCounterBody]
 
+private def runtimeSafeHandleCtxCaptureCounterValue : Term :=
+  Term.abs "z" Typ.unit (Term.var "y")
+
+private def runtimeSafeHandleCtxCaptureCounterBody : Term :=
+  Term.abs "y" Typ.unit (Term.pair (Term.var "x") (Term.var "y"))
+
+private def runtimeSafeHandleCtxCaptureCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", runtimeSafeHandleCtxCaptureCounterBody)]
+
+private def runtimeSafeHandleCtxCaptureCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (plug EvalCtx.copy
+      (Term.perform EffectLabel.accum runtimeSafeHandleCtxCaptureCounterValue))
+    runtimeSafeHandleCtxCaptureCounterClauses
+
+private def runtimeSafeHandleCtxCaptureCounterTerm' : Term :=
+  Term.abs "y" Typ.unit
+    (Term.pair runtimeSafeHandleCtxCaptureCounterValue (Term.var "y"))
+
+/-- The current config-level runtime-safety surface is still not
+    closed under generic captured-handler steps: even when the source
+    handle is runtime-safe, naive named substitution can capture a free
+    variable from the handled value under a clause-local binder and
+    duplicate that variable at the active runtime surface. -/
+theorem runtimeSafeConfig_handleOpCtx_capture_counterexample :
+    RuntimeSafeConfig ⟨([] : Store), runtimeSafeHandleCtxCaptureCounterTerm⟩ ∧
+    Step ⟨[], runtimeSafeHandleCtxCaptureCounterTerm⟩
+      ⟨[], runtimeSafeHandleCtxCaptureCounterTerm'⟩ ∧
+    ¬ RuntimeSafeConfig ⟨[], runtimeSafeHandleCtxCaptureCounterTerm'⟩ := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleCtxCaptureCounterTerm,
+      runtimeSafeHandleCtxCaptureCounterClauses,
+      runtimeSafeHandleCtxCaptureCounterBody,
+      runtimeSafeHandleCtxCaptureCounterValue, plug]
+  · simpa [runtimeSafeHandleCtxCaptureCounterTerm,
+      runtimeSafeHandleCtxCaptureCounterTerm',
+      runtimeSafeHandleCtxCaptureCounterClauses,
+      runtimeSafeHandleCtxCaptureCounterBody,
+      runtimeSafeHandleCtxCaptureCounterValue, plug, subst] using
+      (Step.handleOpCtx ([] : Store)
+        EffectLabel.accum runtimeSafeHandleCtxCaptureCounterValue
+        [EffectLabel.accum] EvalCtx.copy
+        runtimeSafeHandleCtxCaptureCounterClauses
+        "x" "k" runtimeSafeHandleCtxCaptureCounterBody Typ.unit
+        (IsValue.abs "z" Typ.unit (Term.var "y"))
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [runtimeSafeHandleCtxCaptureCounterClauses])
+        (by simp)
+        (by simp [EvalCtx.noHandleFor]))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleCtxCaptureCounterTerm',
+      runtimeSafeHandleCtxCaptureCounterValue]
+
 private def handlerAwareCtxFreshCounterTerm : Term :=
   Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
 
