@@ -664,6 +664,36 @@ def StoreLiveLocRefs (sigma : Store) (e : Term) : Prop :=
 def StoreAwareSubstHandlerRuntimeLinear (sigma : Store) (e : Term) : Prop :=
   SubstAwareHandlerRuntimeLinear e ∧ StoreLiveLocRefs sigma e
 
+/-- Public term-level runtime-safety surface. This is just a stable name
+    for the current honest store-aware handler/substitution predicate. -/
+abbrev RuntimeSafe (sigma : Store) (e : Term) : Prop :=
+  StoreAwareSubstHandlerRuntimeLinear sigma e
+
+/-- Frame-side store-liveness obligation for a one-step evaluation
+    context. -/
+def StoreLiveCtxLocRefs (sigma : Store) (E : EvalCtx) : Prop :=
+  ∀ ell, ell ∈ ctxLocRefs E → (storeLookup sigma ell).isSome
+
+/-- Frame-side store-liveness obligation for a whole evaluation-context
+    chain. -/
+def StoreLiveChainLocRefs (sigma : Store) (Es : EvalCtxChain) : Prop :=
+  ∀ ell, ell ∈ chainLocRefs Es → (storeLookup sigma ell).isSome
+
+/-- Public configuration-level runtime-safety surface. -/
+def RuntimeSafeConfig (c : Config) : Prop :=
+  RuntimeSafe c.store c.term
+
+/-- First honest context-side runtime-safety sidecar extracted from a
+    safe plugged configuration. This is intentionally one-way: it
+    records the frame obligations we can recover today, not yet the full
+    sufficient premise for arbitrary runtime-safe reassembly. -/
+def RuntimeSafeCtx (sigma : Store) (E : EvalCtx) : Prop :=
+  DeepActiveCtx E ∧ StoreLiveCtxLocRefs sigma E
+
+/-- Chain companion to `RuntimeSafeCtx`. -/
+def RuntimeSafeChain (sigma : Store) (Es : EvalCtxChain) : Prop :=
+  DeepActiveChain Es ∧ StoreLiveChainLocRefs sigma Es
+
 private theorem mem_locRefs_of_mem_activeLocRefs :
     ∀ {e : Term} {ell : Loc}, ell ∈ activeLocRefs e → ell ∈ locRefs e
   | Term.var _, _, h => by cases h
@@ -1178,6 +1208,88 @@ theorem handlerAwareRuntimeLinearClauses_of_runtimeLinear :
       rcases List.nodup_append.mp hSplit with ⟨hHead, hRest, _hSep⟩
       exact ⟨handlerAwareRuntimeLinear_of_runtimeLinear hHead,
         handlerAwareRuntimeLinearClauses_of_runtimeLinear hRest⟩
+
+end
+
+mutual
+
+/-- `HandlerAwareRuntimeLinear` is a strengthening of the recursive
+    deep-active invariant. -/
+theorem handlerAwareRuntimeLinear_deepActive :
+    ∀ {e : Term}, HandlerAwareRuntimeLinear e → DeepActiveRuntimeLinear e
+  | Term.var _, _ => by simp [DeepActiveRuntimeLinear]
+  | Term.abs _ _ body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hBody⟩
+  | Term.app e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2, _hSep3⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.letBind _ e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.copy e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.letpair _ _ e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.pair e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.fst _ e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.snd _ e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.unit, _ => by simp [DeepActiveRuntimeLinear]
+  | Term.const _ _, _ => by simp [DeepActiveRuntimeLinear]
+  | Term.add e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.mul e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive h1,
+        handlerAwareRuntimeLinear_deepActive h2⟩
+  | Term.sum e _, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.expand e _, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.uniformLike e _ _, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.grad _ _ _ body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hBody⟩
+  | Term.vmap _ _ _ body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hBody⟩
+  | Term.handle _ body clauses, h => by
+      rcases h with ⟨hAct, hBody, hClauses, _hSep⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hBody,
+        handlerAwareRuntimeLinearClauses_deepActive hClauses⟩
+  | Term.perform _ e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨hAct, handlerAwareRuntimeLinear_deepActive hInner⟩
+  | Term.loc _, _ => by simp [DeepActiveRuntimeLinear]
+
+/-- Clause companion to `handlerAwareRuntimeLinear_deepActive`. -/
+theorem handlerAwareRuntimeLinearClauses_deepActive :
+    ∀ {clauses : List (EffectLabel × String × String × Term)},
+      HandlerAwareRuntimeLinearClauses clauses →
+        DeepActiveRuntimeLinearClauses clauses
+  | [], _ => by simp [HandlerAwareRuntimeLinearClauses, DeepActiveRuntimeLinearClauses]
+  | (_, _, _, hb) :: rest, h => by
+      rcases h with ⟨hHead, hRest⟩
+      exact ⟨handlerAwareRuntimeLinear_deepActive hHead,
+        handlerAwareRuntimeLinearClauses_deepActive hRest⟩
 
 end
 
@@ -1890,6 +2002,248 @@ theorem deepActiveRuntimeLinear_multiPlug_of
         rcases (mem_activeLocRefs_multiPlug Es e ell).1 hLocMulti with hmemEs | hLocE
         · exact locRefsSeparated_right_of_nodup_append hChain ell hmemEs hmemE
         · exact hSepSymm ell hLocE (List.mem_append.mpr <| Or.inl hmemE)
+
+/-- A plugged term with live explicit locations yields live frame
+    locations and a live hole term. -/
+theorem storeLiveLocRefs_plug
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (h : StoreLiveLocRefs sigma (plug E e)) :
+    StoreLiveCtxLocRefs sigma E ∧ StoreLiveLocRefs sigma e := by
+  constructor
+  · intro ell hCtx
+    exact h ell ((mem_locRefs_plug E e ell).2 (Or.inl hCtx))
+  · intro ell hLoc
+    exact h ell ((mem_locRefs_plug E e ell).2 (Or.inr hLoc))
+
+/-- Chain version of `storeLiveLocRefs_plug`. -/
+theorem storeLiveLocRefs_multiPlug
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (h : StoreLiveLocRefs sigma (multiPlug Es e)) :
+    StoreLiveChainLocRefs sigma Es ∧ StoreLiveLocRefs sigma e := by
+  constructor
+  · intro ell hChain
+    exact h ell ((mem_locRefs_multiPlug Es e ell).2 (Or.inl hChain))
+  · intro ell hLoc
+    exact h ell ((mem_locRefs_multiPlug Es e ell).2 (Or.inr hLoc))
+
+/-- Converse direction of `storeLiveLocRefs_plug`. -/
+theorem storeLiveLocRefs_plug_of
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (hCtx : StoreLiveCtxLocRefs sigma E)
+    (h : StoreLiveLocRefs sigma e) :
+    StoreLiveLocRefs sigma (plug E e) := by
+  intro ell hLoc
+  rcases (mem_locRefs_plug E e ell).1 hLoc with hCtxLoc | hHoleLoc
+  · exact hCtx ell hCtxLoc
+  · exact h ell hHoleLoc
+
+/-- Converse direction of `storeLiveLocRefs_multiPlug`. -/
+theorem storeLiveLocRefs_multiPlug_of
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (hEs : StoreLiveChainLocRefs sigma Es)
+    (h : StoreLiveLocRefs sigma e) :
+    StoreLiveLocRefs sigma (multiPlug Es e) := by
+  intro ell hLoc
+  rcases (mem_locRefs_multiPlug Es e ell).1 hLoc with hChainLoc | hHoleLoc
+  · exact hEs ell hChainLoc
+  · exact h ell hHoleLoc
+
+/-- Plug extraction for the handler-aware side of the runtime invariant:
+    from a safe plugged term we can recover a handler-aware hole term
+    and a deep-active frame witness. -/
+theorem handlerAwareRuntimeLinear_plug
+    {E : EvalCtx} {e : Term}
+    (h : HandlerAwareRuntimeLinear (plug E e)) :
+    HandlerAwareRuntimeLinear e ∧ DeepActiveCtx E := by
+  cases E with
+  | hole =>
+      exact ⟨h, trivial⟩
+  | appL e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2, _hSep3⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | appR v1 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2, _hSep3⟩
+      exact ⟨h2, handlerAwareRuntimeLinear_deepActive h1⟩
+  | letBind x e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | copy =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | letpair x y e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | pairL e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | pairR v1 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h2, handlerAwareRuntimeLinear_deepActive h1⟩
+  | fst tRight =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | snd tLeft =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | addL e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | addR v1 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h2, handlerAwareRuntimeLinear_deepActive h1⟩
+  | mulL e2 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h1, handlerAwareRuntimeLinear_deepActive h2⟩
+  | mulR v1 =>
+      rcases h with ⟨_hAct, h1, h2, _hSep1, _hSep2⟩
+      exact ⟨h2, handlerAwareRuntimeLinear_deepActive h1⟩
+  | sum d =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | expand d =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | uniformLike lo hi =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+  | handle epsH clauses =>
+      rcases h with ⟨_hAct, hBody, hClauses, _hSep⟩
+      exact ⟨hBody, handlerAwareRuntimeLinearClauses_deepActive hClauses⟩
+  | perform op =>
+      rcases h with ⟨_hAct, hInner⟩
+      exact ⟨hInner, trivial⟩
+
+/-- Chain version of `handlerAwareRuntimeLinear_plug`. -/
+theorem handlerAwareRuntimeLinear_multiPlug
+    {Es : EvalCtxChain} {e : Term}
+    (h : HandlerAwareRuntimeLinear (multiPlug Es e)) :
+    HandlerAwareRuntimeLinear e ∧ DeepActiveChain Es := by
+  induction Es with
+  | nil =>
+      exact ⟨by simpa [multiPlug] using h, by simp [DeepActiveChain]⟩
+  | cons E Es ih =>
+      rcases handlerAwareRuntimeLinear_plug (E := E) (e := multiPlug Es e) h with
+        ⟨hInner, hE⟩
+      rcases ih hInner with ⟨hHole, hEs⟩
+      exact ⟨hHole, ⟨hE, hEs⟩⟩
+
+/-- Plug extraction for the substitution-aware side of the runtime
+    invariant. -/
+theorem substAwareRuntimeLinear_plug
+    {E : EvalCtx} {e : Term}
+    (h : SubstAwareRuntimeLinear (plug E e)) :
+    SubstAwareRuntimeLinear e := by
+  cases E with
+  | hole =>
+      exact h
+  | appL e2 =>
+      exact h.2.1
+  | appR v1 =>
+      exact h.2.2.1
+  | letBind x e2 =>
+      exact h.2.1
+  | copy =>
+      exact h.2
+  | letpair x y e2 =>
+      exact h.2.1
+  | pairL e2 =>
+      exact h.2.1
+  | pairR v1 =>
+      exact h.2.2.1
+  | fst tRight =>
+      exact h.2
+  | snd tLeft =>
+      exact h.2
+  | addL e2 =>
+      exact h.2.1
+  | addR v1 =>
+      exact h.2.2.1
+  | mulL e2 =>
+      exact h.2.1
+  | mulR v1 =>
+      exact h.2.2.1
+  | sum d =>
+      exact h.2
+  | expand d =>
+      exact h.2
+  | uniformLike lo hi =>
+      exact h.2
+  | handle epsH clauses =>
+      exact h.2.1
+  | perform op =>
+      exact h.2
+
+/-- Chain version of `substAwareRuntimeLinear_plug`. -/
+theorem substAwareRuntimeLinear_multiPlug
+    {Es : EvalCtxChain} {e : Term}
+    (h : SubstAwareRuntimeLinear (multiPlug Es e)) :
+    SubstAwareRuntimeLinear e := by
+  induction Es with
+  | nil =>
+      simpa [multiPlug] using h
+  | cons E Es ih =>
+      exact ih (substAwareRuntimeLinear_plug (E := E) (e := multiPlug Es e) h)
+
+/-- Plug extraction for the combined handler/substitution runtime
+    predicate. -/
+theorem substAwareHandlerRuntimeLinear_plug
+    {E : EvalCtx} {e : Term}
+    (h : SubstAwareHandlerRuntimeLinear (plug E e)) :
+    SubstAwareHandlerRuntimeLinear e := by
+  exact ⟨(handlerAwareRuntimeLinear_plug (E := E) (e := e) h.1).1,
+    substAwareRuntimeLinear_plug (E := E) (e := e) h.2⟩
+
+/-- Chain version of `substAwareHandlerRuntimeLinear_plug`. -/
+theorem substAwareHandlerRuntimeLinear_multiPlug
+    {Es : EvalCtxChain} {e : Term}
+    (h : SubstAwareHandlerRuntimeLinear (multiPlug Es e)) :
+    SubstAwareHandlerRuntimeLinear e := by
+  exact ⟨(handlerAwareRuntimeLinear_multiPlug (Es := Es) (e := e) h.1).1,
+    substAwareRuntimeLinear_multiPlug (Es := Es) (e := e) h.2⟩
+
+/-- First honest plug extraction theorem for the config-level runtime
+    safety surface. This recovers the hole's full runtime safety and the
+    frame obligations that are currently known to be necessary. -/
+theorem runtimeSafe_plug
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (h : RuntimeSafe sigma (plug E e)) :
+    RuntimeSafe sigma e ∧ RuntimeSafeCtx sigma E := by
+  rcases h with ⟨hTerm, hLive⟩
+  rcases handlerAwareRuntimeLinear_plug (E := E) (e := e) hTerm.1 with
+    ⟨_hHoleHandler, hCtx⟩
+  rcases storeLiveLocRefs_plug (sigma := sigma) (E := E) (e := e) hLive with
+    ⟨hCtxLive, hHoleLive⟩
+  exact ⟨⟨substAwareHandlerRuntimeLinear_plug (E := E) (e := e) hTerm, hHoleLive⟩,
+    ⟨hCtx, hCtxLive⟩⟩
+
+/-- Chain version of `runtimeSafe_plug`. -/
+theorem runtimeSafe_multiPlug
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (h : RuntimeSafe sigma (multiPlug Es e)) :
+    RuntimeSafe sigma e ∧ RuntimeSafeChain sigma Es := by
+  rcases h with ⟨hTerm, hLive⟩
+  rcases handlerAwareRuntimeLinear_multiPlug (Es := Es) (e := e) hTerm.1 with
+    ⟨_hHoleHandler, hEs⟩
+  rcases storeLiveLocRefs_multiPlug (sigma := sigma) (Es := Es) (e := e) hLive with
+    ⟨hEsLive, hHoleLive⟩
+  exact ⟨⟨substAwareHandlerRuntimeLinear_multiPlug (Es := Es) (e := e) hTerm, hHoleLive⟩,
+    ⟨hEs, hEsLive⟩⟩
+
+/-- Configuration wrapper for `runtimeSafe_plug`. -/
+theorem runtimeSafeConfig_plug
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (h : RuntimeSafeConfig ⟨sigma, plug E e⟩) :
+    RuntimeSafeConfig ⟨sigma, e⟩ ∧ RuntimeSafeCtx sigma E := by
+  simpa [RuntimeSafeConfig, RuntimeSafe] using
+    (runtimeSafe_plug (sigma := sigma) (E := E) (e := e) h)
+
+/-- Configuration wrapper for `runtimeSafe_multiPlug`. -/
+theorem runtimeSafeConfig_multiPlug
+    {sigma : Store} {Es : EvalCtxChain} {e : Term}
+    (h : RuntimeSafeConfig ⟨sigma, multiPlug Es e⟩) :
+    RuntimeSafeConfig ⟨sigma, e⟩ ∧ RuntimeSafeChain sigma Es := by
+  simpa [RuntimeSafeConfig, RuntimeSafe] using
+    (runtimeSafe_multiPlug (sigma := sigma) (Es := Es) (e := e) h)
 
 /-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
     context `E` is not itself a `handle` whose effect row catches `op`.
