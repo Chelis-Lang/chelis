@@ -371,6 +371,29 @@ theorem storeTypLookup_mem_dom
     have hell_eq : ell' = ell := of_decide_eq_true hpred
     exact List.mem_map.mpr ⟨(ell', t'), hmem_pair, hell_eq⟩
 
+theorem exists_storeTypLookup_of_mem_dom
+    {Sigma : StoreTyp} {ell : Loc}
+    (h : ell ∈ storeTypDom Sigma) :
+    ∃ t, storeTypLookup Sigma ell = some t := by
+  induction Sigma with
+  | nil =>
+      cases h
+  | cons hd tl ih =>
+      simp [storeTypDom] at h
+      rcases h with hhd | htl
+      · subst hhd
+        refine ⟨hd.2, ?_⟩
+        simp [storeTypLookup, List.find?]
+      · by_cases hhd : hd.1 = ell
+        · subst hhd
+          refine ⟨hd.2, ?_⟩
+          simp [storeTypLookup, List.find?]
+        · have htl' : ell ∈ storeTypDom tl := by
+            rcases htl with ⟨t, ht⟩
+            exact List.mem_map.mpr ⟨(ell, t), ht, rfl⟩
+          rcases ih htl' with ⟨t, ht⟩
+          exact ⟨t, by simpa [storeTypLookup, List.find?, hhd] using ht⟩
+
 theorem StoreWf.lookup_isSome_of_typing
     {sigma : Store} {Sigma : StoreTyp} {ell : Loc} {t : Typ}
     (h_wf : StoreWf sigma Sigma)
@@ -599,6 +622,32 @@ theorem StoreLiveOn.of_subset
     StoreLiveOn sigma [] := by
   intro ell hell
   cases hell
+
+theorem storeLiveOn_of_storeTypOn
+    {sigma sigma' : Store} {locs : List Loc}
+    {Sigma Sigma' : StoreTyp}
+    (hLive : StoreLiveOn sigma locs)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn locs Sigma Sigma') :
+    StoreLiveOn sigma' locs := by
+  intro ell hell
+  have hLiveSigma : (storeLookup sigma ell).isSome := hLive ell hell
+  have hDom : ell ∈ storeTypDom Sigma := h_wf.2 ell hLiveSigma
+  rcases exists_storeTypLookup_of_mem_dom hDom with ⟨t, hLook⟩
+  have hLook' : storeTypLookup Sigma' ell = some t := hOn ell t hell hLook
+  exact StoreWf.lookup_isSome_of_typing h_wf' hLook'
+
+theorem storeLiveCtxLocRefs_of_storeTypOn
+    {sigma sigma' : Store} {E : EvalCtx}
+    {Sigma Sigma' : StoreTyp}
+    (hLive : StoreLiveCtxLocRefs sigma E)
+    (h_wf : StoreWf sigma Sigma)
+    (h_wf' : StoreWf sigma' Sigma')
+    (hOn : StoreTypOn (ctxLocRefs E) Sigma Sigma') :
+    StoreLiveCtxLocRefs sigma' E := by
+  simpa [StoreLiveCtxLocRefs, StoreLiveOn] using
+    (storeLiveOn_of_storeTypOn (locs := ctxLocRefs E) hLive h_wf h_wf' hOn)
 
 private theorem hasType_store_live_on_locRefs
     {sigma : Store}

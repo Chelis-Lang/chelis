@@ -2245,6 +2245,26 @@ theorem runtimeSafeConfig_multiPlug
   simpa [RuntimeSafeConfig, RuntimeSafe] using
     (runtimeSafe_multiPlug (sigma := sigma) (Es := Es) (e := e) h)
 
+/-- Reassemble term-level runtime safety for a one-frame context once
+    the plugged term-side invariant has been proved separately. This is
+    the store-live packaging step needed by `Step.ctx`. -/
+theorem runtimeSafe_ctx
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (hCtx : RuntimeSafeCtx sigma E)
+    (h : RuntimeSafe sigma e)
+    (hPlug : SubstAwareHandlerRuntimeLinear (plug E e)) :
+    RuntimeSafe sigma (plug E e) := by
+  exact ⟨hPlug, storeLiveLocRefs_plug_of hCtx.2 h.2⟩
+
+/-- Configuration wrapper for `runtimeSafe_ctx`. -/
+theorem runtimeSafeConfig_ctx
+    {sigma : Store} {E : EvalCtx} {e : Term}
+    (hCtx : RuntimeSafeCtx sigma E)
+    (h : RuntimeSafeConfig ⟨sigma, e⟩)
+    (hPlug : SubstAwareHandlerRuntimeLinear (plug E e)) :
+    RuntimeSafeConfig ⟨sigma, plug E e⟩ := by
+  simpa [RuntimeSafeConfig] using runtimeSafe_ctx hCtx h hPlug
+
 /-- `EvalCtx.noHandleFor op E` holds when the single-step evaluation
     context `E` is not itself a `handle` whose effect row catches `op`.
     Because `EvalCtx` is a one-step (non-recursive) context, this is a
