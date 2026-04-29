@@ -3996,6 +3996,148 @@ theorem runtimeSafeConfig_handleOpDirect_subst_blocks_counterexample :
     handlerAwareHandleSubstCounterTerm, handlerAwareHandleSubstCounterClauses,
     handlerAwareHandleSubstCounterBody]
 
+private def runtimeSafeHandleDirectCaptureCounterValue : Term :=
+  Term.abs "z" Typ.unit (Term.var "y")
+
+private def runtimeSafeHandleDirectCaptureCounterBody : Term :=
+  Term.abs "y" Typ.unit (Term.pair (Term.var "x") (Term.var "y"))
+
+private def runtimeSafeHandleDirectCaptureCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", runtimeSafeHandleDirectCaptureCounterBody)]
+
+private def runtimeSafeHandleDirectCaptureCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (Term.perform EffectLabel.accum runtimeSafeHandleDirectCaptureCounterValue)
+    runtimeSafeHandleDirectCaptureCounterClauses
+
+private def runtimeSafeHandleDirectCaptureCounterTerm' : Term :=
+  Term.abs "y" Typ.unit
+    (Term.pair runtimeSafeHandleDirectCaptureCounterValue (Term.var "y"))
+
+/-- Direct handled operations are still not closed by the current
+    config-level runtime-safety surface: even without a captured
+    evaluation context, naive named substitution can capture a free
+    variable from the handled value under a clause-local binder and
+    duplicate that variable at the active runtime surface. -/
+theorem runtimeSafeConfig_handleOpDirect_capture_counterexample :
+    RuntimeSafeConfig ⟨([] : Store), runtimeSafeHandleDirectCaptureCounterTerm⟩ ∧
+    Step ⟨[], runtimeSafeHandleDirectCaptureCounterTerm⟩
+      ⟨[], runtimeSafeHandleDirectCaptureCounterTerm'⟩ ∧
+    ¬ RuntimeSafeConfig ⟨[], runtimeSafeHandleDirectCaptureCounterTerm'⟩ := by
+  refine ⟨?_, ?_, ?_⟩
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleDirectCaptureCounterTerm,
+      runtimeSafeHandleDirectCaptureCounterClauses,
+      runtimeSafeHandleDirectCaptureCounterBody,
+      runtimeSafeHandleDirectCaptureCounterValue]
+  · simpa [runtimeSafeHandleDirectCaptureCounterTerm,
+      runtimeSafeHandleDirectCaptureCounterTerm',
+      runtimeSafeHandleDirectCaptureCounterClauses,
+      runtimeSafeHandleDirectCaptureCounterBody,
+      runtimeSafeHandleDirectCaptureCounterValue,
+      subst, substClauses, directIdCont, directIdContName] using
+      (Step.handleOpDirect ([] : Store)
+        EffectLabel.accum runtimeSafeHandleDirectCaptureCounterValue
+        [EffectLabel.accum] runtimeSafeHandleDirectCaptureCounterClauses
+        "x" "k" runtimeSafeHandleDirectCaptureCounterBody Typ.unit
+        (IsValue.abs "z" Typ.unit (Term.var "y"))
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [runtimeSafeHandleDirectCaptureCounterClauses]))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleDirectCaptureCounterTerm',
+      runtimeSafeHandleDirectCaptureCounterValue]
+
+private def runtimeSafeHandleDirectClosedCounterValue : Term :=
+  Term.abs "z" Typ.unit (Term.var "z")
+
+private def runtimeSafeHandleDirectClosedCounterBody : Term :=
+  Term.abs "z" Typ.unit (Term.pair (Term.var "x") (Term.var "z"))
+
+private def runtimeSafeHandleDirectClosedCounterClauses :
+    List (EffectLabel × String × String × Term) :=
+  [(EffectLabel.accum, "x", "k", runtimeSafeHandleDirectClosedCounterBody)]
+
+private def runtimeSafeHandleDirectClosedCounterTerm : Term :=
+  Term.handle [EffectLabel.accum]
+    (Term.perform EffectLabel.accum runtimeSafeHandleDirectClosedCounterValue)
+    runtimeSafeHandleDirectClosedCounterClauses
+
+private def runtimeSafeHandleDirectClosedCounterTerm' : Term :=
+  Term.abs "z" Typ.unit
+    (Term.pair runtimeSafeHandleDirectClosedCounterValue (Term.var "z"))
+
+/-- Closing the whole handled source is still not enough to recover a
+    generic direct-handler theorem. The handled value is closed here,
+    but it carries a bound name that collides with a clause-local binder
+    after substitution, and the current runtime surface remains
+    explicitly name-based rather than alpha-equivalence-aware. -/
+theorem runtimeSafeConfig_handleOpDirect_closed_source_counterexample :
+    RuntimeSafeConfig ⟨([] : Store), runtimeSafeHandleDirectClosedCounterTerm⟩ ∧
+    Closed runtimeSafeHandleDirectClosedCounterTerm ∧
+    Step ⟨[], runtimeSafeHandleDirectClosedCounterTerm⟩
+      ⟨[], runtimeSafeHandleDirectClosedCounterTerm'⟩ ∧
+    ¬ RuntimeSafeConfig ⟨[], runtimeSafeHandleDirectClosedCounterTerm'⟩ := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleDirectClosedCounterTerm,
+      runtimeSafeHandleDirectClosedCounterClauses,
+      runtimeSafeHandleDirectClosedCounterBody,
+      runtimeSafeHandleDirectClosedCounterValue]
+  · simp [Closed, freeVars, freeVarsClauses,
+      runtimeSafeHandleDirectClosedCounterTerm,
+      runtimeSafeHandleDirectClosedCounterClauses,
+      runtimeSafeHandleDirectClosedCounterBody,
+      runtimeSafeHandleDirectClosedCounterValue]
+  · simpa [runtimeSafeHandleDirectClosedCounterTerm,
+      runtimeSafeHandleDirectClosedCounterTerm',
+      runtimeSafeHandleDirectClosedCounterClauses,
+      runtimeSafeHandleDirectClosedCounterBody,
+      runtimeSafeHandleDirectClosedCounterValue,
+      subst, substClauses, directIdCont, directIdContName] using
+      (Step.handleOpDirect ([] : Store)
+        EffectLabel.accum runtimeSafeHandleDirectClosedCounterValue
+        [EffectLabel.accum] runtimeSafeHandleDirectClosedCounterClauses
+        "x" "k" runtimeSafeHandleDirectClosedCounterBody Typ.unit
+        (IsValue.abs "z" Typ.unit (Term.var "z"))
+        ⟨Typ.unit, by simp [OpSigMatch, opArgType, opRetType]⟩
+        (by simp [runtimeSafeHandleDirectClosedCounterClauses]))
+  · simp [RuntimeSafeConfig, RuntimeSafe, StoreAwareSubstHandlerRuntimeLinear,
+      StoreLiveLocRefs, SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      locRefs, locRefsClauses,
+      runtimeSafeHandleDirectClosedCounterTerm',
+      runtimeSafeHandleDirectClosedCounterValue]
+
 private def runtimeSafeHandleCtxCaptureCounterValue : Term :=
   Term.abs "z" Typ.unit (Term.var "y")
 

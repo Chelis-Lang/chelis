@@ -93,9 +93,10 @@ private theorem linearity_soundness_aux
 
 /-- Runtime-safety cases that remain open after the store-aware
     handler/substitution redesign. These are exactly the steps that
-    still require a dedicated substitution/context proof or depend on
-    the unresolved AD surface. This is the honest public residual
-    surface for the runtime track. -/
+    still have config-level counterexamples under the current
+    name-based substitution/runtime surface, or depend on the
+    unresolved AD track. This is the honest public residual surface
+    for the runtime track. -/
 inductive RuntimeSafeDebt : Config → Config → Prop
   | beta
       (sigma : Store) (x : String) (t : Typ) (e v : Term)
@@ -462,10 +463,11 @@ private theorem runtimeSafeConfig_pair_right
     sidecar. This closes the store-safe head rules and the unary
     context frames, while leaving the remaining substitution, handler,
     AD, and sibling-interaction cases as explicit `RuntimeSafeDebt`.
-    The unresolved `ctx` surface is now known to include dormant frame
-    locations that are invisible to the active/step footprints but
-    still required by `StoreLiveCtxLocRefs`, so those cases cannot be
-    folded back into the theorem without a stronger frame premise. -/
+    The residual debt now matches the known config-level blocker
+    families: beta/let-style named substitution, direct/captured
+    handler capture, the AD `tgrad` step, and contextual replugging
+    across store-changing inner steps whose siblings can lose store
+    liveness outside the active/step footprints. -/
 theorem runtimeSafeConfig_step_or_debt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :

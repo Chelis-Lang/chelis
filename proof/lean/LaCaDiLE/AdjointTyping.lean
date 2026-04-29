@@ -2049,6 +2049,527 @@ private theorem hasType_var_with_suffix
   simpa [List.append_assoc] using
     (HasType.var Delta Sigma GammaPre GammaPost x t)
 
+private theorem adjointTypedClauses_cons_typed
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    {t : Typ} {op : EffectLabel} {xv kv param : String} {hb body : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (ihHead :
+      ∀ {Gamma_s Gamma_s' suffix : LinearCtx} {x : String} {gSeed : Term} {n : Nat},
+        HasType Delta Sigma
+          (Gamma_s ++ suffix) gSeed (cotangentType t) [] (Gamma_s' ++ suffix) →
+        HasType Delta Sigma
+          (Gamma_s ++ suffix)
+          (adjointTypedFrom hb t x gSeed n)
+          Typ.unit
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix))
+    (ihRest :
+      ∀ {Gamma_s Gamma_s' suffix : LinearCtx} {x : String} {body' : Term} {gSeed : Term}
+          {n : Nat},
+        (∀ {Gamma_s0 Gamma_s0' suffix0 : LinearCtx} {x0 : String} {gSeed0 : Term}
+            {n0 : Nat},
+          HasType Delta Sigma
+            (Gamma_s0 ++ suffix0) gSeed0 (cotangentType t) [] (Gamma_s0' ++ suffix0) →
+          HasType Delta Sigma
+            (Gamma_s0 ++ suffix0)
+            (adjointTypedFrom body' t x0 gSeed0 n0)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s0' ++ suffix0)) →
+        HasType Delta Sigma
+          (Gamma_s ++ suffix) gSeed (cotangentType t) [] (Gamma_s' ++ suffix) →
+        HasType Delta Sigma
+          (Gamma_s ++ suffix)
+          (adjointTypedClausesFrom rest x body' t gSeed n)
+          Typ.unit
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix))
+    {Gamma_s Gamma_s' suffix : LinearCtx} {gSeed : Term} {n : Nat}
+    (ihBody :
+      ∀ {Gamma_s0 Gamma_s0' suffix0 : LinearCtx} {x0 : String} {gSeed0 : Term}
+          {n0 : Nat},
+        HasType Delta Sigma
+          (Gamma_s0 ++ suffix0) gSeed0 (cotangentType t) [] (Gamma_s0' ++ suffix0) →
+        HasType Delta Sigma
+          (Gamma_s0 ++ suffix0)
+          (adjointTypedFrom body t x0 gSeed0 n0)
+          Typ.unit
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s0' ++ suffix0))
+    (h_seed :
+      HasType Delta Sigma
+        (Gamma_s ++ suffix) gSeed (cotangentType t) [] (Gamma_s' ++ suffix)) :
+    HasType Delta Sigma
+      (Gamma_s ++ suffix)
+      (adjointTypedClausesFrom ((op, xv, kv, hb) :: rest) param body t gSeed n)
+      Typ.unit
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+      (Gamma_s' ++ suffix) := by
+  cases t with
+  | tensor ds =>
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      let adjHb := freshName "adjHb" (n + 2)
+      have hHeadSeed :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.var gA)
+            (cotangentType (Typ.tensor ds))
+            []
+            (((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))]) := by
+        simpa [gA, gB, cotangentType, List.append_assoc] using
+          (hasType_var_with_suffix Delta Sigma
+            (Gamma_s' ++ suffix)
+            ([(gB, some (Typ.tensor ds))] : LinearCtx)
+            gA
+            (Typ.tensor ds))
+      have hHeadTyped :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (adjointTypedFrom hb (Typ.tensor ds) param (Term.var gA) (n + 3))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))]) := by
+        simpa [gA, gB, List.append_assoc] using
+          (ihHead
+            (Gamma_s := (Gamma_s' ++ suffix) ++ [(gA, some (Typ.tensor ds))])
+            (Gamma_s' := (Gamma_s' ++ suffix) ++ [(gA, none)])
+            (suffix := ([(gB, some (Typ.tensor ds))] : LinearCtx))
+            (x := param)
+            (gSeed := Term.var gA)
+            (n := n + 3)
+            hHeadSeed)
+      have hRestSeed :
+          HasType Delta Sigma
+            ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+                [(gB, some (Typ.tensor ds))]) ++
+              [(adjHb, some Typ.unit)])
+            (Term.var gB)
+            (cotangentType (Typ.tensor ds))
+            []
+            ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+                [(gB, none)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        refine Eq.mp ?_
+          (hasType_var_with_suffix Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(gA, none)])
+            ([(adjHb, some Typ.unit)] : LinearCtx)
+            gB
+            (Typ.tensor ds))
+        simp [gA, gB, adjHb, cotangentType, List.append_assoc, linearCtx_append3_aux]
+      have hRestTyped :
+          HasType Delta Sigma
+            ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+                [(gB, some (Typ.tensor ds))]) ++
+              [(adjHb, some Typ.unit)])
+            (adjointTypedClausesFrom rest param body (Typ.tensor ds) (Term.var gB) (n + 3))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+                [(gB, none)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [gA, gB, adjHb, List.append_assoc] using
+          (ihRest
+            (Gamma_s := ((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Gamma_s' := ((Gamma_s' ++ suffix) ++ [(gA, none)]) ++ [(gB, none)])
+            (suffix := ([(adjHb, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (body' := body)
+            (gSeed := Term.var gB)
+            (n := n + 3)
+            ihBody
+            hRestSeed)
+      have hSeq :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.letBind adjHb
+              (adjointTypedFrom hb (Typ.tensor ds) param (Term.var gA) (n + 3))
+              (adjointTypedClausesFrom rest param body (Typ.tensor ds) (Term.var gB)
+                (n + 3)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+              [(gB, none)]) := by
+        exact adjointTyped_seq_typed Delta Sigma
+          ((((Gamma_s' ++ suffix) ++ [(gA, some (Typ.tensor ds))]) ++
+            [(gB, some (Typ.tensor ds))]))
+          ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++
+            [(gB, some (Typ.tensor ds))]))
+          ((((Gamma_s' ++ suffix) ++ [(gA, none)]) ++ [(gB, none)]))
+          adjHb
+          (adjointTypedFrom hb (Typ.tensor ds) param (Term.var gA) (n + 3))
+          (adjointTypedClausesFrom rest param body (Typ.tensor ds) (Term.var gB) (n + 3))
+          (some Typ.unit)
+          hHeadTyped
+          hRestTyped
+      have hSplit :
+          HasType Delta Sigma
+            (Gamma_s ++ suffix)
+            (splitCotangentSeedFrom (Typ.tensor ds) gSeed n
+              (fun n' gA' gB' =>
+                let adjHb' := freshName "adjHb" n'
+                Term.letBind adjHb'
+                  (adjointTypedFrom hb (Typ.tensor ds) param gA' (n' + 1))
+                  (adjointTypedClausesFrom rest param body (Typ.tensor ds) gB' (n' + 1))))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s' ++ suffix) := by
+        exact splitCotangentSeedFrom_typed Delta Sigma
+          (Gamma_s ++ suffix)
+          (Gamma_s' ++ suffix)
+          (Typ.tensor ds)
+          gSeed
+          n
+          (fun n' gA' gB' =>
+            let adjHb' := freshName "adjHb" n'
+            Term.letBind adjHb'
+              (adjointTypedFrom hb (Typ.tensor ds) param gA' (n' + 1))
+              (adjointTypedClausesFrom rest param body (Typ.tensor ds) gB' (n' + 1)))
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix)
+          h_seed
+          ⟨none, none, by simpa [gA, gB, adjHb, List.append_assoc] using hSeq⟩
+      simpa [adjointTypedClausesFrom] using hSplit
+  | pair t1 t2 =>
+      sorry
+  | unit =>
+      let adjA := freshName "adjA" n
+      let adjHb := freshName "adjHb" (n + 1)
+      have hHeadSeed :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            Term.unit
+            (cotangentType Typ.unit)
+            []
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])))
+      have hHeadTyped :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (adjointTypedFrom hb Typ.unit param Term.unit (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, List.append_assoc] using
+          (ihHead
+            (Gamma_s := (Gamma_s' ++ suffix))
+            (Gamma_s' := (Gamma_s' ++ suffix))
+            (suffix := ([(adjA, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            hHeadSeed)
+      have hRestSeed :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            Term.unit
+            (cotangentType Typ.unit)
+            []
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma
+            ((((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])))
+      have hRestTyped :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            (adjointTypedClausesFrom rest param body Typ.unit Term.unit (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, List.append_assoc] using
+          (ihRest
+            (Gamma_s := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Gamma_s' := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (suffix := ([(adjHb, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (body' := body)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            ihBody
+            hRestSeed)
+      have hSeq :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Term.letBind adjHb
+              (adjointTypedFrom hb Typ.unit param Term.unit (n + 2))
+              (adjointTypedClausesFrom rest param body Typ.unit Term.unit (n + 2)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        exact adjointTyped_seq_typed Delta Sigma
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          adjHb
+          (adjointTypedFrom hb Typ.unit param Term.unit (n + 2))
+          (adjointTypedClausesFrom rest param body Typ.unit Term.unit (n + 2))
+          (some Typ.unit)
+          hHeadTyped
+          hRestTyped
+      have hSplit :
+          HasType Delta Sigma
+            (Gamma_s ++ suffix)
+            (splitCotangentSeedFrom Typ.unit gSeed n
+              (fun n' gA' gB' =>
+                let adjHb' := freshName "adjHb" n'
+                Term.letBind adjHb'
+                  (adjointTypedFrom hb Typ.unit param gA' (n' + 1))
+                  (adjointTypedClausesFrom rest param body Typ.unit gB' (n' + 1))))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s' ++ suffix) := by
+        exact splitCotangentSeedFrom_typed Delta Sigma
+          (Gamma_s ++ suffix)
+          (Gamma_s' ++ suffix)
+          Typ.unit
+          gSeed
+          n
+          (fun n' gA' gB' =>
+            let adjHb' := freshName "adjHb" n'
+            Term.letBind adjHb'
+              (adjointTypedFrom hb Typ.unit param gA' (n' + 1))
+              (adjointTypedClausesFrom rest param body Typ.unit gB' (n' + 1)))
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix)
+          h_seed
+          ⟨some Typ.unit, by simpa [adjA, adjHb, List.append_assoc] using hSeq⟩
+      simpa [adjointTypedClausesFrom] using hSplit
+  | arrow tIn tOut eps =>
+      let adjA := freshName "adjA" n
+      let adjHb := freshName "adjHb" (n + 1)
+      have hHeadSeed :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            Term.unit
+            (cotangentType (Typ.arrow tIn tOut eps))
+            []
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])))
+      have hHeadTyped :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (adjointTypedFrom hb (Typ.arrow tIn tOut eps) param Term.unit (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, List.append_assoc] using
+          (ihHead
+            (Gamma_s := (Gamma_s' ++ suffix))
+            (Gamma_s' := (Gamma_s' ++ suffix))
+            (suffix := ([(adjA, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            hHeadSeed)
+      have hRestSeed :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            Term.unit
+            (cotangentType (Typ.arrow tIn tOut eps))
+            []
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma
+            ((((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])))
+      have hRestTyped :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            (adjointTypedClausesFrom rest param body (Typ.arrow tIn tOut eps) Term.unit
+              (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, List.append_assoc] using
+          (ihRest
+            (Gamma_s := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Gamma_s' := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (suffix := ([(adjHb, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (body' := body)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            ihBody
+            hRestSeed)
+      have hSeq :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Term.letBind adjHb
+              (adjointTypedFrom hb (Typ.arrow tIn tOut eps) param Term.unit (n + 2))
+              (adjointTypedClausesFrom rest param body (Typ.arrow tIn tOut eps) Term.unit
+                (n + 2)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        exact adjointTyped_seq_typed Delta Sigma
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          adjHb
+          (adjointTypedFrom hb (Typ.arrow tIn tOut eps) param Term.unit (n + 2))
+          (adjointTypedClausesFrom rest param body (Typ.arrow tIn tOut eps) Term.unit
+            (n + 2))
+          (some Typ.unit)
+          hHeadTyped
+          hRestTyped
+      have hSplit :
+          HasType Delta Sigma
+            (Gamma_s ++ suffix)
+            (splitCotangentSeedFrom (Typ.arrow tIn tOut eps) gSeed n
+              (fun n' gA' gB' =>
+                let adjHb' := freshName "adjHb" n'
+                Term.letBind adjHb'
+                  (adjointTypedFrom hb (Typ.arrow tIn tOut eps) param gA' (n' + 1))
+                  (adjointTypedClausesFrom rest param body (Typ.arrow tIn tOut eps) gB'
+                    (n' + 1))))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s' ++ suffix) := by
+        exact splitCotangentSeedFrom_typed Delta Sigma
+          (Gamma_s ++ suffix)
+          (Gamma_s' ++ suffix)
+          (Typ.arrow tIn tOut eps)
+          gSeed
+          n
+          (fun n' gA' gB' =>
+            let adjHb' := freshName "adjHb" n'
+            Term.letBind adjHb'
+              (adjointTypedFrom hb (Typ.arrow tIn tOut eps) param gA' (n' + 1))
+              (adjointTypedClausesFrom rest param body (Typ.arrow tIn tOut eps) gB'
+                (n' + 1)))
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix)
+          h_seed
+          ⟨some Typ.unit, by simpa [adjA, adjHb, List.append_assoc] using hSeq⟩
+      simpa [adjointTypedClausesFrom] using hSplit
+  | tyVar alpha =>
+      let adjA := freshName "adjA" n
+      let adjHb := freshName "adjHb" (n + 1)
+      have hHeadSeed :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            Term.unit
+            (cotangentType (Typ.tyVar alpha))
+            []
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])))
+      have hHeadTyped :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (adjointTypedFrom hb (Typ.tyVar alpha) param Term.unit (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        simpa [adjA, List.append_assoc] using
+          (ihHead
+            (Gamma_s := (Gamma_s' ++ suffix))
+            (Gamma_s' := (Gamma_s' ++ suffix))
+            (suffix := ([(adjA, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            hHeadSeed)
+      have hRestSeed :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            Term.unit
+            (cotangentType (Typ.tyVar alpha))
+            []
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, cotangentType, List.append_assoc] using
+          (HasType.unit Delta Sigma
+            ((((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])))
+      have hRestTyped :
+          HasType Delta Sigma
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)])
+            (adjointTypedClausesFrom rest param body (Typ.tyVar alpha) Term.unit (n + 2))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) ++
+              [(adjHb, some Typ.unit)]) := by
+        simpa [adjA, adjHb, List.append_assoc] using
+          (ihRest
+            (Gamma_s := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Gamma_s' := (Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (suffix := ([(adjHb, some Typ.unit)] : LinearCtx))
+            (x := param)
+            (body' := body)
+            (gSeed := Term.unit)
+            (n := n + 2)
+            ihBody
+            hRestSeed)
+      have hSeq :
+          HasType Delta Sigma
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)])
+            (Term.letBind adjHb
+              (adjointTypedFrom hb (Typ.tyVar alpha) param Term.unit (n + 2))
+              (adjointTypedClausesFrom rest param body (Typ.tyVar alpha) Term.unit (n + 2)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            ((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]) := by
+        exact adjointTyped_seq_typed Delta Sigma
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          (((Gamma_s' ++ suffix) ++ [(adjA, some Typ.unit)]))
+          adjHb
+          (adjointTypedFrom hb (Typ.tyVar alpha) param Term.unit (n + 2))
+          (adjointTypedClausesFrom rest param body (Typ.tyVar alpha) Term.unit (n + 2))
+          (some Typ.unit)
+          hHeadTyped
+          hRestTyped
+      have hSplit :
+          HasType Delta Sigma
+            (Gamma_s ++ suffix)
+            (splitCotangentSeedFrom (Typ.tyVar alpha) gSeed n
+              (fun n' gA' gB' =>
+                let adjHb' := freshName "adjHb" n'
+                Term.letBind adjHb'
+                  (adjointTypedFrom hb (Typ.tyVar alpha) param gA' (n' + 1))
+                  (adjointTypedClausesFrom rest param body (Typ.tyVar alpha) gB'
+                    (n' + 1))))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma_s' ++ suffix) := by
+        exact splitCotangentSeedFrom_typed Delta Sigma
+          (Gamma_s ++ suffix)
+          (Gamma_s' ++ suffix)
+          (Typ.tyVar alpha)
+          gSeed
+          n
+          (fun n' gA' gB' =>
+            let adjHb' := freshName "adjHb" n'
+            Term.letBind adjHb'
+              (adjointTypedFrom hb (Typ.tyVar alpha) param gA' (n' + 1))
+              (adjointTypedClausesFrom rest param body (Typ.tyVar alpha) gB'
+                (n' + 1)))
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma_s' ++ suffix)
+          h_seed
+          ⟨some Typ.unit, by simpa [adjA, adjHb, List.append_assoc] using hSeq⟩
+      simpa [adjointTypedClausesFrom] using hSplit
+
 private theorem adjointTypedShape_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) :
     ∀ {t : Typ} {e : Term},
@@ -2413,9 +2934,48 @@ private theorem adjointTypedShape_preserves_typing
         (ihBody (Gamma_s0 := Gamma_s) (Gamma_s0' := Gamma_s')
           (suffix0 := suffix) (x0 := x) (gSeed0 := gSeed) (n0 := n) h_seed)
   | cons =>
-      rename_i t op xv kv hb rest hHead hRest ihHead ihRest
-      rename_i Gamma_s Gamma_s' suffix x body gSeed n ihBody h_seed
-      sorry
+      rename_i tShape op xv kv hb rest hHead hRest ihHead ihRest
+        Gamma_s Gamma_s' suffix x body gSeed n ihBody h_seed
+      have ihRest' :
+          ∀ {Gamma_s0 Gamma_s0' suffix0 : LinearCtx} {x0 : String} {body' : Term}
+              {gSeed0 : Term} {n0 : Nat},
+            (∀ {Gamma_s1 Gamma_s1' suffix1 : LinearCtx} {x1 : String} {gSeed1 : Term}
+                {n1 : Nat},
+              HasType Delta Sigma
+                (Gamma_s1 ++ suffix1) gSeed1 (cotangentType tShape) [] (Gamma_s1' ++ suffix1) →
+              HasType Delta Sigma
+                (Gamma_s1 ++ suffix1)
+                (adjointTypedFrom body' tShape x1 gSeed1 n1)
+                Typ.unit
+                (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+                (Gamma_s1' ++ suffix1)) →
+            HasType Delta Sigma
+              (Gamma_s0 ++ suffix0) gSeed0 (cotangentType tShape) [] (Gamma_s0' ++ suffix0) →
+            HasType Delta Sigma
+              (Gamma_s0 ++ suffix0)
+              (adjointTypedClausesFrom rest x0 body' tShape gSeed0 n0)
+              Typ.unit
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (Gamma_s0' ++ suffix0) := by
+        intro Gamma_s0 Gamma_s0' suffix0 x0 body' gSeed0 n0 ihBody0 hSeed0
+        exact ihRest
+          (Gamma_s := Gamma_s0)
+          (Gamma_s' := Gamma_s0')
+          (suffix := suffix0)
+          (x := x0)
+          (body := body')
+          (gSeed := gSeed0)
+          (n := n0)
+          ihBody0
+          hSeed0
+      exact adjointTypedClauses_cons_typed Delta Sigma
+        (t := tShape)
+        (param := x)
+        (body := body)
+        (ihHead := ihHead)
+        (ihRest := ihRest')
+        (ihBody := ihBody)
+        (h_seed := h_seed)
 
 /-- Typed public surface for the staged adjoint transform. This is the
     theorem `T-Grad` now needs because the operational reduct uses
