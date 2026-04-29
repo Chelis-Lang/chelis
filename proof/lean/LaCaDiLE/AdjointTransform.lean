@@ -129,11 +129,14 @@ def splitCotangentSeedFrom
               (fun n'' gB1 gB2 =>
                 k n'' (Term.pair gA1 gB1) (Term.pair gA2 gB2))))
   | Typ.unit =>
-      k n Term.unit Term.unit
+      Term.letBind (freshName "adjA" n) gSeed
+        (k (n + 1) Term.unit Term.unit)
   | Typ.arrow _ _ _ =>
-      k n Term.unit Term.unit
+      Term.letBind (freshName "adjA" n) gSeed
+        (k (n + 1) Term.unit Term.unit)
   | Typ.tyVar _ =>
-      k n Term.unit Term.unit
+      Term.letBind (freshName "adjA" n) gSeed
+        (k (n + 1) Term.unit Term.unit)
 termination_by sizeOf t
 decreasing_by
   all_goals

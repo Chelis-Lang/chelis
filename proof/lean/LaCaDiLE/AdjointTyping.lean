@@ -348,14 +348,29 @@ private theorem splitCotangentSeedFrom_typed
                 [(freshName "gA" n, slotA),
                  (freshName "gB" n, slotB)])
       | Typ.unit =>
-          HasType Delta Sigma Gamma_s
-            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out
+          ∃ slotA,
+            HasType Delta Sigma
+              (Gamma_s' ++ [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma_out ++ [(freshName "adjA" n, slotA)])
       | Typ.arrow _ _ _ =>
-          HasType Delta Sigma Gamma_s
-            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out
+          ∃ slotA,
+            HasType Delta Sigma
+              (Gamma_s' ++ [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma_out ++ [(freshName "adjA" n, slotA)])
       | Typ.tyVar _ =>
-          HasType Delta Sigma Gamma_s
-            (k n Term.unit Term.unit) Typ.unit epsK Gamma_out) :
+          ∃ slotA,
+            HasType Delta Sigma
+              (Gamma_s' ++ [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma_out ++ [(freshName "adjA" n, slotA)])) :
     HasType Delta Sigma Gamma_s
       (splitCotangentSeedFrom t gSeed n k)
       Typ.unit
@@ -397,11 +412,29 @@ private theorem splitCotangentSeedFrom_typed
           h_seed
           hBody)
   | unit =>
-      simpa [splitCotangentSeedFrom] using h_k
+      rcases h_k with ⟨slotA, hBody⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma Gamma_s Gamma_s' Gamma_out
+          (freshName "adjA" n) gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit Typ.unit [] epsK slotA
+          h_seed hBody)
   | arrow _ _ _ =>
-      simpa [splitCotangentSeedFrom] using h_k
+      rcases h_k with ⟨slotA, hBody⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma Gamma_s Gamma_s' Gamma_out
+          (freshName "adjA" n) gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit Typ.unit [] epsK slotA
+          h_seed hBody)
   | tyVar _ =>
-      simpa [splitCotangentSeedFrom] using h_k
+      rcases h_k with ⟨slotA, hBody⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma Gamma_s Gamma_s' Gamma_out
+          (freshName "adjA" n) gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit Typ.unit [] epsK slotA
+          h_seed hBody)
 
 /-- On quotient-based dimension multisets, re-inserting an erased member
     recovers the original multiset. This is the key shape fact for the
