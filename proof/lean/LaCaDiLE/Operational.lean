@@ -2873,13 +2873,13 @@ theorem directIdCont_wellScoped
     differentiated parameter name and be fresh for the body so the
     inserted seed variable cannot be captured or accidentally shadow the
     outer parameter binding. -/
-def gradSeedName (x : String) (e : Term) : String :=
+def gradPrimalName (x : String) (e : Term) : String :=
   freshNameAvoiding (x :: (freeVars e ++ boundVars e))
 
-theorem gradSeedName_freshInTerm
+theorem gradPrimalName_freshInTerm
     (x : String) (e : Term) :
-    freshInTerm (gradSeedName x e) e := by
-  unfold freshInTerm gradSeedName
+    freshInTerm (gradPrimalName x e) e := by
+  unfold freshInTerm gradPrimalName
   refine ⟨?_, ?_⟩
   · intro hmem
     exact freshNameAvoiding_not_mem
@@ -2890,17 +2890,42 @@ theorem gradSeedName_freshInTerm
       (x :: (freeVars e ++ boundVars e))
       (List.mem_cons_of_mem _ (List.mem_append.mpr (Or.inr hmem)))
 
+/-- Seed binder minted for `grad` operational steps. It must avoid the
+    differentiated parameter name, the retained primal copy binder, and
+    the body's existing names so the inserted seed variable cannot be
+    captured or accidentally shadow an in-scope binding. -/
+def gradSeedName (x : String) (e : Term) : String :=
+  freshNameAvoiding (gradPrimalName x e :: x :: (freeVars e ++ boundVars e))
+
+theorem gradSeedName_freshInTerm
+    (x : String) (e : Term) :
+    freshInTerm (gradSeedName x e) e := by
+  unfold freshInTerm gradSeedName
+  refine ⟨?_, ?_⟩
+  · intro hmem
+    exact freshNameAvoiding_not_mem
+      (gradPrimalName x e :: x :: (freeVars e ++ boundVars e))
+      (List.mem_cons_of_mem _ (List.mem_cons_of_mem _
+        (List.mem_append.mpr (Or.inl hmem))))
+  · intro hmem
+    exact freshNameAvoiding_not_mem
+      (gradPrimalName x e :: x :: (freeVars e ++ boundVars e))
+      (List.mem_cons_of_mem _ (List.mem_cons_of_mem _
+        (List.mem_append.mpr (Or.inr hmem))))
+
 /-- Temporary binder minted for sequencing the unit-valued handled
     adjoint result in `E-Grad` before returning the parameter value. -/
 def gradResultName (x : String) (e : Term) : String :=
-  freshNameAvoiding (gradSeedName x e :: x :: (freeVars e ++ boundVars e))
+  freshNameAvoiding
+    (gradSeedName x e :: gradPrimalName x e :: x :: (freeVars e ++ boundVars e))
 
 /-- Start counter for the adjoint transform inside `E-Grad`. Choosing a
     counter above every visible name in the source body keeps all
     internal `freshName` binders disjoint from the grad parameter, the
-    seed binder, and the body's free or bound names. -/
+    retained primal binder, the seed binder, and the body's free or
+    bound names. -/
 def gradAdjointCounter (x gs : String) (e : Term) : Nat :=
-  maxStringLength (gs :: x :: (freeVars e ++ boundVars e)) + 1
+  maxStringLength (gs :: gradPrimalName x e :: x :: (freeVars e ++ boundVars e)) + 1
 
 /-- The small-step reduction relation. Constructors cover the head
     reductions (redex at top position); `Step.ctx` provides the
@@ -3140,11 +3165,13 @@ inductive Step : Config → Config → Prop
 
   /- ## AD and vectorization transforms -/
 
-  -- E-Grad: grad(λx:t.e)  ↦  λx:t. λgs:tOut.
-  --                              let _ = handle[{Accum}]
-  --                                         (adjointFrom(e, x, gs, n))
-  --                                         with {accum(p, k) → k(p)}
-  --                              in x
+  -- E-Grad: grad(λx:t.e)  ↦  λx:t.
+  --                              let (xRet, x) = copy x in
+  --                              λgs:tOut.
+  --                                let _ = handle[{Accum}]
+  --                                           (adjointFrom(e, x, gs, n))
+  --                                           with {accum(p, k) → k(p)}
+  --                                in xRet
   --
   -- The constructor takes `tOut` as an extra parameter so preservation can
   -- pick the output type of `e` from the typing derivation. The paper's
@@ -3161,14 +3188,16 @@ inductive Step : Config → Config → Prop
       Step ⟨sigma, Term.grad x t tOut e⟩
            ⟨sigma,
             Term.abs x t
-              (Term.abs (gradSeedName x e) tOut
-                (Term.letBind (gradResultName x e)
-                  (Term.handle [EffectLabel.accum]
-                    (adjointTypedFrom e tOut x (Term.var (gradSeedName x e))
-                      (gradAdjointCounter x (gradSeedName x e) e))
-                    [(EffectLabel.accum, "p", "k",
-                      Term.app (Term.var "k") (Term.var "p"))])
-                  (Term.var x)))⟩
+              (Term.letpair (gradPrimalName x e) x
+                (Term.copy (Term.var x))
+                (Term.abs (gradSeedName x e) tOut
+                  (Term.letBind (gradResultName x e)
+                    (Term.handle [EffectLabel.accum]
+                      (adjointTypedFrom e tOut x (Term.var (gradSeedName x e))
+                        (gradAdjointCounter x (gradSeedName x e) e))
+                      [(EffectLabel.accum, "p", "k",
+                        Term.app (Term.var "k") (Term.var "p"))])
+                    (Term.var (gradPrimalName x e)))))⟩
 
   -- E-Vmap: vmap(λx:t.e)  ↦  λx:addDim(d, t). addDimTerm(d, e)
   -- Wave 0 P6: body is now lifted via `addDimTerm` (defined in

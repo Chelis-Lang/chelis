@@ -175,13 +175,15 @@ inductive RuntimeSafeDebt : Config → Config → Prop
         ⟨sigma, Term.grad x tv tOut body⟩
         ⟨sigma,
           Term.abs x tv
-            (Term.abs (gradSeedName x body) tOut
-              (Term.letBind (gradResultName x body)
-                (Term.handle [EffectLabel.accum]
-                  (adjointTypedFrom body tOut x (Term.var (gradSeedName x body))
-                    (gradAdjointCounter x (gradSeedName x body) body))
-                  [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
-                (Term.var x)))⟩
+            (Term.letpair (gradPrimalName x body) x
+              (Term.copy (Term.var x))
+              (Term.abs (gradSeedName x body) tOut
+                (Term.letBind (gradResultName x body)
+                  (Term.handle [EffectLabel.accum]
+                    (adjointTypedFrom body tOut x (Term.var (gradSeedName x body))
+                      (gradAdjointCounter x (gradSeedName x body) body))
+                    [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
+                  (Term.var (gradPrimalName x body)))))⟩
   | ctx
       (sigma sigma' : Store) (E : EvalCtx) (e e' : Term)
       (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
