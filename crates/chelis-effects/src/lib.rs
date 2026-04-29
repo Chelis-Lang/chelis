@@ -794,7 +794,7 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             {
                 let ok = match target {
                     "c" => !device.starts_with("gpu"),
-                    "hip" => device.starts_with("gpu"),
+                    "hip" | "metal" => device.starts_with("gpu"),
                     _ => true,
                 };
                 if !ok {
@@ -805,10 +805,10 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
                         ),
                         suggestions: match target {
                             "c" => vec![
-                                "Use `with device(\"cpu\") { ... }` or build with `--target hip`"
+                                "Use `with device(\"cpu\") { ... }` or build with `--target hip` or `--target metal`"
                                     .to_string(),
                             ],
-                            "hip" => vec![
+                            "hip" | "metal" => vec![
                                 "Use a GPU device such as `with device(\"gpu:0\") { ... }`"
                                     .to_string(),
                             ],

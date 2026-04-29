@@ -89,7 +89,7 @@ jobs:
   macos-smoke:
     name: macOS Smoke
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -99,13 +99,22 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      - name: Build workspace
-        run: cargo build --workspace
-
       - name: Assert Apple Silicon runner
         run: |
           set -euo pipefail
           test "$(uname -m)" = "arm64"
+
+      # Run the real workspace test suite on macOS so macOS-only failures
+      # (e.g., test harnesses that miss `-framework Accelerate` on linking
+      # generated C, or Metal codegen-structure regressions) actually turn
+      # this job red. Before this step existed, macOS-only breakage was
+      # silently invisible to CI because the job only built and ran a
+      # narrow Accelerate smoke shell script. `cargo test --workspace
+      # --tests` builds everything it needs as part of test compilation,
+      # so a separate `cargo build --workspace` step beforehand is
+      # redundant under Swatinem's rust-cache.
+      - name: Workspace tests
+        run: cargo test --workspace --tests
 
       - name: Verify packaged binary architecture
         run: |
@@ -114,6 +123,15 @@ jobs:
 
       - name: Smoke test generated C with Accelerate
         run: bash .github/scripts/smoke_macos_accelerate.sh ./target/debug/chelis
+
+      # Phase M smoke: emit `.mm` from the Metal backend and link it
+      # against the Metal/Foundation frameworks. Compile-and-link only
+      # — no kernel dispatch — because MTLCreateSystemDefaultDevice may
+      # return null on macos-latest CI VMs. Real GPU correctness lives
+      # in the M6 manual gate (`cargo test -p chelis-backend-metal
+      # --test gpu_correctness -- --ignored`) on a real workstation.
+      - name: Smoke test Metal backend codegen + link
+        run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
 
   backend-sanitizers:
     name: Backend Sanitizers

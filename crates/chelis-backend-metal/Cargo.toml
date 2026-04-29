@@ -1,0 +1,13 @@
+[package]
+name = "chelis-backend-metal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chelis-ir = { path = "../chelis-ir" }
+chelis-types = { path = "../chelis-types" }
+
+[dev-dependencies]
+chelis-runtime = { path = "../chelis-runtime" }
+tempfile = "3"

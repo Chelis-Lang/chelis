@@ -29,6 +29,7 @@ Detailed Phase 3 planning lives in `spec/design/chelis_phase3_plan.md`.
 | **3** | Language completeness: pipe-first style pass, package system (Reef), Python FFI, direct execution, scalar/string foundation, collections/iteration, core numeric primitives, Rust runtime rewrite, data loading/tokenization, `Std.Time`/`Std.Decimal`, SKILL.md v2 | In progress; `3a`, `3b`, `3b-ii`, `3c`, `3d`, `3e`, `3g`, `3h`, `3i`, and `3m` are shipped; the real `3f` redo remains |
 | **4** | ML & AI coding: seed corpus, ICL measurement, trajectory collection, local model training, model integration |  |
 | **5** | Advanced backends + research: StableHLO + JAX DLPack guarantee, FX Graph, Triton, multi-GPU, sparse tensors, complex numbers, research type features, Lean formalization, host-lane scalar AD (`grad` over `f32 -> f32` functions; design locked in `spec/design/phase5_host_scalar_ad.md` — recommendation: forward-mode dual numbers; deferred until a real driver appears) |  |
+| **M** | Metal backend (`chelis build --target metal`) — Apple Silicon GPU peer of HIP. Pure string emission of Objective-C++ host + MSL kernels; `[MTLDevice newLibraryWithSource:]` is the hiprtc analog. Design: `spec/design/chelis_metal_backend_plan.md`. | In progress; M0 spec-sync underway, M1–M7 to follow |
 
 ## Red Team Checkpoints
 

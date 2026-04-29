@@ -75,9 +75,23 @@ Status legend:
 | 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
 | 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `phase3t_test_smoke.rs`, `phase3t_test_std.rs`, `phase3t_pseudo_nautilus.rs` cover the smoke + pseudo-nautilus pieces) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + aspirational (downstream test migration) + manual gate (scipy parity) |
 
+## Phase M (Metal Backend)
+
+| Phase | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| M0 | `grep -F "[MTLDevice newLibraryWithSource:]" spec/design/chelis_metal_backend_plan.md` returns at least one hit (proves §3.3 was rewritten away from the metal-rs Rust runtime to the string-emission-only model) | `spec/design/chelis_metal_backend_plan.md` §3.3 | default gate (doc grep) |
+| M1 | `cargo build --workspace` + `cargo test -p chelis-cli --test cli -- target_metal` + `cargo tree -p chelis-cli` no-Apple-SDK-deps guard | `spec/design/chelis_metal_backend_plan.md` §9 (M1) | default gate |
+| M2 | `cargo test -p chelis-backend-metal --test codegen_structure` | `spec/design/chelis_metal_backend_plan.md` §9 (M2) | default gate |
+| M3 | `.github/workflows/ci.yml` `macos-smoke` job runs `python3 .github/scripts/smoke_macos_metal.py` and exits 0 | `spec/design/chelis_metal_backend_plan.md` §9 (M3) | default gate (macOS CI) |
+| M4 | `cargo test -p chelis-backend-metal --test codegen_structure -- reduction` | `spec/design/chelis_metal_backend_plan.md` §9 (M4) | default gate |
+| M5 | `cargo test -p chelis-backend-metal --test codegen_structure -- matmul_tiled` | `spec/design/chelis_metal_backend_plan.md` §9 (M5) | default gate |
+| M6 | `cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/chelis_metal_backend_plan.md` §9 (M6) | manual gate (Apple Silicon Mac with Metal device available) |
+| M7 | `cargo test -p chelis-backend-metal --test redteam_adversarial` | `spec/design/chelis_metal_backend_plan.md` §9 (M7) | default gate |
+
 ## Also See
 
 - [`manual_gates.md`](manual_gates.md) — every `#[ignore]`'d test with its manual command and prerequisite
 - [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory
 - [`spec/design/chelis_project_plan.md`](../spec/design/chelis_project_plan.md) — top-level phase ledger
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — detailed Phase 3 implementation plan
+- [`spec/design/chelis_metal_backend_plan.md`](../spec/design/chelis_metal_backend_plan.md) — Phase M Metal backend

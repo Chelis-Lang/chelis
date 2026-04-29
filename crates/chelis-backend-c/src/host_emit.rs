@@ -8,20 +8,23 @@ use chelis_ir::dag::RiscOp;
 use std::collections::HashMap;
 
 pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
-    let mut out: Vec<String> = vec![
-        "#include \"chelis_runtime.h\"".to_string(),
-        "#include <assert.h>".to_string(),
-        "#include <math.h>".to_string(),
-        String::new(),
-    ];
-    append_tensor_reshape_helper(&mut out);
-    out.push(String::new());
-    append_tensor_print_helper(&mut out);
-    out.push(String::new());
-    append_uniform_sample_helper(&mut out);
-    out.push(String::new());
-    append_tensor_math_helpers(&mut out);
-    out.push(String::new());
+    // Emit helpers and functions into a body buffer first so we can detect which
+    // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
+    // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
+    // assembled with the right includes and prepended.  Without this, the
+    // include-stripping in `append_helper` silently drops the inner emitter's
+    // `#include "chelis_math.h"` and the resulting `main.c` calls vvexpf with
+    // no declaration in scope.
+    let mut body: Vec<String> = Vec::new();
+    let mut needs_math_header = false;
+    append_tensor_reshape_helper(&mut body);
+    body.push(String::new());
+    append_tensor_print_helper(&mut body);
+    body.push(String::new());
+    append_uniform_sample_helper(&mut body);
+    body.push(String::new());
+    append_tensor_math_helpers(&mut body);
+    body.push(String::new());
     // When the program is a self-contained binary (has globals → `main` is emitted in the
     // same translation unit), user-defined host functions can be marked `static inline` so
     // the compiler can inline scalar helpers across calls under `-O2` / `-fPIC` without
@@ -32,33 +35,37 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
     let emitted_names = emitted_function_names(program, program_name);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage);
     if !header.is_empty() {
-        out.push(header);
-        out.push(String::new());
+        body.push(header);
+        body.push(String::new());
     }
 
     for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
-        append_helper(
-            &mut out,
+        if append_helper(
+            &mut body,
             helper,
             &format!("{program_name}__global__tensor_{index}"),
-        );
+        ) {
+            needs_math_header = true;
+        }
     }
     for function in &program.functions {
         for (index, helper) in function.tensor_helpers.iter().enumerate() {
             let function_name = emitted_names
                 .get(&function.name)
                 .expect("host function emitted name");
-            append_helper(
-                &mut out,
+            if append_helper(
+                &mut body,
                 helper,
                 &format!("{function_name}__tensor_{index}"),
-            );
+            ) {
+                needs_math_header = true;
+            }
         }
     }
 
     for function in &program.functions {
         emit_function(
-            &mut out,
+            &mut body,
             function,
             emitted_names
                 .get(&function.name)
@@ -66,13 +73,23 @@ pub fn emit_host_program(program: &HostProgram, program_name: &str) -> String {
             &emitted_names,
             internal_linkage,
         );
-        out.push(String::new());
+        body.push(String::new());
     }
 
     if !program.globals.is_empty() {
-        emit_main(&mut out, program_name, program);
+        emit_main(&mut body, program_name, program);
     }
 
+    let mut out: Vec<String> = vec![
+        "#include \"chelis_runtime.h\"".to_string(),
+        "#include <assert.h>".to_string(),
+        "#include <math.h>".to_string(),
+    ];
+    if needs_math_header {
+        out.push("#include \"chelis_math.h\"".to_string());
+    }
+    out.push(String::new());
+    out.extend(body);
     out.join("\n")
 }
 
@@ -235,7 +252,10 @@ fn emit_host_header_with_linkage(
         .join("\n")
 }
 
-fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: &str) {
+/// Append a tensor helper to `out` and return `true` if the inner emitter
+/// included `chelis_math.h`.  The caller propagates that signal to the host
+/// preamble so the math header is emitted exactly once at file scope.
+fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: &str) -> bool {
     if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
@@ -246,7 +266,7 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
-        return;
+        return false;
     }
 
     // Tensor helpers are TU-internal: they are only called from within this
@@ -268,8 +288,16 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_uniform_prelude = false;
+    let mut needs_math_header = false;
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
+            // Track whether the inner emitter pulled in chelis_math.h so the
+            // host preamble can re-emit it once.  Otherwise vForce intrinsics
+            // such as vvexpf/vvlogf reach the compiler with no declaration in
+            // scope.
+            if line.contains("\"chelis_math.h\"") {
+                needs_math_header = true;
+            }
             continue;
         }
         if line.contains("chelis_uniform_sample_f32(uint64_t seed") {
@@ -288,6 +316,7 @@ fn append_helper(out: &mut Vec<String>, helper: &HostTensorHelper, helper_name: 
         out.push(line.to_string());
     }
     out.push(String::new());
+    needs_math_header
 }
 
 fn identity_helper_input(

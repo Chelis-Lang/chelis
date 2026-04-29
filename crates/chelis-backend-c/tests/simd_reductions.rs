@@ -12,6 +12,13 @@ fn simd_include_dir() -> PathBuf {
 }
 
 fn gcc_available() -> bool {
+    // These tests require real GNU gcc with `-mavx2` and `-fopenmp` support,
+    // which only makes sense on x86_64. On other architectures (e.g. Apple
+    // Silicon, where `/usr/bin/gcc` is a symlink to Apple's clang that
+    // doesn't ship libomp and doesn't understand `-mavx2`), skip cleanly.
+    if !cfg!(target_arch = "x86_64") {
+        return false;
+    }
     Command::new("gcc")
         .arg("--version")
         .output()

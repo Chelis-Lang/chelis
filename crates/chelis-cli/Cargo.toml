@@ -22,6 +22,7 @@ chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
+chelis-backend-metal = { path = "../chelis-backend-metal" }
 chelis-compiler-api = { path = "../chelis-compiler-api" }
 chelis-cove.workspace = true
 chelis-lsp.workspace = true

@@ -206,7 +206,170 @@ The first shipped effect surface interacts with backend selection in two explici
 - `chelis build` for either target currently rejects lowered `dropout`; seeded dropout
   is implemented on the evaluator path, not yet on emitted C/HIP code
 
-## 4. Later Integration Backends
+## 4. Phase M: Metal Backend (macOS GPU peer)
+
+The Metal backend is the macOS-native GPU peer of the HIP backend. It is not a
+continuation of HIP work — it is an independent backend track that mirrors HIP's
+architecture exactly:
+
+- host-side control remains in generated source, here Objective-C++ in `.mm` files
+- GPU kernels are emitted as Metal Shading Language (MSL) source strings
+- `[MTLDevice newLibraryWithSource:options:error:]` performs runtime compilation —
+  the direct analog of `hiprtc` for the HIP path
+
+Same ABI as the C and HIP backends:
+`extern "C" void func_name(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out)`.
+
+The Metal backend is **pure string emission** in Rust. The crate has zero macOS-only
+Rust dependencies (no `metal-rs`, no `objc`); it builds, tests, and lints clean on
+Linux, macOS, and Windows. Apple-SDK integration happens later when the user runs
+`clang++ -fobjc-arc -framework Metal -framework Foundation` against the emitted
+`.mm`. This keeps `--target metal` available as a cross-compilation target and
+mirrors how HIP works (no `hip-rs` dep on the Rust side; the user runs `hipcc`).
+
+Full design in `spec/design/chelis_metal_backend_plan.md`.
+
+### Phase M0: Spec sync (complete)
+
+Authoritative oracle:
+
+```sh
+grep -F "[MTLDevice newLibraryWithSource:]" \
+  spec/design/chelis_metal_backend_plan.md
+```
+
+The grep proves the Metal runtime model has been switched away from the original
+`metal-rs` Rust runtime to the string-emission-plus-runtime-source-compilation
+model that mirrors HIP.
+
+### Phase M1: Scaffolding + CLI dispatch
+
+`crates/chelis-backend-metal/` is structurally a peer of `crates/chelis-backend-hip/`:
+`src/{lib,emit,kernels,launch,memory,blas}.rs`, `runtime/chelis_metal_runtime.h`,
+`tests/{codegen_structure,redteam_adversarial,gpu_correctness}.rs`.
+
+`chelis build --target metal` is wired in `crates/chelis-cli/src/main.rs` alongside
+`--target c` and `--target hip`. Reject passes deny `pad`/`shrink` (the IR ops
+the M-phase emitter doesn't yet handle) and non-{f32, bool} precisions,
+mirroring HIP's deny-list. Sort/argsort/cumsum/cumprod don't exist as IR
+variants today — when they're added, both backends' reject passes will need
+the corresponding arms; documented as a follow-up rather than a current
+guarantee.
+
+Authoritative oracle:
+
+```sh
+cargo build --workspace && \
+cargo test -p chelis-cli --test cli -- target_metal && \
+cargo tree -p chelis-cli --prefix none --no-dedupe \
+  | python3 -c 'import sys, re
+forbidden = ("metal", "objc", "objc-foundation", "objc_id", "objc_exception",
+             "cocoa", "core-graphics", "core-foundation", "block")
+pattern = re.compile(r"^(" + "|".join(re.escape(n) for n in forbidden) + r") v")
+bad = sorted({l.strip() for l in sys.stdin if pattern.match(l)})
+sys.exit(1 if bad else 0)'
+```
+
+The `cargo tree` step enforces the no-Apple-SDK-Rust-deps invariant.
+
+### Phase M2: Elementwise emission
+
+`MetalEmitter` mirrors `HipEmitter::emit_dag` (same passes: `collect_kernels`,
+`emit_kernel_string_decl`, signature emission, `emit_input_shape_preamble`,
+plan-driven slot allocation). MSL replaces HIP C/C++ syntax for kernel
+declarations, thread indexing, buffer qualifiers, and math built-ins.
+
+Coverage: add/sub/mul/div/neg/exp/log/sqrt/sin/cast/clamp/where, fill,
+fused elementwise chains, reshape (metadata-only), permute, expand.
+
+Authoritative oracle:
+
+```sh
+cargo test -p chelis-backend-metal --test codegen_structure
+```
+
+### Phase M3: macOS CI compile-and-link smoke
+
+A Python smoke harness (`.github/scripts/smoke_macos_metal.py`) drives
+`chelis build --target metal` on a fixed-shape elementwise program and then runs
+`clang++ -std=c++17 -fobjc-arc -O2 ... -framework Metal -framework Foundation`
+on the emitted `.mm`. Smoke is intentionally compile-and-link only;
+`MTLCreateSystemDefaultDevice` may return null on macos-latest VMs, so kernel
+dispatch is gated to the workstation (Phase M6), not CI.
+
+Authoritative oracle: the `macos-smoke` GitHub Actions job exits 0.
+
+### Phase M4: Reductions + fused-elementwise-into-reduction
+
+MSL reduction templates (sum/max/min) using threadgroup memory and tree
+reduction. Two-pass for arrays larger than one threadgroup. Fused
+elementwise-into-reduction reuses the existing `reduction_inlined_fused_elems`
+path in `chelis-ir`.
+
+Authoritative oracle:
+
+```sh
+cargo test -p chelis-backend-metal --test codegen_structure -- reduction
+```
+
+### Phase M5: Tiled matmul
+
+Custom 16×16 tiled MSL matmul kernel (no MPS dep). The specialization rule
+mirrors HIP's hipBLAS detection: rank-2 contiguous f32 matmul subgraphs
+(`expand + mul + sum(axis=1)`) route to `chelis_metal_matmul_tiled`.
+
+Authoritative oracle:
+
+```sh
+cargo test -p chelis-backend-metal --test codegen_structure -- matmul_tiled
+```
+
+### Phase M6: GPU correctness oracle (manual)
+
+`tests/gpu_correctness.rs` with `#[ignore]` on every test. Each test invokes
+`codegen_metal`, writes the emitted `.mm` to a tempdir, drives `clang++` against
+`-framework Metal -framework Foundation`, runs the resulting binary, and asserts
+agreement with the `chelis-ir` evaluator within Metal-specific f32 tolerances.
+
+Authoritative oracle (manual, requires Apple Silicon Mac with a usable Metal
+device):
+
+```sh
+cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
+```
+
+This is the single oracle for M2–M6 GPU correctness. MSL fast-math semantics may
+require widened tolerance versus HIP for `exp`/`log`/`sqrt`-heavy kernels;
+specific kernels needing higher precision use `precise::*` qualifiers per-call.
+
+### Phase M7: Adversarial test surface
+
+`tests/redteam_adversarial.rs` mirrors `crates/chelis-backend-hip/tests/redteam_adversarial.rs`.
+Cases: zero-element tensors, rank-0 scalars, symbolic dims of 0/1, bool through
+`where`, cast f32→bool→f32 round-trip, very large grids (>2^16 threadgroups),
+single-element reductions, matmul with degenerate dimensions.
+
+Authoritative oracle:
+
+```sh
+cargo test -p chelis-backend-metal --test redteam_adversarial
+```
+
+### Carried-forward limitations
+
+- `pad` and `shrink` deferred (mirrors HIP's deferral); enforce via the reject pass
+- `sort`, `argsort`, `cumsum`, `cumprod`, `diagonal`, `trace` not on the GPU path
+- f64 not supported (Apple Silicon GPU has limited f64 support); enforce via the
+  reject pass
+- MPS integration deferred; custom tiled matmul is the M5 first cut
+- Async dispatch deferred; M-phase uses `waitUntilCompleted` for synchronous launches
+- `peak_device_bytes_formula` semantically reports peak system RAM for tensor
+  storage on Apple Silicon (no separate VRAM); the CLI prefixes the formula with
+  a one-line note so users do not double-count
+
+These are real backend limitations, not hidden caveats.
+
+## 5. Later Integration Backends
 
 Later backends are additive:
 
@@ -219,9 +382,9 @@ For TPU/XLA ecosystem access and ML compiler interop.
 For PyTorch ecosystem interop, export, and execution through the FX / TorchInductor
 toolchain.
 
-These do not replace the C/HIP path.
+These do not replace the C/HIP/Metal path.
 
-## 5. Interactive Execution
+## 6. Interactive Execution
 
 Interactive execution is not a separate backend.
 Tide and `chelis eval` use the IR evaluator first.
@@ -233,16 +396,17 @@ If latency later becomes a problem, the escalation order is:
 
 No Cranelift-based backend is currently planned.
 
-## 6. Backend Selection
+## 7. Backend Selection
 
 Planned command surface:
 
 - `chelis build app.ch`
 - `chelis build app.ch --target hip`
+- `chelis build app.ch --target metal`
 
 Additional targets may be added later as StableHLO, FX, and Triton land.
 
-## 7. Invariants
+## 8. Invariants
 
 All backends must preserve:
 

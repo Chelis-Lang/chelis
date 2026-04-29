@@ -32,6 +32,10 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
+const METAL_RUNTIME_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-metal/runtime/chelis_metal_runtime.h"
+));
 
 fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
     const LIB_NAME: &str = "libchelis_runtime.a";
@@ -95,16 +99,25 @@ fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
     .into())
 }
 
+#[derive(Clone, Copy, Default)]
+struct ExtraRuntimeArtifacts {
+    hip: bool,
+    metal: bool,
+}
+
 fn copy_runtime_artifacts(
     runtime_dir: &Path,
-    include_hip_runtime: bool,
+    extras: ExtraRuntimeArtifacts,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
     fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
     fs::write(runtime_dir.join("chelis_simd.h"), SIMD_H)?;
     fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
-    if include_hip_runtime {
+    if extras.hip {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+    }
+    if extras.metal {
+        fs::write(runtime_dir.join("chelis_metal_runtime.h"), METAL_RUNTIME_H)?;
     }
     let source = find_runtime_library()?;
     let dest = runtime_dir.join("libchelis_runtime.a");
@@ -178,7 +191,7 @@ enum Command {
         file: PathBuf,
         #[arg(long, short)]
         output: Option<PathBuf>,
-        /// Backend target: "c" (default) or "hip" (GPU)
+        /// Backend target: "c" (default), "hip" (AMD GPU), or "metal" (Apple GPU)
         #[arg(long, default_value = "c")]
         target: String,
     },
@@ -964,7 +977,47 @@ fn cmd_build(
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        other => Err(format!("unknown target '{other}': expected 'c' or 'hip'").into()),
+        "metal" => {
+            let host_requires_host_backend = compiled_program
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+            // Same single-entry limitation as HIP: programs without a `main`
+            // and with multiple sibling tensor-signature defs fall back to
+            // the preferred entry; others are silently dropped. Tracked as
+            // a residual issue mirroring HIP.
+            let preferred_entry_dag = compiled_program
+                .host
+                .as_ref()
+                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+            if dag.roots().is_empty()
+                && preferred_entry_dag.is_none()
+                && host_requires_host_backend
+                && let Some(host_program) = compiled_program.host.as_ref()
+            {
+                // Host-only programs fall through to the C backend, exactly
+                // like the HIP path. The metal path doesn't have a separate
+                // host wrapper today; reuse cmd_build_hip_host for parity.
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_hip_host(result, func_name, output)
+            } else {
+                let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
+                    entry_dag
+                } else if !dag.roots().is_empty() {
+                    dag.clone()
+                } else {
+                    chelis_ir::lower::lower_program(&checked)
+                };
+                metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
+                reject_unsupported_effect_ops(&metal_dag, "metal")?;
+                reject_unsupported_metal_ops(&metal_dag)?;
+                let fused = chelis_ir::fuse::fuse(&metal_dag);
+                cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
+            }
+        }
+        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
     }
 }
 
@@ -2384,6 +2437,45 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
     Ok(())
 }
 
+fn reject_unsupported_metal_ops(
+    dag: &chelis_ir::dag::Dag,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for node in dag.nodes() {
+        match &node.op {
+            chelis_ir::dag::RiscOp::Pad { .. } => {
+                return Err(format!(
+                    "`chelis build --target metal` does not yet support `pad`; lowered node {} requires it",
+                    node.id.0
+                )
+                .into());
+            }
+            chelis_ir::dag::RiscOp::Shrink { .. } => {
+                return Err(format!(
+                    "`chelis build --target metal` does not yet support `shrink`; lowered node {} requires it",
+                    node.id.0
+                )
+                .into());
+            }
+            _ => {}
+        }
+        match node.output_type.precision {
+            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
+            other => {
+                return Err(format!(
+                    "`chelis build --target metal` DAG path only supports f32/bool tensors; \
+                     node {} carries precision `{}`. \
+                     Apple Silicon GPU has limited f64 support; rewrite the program \
+                     to use f32 tensors or build it with `--target c` instead.",
+                    node.id.0,
+                    other.name()
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Mirror of the per-node precision walk that the C backend's emitter
 /// performs internally (`validate_supported_precisions` panics). Emits a
 /// clean user-facing error BEFORE the backend panics, closing a
@@ -2507,7 +2599,7 @@ fn cmd_build_c_result(
     fs::write(&h_path, &result.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(runtime_dir, false)?;
+    copy_runtime_artifacts(runtime_dir, ExtraRuntimeArtifacts::default())?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
@@ -2566,7 +2658,13 @@ fn cmd_build_hip_host(
     fs::write(&h_path, &result.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(runtime_dir, true)?;
+    copy_runtime_artifacts(
+        runtime_dir,
+        ExtraRuntimeArtifacts {
+            hip: true,
+            metal: false,
+        },
+    )?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
@@ -2639,7 +2737,13 @@ fn cmd_build_hip(
 
     // HIP runtime includes the CPU runtime (for chelis_tensor host struct)
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(runtime_dir, true)?;
+    copy_runtime_artifacts(
+        runtime_dir,
+        ExtraRuntimeArtifacts {
+            hip: true,
+            metal: false,
+        },
+    )?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
@@ -2673,6 +2777,81 @@ fn cmd_build_hip(
         c_path.display(),
         runtime_dir.display(),
         c_path.with_extension("").display()
+    );
+    Ok(())
+}
+
+fn cmd_build_metal(
+    dag: &chelis_ir::dag::Dag,
+    func_name: &str,
+    _file: &std::path::Path,
+    output: Option<&std::path::Path>,
+    symbolic_dims_hint: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = chelis_backend_metal::codegen_metal(dag, func_name);
+
+    let out_dir = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mm_path = if matches!(
+        out_dir.extension().and_then(|e| e.to_str()),
+        Some("mm") | Some("cpp") | Some("cxx") | Some("cc")
+    ) {
+        out_dir.clone()
+    } else {
+        out_dir.join(format!("{func_name}_metal.mm"))
+    };
+    let h_path = mm_path.with_extension("h");
+    if let Some(parent) = mm_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&mm_path, &result.mm_source)?;
+    fs::write(&h_path, &result.h_header)?;
+
+    // Metal runtime header includes the CPU runtime (for chelis_tensor host struct)
+    let runtime_dir = mm_path.parent().unwrap_or(std::path::Path::new("."));
+    copy_runtime_artifacts(
+        runtime_dir,
+        ExtraRuntimeArtifacts {
+            hip: false,
+            metal: true,
+        },
+    )?;
+
+    println!("Wrote {} and {}", mm_path.display(), h_path.display());
+    println!(
+        "Wrote runtime: {}, {}, {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("libchelis_runtime.a").display(),
+        runtime_dir.join("chelis_metal_runtime.h").display()
+    );
+    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    if !symbolic_dims.is_empty() {
+        println!("Symbolic dims: {}", symbolic_dims.join(", "));
+    }
+    // The Metal backend embeds the unified-memory caveat in the formula
+    // string itself (see chelis_backend_metal::codegen_metal), so the
+    // print line stays short — duplicating the note here would make it
+    // double up.
+    println!("Peak device memory: {}", result.peak_device_bytes_formula);
+    if let Some(bytes) = result.peak_device_bytes_estimate {
+        println!("Estimated peak device memory: {}", human_bytes(bytes));
+    }
+    // Preserve the (-framework, NAME) pair ordering — sorting would split
+    // them. Compile flags first, then link flags, in their declared order.
+    let flags: Vec<&str> = result
+        .compile_flags
+        .iter()
+        .chain(result.link_flags.iter())
+        .map(|s| s.as_str())
+        .collect();
+    println!(
+        "Compile: clang++ {} -O2 {} -L{} -lchelis_runtime -o {}",
+        flags.join(" "),
+        mm_path.display(),
+        runtime_dir.display(),
+        mm_path.with_extension("").display()
     );
     Ok(())
 }

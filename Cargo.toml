@@ -14,6 +14,7 @@ members = [
     "crates/chelis-ir",
     "crates/chelis-backend-c",
     "crates/chelis-backend-hip",
+    "crates/chelis-backend-metal",
     "crates/chelis-validate",
     "crates/chelis-tide",
     "crates/chelis-lsp",
@@ -25,7 +26,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.3.2"
+version = "0.4.0"
 license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
@@ -42,6 +43,7 @@ chelis-effects = { path = "crates/chelis-effects" }
 chelis-ir = { path = "crates/chelis-ir" }
 chelis-backend-c = { path = "crates/chelis-backend-c" }
 chelis-backend-hip = { path = "crates/chelis-backend-hip" }
+chelis-backend-metal = { path = "crates/chelis-backend-metal" }
 chelis-validate = { path = "crates/chelis-validate" }
 chelis-tide = { path = "crates/chelis-tide" }
 chelis-lsp = { path = "crates/chelis-lsp" }

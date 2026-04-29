@@ -1856,6 +1856,79 @@ fn phase3h_numeric_acceptance_oracle() {
     assert_reef_std_embedding_builds_to_valid_c();
 }
 
+/// Regression test for the macOS-only bug where `host_emit::emit_host_program`
+/// stripped `#include "chelis_math.h"` from the generated host code, causing
+/// `vvexpf`/`vvlogf` calls to reach the compiler with no declaration in
+/// scope. Direct guard on the include-emission invariant rather than only
+/// transitive coverage via the (slow) `phase3h_numeric_acceptance_oracle`.
+///
+/// The test builds a tiny program that uses a transcendental in a
+/// host-lane scalar context, emits it via `chelis build --target c`, and
+/// asserts the generated `main.c`:
+///   - On macOS: contains both `#include "chelis_math.h"` AND a `vvexpf`
+///     call. If either is missing, the regression is back.
+///   - On Linux without sleef: must NOT contain `chelis_math.h` (the
+///     inner CEmitter selects MathLib::None and the include should stay
+///     out — confirms the `needs_math_header` flag is platform-driven).
+#[test]
+fn build_c_host_emits_chelis_math_h_when_program_uses_transcendentals() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("transcendental.ch");
+    let out_dir = dir.path().join("c-output");
+    // The phase3h embedding helper exercises the same vForce/vvexpf
+    // path that triggered the original bug. Reusing it keeps the test
+    // shape simple: any `exp` in a host-lane helper must produce a
+    // generated `main.c` that #includes `chelis_math.h`.
+    write_file(
+        &path,
+        r#"
+def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let main_c = fs::read_to_string(out_dir.join("transcendental.c")).expect("emitted .c");
+
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            main_c.contains("#include \"chelis_math.h\""),
+            "macOS host_emit must include chelis_math.h when a helper uses \
+             a transcendental — regression of the vForce header bug. Source:\n{main_c}"
+        );
+        assert!(
+            main_c.contains("vvexpf"),
+            "macOS host_emit should route exp through Accelerate vForce \
+             (`vvexpf`); none found in generated main.c:\n{main_c}"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux without the `sleef` feature selects MathLib::None and
+        // emits no `chelis_math.h` include. The include MUST NOT leak in
+        // unconditionally — that would force a useless dependency on
+        // platforms that don't need it.
+        assert!(
+            !main_c.contains("#include \"chelis_math.h\""),
+            "non-macOS host_emit should not include chelis_math.h \
+             when the inner emitter selected MathLib::None. Source:\n{main_c}"
+        );
+    }
+}
+
 #[test]
 fn check_rejects_static_invalid_phase3h_einsum_extent_mismatch() {
     let dir = tempdir().expect("tempdir");
@@ -4025,4 +4098,183 @@ fn reef_book_workflow_commands_are_valid() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Built demo 0.1.0"));
+}
+
+// ===========================================================================
+// Phase M (Metal backend) — M1 CLI dispatch tests.
+//
+// These verify that `--target metal` is wired through main.rs alongside
+// `--target c` and `--target hip`. M2 will add structural assertions on the
+// emitted .mm; M6 owns runtime correctness on Apple Silicon.
+// ===========================================================================
+
+#[test]
+fn target_metal_emits_mm_header_and_runtime_artifacts() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("simple_add.ch");
+    let out_dir = dir.path().join("metal-output");
+    write_file(
+        &src,
+        "def simple_add(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = add(a, b)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("simple_add_metal.mm"))
+        .stdout(predicate::str::contains("chelis_metal_runtime.h"))
+        .stdout(predicate::str::contains(
+            "Apple Silicon unified memory means this is also peak system RAM",
+        ))
+        .stdout(predicate::str::contains("clang++"))
+        .stdout(predicate::str::contains("-framework Metal"))
+        .stdout(predicate::str::contains("-framework Foundation"));
+
+    let mm_src = fs::read_to_string(out_dir.join("simple_add_metal.mm")).expect("metal source");
+    assert!(
+        mm_src.contains("extern \"C\" void simple_add("),
+        "metal .mm should declare the C-ABI entry point, got:\n{mm_src}"
+    );
+    assert!(
+        mm_src.contains("#import \"chelis_metal_runtime.h\""),
+        "metal .mm should import the Metal runtime header, got:\n{mm_src}"
+    );
+
+    let header = fs::read_to_string(out_dir.join("simple_add_metal.h")).expect("metal header");
+    assert!(header.contains("extern \"C\" void simple_add("));
+
+    assert!(out_dir.join("chelis_metal_runtime.h").exists());
+    assert!(out_dir.join("chelis_runtime.h").exists());
+    assert!(out_dir.join("libchelis_runtime.a").exists());
+
+    // `chelis_hip_runtime.h` must NOT leak into a metal build directory.
+    assert!(!out_dir.join("chelis_hip_runtime.h").exists());
+}
+
+#[test]
+fn target_metal_unknown_target_message_lists_metal() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("hello.ch");
+    write_file(
+        &path,
+        "def hello(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(a, b)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "vulkan"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unknown target 'vulkan': expected 'c', 'hip', or 'metal'",
+        ));
+}
+
+#[test]
+fn target_metal_rejects_pad() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pad.ch");
+    // Same form the HIP rejection test uses; pad takes its padding via a
+    // metadata channel, so the surface call is single-arg with an ascribed
+    // output shape.
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32]): tensor[4, f32] = (pad(x) : tensor[4, f32])\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`chelis build --target metal` does not yet support `pad`",
+        ));
+}
+
+#[test]
+fn target_metal_rejects_shrink() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("shrink.ch");
+    // Same shape as the pad test — shrink is registered as a tensor_unop
+    // with bounds carried via metadata, so the surface call is single-arg
+    // with an ascribed output shape.
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32]): tensor[4, f32] = (shrink(x) : tensor[4, f32])\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`chelis build --target metal` does not yet support `shrink`",
+        ));
+}
+
+#[test]
+fn target_metal_rejects_f64_precision() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("f64_one.ch");
+    write_file(&path, "def f64_one() -> f64 = cast(1.0, f64)\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`chelis build --target metal` DAG path only supports f32/bool tensors",
+        ));
+}
+
+#[test]
+fn target_metal_rejects_cpu_resource_region() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("cpu_region.ch");
+    write_file(&path, "x: int32 = with device(\"cpu\") { 1 }\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["build", path.to_str().unwrap(), "--target", "metal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot satisfy resource region"));
+}
+
+#[test]
+fn target_metal_accepts_gpu_resource_region() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("gpu_region.ch");
+    let out_dir = dir.path().join("metal-output");
+    // Same form Phase 2a uses to verify HIP accepts gpu device regions.
+    // Use distinct args to satisfy linearity (`a` consumed once).
+    write_file(
+        &path,
+        "def f(a: tensor[4, f32], b: tensor[4, f32]) -> tensor[4, f32] = with device(\"gpu:0\") { add(a, b) }\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "metal",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
 }
