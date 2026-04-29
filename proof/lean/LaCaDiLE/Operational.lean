@@ -1320,6 +1320,485 @@ theorem substAwareRuntimeLinear_activeNodup :
   | Term.perform _ _, h => by simpa [SubstAwareRuntimeLinear, activeVarRefs] using h.1
   | Term.loc _, _ => by simp [SubstAwareRuntimeLinear, activeVarRefs]
 
+mutual
+
+/-- `addDimTerm` preserves the active variable footprint exactly. -/
+theorem activeVarRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, activeVarRefs (addDimTerm d e) = activeVarRefs e
+  | Term.var x => by simp [addDimTerm, activeVarRefs]
+  | Term.abs x t body => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d body
+  | Term.app e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.letBind x e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.copy e => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.letpair x y e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.fst tRight e => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.snd tLeft e => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.unit => by simp [addDimTerm, activeVarRefs]
+  | Term.const v ds => by simp [addDimTerm, activeVarRefs]
+  | Term.add e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d e1,
+        activeVarRefs_addDimTerm d e2]
+  | Term.sum e d' => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.expand e d' => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.uniformLike e lo hi => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.grad x t tOut body => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d body
+  | Term.vmap x t dMap body => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d body
+  | Term.handle epsH body clauses => by
+      simp [addDimTerm, activeVarRefs, activeVarRefs_addDimTerm d body]
+  | Term.perform op e => by
+      simpa [addDimTerm, activeVarRefs] using activeVarRefs_addDimTerm d e
+  | Term.loc ell => by simp [addDimTerm, activeVarRefs]
+
+/-- `addDimTerm` preserves the one-step variable exposure footprint. -/
+theorem StepVarRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, StepVarRefs (addDimTerm d e) = StepVarRefs e
+  | Term.var x => by simp [addDimTerm, StepVarRefs]
+  | Term.abs x t body => by simp [addDimTerm, StepVarRefs]
+  | Term.app e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.letBind x e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.copy e => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.letpair x y e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.fst tRight e => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.snd tLeft e => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.unit => by simp [addDimTerm, StepVarRefs]
+  | Term.const v ds => by simp [addDimTerm, StepVarRefs]
+  | Term.add e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d e1,
+        StepVarRefs_addDimTerm d e2]
+  | Term.sum e d' => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.expand e d' => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.uniformLike e lo hi => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.grad x t tOut body => by simp [addDimTerm, StepVarRefs]
+  | Term.vmap x t dMap body => by simp [addDimTerm, StepVarRefs]
+  | Term.handle epsH body clauses => by
+      simp [addDimTerm, StepVarRefs, StepVarRefs_addDimTerm d body,
+        StepVarRefsClauses_addDimClauses d clauses]
+  | Term.perform op e => by
+      simpa [addDimTerm, StepVarRefs] using StepVarRefs_addDimTerm d e
+  | Term.loc ell => by simp [addDimTerm, StepVarRefs]
+
+/-- Clause companion to `StepVarRefs_addDimTerm`. -/
+theorem StepVarRefsClauses_addDimClauses (d : Dim) :
+    ∀ clauses,
+      StepVarRefsClauses (addDimClauses d clauses) = StepVarRefsClauses clauses
+  | [] => by simp [addDimClauses, StepVarRefsClauses]
+  | (_, _, _, hb) :: rest => by
+      simp [addDimClauses, StepVarRefsClauses, StepVarRefs_addDimTerm d hb,
+        StepVarRefsClauses_addDimClauses d rest]
+
+end
+
+/-- `addDimTerm` preserves the beta-exposed function-variable
+    footprint. -/
+theorem AppFunVarRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, AppFunVarRefs (addDimTerm d e) = AppFunVarRefs e := by
+  intro e
+  cases e <;> simp [AppFunVarRefs, StepVarRefs, addDimTerm,
+    StepVarRefs_addDimTerm, StepVarRefsClauses_addDimClauses]
+
+mutual
+
+/-- `addDimTerm` preserves the active location footprint exactly. -/
+theorem activeLocRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, activeLocRefs (addDimTerm d e) = activeLocRefs e
+  | Term.var x => by simp [addDimTerm, activeLocRefs]
+  | Term.abs x t body => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d body
+  | Term.app e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.letBind x e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.copy e => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.letpair x y e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.fst tRight e => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.snd tLeft e => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.unit => by simp [addDimTerm, activeLocRefs]
+  | Term.const v ds => by simp [addDimTerm, activeLocRefs]
+  | Term.add e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d e1,
+        activeLocRefs_addDimTerm d e2]
+  | Term.sum e d' => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.expand e d' => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.uniformLike e lo hi => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.grad x t tOut body => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d body
+  | Term.vmap x t dMap body => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d body
+  | Term.handle epsH body clauses => by
+      simp [addDimTerm, activeLocRefs, activeLocRefs_addDimTerm d body]
+  | Term.perform op e => by
+      simpa [addDimTerm, activeLocRefs] using activeLocRefs_addDimTerm d e
+  | Term.loc ell => by simp [addDimTerm, activeLocRefs]
+
+/-- `addDimTerm` preserves the one-step location exposure footprint. -/
+theorem StepLocRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, StepLocRefs (addDimTerm d e) = StepLocRefs e
+  | Term.var x => by simp [addDimTerm, StepLocRefs]
+  | Term.abs x t body => by simp [addDimTerm, StepLocRefs]
+  | Term.app e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.letBind x e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.copy e => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.letpair x y e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.pair e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.fst tRight e => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.snd tLeft e => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.unit => by simp [addDimTerm, StepLocRefs]
+  | Term.const v ds => by simp [addDimTerm, StepLocRefs]
+  | Term.add e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.mul e1 e2 => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d e1,
+        StepLocRefs_addDimTerm d e2]
+  | Term.sum e d' => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.expand e d' => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.uniformLike e lo hi => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.grad x t tOut body => by simp [addDimTerm, StepLocRefs]
+  | Term.vmap x t dMap body => by simp [addDimTerm, StepLocRefs]
+  | Term.handle epsH body clauses => by
+      simp [addDimTerm, StepLocRefs, StepLocRefs_addDimTerm d body,
+        StepLocRefsClauses_addDimClauses d clauses]
+  | Term.perform op e => by
+      simpa [addDimTerm, StepLocRefs] using StepLocRefs_addDimTerm d e
+  | Term.loc ell => by simp [addDimTerm, StepLocRefs]
+
+/-- Clause companion to `StepLocRefs_addDimTerm`. -/
+theorem StepLocRefsClauses_addDimClauses (d : Dim) :
+    ∀ clauses,
+      StepLocRefsClauses (addDimClauses d clauses) = StepLocRefsClauses clauses
+  | [] => by simp [addDimClauses, StepLocRefsClauses]
+  | (_, _, _, hb) :: rest => by
+      simp [addDimClauses, StepLocRefsClauses, StepLocRefs_addDimTerm d hb,
+        StepLocRefsClauses_addDimClauses d rest]
+
+end
+
+/-- `addDimTerm` preserves the beta-exposed function-location
+    footprint. -/
+theorem AppFunLocRefs_addDimTerm (d : Dim) :
+    ∀ e : Term, AppFunLocRefs (addDimTerm d e) = AppFunLocRefs e := by
+  intro e
+  cases e <;> simp [AppFunLocRefs, StepLocRefs, addDimTerm,
+    StepLocRefs_addDimTerm, StepLocRefsClauses_addDimClauses]
+
+private theorem activeVarRefs_nodup_addDimTerm {d : Dim} {e : Term}
+    (h : (activeVarRefs e).Nodup) :
+    (activeVarRefs (addDimTerm d e)).Nodup := by
+  simpa [activeVarRefs_addDimTerm (d := d) (e := e)] using h
+
+private theorem activeLocRefs_nodup_addDimTerm {d : Dim} {e : Term}
+    (h : (activeLocRefs e).Nodup) :
+    (activeLocRefs (addDimTerm d e)).Nodup := by
+  simpa [activeLocRefs_addDimTerm (d := d) (e := e)] using h
+
+mutual
+
+/-- `addDimTerm` preserves the substitution-aware runtime predicate. -/
+theorem substAwareRuntimeLinear_addDimTerm (d : Dim) :
+    ∀ {e : Term}, SubstAwareRuntimeLinear e → SubstAwareRuntimeLinear (addDimTerm d e)
+  | Term.var _, h => by simpa [SubstAwareRuntimeLinear, addDimTerm]
+  | Term.abs x t body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.abs x t body) hAct,
+        substAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.app e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21, hSepFun⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.app e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21,
+        by simpa [AppFunVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSepFun⟩
+  | Term.letBind x e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.letBind x e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21⟩
+  | Term.copy e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.copy e) hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.letpair x y e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.letpair x y e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21⟩
+  | Term.pair e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.pair e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21⟩
+  | Term.fst tRight e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.fst tRight e) hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.snd tLeft e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.snd tLeft e) hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.unit, h => by simpa [SubstAwareRuntimeLinear, addDimTerm] using h
+  | Term.const v ds, h => by simpa [SubstAwareRuntimeLinear, addDimTerm] using h
+  | Term.add e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.add e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21⟩
+  | Term.mul e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.mul e1 e2) hAct,
+        substAwareRuntimeLinear_addDimTerm d h1,
+        substAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep12,
+        by simpa [StepVarRefs_addDimTerm, activeVarRefs_addDimTerm] using hSep21⟩
+  | Term.sum e d', h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.sum e d') hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.expand e d', h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.expand e d') hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.uniformLike e lo hi, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.uniformLike e lo hi) hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.grad x t tOut body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.grad x t tOut body) hAct,
+        substAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.vmap x t dMap body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.vmap x t dMap body) hAct,
+        substAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.handle epsH body clauses, h => by
+      rcases h with ⟨hAct, hBody, hClauses, hSep⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.handle epsH body clauses) hAct,
+        substAwareRuntimeLinear_addDimTerm d hBody,
+        substAwareRuntimeLinearClauses_addDimClauses d hClauses,
+        by simpa [StepVarRefsClauses_addDimClauses, activeVarRefs_addDimTerm] using hSep⟩
+  | Term.perform op e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨activeVarRefs_nodup_addDimTerm (d := d) (e := Term.perform op e) hAct,
+        substAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.loc ell, h => by simpa [SubstAwareRuntimeLinear, addDimTerm] using h
+
+/-- Clause companion to `substAwareRuntimeLinear_addDimTerm`. -/
+theorem substAwareRuntimeLinearClauses_addDimClauses (d : Dim) :
+    ∀ {clauses}, SubstAwareRuntimeLinearClauses clauses →
+      SubstAwareRuntimeLinearClauses (addDimClauses d clauses)
+  | [], h => by simpa [SubstAwareRuntimeLinearClauses, addDimClauses] using h
+  | (_, _, _, hb) :: rest, h => by
+      rcases h with ⟨hHead, hRest⟩
+      exact ⟨substAwareRuntimeLinear_addDimTerm d hHead,
+        substAwareRuntimeLinearClauses_addDimClauses d hRest⟩
+
+end
+
+mutual
+
+/-- `addDimTerm` preserves the handler-aware runtime predicate. -/
+theorem handlerAwareRuntimeLinear_addDimTerm (d : Dim) :
+    ∀ {e : Term}, HandlerAwareRuntimeLinear e → HandlerAwareRuntimeLinear (addDimTerm d e)
+  | Term.var _, h => by simpa [HandlerAwareRuntimeLinear, addDimTerm] using h
+  | Term.abs x t body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.abs x t body) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.app e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21, hSepFun⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.app e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21,
+        by simpa [AppFunLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSepFun⟩
+  | Term.letBind x e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.letBind x e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21⟩
+  | Term.copy e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.copy e) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.letpair x y e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.letpair x y e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21⟩
+  | Term.pair e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.pair e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21⟩
+  | Term.fst tRight e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.fst tRight e) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.snd tLeft e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.snd tLeft e) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.unit, h => by simpa [HandlerAwareRuntimeLinear, addDimTerm] using h
+  | Term.const v ds, h => by simpa [HandlerAwareRuntimeLinear, addDimTerm] using h
+  | Term.add e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.add e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21⟩
+  | Term.mul e1 e2, h => by
+      rcases h with ⟨hAct, h1, h2, hSep12, hSep21⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.mul e1 e2) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d h1,
+        handlerAwareRuntimeLinear_addDimTerm d h2,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep12,
+        by simpa [StepLocRefs_addDimTerm, activeLocRefs_addDimTerm] using hSep21⟩
+  | Term.sum e d', h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.sum e d') hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.expand e d', h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.expand e d') hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.uniformLike e lo hi, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.uniformLike e lo hi) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.grad x t tOut body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.grad x t tOut body) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.vmap x t dMap body, h => by
+      rcases h with ⟨hAct, hBody⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.vmap x t dMap body) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hBody⟩
+  | Term.handle epsH body clauses, h => by
+      rcases h with ⟨hAct, hBody, hClauses, hSep⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.handle epsH body clauses) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hBody,
+        handlerAwareRuntimeLinearClauses_addDimClauses d hClauses,
+        by simpa [StepLocRefsClauses_addDimClauses, activeLocRefs_addDimTerm] using hSep⟩
+  | Term.perform op e, h => by
+      rcases h with ⟨hAct, hInner⟩
+      exact ⟨by simpa [ActiveRuntimeLinear] using
+          (activeLocRefs_nodup_addDimTerm (d := d) (e := Term.perform op e) hAct),
+        handlerAwareRuntimeLinear_addDimTerm d hInner⟩
+  | Term.loc ell, h => by simpa [HandlerAwareRuntimeLinear, addDimTerm] using h
+
+/-- Clause companion to `handlerAwareRuntimeLinear_addDimTerm`. -/
+theorem handlerAwareRuntimeLinearClauses_addDimClauses (d : Dim) :
+    ∀ {clauses}, HandlerAwareRuntimeLinearClauses clauses →
+      HandlerAwareRuntimeLinearClauses (addDimClauses d clauses)
+  | [], h => by simpa [HandlerAwareRuntimeLinearClauses, addDimClauses] using h
+  | (_, _, _, hb) :: rest, h => by
+      rcases h with ⟨hHead, hRest⟩
+      exact ⟨handlerAwareRuntimeLinear_addDimTerm d hHead,
+        handlerAwareRuntimeLinearClauses_addDimClauses d hRest⟩
+
+end
+
 /-- Every deep-active term has a duplicate-free active footprint at its
     root. -/
 theorem deepActiveRuntimeLinear_active

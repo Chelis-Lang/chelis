@@ -305,8 +305,13 @@ private theorem handlerAwareRuntimeLinear_step_or_debt
       intro _h
       exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
-      intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.tvmap sigma x tv d body)
+      intro h
+      rcases (by simpa [HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using h) with
+        ⟨hActBody, hBody⟩
+      exact Or.inl <| by
+        refine ⟨?_, handlerAwareRuntimeLinear_addDimTerm d hBody⟩
+        simpa [ActiveRuntimeLinear, activeLocRefs, activeLocRefs_addDimTerm (d := d) (e := body)]
+          using hActBody
   | ctx sigma sigma' E e e' h_inner ih =>
       intro h
       cases E with
@@ -594,8 +599,29 @@ theorem runtimeSafeConfig_step_or_handlerAwareDebt
       intro _h
       exact Or.inr (HandlerAwareRuntimeDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
-      intro _h
-      exact Or.inr (HandlerAwareRuntimeDebt.tvmap sigma x tv d body)
+      intro h
+      rcases h with ⟨hSafe, hLive⟩
+      rcases hSafe with ⟨hHandler, hSubst⟩
+      rcases (by simpa [HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using hHandler)
+        with ⟨hActLocBody, hBodyHandler⟩
+      rcases (by simpa [SubstAwareRuntimeLinear, activeVarRefs] using hSubst)
+        with ⟨hActVarBody, hBodySubst⟩
+      have hHandler' :
+          HandlerAwareRuntimeLinear (Term.abs x (addDim d tv) (addDimTerm d body)) := by
+        refine ⟨?_, handlerAwareRuntimeLinear_addDimTerm d hBodyHandler⟩
+        simpa [ActiveRuntimeLinear, activeLocRefs, activeLocRefs_addDimTerm (d := d) (e := body)]
+          using hActLocBody
+      have hSubst' :
+          SubstAwareRuntimeLinear (Term.abs x (addDim d tv) (addDimTerm d body)) := by
+        refine ⟨?_, substAwareRuntimeLinear_addDimTerm d hBodySubst⟩
+        simpa [SubstAwareRuntimeLinear, activeVarRefs,
+          activeVarRefs_addDimTerm (d := d) (e := body)] using hActVarBody
+      have hLive' :
+          StoreLiveLocRefs sigma (Term.abs x (addDim d tv) (addDimTerm d body)) := by
+        intro ell hmem
+        exact hLive ell (by
+          simpa [locRefs, locRefs_addDimTerm (d := d) (e := body)] using hmem)
+      exact Or.inl ⟨⟨hHandler', hSubst'⟩, hLive'⟩
   | ctx sigma sigma' E e e' h_inner ih =>
       intro h
       rcases runtimeSafeConfig_plug (sigma := sigma) (E := E) (e := e) h with
