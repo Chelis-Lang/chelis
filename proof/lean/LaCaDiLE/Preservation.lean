@@ -4584,6 +4584,65 @@ theorem runtimeSafeConfig_ctx_dormant_clause_counterexample :
       runtimeSafeCtxDormantClauseCounterSibling,
       runtimeSafeCtxDormantClauseCounterInnerBody]
 
+/-- The `StoreTypOn` premise in `runtimeSafeConfig_ctx_of_storeTypOn`
+    is not optional. Even if the extracted frame sidecar still holds on
+    the source store, the inner post-step configuration is
+    runtime-safe, the source/target stores are both well-formed, and
+    the replugged target satisfies the full term-side
+    `SubstAwareHandlerRuntimeLinear` invariant, reassembly can still
+    fail because the target store has dropped a dormant frame location.
+    The dormant-clause witness above is the concrete blocker. -/
+theorem runtimeSafeConfig_ctx_transport_without_storeTypOn_false :
+    ¬ (∀ {sigma sigma' : Store} {Sigma Sigma' : StoreTyp}
+         {E : EvalCtx} {e' : Term},
+         RuntimeSafeCtx sigma E →
+         RuntimeSafeConfig ⟨sigma', e'⟩ →
+         StoreWf sigma Sigma →
+         StoreWf sigma' Sigma' →
+         SubstAwareHandlerRuntimeLinear (plug E e') →
+         RuntimeSafeConfig ⟨sigma', plug E e'⟩) := by
+  intro hTransport
+  rcases runtimeSafeConfig_ctx_dormant_clause_counterexample with
+    ⟨_hSrc, hCtx, _hInnerStep, hInner, _hOuterStep, hNotOuter⟩
+  have hWfSource : StoreWf ctxCounterSigma ctxCounterStoreTyp := by
+    refine ⟨?_, ?_⟩
+    · intro ell hmem
+      simp [ctxCounterSigma, ctxCounterStoreTyp, storeTypDom, storeLookup] at hmem ⊢
+      rcases hmem with rfl | rfl
+      · simp [ctxCounterSigma, storeLookup]
+      · simp [ctxCounterSigma, storeLookup]
+    · intro ell hsome
+      simp [ctxCounterSigma, storeLookup] at hsome
+      simpa [ctxCounterStoreTyp, storeTypDom, eq_comm] using hsome
+  have hWfTarget :
+      StoreWf
+        [(3, tensorOpPlaceholder ctxCounterTensor ctxCounterTensor)]
+        [(3, Typ.tensor DimList.empty)] := by
+    refine ⟨?_, ?_⟩
+    · intro ell hmem
+      simp [storeTypDom, storeLookup] at hmem ⊢
+      rcases hmem with rfl
+      simp [storeLookup]
+    · intro ell hsome
+      simp [storeLookup] at hsome
+      simpa [storeTypDom, eq_comm] using hsome
+  have hPlug :
+      SubstAwareHandlerRuntimeLinear
+        (plug
+          (EvalCtx.pairL runtimeSafeCtxDormantClauseCounterSibling)
+          (Term.loc 3)) := by
+    simp [SubstAwareHandlerRuntimeLinear,
+      HandlerAwareRuntimeLinear, HandlerAwareRuntimeLinearClauses,
+      SubstAwareRuntimeLinear, SubstAwareRuntimeLinearClauses,
+      StepLocRefs, StepLocRefsClauses, AppFunLocRefs,
+      activeVarRefs, StepVarRefs, StepVarRefsClauses, AppFunVarRefs,
+      LocRefsDisjoint, LocRefsSeparated, VarRefsDisjoint, VarRefsSeparated,
+      ActiveRuntimeLinear, activeLocRefs, activeLocRefsClauses,
+      runtimeSafeCtxDormantClauseCounterSibling,
+      runtimeSafeCtxDormantClauseCounterInnerBody, plug]
+  exact hNotOuter <|
+    hTransport hCtx hInner hWfSource hWfTarget hPlug
+
 theorem wellScoped_plug_inner
     {E : EvalCtx} {e : Term}
     (h : WellScoped (plug E e)) :
