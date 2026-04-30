@@ -33,6 +33,7 @@ import LaCaDiLE.Typing
 import LaCaDiLE.AdjointTransform
 import LaCaDiLE.StringHelpers
 import LaCaDiLE.Operational
+import LaCaDiLE.Substitution
 import LaCaDiLE.TranslationDB
 
 namespace LaCaDiLE
@@ -91,6 +92,63 @@ theorem AdjointNamesFresh.cons_freshName
   rcases hmem with hIn | hIn
   · exact h m hm base hbase (by simpa [linearCtxDom] using hIn)
   · exact hne_name hIn
+
+/-- Term-side freshness companion to `AdjointNamesFresh`: every adjoint
+    `freshName` at counter `m ≥ n` is fresh in the source term. This is
+    the reusable hypothesis needed to weaken forward-replayed source
+    subterms past generated seed / tape binders. -/
+def AdjointTermFresh (n : Nat) (e : Term) : Prop :=
+  ∀ m, m ≥ n → ∀ base, base ∈ adjointBases →
+    freshInTerm (freshName base m) e
+
+theorem AdjointTermFresh.mono {n n' : Nat} {e : Term}
+    (h : AdjointTermFresh n e) (hle : n ≤ n') : AdjointTermFresh n' e := by
+  intro m hm base hb
+  exact h m (Nat.le_trans hle hm) base hb
+
+private theorem freshName_length_gt_used
+    {used : List String} {base : String} {m : Nat}
+    (hgt : maxStringLength used < m) :
+    maxStringLength used < (freshName base m).toList.length := by
+  rw [freshName_toList, List.length_append, List.length_cons, List.length_replicate]
+  omega
+
+private theorem freshName_not_mem_of_length_bound
+    {used : List String} {base : String} {m : Nat}
+    (hgt : maxStringLength used < m) :
+    freshName base m ∉ used := by
+  intro hmem
+  have hle :
+      (freshName base m).toList.length ≤ maxStringLength used :=
+    mem_maxStringLength (used := used) (s := freshName base m) hmem
+  have hlen :
+      maxStringLength used < (freshName base m).toList.length :=
+    freshName_length_gt_used (used := used) hgt
+  exact Nat.not_lt_of_ge hle hlen
+
+private theorem freshName_freshInTerm_of_length_bound
+    {base : String} {m : Nat} {e : Term}
+    (hgt : maxStringLength (freeVars e ++ boundVars e) < m) :
+    freshInTerm (freshName base m) e := by
+  refine ⟨?_, ?_⟩
+  · intro hmem
+    exact
+      (freshName_not_mem_of_length_bound
+        (used := freeVars e ++ boundVars e) (base := base) (m := m) hgt)
+        (List.mem_append_left _ hmem)
+  · intro hmem
+    exact
+      (freshName_not_mem_of_length_bound
+        (used := freeVars e ++ boundVars e) (base := base) (m := m) hgt)
+        (List.mem_append_right _ hmem)
+
+theorem adjointTermFresh_of_length_bound
+    {n : Nat} {e : Term}
+    (hgt : maxStringLength (freeVars e ++ boundVars e) < n) :
+    AdjointTermFresh n e := by
+  intro m hm base _hb
+  exact freshName_freshInTerm_of_length_bound (e := e)
+    (Nat.lt_of_lt_of_le hgt hm)
 
 -- linearCtx_filter_fresh_eq and linearCtx_filter_fresh_two_eq
 -- deleted: obsolete under tombstone-style contexts (no more .filter
