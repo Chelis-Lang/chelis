@@ -32,6 +32,18 @@ pub struct ManifestPackage {
     pub version: String,
     pub compiler: String,
     pub module_prefix: String,
+    /// Additional top-level source roots to walk in addition to `src/`.
+    /// Each entry is a single-segment directory name relative to the
+    /// package root (e.g. `"properties"`, `"references"`). Files under
+    /// these roots derive their module name with the root name as the
+    /// first segment after `module_prefix` (so `<root>/properties/foo.ch`
+    /// must declare `module <Prefix>.Properties.Foo`).
+    ///
+    /// Default-empty: a `reef.toml` without this field gets the same
+    /// `src/`-only treatment as before. See `validate_manifest` for the
+    /// full set of validation rules.
+    #[serde(default)]
+    pub additional_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +168,10 @@ impl PreparedReefGraph {
                 }
             };
             for module in package.modules.values() {
-                let abs = source_root.join("src").join(&module.file_rel);
+                // Multi-root: resolve via the per-module source_root, which
+                // is "src" for legacy packages and a manifest-declared
+                // additional_sources entry for non-src roots.
+                let abs = source_root.join(&module.source_root).join(&module.file_rel);
                 let bytes = fs::read(&abs)
                     .map_err(|e| format!("read source file `{}`: {e}", abs.display()))?;
                 let sha256: [u8; 32] = Sha256::digest(&bytes).into();
@@ -164,6 +179,35 @@ impl PreparedReefGraph {
                     package_name: package.id.name.clone(),
                     package_version: package.id.version.clone(),
                     module_name: module.module_name.clone(),
+                    sha256,
+                });
+            }
+            // Cache invalidation: the file-content walk above does not
+            // change when a manifest *adds* additional_sources entries
+            // that point at empty/absent dirs — same files walked, same
+            // digests, stale cache hit. Mix the manifest's
+            // additional_sources list into the digest set as a synthetic
+            // SourceDigest so any change to the declared roots flips the
+            // downstream cache key (ContextHash::from_digests includes
+            // every row in its sort+hash). The synthetic row uses a
+            // module_name of `<manifest::additional_sources>` which is
+            // syntactically not a valid module name, so it cannot collide
+            // with a real module digest.
+            if !package.manifest.package.additional_sources.is_empty() {
+                let serialized = serde_json::to_string(
+                    &package.manifest.package.additional_sources,
+                )
+                .map_err(|e| {
+                    format!(
+                        "serialize additional_sources for `{}` v{}: {e}",
+                        package.id.name, package.id.version
+                    )
+                })?;
+                let sha256: [u8; 32] = Sha256::digest(serialized.as_bytes()).into();
+                digests.push(SourceDigest {
+                    package_name: package.id.name.clone(),
+                    package_version: package.id.version.clone(),
+                    module_name: "<manifest::additional_sources>".to_string(),
                     sha256,
                 });
             }
@@ -234,7 +278,18 @@ struct ModuleSource {
     package_name: String,
     module_name: String,
     decls: Vec<Decl>,
+    /// Path relative to `source_root` (i.e. relative to
+    /// `<package_root>/<source_root>/`). For files under `src/` this is
+    /// the same as the legacy `file_rel`; for files under an additional
+    /// source root, this is still relative to that root, *not* to the
+    /// package root.
     file_rel: PathBuf,
+    /// Which declared source root (relative to the package root) this
+    /// module came from: `"src"` for files under `src/`, or one of the
+    /// entries from `manifest.package.additional_sources`. Used by
+    /// `source_digests` and `module_name_for_input` to reconstruct the
+    /// absolute path as `package_root.join(&source_root).join(&file_rel)`.
+    source_root: String,
     exports: BTreeSet<String>,
     symbols: BTreeMap<String, SymbolKind>,
 }
@@ -264,6 +319,7 @@ pub fn init_package(
             version: "0.1.0".to_string(),
             compiler: CURRENT_COMPILER_VERSION.to_string(),
             module_prefix: module_prefix.to_string(),
+            additional_sources: Vec::new(),
         },
         dependencies: BTreeMap::new(),
     };
@@ -426,6 +482,10 @@ pub fn rewrite_entry_decls_with_reef_graph(
         module_name: eval_module_name,
         decls: entry_decls.to_vec(),
         file_rel: PathBuf::from("__eval__.ch"),
+        // Synthetic eval module: it doesn't live on disk, so the
+        // source_root is purely cosmetic — the rewrite path doesn't
+        // resolve back to a file.
+        source_root: "src".to_string(),
         exports: BTreeSet::new(),
         symbols: collect_symbol_kinds(entry_decls),
     };
@@ -977,6 +1037,17 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
     })
 }
 
+/// Reserved top-level directory names that cannot appear in
+/// `additional_sources`. Future sibling tools that introduce their own
+/// walks (`bench`, `examples`, etc.) extend this list with a comment.
+/// Single hardcoded list keeps the rule explicit and discoverable.
+///
+/// - `src` is the implicit always-walked source root; redeclaring it
+///   would either no-op or double-walk.
+/// - `tests` is walked separately by chelis-cli's `cmd_test` /
+///   `discover_test_files`; reef does not subsume test discovery.
+const RESERVED_ADDITIONAL_SOURCE_DIRS: &[&str] = &["src", "tests"];
+
 fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
     if manifest.package.name.trim().is_empty() {
         return Err("package.name must not be empty".to_string());
@@ -991,6 +1062,39 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
         return Err(format!(
             "package.compiler must be `{CURRENT_COMPILER_VERSION}` in 3a"
         ));
+    }
+    let mut seen_additional = HashSet::new();
+    for entry in &manifest.package.additional_sources {
+        if entry.trim().is_empty() {
+            return Err("package.additional_sources entries must not be empty".to_string());
+        }
+        if RESERVED_ADDITIONAL_SOURCE_DIRS.contains(&entry.as_str()) {
+            return Err(format!(
+                "package.additional_sources entry `{entry}` is reserved \
+                 (reserved: {:?})",
+                RESERVED_ADDITIONAL_SOURCE_DIRS
+            ));
+        }
+        if entry.contains('/') || entry.contains('\\') {
+            return Err(format!(
+                "package.additional_sources entry `{entry}` must be a single \
+                 directory name without path separators"
+            ));
+        }
+        if !entry
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "package.additional_sources entry `{entry}` must contain only \
+                 ASCII alphanumeric, underscore, or hyphen characters"
+            ));
+        }
+        if !seen_additional.insert(entry.as_str()) {
+            return Err(format!(
+                "package.additional_sources contains duplicate entry `{entry}`"
+            ));
+        }
     }
     for (name, dep) in &manifest.dependencies {
         match (&dep.version, &dep.path) {
@@ -1245,64 +1349,141 @@ fn load_package_modules(
     root: &Path,
     manifest: &ReefManifest,
 ) -> Result<BTreeMap<String, ModuleSource>, String> {
+    // src/ remains mandatory; the additional-roots loop runs after
+    // confirming src/ exists so the loop body stays uniform.
     let src_root = root.join("src");
     if !src_root.exists() {
         return Err(format!("{} is missing src/", root.display()));
     }
-    let mut modules = BTreeMap::new();
-    for entry in WalkDir::new(&src_root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch") {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(&src_root)
-            .map_err(|e| e.to_string())?
-            .to_path_buf();
-        let decls = chelis_surf::parser::parse_str(
-            &fs::read_to_string(entry.path()).map_err(|e| e.to_string())?,
+
+    // Walk every declared source root: src/ first, then each entry from
+    // manifest.package.additional_sources (validated empty/distinct/safe
+    // by validate_manifest before we get here).
+    let roots: Vec<&str> = std::iter::once("src")
+        .chain(
+            manifest
+                .package
+                .additional_sources
+                .iter()
+                .map(|s| s.as_str()),
         )
-        .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        let module_decl = match decls.as_slice() {
-            [Decl::Module { name, decls, .. }] => (name.clone(), decls.clone()),
-            _ => {
+        .collect();
+
+    let mut modules: BTreeMap<String, ModuleSource> = BTreeMap::new();
+    let mut total_files = 0usize;
+    for source_root_name in &roots {
+        let abs_root = root.join(source_root_name);
+        // Additional roots are optional: a manifest may declare
+        // additional_sources = ["properties"] with no properties/ dir
+        // yet (e.g. while migrating). We skip silently rather than
+        // erroring; src/ is the only mandatory root and was checked
+        // above.
+        if !abs_root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&abs_root).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch") {
+                continue;
+            }
+            total_files += 1;
+            let rel = entry
+                .path()
+                .strip_prefix(&abs_root)
+                .map_err(|e| e.to_string())?
+                .to_path_buf();
+            // CRITICAL: for non-src roots, prepend the source root name to
+            // the relative path before validation. validate_module_path
+            // strips the source-root prefix entirely from path-to-module
+            // derivation, so without prepending,
+            //   <root>/src/foo.ch         (rel = foo.ch)            -> prefix.foo
+            //   <root>/properties/foo.ch  (rel would be foo.ch too) -> prefix.foo
+            // would collide. Prepending makes the second case
+            //   rel_for_validation = properties/foo.ch  -> prefix.properties.foo
+            // The author of properties/foo.ch must declare
+            // `module <Prefix>.Properties.Foo` — convention follows the
+            // same path-to-module rule, just with the root name as the
+            // first segment for non-src roots.
+            let rel_for_validation = if *source_root_name == "src" {
+                rel.clone()
+            } else {
+                Path::new(source_root_name).join(&rel)
+            };
+            let decls = chelis_surf::parser::parse_str(
+                &fs::read_to_string(entry.path()).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+            let module_decl = match decls.as_slice() {
+                [Decl::Module { name, decls, .. }] => (name.clone(), decls.clone()),
+                _ => {
+                    return Err(format!(
+                        "{} must contain exactly one top-level module declaration",
+                        entry.path().display()
+                    ));
+                }
+            };
+            validate_module_path(
+                &manifest.package.module_prefix,
+                &module_decl.0,
+                &rel_for_validation,
+            )?;
+            let exports = compute_exports(&module_decl.1);
+            let symbols = collect_symbol_kinds(&module_decl.1);
+            if exports
+                .iter()
+                .any(|name| matches!(symbols.get(name), Some(SymbolKind::Macro)))
+            {
                 return Err(format!(
-                    "{} must contain exactly one top-level module declaration",
-                    entry.path().display()
+                    "cross-package macro exports are deferred in 3a; module {} exports a macro",
+                    module_decl.0
                 ));
             }
-        };
-        validate_module_path(&manifest.package.module_prefix, &module_decl.0, &rel)?;
-        let exports = compute_exports(&module_decl.1);
-        let symbols = collect_symbol_kinds(&module_decl.1);
-        if exports
-            .iter()
-            .any(|name| matches!(symbols.get(name), Some(SymbolKind::Macro)))
-        {
-            return Err(format!(
-                "cross-package macro exports are deferred in 3a; module {} exports a macro",
-                module_decl.0
-            ));
-        }
-        modules.insert(
-            module_decl.0.clone(),
-            ModuleSource {
+            // Belt-and-suspenders against any case the rel-prepending
+            // missed: BTreeMap::insert returns Some(prev) on a duplicate
+            // key. The rel-prepending should already prevent cross-root
+            // collisions, but a duplicate module-name across roots
+            // (e.g. two `module Pkg.Foo` declared with mismatched paths)
+            // is still a hard error.
+            let module_name = module_decl.0.clone();
+            let new_source = ModuleSource {
                 package_name: manifest.package.name.clone(),
                 module_name: module_decl.0,
                 decls: module_decl.1,
                 file_rel: rel,
+                source_root: (*source_root_name).to_string(),
                 exports,
                 symbols,
-            },
-        );
+            };
+            if let Some(prev) = modules.insert(module_name.clone(), new_source) {
+                return Err(format!(
+                    "duplicate module `{module_name}` across source roots: \
+                     `{}/{}` and `{}/{}`",
+                    prev.source_root,
+                    prev.file_rel.display(),
+                    source_root_name,
+                    entry
+                        .path()
+                        .strip_prefix(&abs_root)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| entry.path().display().to_string())
+                ));
+            }
+        }
     }
-    if modules.is_empty() {
+    if total_files == 0 {
         return Err(format!(
-            "{} has no .ch source files under src/",
-            root.display()
+            "{} has no .ch source files under src/{}",
+            root.display(),
+            if manifest.package.additional_sources.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " or any of [{}]",
+                    manifest.package.additional_sources.join(", ")
+                )
+            }
         ));
     }
     Ok(modules)
@@ -1324,8 +1505,13 @@ fn validate_module_path(prefix: &str, module: &str, rel: &Path) -> Result<(), St
         .join(".");
     let expected = format!("{prefix_lower}.{rel_module}");
     if module_lower != expected {
+        // The caller passes `rel` already prefixed with the source root
+        // name for non-src roots (see `load_package_modules`), so the
+        // displayed path is the source-root-relative-from-package-root
+        // form ("src/foo.ch" or "properties/foo.ch") and the expected
+        // module name reflects the same rule.
         return Err(format!(
-            "module `{module}` does not match file path src/{} (expected `{}`)",
+            "module `{module}` does not match file path {} (expected `{}`)",
             rel.display(),
             expected
         ));
@@ -1389,19 +1575,31 @@ fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result
     let canonical = file
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize {}: {e}", file.display()))?;
+    // Multi-root: each module records its own source_root, so we
+    // reconstruct the absolute path the same way `source_digests` does.
     for module in root_pkg.modules.values() {
-        if root.join("src").join(&module.file_rel) == canonical {
+        if root.join(&module.source_root).join(&module.file_rel) == canonical {
             return Ok(module.module_name.clone());
         }
     }
+    let declared_roots = std::iter::once("src".to_string())
+        .chain(root_pkg.manifest.package.additional_sources.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(format!(
-        "{} is not a source file under {}/src",
+        "{} is not a source file under any declared root of {} (roots: [{}])",
         file.display(),
-        root.display()
+        root.display(),
+        declared_roots,
     ))
 }
 
 fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
+    // Re-read the manifest to know which additional source roots to pack.
+    // (This function is called from `build_package` after the graph has
+    // already been resolved; reading once more here is cheap and keeps
+    // the archive packing self-contained.)
+    let manifest = read_manifest(&root.join("reef.toml"))?;
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
@@ -1413,17 +1611,35 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
             }
         }
-        for entry in WalkDir::new(root.join("src"))
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
+        // Pack src/ plus every declared additional source root. Tar
+        // paths remain relative to the package root, so an archive with
+        // additional_sources = ["properties"] contains both src/main.ch
+        // and properties/foo.ch at their canonical relative locations.
+        // extract_archive (just below) is path-agnostic — it unpacks
+        // whatever paths were packed.
+        let roots: Vec<&str> = std::iter::once("src")
+            .chain(
+                manifest
+                    .package
+                    .additional_sources
+                    .iter()
+                    .map(|s| s.as_str()),
+            )
+            .collect();
+        for source_root_name in &roots {
+            let abs_root = root.join(source_root_name);
+            if !abs_root.exists() {
                 continue;
             }
-            let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
-            builder
-                .append_path_with_name(entry.path(), rel)
-                .map_err(|e| e.to_string())?;
+            for entry in WalkDir::new(&abs_root).into_iter().filter_map(Result::ok) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
+                builder
+                    .append_path_with_name(entry.path(), rel)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         builder.finish().map_err(|e| e.to_string())?;
     }
@@ -2428,6 +2644,7 @@ mod tests {
                 version: "0.1.0".to_string(),
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Demo".to_string(),
+                additional_sources: Vec::new(),
             },
             dependencies: BTreeMap::from([(
                 "chelis-std".to_string(),
@@ -3096,5 +3313,279 @@ path = "./mylib"
             restored.internal_maps.len(),
             "internal maps survive round-trip"
         );
+    }
+
+    // ---- Multi-source-roots (additional_sources) ----
+
+    /// Backward compat: a `reef.toml` without `additional_sources`
+    /// deserializes with an empty Vec — existing packages keep
+    /// working without modification.
+    #[test]
+    fn additional_sources_default_is_empty() {
+        let toml_text = format!(
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        let parsed: ReefManifest = toml::from_str(&toml_text).expect("parse");
+        assert!(
+            parsed.package.additional_sources.is_empty(),
+            "additional_sources must default to empty Vec, got {:?}",
+            parsed.package.additional_sources
+        );
+        // And serialization round-trips: empty Vec serializes back and
+        // re-parses to the same empty Vec.
+        let re_serialized = toml::to_string(&parsed).expect("serialize");
+        let re_parsed: ReefManifest = toml::from_str(&re_serialized).expect("re-parse");
+        assert_eq!(re_parsed, parsed);
+    }
+
+    /// Happy path: a package with `additional_sources = ["properties"]`
+    /// has both `src/` and `properties/` walked, both produce
+    /// importable modules, and the module names follow the
+    /// path-with-root-prefix rule
+    /// (`<prefix>.foo` for src/foo.ch,
+    ///  `<prefix>.properties.bar` for properties/bar.ch).
+    /// Cross-root imports must resolve.
+    #[test]
+    fn multi_root_packages_resolve_correctly() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("multi");
+
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "multi"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Pkg"
+additional_sources = ["properties"]
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        // src/foo.ch defines call_price; module Pkg.Foo.
+        write(
+            &root.join("src/foo.ch"),
+            "module Pkg.Foo\n\nexport (call_price)\ndef call_price(s: f32, k: f32) -> f32 = s - k\n",
+        );
+        // properties/bar.ch imports Pkg.Foo (call_price) and uses it.
+        // Must declare module Pkg.Properties.Bar — the path-to-module
+        // rule with the source root name as the first segment after the
+        // module prefix.
+        write(
+            &root.join("properties/bar.ch"),
+            "module Pkg.Properties.Bar\n\nimport Pkg.Foo (call_price)\nexport (matches)\ndef matches(s: f32, k: f32, expected: f32) -> bool = call_price(s, k) == expected\n",
+        );
+
+        let modules = load_package_modules(
+            &root,
+            &read_manifest(&root.join("reef.toml")).expect("manifest"),
+        )
+        .expect("load modules across roots");
+        // Both modules must be present, with distinct names.
+        assert!(
+            modules.contains_key("Pkg.Foo"),
+            "expected Pkg.Foo from src/, got: {:?}",
+            modules.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            modules.contains_key("Pkg.Properties.Bar"),
+            "expected Pkg.Properties.Bar from properties/, got: {:?}",
+            modules.keys().collect::<Vec<_>>()
+        );
+        // Source roots must be tagged correctly so source_digests and
+        // module_name_for_input can find each file again.
+        assert_eq!(modules["Pkg.Foo"].source_root, "src");
+        assert_eq!(modules["Pkg.Properties.Bar"].source_root, "properties");
+
+        // Cross-root import resolution: prepare the full graph and
+        // confirm the linked library decls include the rewritten
+        // call_price function so Pkg.Properties.Bar's import of
+        // Pkg.Foo (call_price) is resolvable.
+        let graph = prepare_reef_graph(&root).expect("prepare_reef_graph");
+        let has_call_price = graph
+            .linked_library_decls
+            .iter()
+            .any(|d| matches!(d, Decl::FunDef { name, .. } if name.contains("call_price")));
+        assert!(
+            has_call_price,
+            "linked library must include call_price for cross-root import resolution"
+        );
+    }
+
+    /// Validation negatives: every documented `additional_sources` rule
+    /// is locked with a table-driven test. Empty entry, reserved names,
+    /// path separators, non-alphanumeric chars, and duplicates each
+    /// produce a clear error with the offending entry named.
+    #[test]
+    fn additional_sources_validation_rejects_bad_entries() {
+        // Each row: (additional_sources value, expected substring in the error).
+        let cases: Vec<(Vec<&str>, &str)> = vec![
+            (vec![""], "must not be empty"),
+            (vec!["src"], "reserved"),
+            (vec!["tests"], "reserved"),
+            (vec!["a/b"], "single directory name"),
+            (vec!["a\\b"], "single directory name"),
+            (vec!["bad name"], "ASCII alphanumeric"),
+            (vec!["bad.name"], "ASCII alphanumeric"),
+            (vec!["properties", "properties"], "duplicate"),
+        ];
+        for (entries, expected_substr) in cases {
+            let manifest = ReefManifest {
+                package: ManifestPackage {
+                    name: "demo".to_string(),
+                    version: "0.1.0".to_string(),
+                    compiler: CURRENT_COMPILER_VERSION.to_string(),
+                    module_prefix: "Demo".to_string(),
+                    additional_sources: entries.iter().map(|s| s.to_string()).collect(),
+                },
+                dependencies: BTreeMap::new(),
+            };
+            let err =
+                validate_manifest(&manifest).expect_err(&format!("{entries:?} must be rejected"));
+            assert!(
+                err.contains(expected_substr),
+                "for {entries:?}, expected error to contain {expected_substr:?}, got: {err}"
+            );
+        }
+        // Positive control: a valid additional_sources passes.
+        let manifest = ReefManifest {
+            package: ManifestPackage {
+                name: "demo".to_string(),
+                version: "0.1.0".to_string(),
+                compiler: CURRENT_COMPILER_VERSION.to_string(),
+                module_prefix: "Demo".to_string(),
+                additional_sources: vec!["properties".to_string(), "references".to_string()],
+            },
+            dependencies: BTreeMap::new(),
+        };
+        validate_manifest(&manifest).expect("valid additional_sources must pass");
+    }
+
+    /// `build_archive` packs files from every declared root, not just
+    /// `src/`, so a downstream consumer extracting the tarball gets the
+    /// canonical multi-root layout (src/ + each additional root) at
+    /// their relative-to-package-root locations.
+    #[test]
+    fn multi_root_archive_contains_all_roots() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("multi");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "multi"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Pkg"
+additional_sources = ["properties"]
+"#,
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/foo.ch"),
+            "module Pkg.Foo\n\nexport (one)\ndef one -> int32 = 1\n",
+        );
+        write(
+            &root.join("properties/bar.ch"),
+            "module Pkg.Properties.Bar\n\nexport (two)\ndef two -> int32 = 2\n",
+        );
+
+        let archive_path = root.join("multi.tar.zst");
+        build_archive(&root, &archive_path).expect("build_archive");
+
+        // Decode and inspect the tar entries.
+        let bytes = fs::read(&archive_path).expect("read archive");
+        let decoded = zstd::stream::decode_all(Cursor::new(bytes)).expect("zstd decode");
+        let mut archive = Archive::new(Cursor::new(decoded));
+        let mut entries: Vec<String> = archive
+            .entries()
+            .expect("entries")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().expect("entry path").to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        // Tar paths are relative-to-package-root, so files appear at
+        // their canonical layout positions.
+        assert!(
+            entries.iter().any(|p| p == "reef.toml"),
+            "archive must contain reef.toml, got: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|p| p == "src/foo.ch"),
+            "archive must contain src/foo.ch, got: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|p| p == "properties/bar.ch"),
+            "archive must contain properties/bar.ch, got: {entries:?}"
+        );
+    }
+
+    /// Cache-invalidation guarantee for the manifest: adding
+    /// `additional_sources = ["properties"]` to a package whose
+    /// `properties/` directory is empty/absent must still flip the
+    /// cache key. Otherwise a customer would update the manifest, see
+    /// no change in walked files, and get a stale compiled context.
+    #[test]
+    fn additional_sources_change_invalidates_source_digests() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("invalidation");
+        let manifest_path = root.join("reef.toml");
+        let pre_manifest = format!(
+            r#"[package]
+name = "invalidation"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Invalidation"
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        write(&manifest_path, &pre_manifest);
+        write(
+            &root.join("src/main.ch"),
+            "module Invalidation.Main\n\nexport (id)\ndef id(x: int32) -> int32 = x\n",
+        );
+
+        let pre_digests = prepare_reef_graph(&root)
+            .expect("prepare pre")
+            .source_digests()
+            .expect("source_digests pre");
+
+        // Mutate the manifest to add additional_sources, but leave
+        // properties/ absent so the file walk yields the same .ch files.
+        let post_manifest = format!(
+            r#"[package]
+name = "invalidation"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Invalidation"
+additional_sources = ["properties"]
+"#,
+            ver = CURRENT_COMPILER_VERSION
+        );
+        write(&manifest_path, &post_manifest);
+        // Sanity: the file set is genuinely unchanged.
+        assert!(!root.join("properties").exists());
+
+        let post_digests = prepare_reef_graph(&root)
+            .expect("prepare post")
+            .source_digests()
+            .expect("source_digests post");
+
+        assert_ne!(
+            pre_digests, post_digests,
+            "manifest additional_sources change must flip source_digests \
+             even when no .ch files were added"
+        );
+        // The downstream cache key (ContextHash::from_digests) is a
+        // deterministic SHA over the digests Vec; any difference in
+        // the Vec content propagates.
     }
 }
