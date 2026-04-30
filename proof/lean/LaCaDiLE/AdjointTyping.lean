@@ -2244,6 +2244,139 @@ private theorem slot_choice_trans
     · exact Or.inl (h12.trans h01)
     · exact Or.inr (h12.trans h01)
 
+private theorem adjointTypedClauses_pair_finish_slot_typed
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    {t1 t2 : Typ} {hb body : Term}
+    {rest : List (EffectLabel × String × String × Term)}
+    (ihHead :
+      ∀ {Gamma suffixIn suffixOut : LinearCtx} {x : String} {gSeed : Term}
+          {n : Nat} {slotIn : Option Typ},
+        HasType Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          gSeed
+          (cotangentType (Typ.pair t1 t2))
+          []
+          (Gamma ++ [(x, slotIn)] ++ suffixOut) →
+        ∃ slotOut,
+          (slotOut = none ∨ slotOut = slotIn) ∧
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (adjointTypedFrom hb (Typ.pair t1 t2) x gSeed n)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut))
+    (ihRest :
+      ∀ {Gamma suffixIn suffixOut : LinearCtx} {x : String} {body' : Term}
+          {gSeed : Term} {n : Nat} {slotIn : Option Typ},
+        (∀ {Gamma0 suffixIn0 suffixOut0 : LinearCtx} {x0 : String} {gSeed0 : Term}
+            {n0 : Nat} {slotIn0 : Option Typ},
+          HasType Delta Sigma
+            (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+            gSeed0
+            (cotangentType (Typ.pair t1 t2))
+            []
+            (Gamma0 ++ [(x0, slotIn0)] ++ suffixOut0) →
+          ∃ slotOut0,
+            (slotOut0 = none ∨ slotOut0 = slotIn0) ∧
+            HasType Delta Sigma
+              (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+              (adjointTypedFrom body' (Typ.pair t1 t2) x0 gSeed0 n0)
+              Typ.unit
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (Gamma0 ++ [(x0, slotOut0)] ++ suffixOut0)) →
+        HasType Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          gSeed
+          (cotangentType (Typ.pair t1 t2))
+          []
+          (Gamma ++ [(x, slotIn)] ++ suffixOut) →
+        ∃ slotOut,
+          (slotOut = none ∨ slotOut = slotIn) ∧
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (adjointTypedClausesFrom rest x body' (Typ.pair t1 t2) gSeed n)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut))
+    {Gamma suffixHead suffixRest suffixOut : LinearCtx}
+    {param adjHb : String} {headSeed restSeed : Term}
+    {n : Nat} {slotIn : Option Typ}
+    (ihBody :
+      ∀ {Gamma0 suffixIn0 suffixOut0 : LinearCtx} {x0 : String} {gSeed0 : Term}
+          {n0 : Nat} {slotIn0 : Option Typ},
+        HasType Delta Sigma
+          (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+          gSeed0
+          (cotangentType (Typ.pair t1 t2))
+          []
+          (Gamma0 ++ [(x0, slotIn0)] ++ suffixOut0) →
+        ∃ slotOut0,
+          (slotOut0 = none ∨ slotOut0 = slotIn0) ∧
+          HasType Delta Sigma
+            (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+            (adjointTypedFrom body (Typ.pair t1 t2) x0 gSeed0 n0)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma0 ++ [(x0, slotOut0)] ++ suffixOut0))
+    (hHeadSeed :
+      HasType Delta Sigma
+        (Gamma ++ [(param, slotIn)] ++ suffixHead)
+        headSeed
+        (cotangentType (Typ.pair t1 t2))
+        []
+        (Gamma ++ [(param, slotIn)] ++ suffixRest))
+    (hRestSeed :
+      ∀ {slotMid : Option Typ},
+        HasType Delta Sigma
+          (Gamma ++ [(param, slotMid)] ++ suffixRest ++ [(adjHb, some Typ.unit)])
+          restSeed
+          (cotangentType (Typ.pair t1 t2))
+          []
+          (Gamma ++ [(param, slotMid)] ++ suffixOut ++ [(adjHb, some Typ.unit)])) :
+    ∃ slotOut,
+      (slotOut = none ∨ slotOut = slotIn) ∧
+      HasType Delta Sigma
+        (Gamma ++ [(param, slotIn)] ++ suffixHead)
+        (Term.letBind adjHb
+          (adjointTypedFrom hb (Typ.pair t1 t2) param headSeed n)
+          (adjointTypedClausesFrom rest param body (Typ.pair t1 t2) restSeed n))
+        Typ.unit
+        (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+        (Gamma ++ [(param, slotOut)] ++ suffixOut) := by
+  obtain ⟨slotMid, hslotMid, hHeadTyped⟩ :=
+    ihHead
+      (Gamma := Gamma)
+      (suffixIn := suffixHead)
+      (suffixOut := suffixRest)
+      (x := param)
+      (gSeed := headSeed)
+      (n := n)
+      (slotIn := slotIn)
+      hHeadSeed
+  obtain ⟨slotOut, hslotOut, hRestTyped⟩ :=
+    ihRest
+      (Gamma := Gamma)
+      (suffixIn := suffixRest ++ [(adjHb, some Typ.unit)])
+      (suffixOut := suffixOut ++ [(adjHb, some Typ.unit)])
+      (x := param)
+      (body' := body)
+      (gSeed := restSeed)
+      (n := n)
+      (slotIn := slotMid)
+      ihBody
+      (by simpa [List.append_assoc] using hRestSeed (slotMid := slotMid))
+  refine ⟨slotOut, slot_choice_trans hslotMid hslotOut, ?_⟩
+  exact adjointTyped_seq_typed Delta Sigma
+    (Gamma ++ [(param, slotIn)] ++ suffixHead)
+    (Gamma ++ [(param, slotMid)] ++ suffixRest)
+    (Gamma ++ [(param, slotOut)] ++ suffixOut)
+    adjHb
+    (adjointTypedFrom hb (Typ.pair t1 t2) param headSeed n)
+    (adjointTypedClausesFrom rest param body (Typ.pair t1 t2) restSeed n)
+    (some Typ.unit)
+    hHeadTyped
+    (by simpa [List.append_assoc] using hRestTyped)
+
 private theorem adjointTypedClauses_cons_slot_typed
     (Delta : CapCtx) (Sigma : StoreTyp)
     {t : Typ} {op : EffectLabel} {xv kv param : String} {hb body : Term}
