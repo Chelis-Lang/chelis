@@ -318,6 +318,18 @@ These invariants span both 3n and 3o and must hold on every release:
    modulo floating-point formatting. Re-parsing the rendered output must
    produce the same SymExpr modulo whitespace and bracket normalization.
 
+## 3a. Toolchain dependencies
+
+**`properties/`/`references/` layout downstream of Octant.** Octant emits `.dp`
+files from customer LaTeX inputs. Where the customer integrates those `.dp`
+files into their reef package layout — under `src/properties/`, `src/references/`,
+or top-level `properties/`/`references/` once chelis-reef supports it — is the
+customer's choice, not Octant's. Until chelis-reef gains multi-source-root
+support (tracked at `spec/upstream-bugs/reef-multi-source-roots.md`), customers
+who follow the Shoals v0.1.0 pattern will place Octant outputs under `src/`.
+Customers on a future chelis-reef will place them at the canonical root. Octant's
+contract ends at emitting the `.dp`; the integration shape is downstream.
+
 ## 4. Post-Phase-3 stub: Octant document ingestion
 
 Octant Phase 4 (from the design doc) is parked outside Phase 3. It covers
