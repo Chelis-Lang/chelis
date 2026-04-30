@@ -2031,6 +2031,132 @@ theorem adjointTyped_mul_output_counterexample :
   obtain ⟨tIn, hLookupIn⟩ := slotSub_lookup_some hSlotSubRest hLookupOut
   simp [lookupLinearCtx, adjointMulCtxGapX, adjointMulCtxGapT, freshName] at hLookupIn
 
+private def adjointMulShapeGapBody : Term :=
+  Term.mul (Term.var "y") (Term.const 0 DimList.empty)
+
+private theorem adjointMulShapeGapShape
+    {Sigma : StoreTyp} :
+    AdjointTypedShape (Capability.diff :: []) Sigma
+      adjointMulCtxGapT
+      adjointMulShapeGapBody := by
+  refine .mul ?_ .var .const
+  refine ⟨[("y", some adjointMulCtxGapT)],
+    [("y", none)],
+    [("y", none)],
+    [], [], ?_, ?_⟩
+  · simpa [adjointMulCtxGapT, List.append_assoc] using
+      (HasType.var (Capability.diff :: []) Sigma
+        ([] : LinearCtx)
+        ([] : LinearCtx)
+        "y"
+        adjointMulCtxGapT)
+  · simpa [adjointMulCtxGapT] using
+      (HasType.const (Capability.diff :: []) Sigma
+        ([("y", none)] : LinearCtx)
+        0
+        DimList.empty)
+
+private theorem adjointMulShapeGap_head :
+    adjointTypedFrom adjointMulShapeGapBody
+      adjointMulCtxGapT
+      adjointMulCtxGapX
+      (Term.var "gs")
+      0 =
+      Term.letpair (freshName "gA" 0) (freshName "gB" 0)
+        (Term.copy (Term.var "gs"))
+        (Term.letpair (freshName "a" 2) (freshName "aTape" 2)
+          (Term.copy (Term.var "y"))
+          (Term.letpair (freshName "b" 3) (freshName "bTape" 3)
+            (Term.copy (Term.const 0 DimList.empty))
+            (Term.letBind (freshName "y" 4)
+              (Term.mul (Term.var (freshName "a" 2)) (Term.var (freshName "b" 3)))
+              (Term.letBind (freshName "adjA" 5)
+                (adjointTypedFrom (Term.var "y")
+                  adjointMulCtxGapT
+                  adjointMulCtxGapX
+                  (Term.mul (Term.var (freshName "gA" 0))
+                    (Term.var (freshName "bTape" 3)))
+                  6)
+                (adjointTypedFrom (Term.const 0 DimList.empty)
+                  adjointMulCtxGapT
+                  adjointMulCtxGapX
+                  (Term.mul (Term.var (freshName "gB" 0))
+                    (Term.var (freshName "aTape" 2)))
+                  6))))) := by
+  simp [adjointMulShapeGapBody, adjointMulCtxGapT,
+    adjointTypedFrom, splitCotangentSeedFrom]
+
+private theorem adjointMulShapeGap_ctx_no_y
+    {GammaPre GammaPost : LinearCtx} {ds : DimList}
+    {t1 t2 : Typ}
+    (h :
+      ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+        ("gs", none),
+        (freshName "gA" 0, some t1),
+        (freshName "gB" 0, some t2)] : LinearCtx) =
+        GammaPre ++ [("y", some (Typ.tensor ds))] ++ GammaPost) :
+    False := by
+  cases GammaPre with
+  | nil =>
+      simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at h
+  | cons a GammaPre =>
+      cases GammaPre with
+      | nil =>
+          simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at h
+      | cons b GammaPre =>
+          cases GammaPre with
+          | nil =>
+              simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at h
+          | cons c GammaPre =>
+              cases GammaPre with
+              | nil =>
+                  simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at h
+              | cons d GammaPre =>
+                  simp [adjointMulCtxGapX, adjointMulCtxGapT, freshName] at h
+
+/-- The current shape-only private helper surface is still too strong for
+    `mul`: even with the honest slot result, a shape witness alone does
+    not constrain the current seed/source context enough to replay raw
+    source operands like `var "y"` under `copy`. -/
+theorem adjointTyped_mul_shape_counterexample :
+    (∀ Sigma,
+      AdjointTypedShape (Capability.diff :: []) Sigma
+        adjointMulCtxGapT
+        adjointMulShapeGapBody) ∧
+    (∀ Sigma, ¬ ∃ eps GammaOut,
+      HasType [] Sigma
+        ([(adjointMulCtxGapX, some adjointMulCtxGapT),
+          ("gs", some adjointMulCtxGapT)] : LinearCtx)
+        (adjointTypedFrom adjointMulShapeGapBody
+          adjointMulCtxGapT
+          adjointMulCtxGapX
+          (Term.var "gs")
+          0)
+        Typ.unit
+        eps
+        GammaOut) := by
+  refine ⟨?_, ?_⟩
+  · intro Sigma
+    exact adjointMulShapeGapShape (Sigma := Sigma)
+  · intro Sigma
+    intro h
+    rcases h with ⟨eps, GammaOut, hAdj⟩
+    rw [adjointMulShapeGap_head] at hAdj
+    rcases hasType_letpair_inv hAdj with
+      ⟨Gamma2, Gamma3, t1, t2, eps1, eps2, slotGA, slotGB,
+        hCopySeed, hAfterSeed, _hOut⟩
+    obtain ⟨_dsSeed, _hCopyTy, hVarSeed⟩ := hasType_copy_inv hCopySeed
+    obtain ⟨hTySeed, hOutSeed⟩ :=
+      adjointMulPublic_seed_var_inv (Sigma := Sigma) hVarSeed
+    cases hTySeed
+    subst Gamma2
+    rcases hasType_letpair_inv hAfterSeed with
+      ⟨Gamma2', Gamma3', tA, tATape, _epsA, _epsRest, slotA, slotATape,
+        hCopyY, _hRest, _hOut2⟩
+    obtain ⟨dsY, _hCopyTy, hVarY⟩ := hasType_copy_inv hCopyY
+    obtain ⟨GammaPre, GammaPost, hCtx, _hOutVar⟩ := hasType_var_ctx_inv hVarY
+    exact adjointMulShapeGap_ctx_no_y (t1 := t1) (t2 := t2) hCtx
+
 /- The legacy `adjointFrom` theorem family was removed from the live
    proof surface once handled product-seed counterexamples showed that
    its tensor-only clause threading is false. `Preservation` now uses
