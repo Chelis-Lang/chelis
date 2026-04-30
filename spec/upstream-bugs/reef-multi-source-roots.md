@@ -1,9 +1,18 @@
 # reef-multi-source-roots: chelis-reef hardcodes `src/` as the only source root
 
-**Status:** open
+**Status:** RESOLVED
 **Filed:** 2026-04-30
 **Owning phase:** chelis-reef
 **Discovered by:** Phase 3l Shoals fix-up #2
+
+## Resolved
+
+Resolved 2026-04-30 in chelis-reef commit `6b58030 feat(reef):
+multi-source-roots — additional_sources in reef.toml; bump v0.4.1`.
+Shoals migrated to canonical layout in commit `553021a`. Octant
+continues to track for downstream customer outputs (no Octant-side change
+required; the layout is the customer's choice per
+`chelis_octant_design.md` Section 3a).
 
 **Why this matters.** This bug blocks the trust stack convention as documented in
 `chelis_reference_implementations_spec.md` and `chelis_canonical_reference.md`. The
