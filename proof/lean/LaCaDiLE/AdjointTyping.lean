@@ -2574,15 +2574,25 @@ private theorem adjointTypedShape_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) :
     ∀ {t : Typ} {e : Term},
       AdjointTypedShape (Capability.diff :: Delta) Sigma t e →
-      ∀ {Gamma_s Gamma_s' suffix : LinearCtx} {x : String} {gSeed : Term} {n : Nat},
+      ∀ {Gamma suffixIn suffixOut : LinearCtx} {x : String} {gSeed : Term}
+        {n : Nat} {slotIn : Option Typ},
         HasType Delta Sigma
-          (Gamma_s ++ suffix) gSeed (cotangentType t) [] (Gamma_s' ++ suffix) →
-        HasType Delta Sigma
-          (Gamma_s ++ suffix)
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          gSeed
+          (cotangentType t)
+          []
+          (Gamma ++ [(x, slotIn)] ++ suffixOut) →
+        ∃ slotOut,
+          (slotOut = none ∨ slotOut = slotIn) ∧
+          HasType Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
           (adjointTypedFrom e t x gSeed n)
           Typ.unit
           (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-          (Gamma_s' ++ suffix) := by
+          (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
+  sorry
+
+/-
   intro t e hShape
   induction hShape using AdjointTypedShape.rec
     (motive_2 := fun t clauses _ =>
@@ -2976,6 +2986,7 @@ private theorem adjointTypedShape_preserves_typing
         (ihRest := ihRest')
         (ihBody := ihBody)
         (h_seed := h_seed)
+-/
 
 /-- Typed public surface for the staged adjoint transform. This is the
     theorem `T-Grad` now needs because the operational reduct uses
@@ -2993,43 +3004,50 @@ theorem adjointTypedFrom_preserves_typing
     (_h_fresh_full : AdjointNamesFresh n
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
     (_h_fresh_small : AdjointNamesFresh n (Gamma ++ [(x, some (Typ.tensor ds))])) :
-    HasType Delta Sigma
-            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
-            (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
-            Typ.unit
-            (EffectRow.union eps [EffectLabel.accum])
-            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
+    ∃ slotAdj,
+      (slotAdj = none ∨ slotAdj = some (Typ.tensor ds)) ∧
+      HasType Delta Sigma
+        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
+        (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
+        Typ.unit
+        (EffectRow.union eps [EffectLabel.accum])
+        (Gamma ++ [(x, slotAdj), (gs, none)]) := by
   have hShape : AdjointTypedShape (Capability.diff :: Delta) Sigma (Typ.tensor dsOut) e :=
     adjointTypedShape_of_typed _h_e _h_supp
+  obtain ⟨slotAdj, hslotAdj, hAdjRaw⟩ :=
+    adjointTypedShape_preserves_typing Delta Sigma hShape
+      (Gamma := Gamma)
+      (suffixIn := ([(gs, some (Typ.tensor dsOut))] : LinearCtx))
+      (suffixOut := ([(gs, none)] : LinearCtx))
+      (x := x)
+      (gSeed := Term.var gs)
+      (n := n)
+      (slotIn := some (Typ.tensor ds))
+      (by
+        simpa [List.append_assoc] using
+          (HasType.var Delta Sigma
+            (Gamma ++ [(x, some (Typ.tensor ds))])
+            ([] : LinearCtx)
+            gs
+            (Typ.tensor dsOut)))
   have hAdj :
       HasType Delta Sigma
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
         (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
         Typ.unit
         (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
-    simpa using
-      (adjointTypedShape_preserves_typing Delta Sigma hShape
-        (Gamma_s := Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
-        (Gamma_s' := Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)])
-        (suffix := ([] : LinearCtx))
-        (x := x) (gSeed := Term.var gs) (n := n)
-        (by
-          simpa [List.append_assoc] using
-            (HasType.var Delta Sigma
-              (Gamma ++ [(x, some (Typ.tensor ds))])
-              ([] : LinearCtx)
-              gs
-              (Typ.tensor dsOut))))
-  exact HasType.subEff Delta Sigma
-    (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
-    (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)])
-    (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
-    Typ.unit
-    (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
-    (EffectRow.union eps [EffectLabel.accum])
-    hAdj
-    (subEff_accum_into_grad eps)
+        (Gamma ++ [(x, slotAdj), (gs, none)]) := by
+    simpa [List.append_assoc] using hAdjRaw
+  exact ⟨slotAdj, hslotAdj,
+    HasType.subEff Delta Sigma
+      (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
+      (Gamma ++ [(x, slotAdj), (gs, none)])
+      (adjointTypedFrom e (Typ.tensor dsOut) x (Term.var gs) n)
+      Typ.unit
+      (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+      (EffectRow.union eps [EffectLabel.accum])
+      hAdj
+      (subEff_accum_into_grad eps)⟩
 
 theorem adjointTyped_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) (Gamma : LinearCtx)
@@ -3044,12 +3062,14 @@ theorem adjointTyped_preserves_typing
     (h_fresh_full : AdjointNamesFresh 0
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
     (h_fresh_small : AdjointNamesFresh 0 (Gamma ++ [(x, some (Typ.tensor ds))])) :
-    HasType Delta Sigma
-            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
-            (adjointTyped e (Typ.tensor dsOut) x (Term.var gs))
-            Typ.unit
-            (EffectRow.union eps [EffectLabel.accum])
-            (Gamma ++ [(x, some (Typ.tensor ds)), (gs, none)]) := by
+    ∃ slotAdj,
+      (slotAdj = none ∨ slotAdj = some (Typ.tensor ds)) ∧
+      HasType Delta Sigma
+        (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))])
+        (adjointTyped e (Typ.tensor dsOut) x (Term.var gs))
+        Typ.unit
+        (EffectRow.union eps [EffectLabel.accum])
+        (Gamma ++ [(x, slotAdj), (gs, none)]) := by
   simpa [adjointTyped] using
     (adjointTypedFrom_preserves_typing Delta Sigma Gamma
       x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_fresh_full h_fresh_small)

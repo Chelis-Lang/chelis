@@ -4134,6 +4134,26 @@ theorem runtimeSafeConfig_handleOpDirect_capture_counterexample :
       runtimeSafeHandleDirectCaptureCounterTerm',
       runtimeSafeHandleDirectCaptureCounterValue]
 
+/-- The direct capture witness stays outside the closed typed surface:
+    the handled value carries the free variable `y`. -/
+theorem runtimeSafeHandleDirectCaptureCounterTerm_not_closed :
+    ¬ Closed runtimeSafeHandleDirectCaptureCounterTerm := by
+  simp [Closed, freeVars, freeVarsClauses,
+    runtimeSafeHandleDirectCaptureCounterTerm,
+    runtimeSafeHandleDirectCaptureCounterClauses,
+    runtimeSafeHandleDirectCaptureCounterBody,
+    runtimeSafeHandleDirectCaptureCounterValue]
+
+/-- Consequently the direct capture witness cannot satisfy the closed
+    source premise used by top-level preservation. -/
+theorem runtimeSafeHandleDirectCaptureCounterTerm_not_typable :
+    ¬ ∃ (Sigma : StoreTyp) (t : Typ) (eps : EffectRow),
+      HasType [] Sigma [] runtimeSafeHandleDirectCaptureCounterTerm t eps [] := by
+  intro h
+  rcases h with ⟨Sigma, t, eps, hTy⟩
+  exact runtimeSafeHandleDirectCaptureCounterTerm_not_closed
+    (has_type_closed_term_of_closed_input hTy)
+
 private def runtimeSafeHandleDirectClosedCounterValue : Term :=
   Term.abs "z" Typ.unit (Term.var "z")
 
@@ -4208,6 +4228,17 @@ theorem runtimeSafeConfig_handleOpDirect_closed_source_counterexample :
       runtimeSafeHandleDirectClosedCounterTerm',
       runtimeSafeHandleDirectClosedCounterValue]
 
+/-- Closing the direct-handler source is still not enough to satisfy
+    the preservation hypotheses: the value binder `z` clashes with the
+    clause-local binder `z`, so the source term is not `WellScoped`. -/
+theorem runtimeSafeHandleDirectClosedCounterTerm_not_wellScoped :
+    ¬ WellScoped runtimeSafeHandleDirectClosedCounterTerm := by
+  simp [runtimeSafeHandleDirectClosedCounterTerm,
+    runtimeSafeHandleDirectClosedCounterClauses,
+    runtimeSafeHandleDirectClosedCounterBody,
+    runtimeSafeHandleDirectClosedCounterValue,
+    WellScoped, boundVars, boundVarsClauses]
+
 private def runtimeSafeHandleCtxCaptureCounterValue : Term :=
   Term.abs "z" Typ.unit (Term.var "y")
 
@@ -4278,6 +4309,27 @@ theorem runtimeSafeConfig_handleOpCtx_capture_counterexample :
       locRefs, locRefsClauses,
       runtimeSafeHandleCtxCaptureCounterTerm',
       runtimeSafeHandleCtxCaptureCounterValue]
+
+/-- The captured-context witness is also outside the closed typed
+    surface for the same reason: the handled value carries the free
+    variable `y`. -/
+theorem runtimeSafeHandleCtxCaptureCounterTerm_not_closed :
+    ¬ Closed runtimeSafeHandleCtxCaptureCounterTerm := by
+  simp [Closed, freeVars, freeVarsClauses,
+    runtimeSafeHandleCtxCaptureCounterTerm,
+    runtimeSafeHandleCtxCaptureCounterClauses,
+    runtimeSafeHandleCtxCaptureCounterBody,
+    runtimeSafeHandleCtxCaptureCounterValue, plug]
+
+/-- So the captured-context witness cannot arise from an empty typing
+    context either. -/
+theorem runtimeSafeHandleCtxCaptureCounterTerm_not_typable :
+    ¬ ∃ (Sigma : StoreTyp) (t : Typ) (eps : EffectRow),
+      HasType [] Sigma [] runtimeSafeHandleCtxCaptureCounterTerm t eps [] := by
+  intro h
+  rcases h with ⟨Sigma, t, eps, hTy⟩
+  exact runtimeSafeHandleCtxCaptureCounterTerm_not_closed
+    (has_type_closed_term_of_closed_input hTy)
 
 private def runtimeSafeHandleCtxClosedCounterValue : Term :=
   Term.abs "z" Typ.unit (Term.var "z")
@@ -4358,6 +4410,17 @@ theorem runtimeSafeConfig_handleOpCtx_closed_source_counterexample :
       locRefs, locRefsClauses,
       runtimeSafeHandleCtxClosedCounterTerm',
       runtimeSafeHandleCtxClosedCounterValue]
+
+/-- Even the closed captured-handler witness violates the source-side
+    scoping discipline used by top-level preservation: the handled
+    value binder `z` collides with the clause-local binder `z`. -/
+theorem runtimeSafeHandleCtxClosedCounterTerm_not_wellScoped :
+    ¬ WellScoped runtimeSafeHandleCtxClosedCounterTerm := by
+  simp [runtimeSafeHandleCtxClosedCounterTerm,
+    runtimeSafeHandleCtxClosedCounterClauses,
+    runtimeSafeHandleCtxClosedCounterBody,
+    runtimeSafeHandleCtxClosedCounterValue, plug,
+    WellScoped, boundVars, boundVarsClauses]
 
 private def handlerAwareCtxFreshCounterTerm : Term :=
   Term.pair (Term.const 0.0 DimList.empty) (Term.loc 1)
@@ -6281,16 +6344,8 @@ private theorem preservation_aux
             ([(xr, some (Typ.tensor ds)), (x, slot)] : LinearCtx) := by
         simpa [List.append_assoc] using
           (hasType_prefix_weaken hBody ([(xr, some (Typ.tensor ds))] : LinearCtx))
-      have hAdjBase :
-          HasType [] Sigma
-            ([(xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
-              (gs, some (Typ.tensor dsOut))] : LinearCtx)
-            adjBody
-            Typ.unit
-            epsAdj
-            ([(xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
-              (gs, none)] : LinearCtx) := by
-        exact adjointTypedFrom_preserves_typing
+      obtain ⟨slotAdj, _hslotAdj, hAdjBase⟩ :=
+        adjointTypedFrom_preserves_typing
           [] Sigma ([(xr, some (Typ.tensor ds))] : LinearCtx)
           x gs ds dsOut body epsBody n slot
           hBodyXR hDiffCompat hSupp hFreshFull hFreshSmall
@@ -6301,7 +6356,7 @@ private theorem preservation_aux
             adjBody
             Typ.unit
             epsAdj
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx) := by
         simpa [List.append_assoc] using
           (hasType_prefix_weaken hAdjBase ([(x, none)] : LinearCtx))
@@ -6309,55 +6364,55 @@ private theorem preservation_aux
         simp [OpSigMatch, opArgType, opRetType]
       have hVarK :
           HasType [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+            ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
               ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
             (Term.var "k")
             (Typ.arrow Typ.unit Typ.unit epsHandle)
             []
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+            ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
               ("k", none)] : LinearCtx) := by
         simpa [List.append_assoc, epsHandle] using
           (HasType.var [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit)] : LinearCtx)
+            ([(x, slotAdj), (gs, none), ("p", some Typ.unit)] : LinearCtx)
             ([] : LinearCtx) "k" (Typ.arrow Typ.unit Typ.unit epsHandle))
       have hVarP :
           HasType [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+            ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
               ("k", none)] : LinearCtx)
             (Term.var "p")
             Typ.unit
             []
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+            ([(x, slotAdj), (gs, none), ("p", none),
               ("k", none)] : LinearCtx) := by
         simpa [List.append_assoc] using
           (HasType.var [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, slotAdj), (gs, none)] : LinearCtx)
             ([("k", none)] : LinearCtx) "p" Typ.unit)
       have hClauseBody :
           HasType [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+            ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
               ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
             clauseBody
             Typ.unit
             epsHandle
-            ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+            ([(x, slotAdj), (gs, none), ("p", none),
               ("k", none)] : LinearCtx) := by
         have hClauseBodyRaw :
             HasType [] Sigma
-              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
                 ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
               clauseBody
               Typ.unit
               (EffectRow.union (EffectRow.union [] []) epsHandle)
-              ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+              ([(x, slotAdj), (gs, none), ("p", none),
                 ("k", none)] : LinearCtx) := by
           simpa [clauseBody] using
             (HasType.app [] Sigma
-              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
                 ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
-              ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+              ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
                 ("k", none)] : LinearCtx)
-              ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+              ([(x, slotAdj), (gs, none), ("p", none),
                 ("k", none)] : LinearCtx)
               (Term.var "k") (Term.var "p") Typ.unit Typ.unit epsHandle [] [] hVarK hVarP)
         have hClauseBodySub :
@@ -6365,9 +6420,9 @@ private theorem preservation_aux
           intro op hop
           simpa [EffectRow.union, List.mem_filter] using hop
         exact HasType.subEff [] Sigma
-          ([(x, some (Typ.tensor ds)), (gs, none), ("p", some Typ.unit),
+          ([(x, slotAdj), (gs, none), ("p", some Typ.unit),
             ("k", some (Typ.arrow Typ.unit Typ.unit epsHandle))] : LinearCtx)
-          ([(x, some (Typ.tensor ds)), (gs, none), ("p", none),
+          ([(x, slotAdj), (gs, none), ("p", none),
             ("k", none)] : LinearCtx)
           clauseBody
           Typ.unit
@@ -6377,32 +6432,32 @@ private theorem preservation_aux
           hClauseBodySub
       have hClausesNil :
           ClausesTyped [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
-            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, slotAdj), (gs, none)] : LinearCtx)
+            ([(x, slotAdj), (gs, none)] : LinearCtx)
             Typ.unit
             epsHandle
             [] :=
         ClausesTyped.nil [] Sigma
-          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          ([(x, slotAdj), (gs, none)] : LinearCtx)
           Typ.unit epsHandle
       have hClauses :
           ClausesTyped [] Sigma
-            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
-            ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+            ([(x, slotAdj), (gs, none)] : LinearCtx)
+            ([(x, slotAdj), (gs, none)] : LinearCtx)
             Typ.unit
             epsHandle
             clauses := by
         exact ClausesTyped.cons [] Sigma
-          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
-          ([(x, some (Typ.tensor ds)), (gs, none)] : LinearCtx)
+          ([(x, slotAdj), (gs, none)] : LinearCtx)
+          ([(x, slotAdj), (gs, none)] : LinearCtx)
           Typ.unit Typ.unit Typ.unit epsHandle
           EffectLabel.accum "p" "k" clauseBody [] none none
           hClauseSig hClauseBody hClausesNil
       have hClausesXR :
           ClausesTyped [] Sigma
-            ([(xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx)
-            ([(xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx)
             Typ.unit
             epsHandle
@@ -6411,9 +6466,9 @@ private theorem preservation_aux
           (clausesTyped_prefix_weaken hClauses ([(xr, some (Typ.tensor ds))] : LinearCtx))
       have hClausesFull :
           ClausesTyped [] Sigma
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx)
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx)
             Typ.unit
             epsHandle
@@ -6429,14 +6484,14 @@ private theorem preservation_aux
               clauses)
             Typ.unit
             epsHandle
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx) := by
         refine HasType.handle [] Sigma
           ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
             (gs, some (Typ.tensor dsOut))] : LinearCtx)
-          ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+          ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
             (gs, none)] : LinearCtx)
-          ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+          ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
             (gs, none)] : LinearCtx)
           adjBody
           clauses
@@ -6486,12 +6541,12 @@ private theorem preservation_aux
               clauses)
             Typ.unit
             epsBody
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx) := by
         exact HasType.subEff [] Sigma
           ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
             (gs, some (Typ.tensor dsOut))] : LinearCtx)
-          ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+          ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
             (gs, none)] : LinearCtx)
           _
           Typ.unit
@@ -6501,17 +6556,17 @@ private theorem preservation_aux
           hHandleSub
       have hReturn :
           HasType [] Sigma
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none), (tmp, some Typ.unit)] : LinearCtx)
             (Term.var xr)
             (Typ.tensor ds)
             []
-            ([(x, none), (xr, none), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, none), (x, slotAdj),
               (gs, none), (tmp, some Typ.unit)] : LinearCtx) := by
         simpa [List.append_assoc] using
           (HasType.var [] Sigma
             ([(x, none)] : LinearCtx)
-            ([(x, some (Typ.tensor ds)), (gs, none), (tmp, some Typ.unit)] : LinearCtx)
+            ([(x, slotAdj), (gs, none), (tmp, some Typ.unit)] : LinearCtx)
             xr (Typ.tensor ds))
       have hLet :
           HasType [] Sigma
@@ -6521,18 +6576,18 @@ private theorem preservation_aux
               (Term.handle [EffectLabel.accum]
                 adjBody
                 clauses)
-              (Term.var xr))
+            (Term.var xr))
             (Typ.tensor ds)
             epsBody
-            ([(x, none), (xr, none), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, none), (x, slotAdj),
               (gs, none)] : LinearCtx) := by
         simpa [List.append_assoc, EffectRow.union, tmp, clauses] using
           (HasType.letBind [] Sigma
             ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
               (gs, some (Typ.tensor dsOut))] : LinearCtx)
-            ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, some (Typ.tensor ds)), (x, slotAdj),
               (gs, none)] : LinearCtx)
-            ([(x, none), (xr, none), (x, some (Typ.tensor ds)),
+            ([(x, none), (xr, none), (x, slotAdj),
               (gs, none)] : LinearCtx)
             tmp
             (Term.handle [EffectLabel.accum]
@@ -6557,10 +6612,10 @@ private theorem preservation_aux
                 (Term.var xr)))
             (Typ.arrow (Typ.tensor dsOut) (Typ.tensor ds) epsBody)
             []
-            ([(x, none), (xr, none), (x, some (Typ.tensor ds))] : LinearCtx) := by
+            ([(x, none), (xr, none), (x, slotAdj)] : LinearCtx) := by
         exact HasType.abs [] Sigma
           ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds))] : LinearCtx)
-          ([(x, none), (xr, none), (x, some (Typ.tensor ds))] : LinearCtx)
+          ([(x, none), (xr, none), (x, slotAdj)] : LinearCtx)
           gs
           (Typ.tensor dsOut)
           (Typ.tensor ds)
@@ -6629,7 +6684,7 @@ private theorem preservation_aux
             []
             []
             none
-            (some (Typ.tensor ds))
+            slotAdj
             hCopy
             hInner)
       have hGrad :
