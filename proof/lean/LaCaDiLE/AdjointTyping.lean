@@ -106,6 +106,16 @@ theorem AdjointTermFresh.mono {n n' : Nat} {e : Term}
   intro m hm base hb
   exact h m (Nat.le_trans hle hm) base hb
 
+private theorem maxStringLength_append_mono_right
+    (pre suffix : List String) :
+    maxStringLength suffix ≤ maxStringLength (pre ++ suffix) := by
+  induction pre with
+  | nil =>
+      simp
+  | cons hd tl ih =>
+      simp [maxStringLength]
+      exact Nat.le_trans ih (Nat.le_max_right _ _)
+
 private theorem freshName_length_gt_used
     {used : List String} {base : String} {m : Nat}
     (hgt : maxStringLength used < m) :
@@ -149,6 +159,20 @@ theorem adjointTermFresh_of_length_bound
   intro m hm base _hb
   exact freshName_freshInTerm_of_length_bound (e := e)
     (Nat.lt_of_lt_of_le hgt hm)
+
+theorem adjointTermFresh_of_gradAdjointCounter
+    (x gs : String) (e : Term) :
+    AdjointTermFresh (gradAdjointCounter x gs e) e := by
+  apply adjointTermFresh_of_length_bound
+  unfold gradAdjointCounter
+  have hle :
+      maxStringLength (freeVars e ++ boundVars e) ≤
+        maxStringLength (gs :: gradPrimalName x e :: x :: (freeVars e ++ boundVars e)) := by
+    simpa [List.append_assoc] using
+      (maxStringLength_append_mono_right
+        [gs, gradPrimalName x e, x]
+        (freeVars e ++ boundVars e))
+  exact Nat.lt_of_le_of_lt hle (Nat.lt_succ_self _)
 
 -- linearCtx_filter_fresh_eq and linearCtx_filter_fresh_two_eq
 -- deleted: obsolete under tombstone-style contexts (no more .filter
