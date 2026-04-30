@@ -2049,6 +2049,17 @@ private theorem hasType_var_with_suffix
   simpa [List.append_assoc] using
     (HasType.var Delta Sigma GammaPre GammaPost x t)
 
+private theorem slot_choice_trans
+    {slot0 slot1 slot2 : Option Typ}
+    (h01 : slot1 = none ∨ slot1 = slot0)
+    (h12 : slot2 = none ∨ slot2 = slot1) :
+    slot2 = none ∨ slot2 = slot0 := by
+  rcases h12 with h12 | h12
+  · exact Or.inl h12
+  · rcases h01 with h01 | h01
+    · exact Or.inl (h12.trans h01)
+    · exact Or.inr (h12.trans h01)
+
 /-
 private theorem adjointTypedClauses_cons_typed
     (Delta : CapCtx) (Sigma : StoreTyp)
@@ -2592,7 +2603,599 @@ private theorem adjointTypedShape_preserves_typing
           Typ.unit
           (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
           (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
-  sorry
+  intro t e hShape
+  induction hShape using AdjointTypedShape.rec
+    (motive_2 := fun t clauses _ =>
+      ∀ {Gamma suffixIn suffixOut : LinearCtx} {x : String} {body gSeed : Term}
+          {n : Nat} {slotIn : Option Typ},
+        (∀ {Gamma0 suffixIn0 suffixOut0 : LinearCtx} {x0 : String} {gSeed0 : Term}
+            {n0 : Nat} {slotIn0 : Option Typ},
+          HasType Delta Sigma
+            (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+            gSeed0
+            (cotangentType t)
+            []
+            (Gamma0 ++ [(x0, slotIn0)] ++ suffixOut0) →
+          ∃ slotOut0,
+            (slotOut0 = none ∨ slotOut0 = slotIn0) ∧
+            HasType Delta Sigma
+              (Gamma0 ++ [(x0, slotIn0)] ++ suffixIn0)
+              (adjointTypedFrom body t x0 gSeed0 n0)
+              Typ.unit
+              (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+              (Gamma0 ++ [(x0, slotOut0)] ++ suffixOut0)) →
+        HasType Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          gSeed
+          (cotangentType t)
+          []
+          (Gamma ++ [(x, slotIn)] ++ suffixOut) →
+        ∃ slotOut,
+          (slotOut = none ∨ slotOut = slotIn) ∧
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (adjointTypedClausesFrom clauses x body t gSeed n)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut))
+  with
+  | var =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      refine ⟨slotIn, Or.inr rfl, ?_⟩
+      simpa [adjointTypedFrom] using
+        (adjointLeaf_typed Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          _ [] n gSeed h_seed)
+  | const =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      refine ⟨slotIn, Or.inr rfl, ?_⟩
+      simpa [adjointTypedFrom] using
+        (adjointLeaf_typed Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          _ [] n gSeed h_seed)
+  | unit =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      refine ⟨slotIn, Or.inr rfl, ?_⟩
+      simpa [adjointTypedFrom] using
+        (adjointLeaf_typed Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          _ [] n gSeed h_seed)
+  | loc =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      refine ⟨slotIn, Or.inr rfl, ?_⟩
+      simpa [adjointTypedFrom] using
+        (adjointLeaf_typed Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          _ [] n gSeed h_seed)
+  | letBind hBody ih =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      simpa [adjointTypedFrom] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := gSeed)
+          (n := n)
+          (slotIn := slotIn)
+          h_seed)
+  | letpair hBody ih =>
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      simpa [adjointTypedFrom] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := gSeed)
+          (n := n)
+          (slotIn := slotIn)
+          h_seed)
+  | add =>
+      rename_i ds e1 e2 h1 h2 ih1 ih2
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      let adjA := freshName "adjA" (n + 2)
+      have hVarA :
+          HasType Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.var gA)
+            (Typ.tensor ds)
+            []
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))]) := by
+        simpa [gA, gB, List.append_assoc] using
+          (hasType_var_with_suffix Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            ([(gB, some (Typ.tensor ds))] : LinearCtx)
+            gA
+            (Typ.tensor ds))
+      obtain ⟨slotMid, hslotMid, hAdj1⟩ :=
+        ih1
+          (Gamma := Gamma)
+          (suffixIn := suffixOut ++ [(gA, some (Typ.tensor ds)), (gB, some (Typ.tensor ds))])
+          (suffixOut := suffixOut ++ [(gA, none), (gB, some (Typ.tensor ds))])
+          (x := x)
+          (gSeed := Term.var gA)
+          (n := n + 3)
+          (slotIn := slotIn)
+          (by simpa [List.append_assoc, gA, gB] using hVarA)
+      have hVarB :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotMid)] ++
+              suffixOut ++ [(gA, none), (gB, some (Typ.tensor ds))] ++
+              [(adjA, some Typ.unit)])
+            (Term.var gB)
+            (Typ.tensor ds)
+            []
+            (Gamma ++ [(x, slotMid)] ++
+              suffixOut ++ [(gA, none), (gB, none)] ++
+              [(adjA, some Typ.unit)]) := by
+        refine Eq.mp ?_
+          (HasType.var Delta Sigma
+            (Gamma ++ [(x, slotMid)] ++ suffixOut ++ [(gA, none)])
+            [(adjA, some Typ.unit)]
+            gB
+            (Typ.tensor ds))
+        simp [gA, gB, adjA, List.append_assoc, linearCtx_suffix_pair, linearCtx_append3_aux]
+      obtain ⟨slotOut, hslotOut, hAdj2⟩ :=
+        ih2
+          (Gamma := Gamma)
+          (suffixIn := suffixOut ++ [(gA, none), (gB, some (Typ.tensor ds)), (adjA, some Typ.unit)])
+          (suffixOut := suffixOut ++ [(gA, none), (gB, none), (adjA, some Typ.unit)])
+          (x := x)
+          (gSeed := Term.var gB)
+          (n := n + 3)
+          (slotIn := slotMid)
+          (by simpa [List.append_assoc, gA, gB, adjA] using hVarB)
+      have hSeq :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++
+              (suffixOut ++ [(gA, some (Typ.tensor ds)), (gB, some (Typ.tensor ds))]))
+            (Term.letBind adjA
+              (adjointTypedFrom e1 (Typ.tensor ds) x (Term.var gA) (n + 3))
+              (adjointTypedFrom e2 (Typ.tensor ds) x (Term.var gB) (n + 3)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++
+              (suffixOut ++ [(gA, none), (gB, none)])) := by
+        exact
+          adjointTyped_seq_typed Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++
+              (suffixOut ++ [(gA, some (Typ.tensor ds)), (gB, some (Typ.tensor ds))]))
+            (Gamma ++ [(x, slotMid)] ++
+              (suffixOut ++ [(gA, none), (gB, some (Typ.tensor ds))]))
+            (Gamma ++ [(x, slotOut)] ++
+              (suffixOut ++ [(gA, none), (gB, none)]))
+            adjA
+            (adjointTypedFrom e1 (Typ.tensor ds) x (Term.var gA) (n + 3))
+            (adjointTypedFrom e2 (Typ.tensor ds) x (Term.var gB) (n + 3))
+            (some Typ.unit)
+            hAdj1
+            (by simpa [List.append_assoc] using hAdj2)
+      have hSplit :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (splitCotangentSeedFrom (Typ.tensor ds) gSeed n
+              (fun n' gA' gB' =>
+                let adjA' := freshName "adjA" n'
+                Term.letBind adjA'
+                  (adjointTypedFrom e1 (Typ.tensor ds) x gA' (n' + 1))
+                  (adjointTypedFrom e2 (Typ.tensor ds) x gB' (n' + 1))))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
+        exact splitCotangentSeedFrom_typed Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Typ.tensor ds)
+          gSeed
+          n
+          (fun n' gA' gB' =>
+            let adjA' := freshName "adjA" n'
+            Term.letBind adjA'
+              (adjointTypedFrom e1 (Typ.tensor ds) x gA' (n' + 1))
+              (adjointTypedFrom e2 (Typ.tensor ds) x gB' (n' + 1)))
+          (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          h_seed
+          ⟨none, none, by simpa [gA, gB, adjA, List.append_assoc] using hSeq⟩
+      exact ⟨slotOut, slot_choice_trans hslotMid hslotOut, by
+        simpa [adjointTypedFrom] using hSplit⟩
+  | mul =>
+      rename_i ds e1 e2 hMul h1 h2 ih1 ih2
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      sorry
+  | sum =>
+      rename_i ds d e hmem hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      have hExpand :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Term.expand gSeed d)
+            (cotangentType (Typ.tensor ds))
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) := by
+        have := HasType.texpand Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          gSeed
+          (rem ds d)
+          d
+          []
+          h_seed
+        simpa [cotangentType, ins_rem_eq_of_mem hmem] using this
+      simpa [adjointTypedFrom, ins_rem_eq_of_mem hmem] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := Term.expand gSeed d)
+          (n := n)
+          (slotIn := slotIn)
+          hExpand)
+  | expand =>
+      rename_i ds d e hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      have hmem : d ∈ ins ds d := by
+        refine Quotient.inductionOn ds ?_
+        intro l
+        change d ∈ (d :: l)
+        simp
+      have hSum :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Term.sum gSeed d)
+            (cotangentType (Typ.tensor ds))
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) := by
+        have := HasType.tsum Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          gSeed
+          (ins ds d)
+          d
+          []
+          h_seed
+          hmem
+        simpa [cotangentType, rem_ins_eq] using this
+      simpa [adjointTypedFrom, rem_ins_eq] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := Term.sum gSeed d)
+          (n := n)
+          (slotIn := slotIn)
+          hSum)
+  | copy =>
+      rename_i ds e hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      have hVarA :
+          HasType Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.var gA)
+            (Typ.tensor ds)
+            []
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))]) := by
+        simpa [gA, gB, List.append_assoc] using
+          (hasType_var_with_suffix Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            ([(gB, some (Typ.tensor ds))] : LinearCtx)
+            gA
+            (Typ.tensor ds))
+      have hVarB :
+          HasType Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.var gB)
+            (Typ.tensor ds)
+            []
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, none)]) := by
+        refine Eq.mp ?_
+          (HasType.var Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]))
+            []
+            gB
+            (Typ.tensor ds))
+        simp [gA, gB, List.append_assoc, linearCtx_suffix_pair]
+      have hAddSeed :
+          HasType Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, some (Typ.tensor ds))]) ++
+              [(gB, some (Typ.tensor ds))])
+            (Term.add (Term.var gA) (Term.var gB))
+            (Typ.tensor ds)
+            []
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, none)]) := by
+        exact HasType.tadd Delta Sigma
+          ((((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, some (Typ.tensor ds))]) ++
+            [(gB, some (Typ.tensor ds))]))
+          ((((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+            [(gB, some (Typ.tensor ds))]))
+          ((((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+            [(gB, none)]))
+          (Term.var gA) (Term.var gB) ds [] [] hVarA hVarB
+      obtain ⟨slotOut, hslotOut, hAdj⟩ :=
+        ih
+          (Gamma := Gamma)
+          (suffixIn := suffixOut ++ [(gA, some (Typ.tensor ds)), (gB, some (Typ.tensor ds))])
+          (suffixOut := suffixOut ++ [(gA, none), (gB, none)])
+          (x := x)
+          (gSeed := Term.add (Term.var gA) (Term.var gB))
+          (n := n + 3)
+          (slotIn := slotIn)
+          (by simpa [List.append_assoc, gA, gB] using hAddSeed)
+      have hPair :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (adjointTypedFrom (Term.copy e)
+              (Typ.pair (Typ.tensor ds) (Typ.tensor ds)) x gSeed n)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
+        simpa [adjointTypedFrom, gA, gB, List.append_assoc] using
+          (HasType.letpair Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            (Gamma ++ [(x, slotOut)] ++ suffixOut)
+            gA gB
+            gSeed
+            (adjointTypedFrom e (Typ.tensor ds) x
+              (Term.add (Term.var gA) (Term.var gB)) (n + 3))
+            (Typ.tensor ds) (Typ.tensor ds) Typ.unit
+            []
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            none none
+            h_seed
+            (by simpa [List.append_assoc] using hAdj))
+      exact ⟨slotOut, hslotOut, hPair⟩
+  | pair =>
+      rename_i t1 t2 e1 e2 h1 h2 ih1 ih2
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      let gA := freshName "gA" n
+      let gB := freshName "gB" n
+      let adjA := freshName "adjA" n
+      have hVarA :
+          HasType Delta Sigma
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, some (cotangentType t1))]) ++
+              [(gB, some (cotangentType t2))])
+            (Term.var gA)
+            (cotangentType t1)
+            []
+            (((Gamma ++ [(x, slotIn)] ++ suffixOut) ++ [(gA, none)]) ++
+              [(gB, some (cotangentType t2))]) := by
+        simpa [gA, gB, List.append_assoc] using
+          (hasType_var_with_suffix Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            ([(gB, some (cotangentType t2))] : LinearCtx)
+            gA
+            (cotangentType t1))
+      obtain ⟨slotMid, hslotMid, hAdj1⟩ :=
+        ih1
+          (Gamma := Gamma)
+          (suffixIn := suffixOut ++ [(gA, some (cotangentType t1)), (gB, some (cotangentType t2))])
+          (suffixOut := suffixOut ++ [(gA, none), (gB, some (cotangentType t2))])
+          (x := x)
+          (gSeed := Term.var gA)
+          (n := n + 3)
+          (slotIn := slotIn)
+          (by simpa [List.append_assoc, gA, gB] using hVarA)
+      have hVarB :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotMid)] ++
+              suffixOut ++ [(gA, none), (gB, some (cotangentType t2))] ++
+              [(adjA, some Typ.unit)])
+            (Term.var gB)
+            (cotangentType t2)
+            []
+            (Gamma ++ [(x, slotMid)] ++
+              suffixOut ++ [(gA, none), (gB, none)] ++
+              [(adjA, some Typ.unit)]) := by
+        refine Eq.mp ?_
+          (HasType.var Delta Sigma
+            (Gamma ++ [(x, slotMid)] ++ suffixOut ++ [(gA, none)])
+            [(adjA, some Typ.unit)]
+            gB
+            (cotangentType t2))
+        simp [gA, gB, adjA, List.append_assoc, linearCtx_suffix_pair, linearCtx_append3_aux]
+      obtain ⟨slotOut, hslotOut, hAdj2⟩ :=
+        ih2
+          (Gamma := Gamma)
+          (suffixIn := suffixOut ++ [(gA, none), (gB, some (cotangentType t2)), (adjA, some Typ.unit)])
+          (suffixOut := suffixOut ++ [(gA, none), (gB, none), (adjA, some Typ.unit)])
+          (x := x)
+          (gSeed := Term.var gB)
+          (n := n + 3)
+          (slotIn := slotMid)
+          (by simpa [List.append_assoc, gA, gB, adjA] using hVarB)
+      have hSeq :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++
+              (suffixOut ++ [(gA, some (cotangentType t1)), (gB, some (cotangentType t2))]))
+            (Term.letBind adjA
+              (adjointTypedFrom e1 t1 x (Term.var gA) (n + 3))
+              (adjointTypedFrom e2 t2 x (Term.var gB) (n + 3)))
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++
+              (suffixOut ++ [(gA, none), (gB, none)])) := by
+        exact
+          adjointTyped_seq_typed Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++
+              (suffixOut ++ [(gA, some (cotangentType t1)), (gB, some (cotangentType t2))]))
+            (Gamma ++ [(x, slotMid)] ++
+              (suffixOut ++ [(gA, none), (gB, some (cotangentType t2))]))
+            (Gamma ++ [(x, slotOut)] ++
+              (suffixOut ++ [(gA, none), (gB, none)]))
+            adjA
+            (adjointTypedFrom e1 t1 x (Term.var gA) (n + 3))
+            (adjointTypedFrom e2 t2 x (Term.var gB) (n + 3))
+            (some Typ.unit)
+            hAdj1
+            (by simpa [List.append_assoc] using hAdj2)
+      have hPair :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (adjointTypedFrom (Term.pair e1 e2) (Typ.pair t1 t2) x gSeed n)
+            Typ.unit
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
+        simpa [adjointTypedFrom, cotangentType, gA, gB, adjA, List.append_assoc] using
+          (HasType.letpair Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            (Gamma ++ [(x, slotOut)] ++ suffixOut)
+            gA gB
+            gSeed
+            (Term.letBind adjA
+              (adjointTypedFrom e1 t1 x (Term.var gA) (n + 3))
+              (adjointTypedFrom e2 t2 x (Term.var gB) (n + 3)))
+            (cotangentType t1) (cotangentType t2) Typ.unit
+            []
+            (EffectRow.union [EffectLabel.accum] ([] : EffectRow))
+            none none
+            h_seed
+            (by simpa [List.append_assoc] using hSeq))
+      exact ⟨slotOut, slot_choice_trans hslotMid hslotOut, hPair⟩
+  | fst =>
+      rename_i t1 t2 e hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      have hZero :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            (zeroCotangent t2)
+            (cotangentType t2)
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) :=
+        zeroCotangent_typed Delta Sigma (Gamma ++ [(x, slotIn)] ++ suffixOut) t2
+      have hPairSeed :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Term.pair gSeed (zeroCotangent t2))
+            (cotangentType (Typ.pair t1 t2))
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) := by
+        simpa [cotangentType] using
+          (HasType.tpair Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            gSeed (zeroCotangent t2)
+            (cotangentType t1) (cotangentType t2)
+            [] [] h_seed hZero)
+      simpa [adjointTypedFrom] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := Term.pair gSeed (zeroCotangent t2))
+          (n := n)
+          (slotIn := slotIn)
+          hPairSeed)
+  | snd =>
+      rename_i t1 t2 e hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      have hZero :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (zeroCotangent t1)
+            (cotangentType t1)
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixIn) :=
+        zeroCotangent_typed Delta Sigma (Gamma ++ [(x, slotIn)] ++ suffixIn) t1
+      have hPairSeed :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Term.pair (zeroCotangent t1) gSeed)
+            (cotangentType (Typ.pair t1 t2))
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) := by
+        simpa [cotangentType] using
+          (HasType.tpair Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            (zeroCotangent t1) gSeed
+            (cotangentType t1) (cotangentType t2)
+            [] [] hZero h_seed)
+      simpa [adjointTypedFrom] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := Term.pair (zeroCotangent t1) gSeed)
+          (n := n)
+          (slotIn := slotIn)
+          hPairSeed)
+  | handle =>
+      rename_i t epsH body clauses hBody hClauses ihBody ihClauses
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      simpa [adjointTypedFrom] using
+        (ihClauses
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (body := body)
+          (gSeed := gSeed)
+          (n := n)
+          (slotIn := slotIn)
+          (fun {Gamma0 suffixIn0 suffixOut0 x0 gSeed0 n0 slotIn0} h_seed0 =>
+            ihBody
+              (Gamma := Gamma0)
+              (suffixIn := suffixIn0)
+              (suffixOut := suffixOut0)
+              (x := x0)
+              (gSeed := gSeed0)
+              (n := n0)
+              (slotIn := slotIn0)
+              h_seed0)
+          h_seed)
+  | perform =>
+      rename_i op e hBody ih
+      intro Gamma suffixIn suffixOut x gSeed n slotIn h_seed
+      have hSeedArg :
+          HasType Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            gSeed
+            (cotangentType (opArgType op))
+            []
+            (Gamma ++ [(x, slotIn)] ++ suffixOut) := by
+        cases op <;> simpa [opArgType, cotangentType] using h_seed
+      simpa [adjointTypedFrom] using
+        (ih
+          (Gamma := Gamma)
+          (suffixIn := suffixIn)
+          (suffixOut := suffixOut)
+          (x := x)
+          (gSeed := gSeed)
+          (n := n)
+          (slotIn := slotIn)
+          hSeedArg)
+  | nil =>
+      rename_i t Gamma suffixIn suffixOut x body gSeed n slotIn ihBody h_seed
+      simpa [adjointTypedClausesFrom] using
+        (ihBody h_seed)
+  | cons =>
+      rename_i tShape op xv kv hb rest hHead hRest ihHead ihRest
+        Gamma suffixIn suffixOut x body gSeed n slotIn ihBody h_seed
+      sorry
 
 /-
   intro t e hShape
