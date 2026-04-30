@@ -7,6 +7,8 @@
 -- Convention: the paper writes `d̄` for a dimension list; Lean identifiers
 -- cannot contain combining marks, so we use `ds` (plural of `d`) instead.
 
+import LaCaDiLE.StringHelpers
+
 namespace LaCaDiLE
 
 /-! ## Dimensions and dimension lists -/
@@ -977,6 +979,41 @@ def boundVarsClauses :
 
 end
 
+mutual
+
+/-- All free and bound source names are hash-free. This keeps the
+    generated `freshName ...` namespace disjoint from user/source names
+    whenever the transform replays forward source structure. -/
+def NoHashTerm : Term → Prop
+  | Term.var x => NoHash x
+  | Term.abs x _ body => NoHash x ∧ NoHashTerm body
+  | Term.app e1 e2 => NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.letBind x e1 e2 => NoHash x ∧ NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.copy e => NoHashTerm e
+  | Term.letpair x y e1 e2 => NoHash x ∧ NoHash y ∧ NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.pair e1 e2 => NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.fst _ e => NoHashTerm e
+  | Term.snd _ e => NoHashTerm e
+  | Term.unit => True
+  | Term.const _ _ => True
+  | Term.add e1 e2 => NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.mul e1 e2 => NoHashTerm e1 ∧ NoHashTerm e2
+  | Term.sum e _ => NoHashTerm e
+  | Term.expand e _ => NoHashTerm e
+  | Term.uniformLike e _ _ => NoHashTerm e
+  | Term.grad x _ _ body => NoHash x ∧ NoHashTerm body
+  | Term.vmap x _ _ body => NoHash x ∧ NoHashTerm body
+  | Term.handle _ body clauses => NoHashTerm body ∧ NoHashClauses clauses
+  | Term.perform _ e => NoHashTerm e
+  | Term.loc _ => True
+
+def NoHashClauses :
+    List (EffectLabel × String × String × Term) → Prop
+  | [] => True
+  | (_, x, k, hb) :: rest => NoHash x ∧ NoHash k ∧ NoHashTerm hb ∧ NoHashClauses rest
+
+end
+
 /-- Freshness of `y` with respect to term `e`: `y` is neither free nor
     bound anywhere inside `e`. Sufficient precondition for the
     position-indexed weakening lemma. -/
@@ -993,6 +1030,228 @@ theorem freshInTerm_of_closed_not_bound
   unfold Closed at hclosed
   rw [hclosed]
   simp
+
+mutual
+
+theorem freshName_freshInTerm_of_noHashTerm
+    {base : String} {n : Nat} :
+    ∀ {e : Term}, NoHashTerm e → freshInTerm (freshName base n) e
+  | Term.var x, hx => by
+      refine ⟨?_, by simp [boundVars]⟩
+      intro hmem
+      simp [freeVars] at hmem
+      exact freshName_ne_of_noHash_name base x n hx hmem
+  | Term.abs x _ body, hNoHash => by
+      rcases hNoHash with ⟨hx, hbody⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hbody with ⟨hfBody, hbBody⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_filter] at hmem
+        exact hfBody hmem.1
+      · intro hmem
+        simp [boundVars] at hmem
+        rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base x n hx hmem
+        · exact hbBody hmem
+  | Term.app e1 e2, hNoHash => by
+      rcases hNoHash with ⟨h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        exact hmem.elim hf1 hf2
+      · intro hmem
+        rw [boundVars, List.mem_append] at hmem
+        exact hmem.elim hb1 hb2
+  | Term.letBind x e1 e2, hNoHash => by
+      rcases hNoHash with ⟨hx, h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        rcases hmem with hmem | hmem
+        · exact hf1 hmem
+        · rw [List.mem_filter] at hmem
+          exact hf2 hmem.1
+      · intro hmem
+        simp [boundVars, List.mem_append] at hmem
+        rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base x n hx hmem
+        · exact hmem.elim hb1 hb2
+  | Term.copy e, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.letpair x y e1 e2, hNoHash => by
+      rcases hNoHash with ⟨hx, hy, h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        rcases hmem with hmem | hmem
+        · exact hf1 hmem
+        · rw [List.mem_filter] at hmem
+          exact hf2 hmem.1
+      · intro hmem
+        simp [boundVars, List.mem_append] at hmem
+        rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base x n hx hmem
+        · rcases hmem with hmem | hmem
+          · exact freshName_ne_of_noHash_name base y n hy hmem
+          · exact hmem.elim hb1 hb2
+  | Term.pair e1 e2, hNoHash => by
+      rcases hNoHash with ⟨h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        exact hmem.elim hf1 hf2
+      · intro hmem
+        rw [boundVars, List.mem_append] at hmem
+        exact hmem.elim hb1 hb2
+  | Term.fst _ e, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.snd _ e, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.unit, _ => by
+      simp [freshInTerm, freeVars, boundVars]
+  | Term.const _ _, _ => by
+      simp [freshInTerm, freeVars, boundVars]
+  | Term.add e1 e2, hNoHash => by
+      rcases hNoHash with ⟨h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        exact hmem.elim hf1 hf2
+      · intro hmem
+        rw [boundVars, List.mem_append] at hmem
+        exact hmem.elim hb1 hb2
+  | Term.mul e1 e2, hNoHash => by
+      rcases hNoHash with ⟨h1, h2⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h1 with ⟨hf1, hb1⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) h2 with ⟨hf2, hb2⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        exact hmem.elim hf1 hf2
+      · intro hmem
+        rw [boundVars, List.mem_append] at hmem
+        exact hmem.elim hb1 hb2
+  | Term.sum e _, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.expand e _, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.uniformLike e _ _, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.grad x _ _ body, hNoHash => by
+      rcases hNoHash with ⟨hx, hbody⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hbody with ⟨hfBody, hbBody⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_filter] at hmem
+        exact hfBody hmem.1
+      · intro hmem
+        simp [boundVars] at hmem
+        rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base x n hx hmem
+        · exact hbBody hmem
+  | Term.vmap x _ _ body, hNoHash => by
+      rcases hNoHash with ⟨hx, hbody⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hbody with ⟨hfBody, hbBody⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_filter] at hmem
+        exact hfBody hmem.1
+      · intro hmem
+        simp [boundVars] at hmem
+        rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base x n hx hmem
+        · exact hbBody hmem
+  | Term.handle _ body clauses, hNoHash => by
+      rcases hNoHash with ⟨hbody, hclauses⟩
+      rcases freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hbody with ⟨hfBody, hbBody⟩
+      refine ⟨?_, ?_⟩
+      · intro hmem
+        rw [freeVars, List.mem_append] at hmem
+        exact hmem.elim hfBody
+          (freshName_not_mem_freeVarsClauses_of_noHashClauses (base := base) (n := n) hclauses)
+      · intro hmem
+        rw [boundVars, List.mem_append] at hmem
+        exact hmem.elim hbBody
+          (freshName_not_mem_boundVarsClauses_of_noHashClauses (base := base) (n := n) hclauses)
+  | Term.perform _ e, hNoHash => by
+      have hInner : NoHashTerm e := by
+        simpa [NoHashTerm] using hNoHash
+      simpa [freshInTerm, freeVars, boundVars] using
+        (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hInner)
+  | Term.loc _, _ => by
+      simp [freshInTerm, freeVars, boundVars]
+
+termination_by
+  e _ => sizeOf e
+
+theorem freshName_not_mem_freeVarsClauses_of_noHashClauses
+    {base : String} {n : Nat} :
+    ∀ {clauses : List (EffectLabel × String × String × Term)},
+      NoHashClauses clauses → freshName base n ∉ freeVarsClauses clauses
+  | [], _ => by
+      simp [freeVarsClauses]
+  | (_, x, k, hb) :: rest, hNoHash => by
+      rcases hNoHash with ⟨hx, hk, hhb, hrest⟩
+      intro hmem
+      rw [freeVarsClauses, List.mem_append] at hmem
+      rcases hmem with hmem | hmem
+      · rw [List.mem_filter] at hmem
+        exact (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hhb).1 hmem.1
+      · exact freshName_not_mem_freeVarsClauses_of_noHashClauses (base := base) (n := n) hrest hmem
+
+termination_by
+  clauses _ => sizeOf clauses
+
+theorem freshName_not_mem_boundVarsClauses_of_noHashClauses
+    {base : String} {n : Nat} :
+    ∀ {clauses : List (EffectLabel × String × String × Term)},
+      NoHashClauses clauses → freshName base n ∉ boundVarsClauses clauses
+  | [], _ => by
+      simp [boundVarsClauses]
+  | (_, x, k, hb) :: rest, hNoHash => by
+      rcases hNoHash with ⟨hx, hk, hhb, hrest⟩
+      intro hmem
+      simp [boundVarsClauses, List.mem_append] at hmem
+      rcases hmem with hmem | hmem
+      · exact freshName_ne_of_noHash_name base x n hx hmem
+      · rcases hmem with hmem | hmem
+        · exact freshName_ne_of_noHash_name base k n hk hmem
+        · rcases hmem with hmem | hmem
+          · exact (freshName_freshInTerm_of_noHashTerm (base := base) (n := n) hhb).2 hmem
+          · exact freshName_not_mem_boundVarsClauses_of_noHashClauses (base := base) (n := n) hrest hmem
+
+termination_by
+  clauses _ => sizeOf clauses
+
+end
 
 /-- Global binder-distinctness for named terms. This is the scoping
     side condition used by the TranslationDB bridge to align lexical

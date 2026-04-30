@@ -44,6 +44,7 @@
 --   * `handle` recurses into clause bodies via `adjointClauses`.
 
 import LaCaDiLE.Syntax
+import LaCaDiLE.StringHelpers
 
 namespace LaCaDiLE
 
@@ -51,15 +52,6 @@ namespace LaCaDiLE
     Phase 1 uses a static name; Phase 2 threads a counter via
     `freshName` below. `tapeName` is kept as a legacy helper. -/
 def tapeName (base : String) : String := base ++ "_tape"
-
-/-- Counter-based fresh name. Attaches the counter `n` to the given
-    prefix so two recursion levels with different counters produce
-    disjoint names. Wave-4 Track B: threading this through
-    `adjointFrom` makes freshness provable in the inner linear
-    context of the `add`/`mul`/`handle` cases of
-    `adjoint_typed_aux`. -/
-def freshName (base : String) (n : Nat) : String :=
-  String.ofList (base.toList ++ '#' :: List.replicate n 'x')
 
 -- The adjoint transformation. Phase-1-note historical summary:
 --   * `mul(e1, e2)` gets full tape treatment (two copies of each operand,

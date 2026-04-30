@@ -21,9 +21,15 @@
 -- alphabetic, so the `NoHash` hypothesis is discharged by `decide`
 -- at each call site.
 
-import LaCaDiLE.AdjointTransform
-
 namespace LaCaDiLE
+
+/-- Counter-based fresh name. Attaches the counter `n` to the given
+    prefix so two recursion levels with different counters produce
+    disjoint names. Keeping this in `StringHelpers` makes the generated
+    name discipline available to `Syntax`/`Typing` without an
+    `AdjointTransform` import cycle. -/
+def freshName (base : String) (n : Nat) : String :=
+  String.ofList (base.toList ++ '#' :: List.replicate n 'x')
 
 /-- A `String` contains no `'#'` character. Used to guarantee the
     `freshName` separator is unambiguous. -/
@@ -92,6 +98,26 @@ theorem freshName_toList (base : String) (n : Nat) :
     (freshName base n).toList = base.toList ++ '#' :: List.replicate n 'x' := by
   unfold freshName
   exact String.toList_ofList
+
+/-- Every `freshName` contains the separator `'#'`, so it is never
+    hash-free. -/
+theorem freshName_not_noHash (base : String) (n : Nat) :
+    ¬ NoHash (freshName base n) := by
+  intro h
+  have hmem : '#' ∈ (freshName base n).toList := by
+    rw [freshName_toList]
+    simp
+  exact h hmem
+
+/-- A hash-free source name can never coincide with a generated
+    `freshName`. -/
+theorem freshName_ne_of_noHash_name
+    (base x : String) (n : Nat)
+    (hx : NoHash x) :
+    freshName base n ≠ x := by
+  intro hEq
+  have : NoHash (freshName base n) := by simpa [hEq] using hx
+  exact freshName_not_noHash base n this
 
 /-- Primary injectivity: if two `freshName`s over the same `base` are
     equal, their counters are equal. -/

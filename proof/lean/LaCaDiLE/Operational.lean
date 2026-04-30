@@ -16,6 +16,7 @@
 
 import LaCaDiLE.Syntax
 import LaCaDiLE.StringHelpers
+import LaCaDiLE.AdjointTransform
 
 namespace LaCaDiLE
 
