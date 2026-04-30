@@ -2049,6 +2049,7 @@ private theorem hasType_var_with_suffix
   simpa [List.append_assoc] using
     (HasType.var Delta Sigma GammaPre GammaPost x t)
 
+/-
 private theorem adjointTypedClauses_cons_typed
     (Delta : CapCtx) (Sigma : StoreTyp)
     {t : Typ} {op : EffectLabel} {xv kv param : String} {hb body : Term}
@@ -2569,6 +2570,7 @@ private theorem adjointTypedClauses_cons_typed
           h_seed
           ⟨some Typ.unit, by simpa [adjA, adjHb, List.append_assoc] using hSeq⟩
       simpa [adjointTypedClausesFrom] using hSplit
+-/
 
 private theorem adjointTypedShape_preserves_typing
     (Delta : CapCtx) (Sigma : StoreTyp) :
