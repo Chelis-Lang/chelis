@@ -518,6 +518,202 @@ private theorem splitCotangentSeedFrom_typed
           Typ.unit Typ.unit [] epsK slotA
           h_seed hBody)
 
+private theorem splitCotangentSeedFrom_slot_typed
+    (Delta : CapCtx) (Sigma : StoreTyp)
+    {t : Typ}
+    {Gamma suffixIn suffixOut : LinearCtx} {x : String}
+    {slotIn : Option Typ}
+    (gSeed : Term) (n : Nat)
+    (k : Nat → Term → Term → Term)
+    (epsK : EffectRow)
+    (h_seed :
+      HasType Delta Sigma
+        (Gamma ++ [(x, slotIn)] ++ suffixIn)
+        gSeed
+        (cotangentType t)
+        []
+        (Gamma ++ [(x, slotIn)] ++ suffixOut))
+    (h_k :
+      match t with
+      | Typ.tensor ds =>
+          ∃ slotOut slotA slotB,
+            (slotOut = none ∨ slotOut = slotIn) ∧
+            HasType Delta Sigma
+              (Gamma ++ [(x, slotIn)] ++ suffixOut ++
+                [(freshName "gA" n, some (Typ.tensor ds)),
+                 (freshName "gB" n, some (Typ.tensor ds))])
+              (k (n + 2)
+                (Term.var (freshName "gA" n))
+                (Term.var (freshName "gB" n)))
+              Typ.unit
+              epsK
+              (Gamma ++ [(x, slotOut)] ++ suffixOut ++
+                [(freshName "gA" n, slotA),
+                 (freshName "gB" n, slotB)])
+      | Typ.pair t1 t2 =>
+          ∃ slotOut slotA slotB,
+            (slotOut = none ∨ slotOut = slotIn) ∧
+            HasType Delta Sigma
+              (Gamma ++ [(x, slotIn)] ++ suffixOut ++
+                [(freshName "gA" n, some (cotangentType t1)),
+                 (freshName "gB" n, some (cotangentType t2))])
+              (splitCotangentSeedFrom t1 (Term.var (freshName "gA" n)) (n + 2)
+                (fun n' gA1 gA2 =>
+                  splitCotangentSeedFrom t2 (Term.var (freshName "gB" n)) n'
+                    (fun n'' gB1 gB2 =>
+                      k n''
+                        (Term.pair gA1 gB1)
+                        (Term.pair gA2 gB2))))
+              Typ.unit
+              epsK
+              (Gamma ++ [(x, slotOut)] ++ suffixOut ++
+                [(freshName "gA" n, slotA),
+                 (freshName "gB" n, slotB)])
+      | Typ.unit =>
+          ∃ slotOut slotA,
+            (slotOut = none ∨ slotOut = slotIn) ∧
+            HasType Delta Sigma
+              (Gamma ++ [(x, slotIn)] ++ suffixOut ++
+                [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma ++ [(x, slotOut)] ++ suffixOut ++
+                [(freshName "adjA" n, slotA)])
+      | Typ.arrow _ _ _ =>
+          ∃ slotOut slotA,
+            (slotOut = none ∨ slotOut = slotIn) ∧
+            HasType Delta Sigma
+              (Gamma ++ [(x, slotIn)] ++ suffixOut ++
+                [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma ++ [(x, slotOut)] ++ suffixOut ++
+                [(freshName "adjA" n, slotA)])
+      | Typ.tyVar _ =>
+          ∃ slotOut slotA,
+            (slotOut = none ∨ slotOut = slotIn) ∧
+            HasType Delta Sigma
+              (Gamma ++ [(x, slotIn)] ++ suffixOut ++
+                [(freshName "adjA" n, some Typ.unit)])
+              (k (n + 1) Term.unit Term.unit)
+              Typ.unit
+              epsK
+              (Gamma ++ [(x, slotOut)] ++ suffixOut ++
+                [(freshName "adjA" n, slotA)])) :
+    ∃ slotOut,
+      (slotOut = none ∨ slotOut = slotIn) ∧
+      HasType Delta Sigma
+        (Gamma ++ [(x, slotIn)] ++ suffixIn)
+        (splitCotangentSeedFrom t gSeed n k)
+        Typ.unit
+        epsK
+        (Gamma ++ [(x, slotOut)] ++ suffixOut) := by
+  cases t with
+  | tensor ds =>
+      rcases h_k with ⟨slotOut, slotA, slotB, hslotOut, hBody⟩
+      refine ⟨slotOut, hslotOut, ?_⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letpair Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          (freshName "gA" n) (freshName "gB" n)
+          (Term.copy gSeed)
+          (k (n + 2)
+            (Term.var (freshName "gA" n))
+            (Term.var (freshName "gB" n)))
+          (Typ.tensor ds) (Typ.tensor ds) Typ.unit
+          []
+          epsK
+          slotA slotB
+          (HasType.copy Delta Sigma
+            (Gamma ++ [(x, slotIn)] ++ suffixIn)
+            (Gamma ++ [(x, slotIn)] ++ suffixOut)
+            gSeed
+            ds
+            []
+            h_seed)
+          hBody)
+  | pair t1 t2 =>
+      rcases h_k with ⟨slotOut, slotA, slotB, hslotOut, hBody⟩
+      refine ⟨slotOut, hslotOut, ?_⟩
+      simpa [splitCotangentSeedFrom, cotangentType] using
+        (HasType.letpair Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          (freshName "gA" n) (freshName "gB" n)
+          gSeed
+          (splitCotangentSeedFrom t1 (Term.var (freshName "gA" n)) (n + 2)
+            (fun n' gA1 gA2 =>
+              splitCotangentSeedFrom t2 (Term.var (freshName "gB" n)) n'
+                (fun n'' gB1 gB2 =>
+                  k n''
+                    (Term.pair gA1 gB1)
+                    (Term.pair gA2 gB2))))
+          (cotangentType t1) (cotangentType t2) Typ.unit
+          []
+          epsK
+          slotA slotB
+          h_seed
+          hBody)
+  | unit =>
+      rcases h_k with ⟨slotOut, slotA, hslotOut, hBody⟩
+      refine ⟨slotOut, hslotOut, ?_⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          (freshName "adjA" n)
+          gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit
+          Typ.unit
+          []
+          epsK
+          slotA
+          h_seed
+          hBody)
+  | arrow tArg tRet epsT =>
+      rcases h_k with ⟨slotOut, slotA, hslotOut, hBody⟩
+      refine ⟨slotOut, hslotOut, ?_⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          (freshName "adjA" n)
+          gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit
+          Typ.unit
+          []
+          epsK
+          slotA
+          h_seed
+          hBody)
+  | tyVar alpha =>
+      rcases h_k with ⟨slotOut, slotA, hslotOut, hBody⟩
+      refine ⟨slotOut, hslotOut, ?_⟩
+      simpa [splitCotangentSeedFrom] using
+        (HasType.letBind Delta Sigma
+          (Gamma ++ [(x, slotIn)] ++ suffixIn)
+          (Gamma ++ [(x, slotIn)] ++ suffixOut)
+          (Gamma ++ [(x, slotOut)] ++ suffixOut)
+          (freshName "adjA" n)
+          gSeed
+          (k (n + 1) Term.unit Term.unit)
+          Typ.unit
+          Typ.unit
+          []
+          epsK
+          slotA
+          h_seed
+          hBody)
+
 /-- On quotient-based dimension multisets, re-inserting an erased member
     recovers the original multiset. This is the key shape fact for the
     typed `sum` adjoint branch. -/
