@@ -1,12 +1,12 @@
 # Lines of Code Report
 
-Generated: 2026-05-01 14:21 UTC
+Generated: 2026-05-01 23:07 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 153 | 71,920 | 4,432 | 27,113 | 103,465 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 153 | 71,943 | 4,449 | 27,124 | 103,516 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 27,929 | 200 | 668 | 28,797 | Generated runtime, headers |
-| JSON | 18 | 3,025 | 0 | 2,371 | 5,396 | Package metadata, test fixtures |
+| JSON | 19 | 3,268 | 0 | 2,434 | 5,702 | Package metadata, test fixtures |
 | **Chelis Surf** (.ch) | **91** | **2,716** | **475** | **47** | **3,238** | **Examples, std library, test fixtures** |
 | Python | 21 | 2,319 | 308 | 765 | 3,392 | PyO3 bindings, tools, benchmarks |
 | TOML | 29 | 452 | 0 | 61 | 513 | Cargo/reef manifests |
@@ -16,7 +16,7 @@ Generated: 2026-05-01 14:21 UTC
 | JavaScript | 2 | 190 | 0 | 28 | 218 | Tree-sitter grammar definitions |
 | Objective-C | 1 | 143 | 63 | 46 | 252 |  |
 | Tree-sitter Queries (.scm) | 2 | 98 | 0 | 6 | 104 | Syntax highlighting for Surf and Deep |
-| **Chelis Deep** (.dp) | **5** | **41** | **0** | **1** | **42** | **Deep test fixtures** |
+| **Chelis Deep** (.dp) | **6** | **73** | **0** | **1** | **74** | **Deep test fixtures** |
 | Bash | 1 | 30 | 1 | 8 | 39 |  |
-| Markdown | 103 | 0 | 9,145 | 4,852 | 13,997 | Specs, design docs, plans |
-| **Total** | **444** | **109,633** | **14,696** | **36,102** | **160,431** | |
+| Markdown | 105 | 0 | 9,312 | 4,937 | 14,249 | Specs, design docs, plans |
+| **Total** | **448** | **109,931** | **14,880** | **36,261** | **161,072** | |
