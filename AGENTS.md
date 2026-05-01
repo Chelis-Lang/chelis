@@ -158,14 +158,36 @@ CPU-only dev box.
 - CPU marketing name from `rocminfo`: `AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`
 - GPU marketing name from `rocminfo`: `Radeon 8060S Graphics`
 - ROCm ISA from `rocminfo`: `amdgcn-amd-amdhsa--gfx1100`
-- `hipcc` on PATH: HIP `6.4.43484-9999`
+- `hipcc` on PATH: HIP `7.13.26162-1140233ffe`, installed via the
+  `_rocm_sdk_core` Python wheel at
+  `~/.local/lib/python3.12/site-packages/_rocm_sdk_core/lib/llvm/bin/clang++`
 - `rocminfo` is available and should be treated as the source of truth for local GPU
   probing
 - `rocm-smi` may be absent; do not assume it exists before using it in instructions or
   validation scripts
 
-Implication for agent work: on this machine, ignored/manual HIP validation gates should
-be treated as runnable unless they require a separate missing prerequisite.
+**Toolchain drift — HIP gates currently broken (as of 2026-04-29).** The
+Python-installed `hipcc` 7.x compiles against the system HIP headers under
+`/usr/include/hip/`, which were installed by the older Fedora ROCm package and
+do not define `__AMDGCN_WAVEFRONT_SIZE`. Even a trivial `__global__ void noop()
+{}` kernel fails to build with:
+
+```
+/usr/include/hip/amd_detail/amd_warp_functions.h:96:37: error: use of
+undeclared identifier '__AMDGCN_WAVEFRONT_SIZE'
+```
+
+Consequence: `cargo test --workspace` fails its HIP-related tests, and any
+manual HIP gate that drives `hipcc` also fails until the toolchain is
+reconciled (either by aligning system HIP headers with the wheel-installed
+clang, or by routing around the Python wheel and using a single coherent ROCm
+install). This is a workstation configuration issue, not a code defect.
+
+Implication for agent work: HIP validation gates on this machine are
+**currently NOT runnable** despite the GPU and `rocminfo` being healthy. Do
+not claim a HIP gate as runnable unless `hipcc` itself actually compiles a
+trivial kernel. The reconciliation work is out of scope for any individual
+phase; flag it as a workstation prerequisite when a HIP gate is needed.
 
 ## Manual Gates
 
@@ -219,8 +241,11 @@ When writing or rewriting Surf in this repository:
 - `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
 - `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
 - Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
-- On this workstation specifically, HIP manual gates can use the local `hipcc` + ROCm
-  stack directly; prefer `rocminfo` for environment confirmation
+- On this workstation specifically, the local HIP toolchain is currently
+  broken (system-headers / wheel-clang mismatch — see "Local HIP
+  Environment" above); HIP manual gates are NOT runnable until the
+  toolchain is reconciled. `rocminfo` itself is healthy and remains the
+  source of truth for environment confirmation.
 
 ## Shared Local Skills
 

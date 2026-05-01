@@ -92,6 +92,7 @@ fn parse_scalar_line(stdout: &str, name: &str) -> Option<f64> {
 }
 
 #[test]
+#[ignore = "5-minute manual gate; see spec/design/chelis_phase3_plan.md Phase 3l Acceptance Oracle. Invoke: cargo test -p chelis-cli phase3l_shoals_oracle -- --ignored --exact"]
 fn phase3l_shoals_oracle() {
     let Some(shoals) = skip_if_no_shoals() else {
         return;
@@ -150,8 +151,7 @@ mc_seed42_b = with seed(42) {
         .assert()
         .success();
 
-    let stdout = String::from_utf8(eval_assert.get_output().stdout.clone())
-        .expect("utf-8 stdout");
+    let stdout = String::from_utf8(eval_assert.get_output().stdout.clone()).expect("utf-8 stdout");
 
     let bs_atm = parse_scalar_line(&stdout, "bs_atm")
         .unwrap_or_else(|| panic!("could not parse bs_atm from eval output:\n{stdout}"));

@@ -320,15 +320,16 @@ These invariants span both 3n and 3o and must hold on every release:
 
 ## 3a. Toolchain dependencies
 
-**`properties/`/`references/` layout downstream of Octant.** Octant emits `.dp`
-files from customer LaTeX inputs. Where the customer integrates those `.dp`
-files into their reef package layout — under `src/properties/`, `src/references/`,
-or top-level `properties/`/`references/` once chelis-reef supports it — is the
-customer's choice, not Octant's. Until chelis-reef gains multi-source-root
-support (tracked at `spec/upstream-bugs/reef-multi-source-roots.md`), customers
-who follow the Shoals v0.1.0 pattern will place Octant outputs under `src/`.
-Customers on a future chelis-reef will place them at the canonical root. Octant's
-contract ends at emitting the `.dp`; the integration shape is downstream.
+**`properties/`/`references/` layout downstream of Octant.** Octant emits
+`.dp` files from customer LaTeX inputs. Where the customer integrates
+those `.dp` files into their reef package layout — under `src/properties/`,
+`src/references/`, or top-level `properties/`/`references/` — is the
+customer's choice, not Octant's. As of chelis-reef v0.4.1, top-level
+`properties/` and `references/` are supported via the `additional_sources`
+manifest field; customers on chelis 0.4.1+ can place Octant outputs at
+the canonical root. Customers on earlier chelis or following the Shoals
+v0.1.0-alpha pattern will place them under `src/`. Octant's contract
+ends at emitting the `.dp`; the integration shape is downstream.
 
 ## 4. Post-Phase-3 stub: Octant document ingestion
 

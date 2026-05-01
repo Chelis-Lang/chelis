@@ -1340,9 +1340,18 @@ write their own references only for proprietary models. Full design:
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli phase3l_shoals_oracle -- --exact` — prices a European call
-option via Black-Scholes and Monte Carlo, verifies convergence, computes Greeks via
-`grad`, loads market data via `coral`, and produces a risk report.
+`cargo test -p chelis-cli phase3l_shoals_oracle -- --ignored --exact` — prices
+a European call option via Black-Scholes and Monte Carlo, verifies convergence,
+computes Greeks via `grad`, loads market data via `coral`, and produces a risk
+report.
+
+**Manual gate.** Wall-clock ~5 minutes on AMD Ryzen AI Max+ 395 (driven by the
+host evaluator's 20K MC sample loop on Shoals). The test is marked `#[ignore]`
+to keep `cargo test --workspace` under the 60-second inner-loop budget defined
+in `CLAUDE.md`. Run before any release tag whose pitch includes Shoals
+end-to-end pricing. Skips with a clear message if a Shoals checkout is not
+present (set `CHELIS_SHOALS_PATH` or place `shoals/` as a sibling of the
+chelis monorepo root).
 
 **Effort:** medium. Black-Scholes + Monte Carlo + basic risk is the core; curves and
 order book are smaller. The bulk of the work is composing existing primitives (`nautilus`
