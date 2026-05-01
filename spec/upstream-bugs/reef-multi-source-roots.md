@@ -152,7 +152,11 @@ property/reference roots (option 2):
   removed.
 - The Octant phase plan's toolchain-dependencies note is removed.
 
-Status update 2026-04-30: orchestrator approved fix plan at
-`/home/jeff/.claude/plans/you-re-going-to-do-synchronous-salamander.md`.
-Implementation in flight; this bug will be marked resolved when the
-chelis-reef change ships in v0.4.1.
+Status update 2026-04-30: resolved in chelis-reef commit `6b58030`
+(v0.4.1) which added the `additional_sources` manifest field;
+Shoals migrated to the canonical layout in commit `553021a`. See
+the Resolved section at the top of this file for the closure
+record. Octant integration (`spec/design/phase3n_octant.md`) now
+notes the support is available in chelis 0.4.1+; downstream
+customers on earlier toolchain versions retain the under-`src/`
+fallback as a transitional layout.

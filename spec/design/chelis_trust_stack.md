@@ -28,6 +28,19 @@ The Chelis type system statically checks properties that matter for numerical co
 | Differentiability | Wrong gradients from non-differentiable operations, in-place mutation inside grad | `grad(f)` only compiles if f is pure and differentiable |
 | Reproducibility | Unseeded Monte Carlo, non-deterministic simulation | `chelis manifest --check` verifies every Random operation is seeded |
 
+The shipped `Effect` enum at `crates/chelis-types/src/types.rs:144-154` has five variants today: `Random`, `Accum`, `Io`, `Test`, and `Resource(String)`. `Random` fires on `dropout` and any operation reachable through it without a surrounding `with seed(...)` handler. `Accum` is reserved as an internal design hook for backward-pass accumulation (not yet user-facing). `Io` is narrow today: it covers host-side print and debug only, not network or filesystem access. `Test` is the in-language test runner's effect. `Resource(String)` carries device-resource boundaries (`gpu:0`, `cpu`) and is validated by `chelis build --target {c,hip}` at the build boundary. The set is correct for what it tracks; the next-round expansion of the taxonomy lives in `effect_taxonomy_expansion.md`.
+
+#### Planned expansion
+
+The current taxonomy is bounded but does not yet cover two categories that matter for the broader trust story. Network access and filesystem access are not separate variants today; they fold into either `Io` (in the case of stdout-style writes) or get inferred without effect annotation entirely (in the case of file reads, since no `Std.IO` function declares one yet). The expansion in `effect_taxonomy_expansion.md` is bounded to four items:
+
+- **Item 1** — add `Network` and `Filesystem` variants to the `Effect` enum and annotate every `Std.IO` and shell function that touches them.
+- **Item 2** — ship `chelis audit --effects <package.chb>` to surface the union of effects across a package's public API; same data exposed via Tide HTTP and as an MCP `chelis_audit` tool.
+- **Item 3** — `chelis run --refuse Network,Filesystem` for signature-based pre-flight refusal of binaries whose declared effects exceed an operator's allowlist (not runtime sandboxing; the binary is still trusted to honestly describe itself).
+- **Item 4** — wire effect aggregation into `chelis reef install` so the install path can `--print-effects` and `--refuse` at the package boundary.
+
+Subprocess tracking is intentionally deferred until FFI lands (no current Chelis program can spawn subprocesses; there is nothing to track yet). Signing of artifacts is a separate concern tracked but not in the bounded taxonomy expansion.
+
 These guarantee that a program is internally consistent. They do NOT guarantee it computes the right answer. A program can be dimension-safe, effect-correct, linear, and differentiable while implementing the wrong formula entirely.
 
 ### Level 2 -- Executable Properties as Spec (planned, core future value prop)
@@ -199,6 +212,18 @@ For the strongest guarantee, the customer writes the properties themselves. They
 **CProof.** The commercial pitch incorporates the trust stack directly: "Your quants write pricing models. AI generates optimized code. The compiler guarantees structural soundness. Your quants write domain properties. The toolchain verifies the code satisfies them. You deploy with confidence."
 
 ---
+
+## Limits of the current trust stack
+
+This section keeps future readers from claiming more than is built. Each bullet records a property that is sometimes ascribed to the trust stack but is not actually shipped today.
+
+- **No artifact signing beyond SHA256 content addressing.** Reef artifacts are content-addressed (the lockfile pins `archive_sha256` and `shell_sha256`; substituted bytes are detected on install). They are NOT cryptographically signed by any publisher key. Authenticity (who published this) is a separate property from integrity (the bytes are what was pinned), and the trust stack today provides only the latter. Signing is tracked but demand-driven; it is not designed in `effect_taxonomy_expansion.md` or `reef_distribution.md`.
+- **No runtime sandboxing.** Effect checking is compile-time only. A binary that has been post-edited (function bodies replaced with arbitrary C, for example) executes whatever it contains; the runtime does not re-verify the manifest against the binary's actual behavior. The Item 3 capability flag (`chelis run --refuse Network,Filesystem`) is signature-based pre-flight refusal: it consults the binary's declared manifest, not its actual syscall pattern. True syscall interception requires OS-level integration and is post-roadmap.
+- **No bit-reproducible-build verification end-to-end.** The reef manifest pins source hashes and the compiler version, so the inputs are reproducible. The C emitter has not been audited for non-determinism (timestamps, embedded paths, hostnames). A claim that "two independent rebuilds from the same source produce bit-identical bytes" is plausible from the architecture but not verified end-to-end today.
+- **No FFI security model.** FFI does not exist yet. When it lands in a later phase, security becomes a design question for that phase. Until then, the surface that an FFI security model would protect against simply does not exist; Chelis programs cannot reach C, cannot embed-and-execute binary payloads, and cannot route around the type system through string-to-code conversion.
+- **Effect taxonomy is narrower than the broader trust pitch suggests.** As detailed above, `Network` and `Filesystem` are not yet variants. The `effect_taxonomy_expansion.md` bounded plan is what closes that gap; until it lands, claims that "Chelis tracks network access at compile time" are roadmap, not shipped.
+
+These limits are stable: each will move from "limit" to "shipped" only when a corresponding item lands and produces a demo-able CLI command. They are NOT the same as future-product aspirations; they are specifically the gap between what is sometimes attributed to the stack and what the stack actually demonstrates today.
 
 ## Shells and Tools Affected
 

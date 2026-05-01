@@ -47,3 +47,33 @@ MNIST runner in `crates/chelis-e2e`, not `cargo test --workspace` alone.
 Phase 2 begins with the documented carry-forward fixes from the shipped Phase 1
 boundary: the remaining HIP `pad`/`shrink` work, symbolic normalized-axis support for
 `layer_norm`/`mean` when needed, and the Deep dotted-path round-trip gap.
+
+## Trust stack expansion and reef distribution
+
+Two parallel tracks emerged from a red-team review of the shipped trust-stack
+surface and a state-of-the-world survey of reef. The trust-stack review found
+that the architectural foundation is correct but the effect taxonomy is
+narrower than the broader trust story needs (five variants today, no
+`Network` or `Filesystem`). The reef survey found that reef has the
+foundational pieces (content-addressed local registry, validated install
+path, lockfile + SHA256 verification) but no remote-fetch path; the dev team
+currently has to clone four shell repos and publish them manually in
+dependency order. Both tracks layer on top of existing language work without
+changing language semantics. Detailed designs in
+`spec/design/effect_taxonomy_expansion.md` and
+`spec/design/reef_distribution.md`.
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **A** | Distribution unblock — `chelis reef install --from-github`, `--bootstrap`, auto-fetch during build, lockfile remote-origin field. After Phase A: a fresh dev's onboarding is `git clone + GITHUB_TOKEN + chelis reef build`. ~3–4 days. | Planned |
+| **B** | Effect taxonomy expansion — add `Network` and `Filesystem` variants to the `Effect` enum, annotate `Std.IO` and shells, ship `chelis audit --effects` CLI plus matching MCP tool. ~1.5 weeks. | Planned |
+| **C** | Capability enforcement — `chelis run --refuse Network,Filesystem` (signature-based pre-flight refusal, not runtime sandboxing) plus reef-side effect manifests at install time (`chelis reef install --print-effects`, `--refuse`). Depends on Phase B. ~1 week. | Planned |
+| **D** | Signing and registry server — artifact signing with publisher keys; public registry server replacing GitHub Releases as the artifact backend. Demand-driven; do not start without a specific driver. | Demand-driven |
+
+Phase A is independent of the language phases. Phase B is independent of
+the language phases but its annotation pass touches every shell. Phase C
+depends on Phase B. Phase D is post-launch.
+
+Cross-references: `spec/design/effect_taxonomy_expansion.md` for the
+detailed design of Phases B and C; `spec/design/reef_distribution.md` for
+Phase A and the post-launch Phase D registry-server endgame.

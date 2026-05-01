@@ -1,9 +1,19 @@
 # grad-eval-host-runtime: `chelis test` host runtime does not support `grad`
 
-**Status:** open
+**Status:** open; deferred to Phase 5
 **Filed:** 2026-04-29
 **Owning phase:** chelis-core (AD), chelis-cli (test runner)
 **Discovered by:** Phase 3l Shoals fix-up #2
+
+**Deferral rationale.** This bug surfaces the host-lane scalar AD gap.
+The host evaluator does not have `grad` support because host-lane scalar
+AD is not yet implemented. The architectural decision is locked at
+`spec/design/phase5_host_scalar_ad.md` (recommendation: forward-mode
+dual numbers; deferred until a real driver appears). Until Phase 5 lands
+host-lane scalar AD, downstream consumers (Shoals's Greeks tests and
+similar) work around this by using finite-difference approximations as a
+stand-in. The rest of this file documents the original repro and impact
+for when a real driver causes Phase 5 to be picked up.
 
 ## Summary
 
