@@ -2454,7 +2454,7 @@ mutual
 /-- Cutoff-indexed weakening for named contexts. Insert a fresh unused
     binding before the suffix of length `j` on both the input and output
     sides of a typing derivation. -/
-private theorem weakening_beforeSuffix
+theorem weakening_beforeSuffix
     (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (slot_y : Option Typ)
     {Gamma Gamma' : LinearCtx} {e : Term} {t : Typ} {eps : EffectRow}
     (h : HasType Delta Sigma Gamma e t eps Gamma') :
@@ -2781,7 +2781,7 @@ private theorem weakening_beforeSuffix
         (weakening_beforeSuffix Delta Sigma y slot_y hBody j hj hdom hfresh)
         hsub
 
-private theorem weakening_beforeSuffix_clauses
+theorem weakening_beforeSuffix_clauses
     (Delta : CapCtx) (Sigma : StoreTyp) (y : String) (slot_y : Option Typ)
     {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}
     {cls : List (EffectLabel × String × String × Term)}

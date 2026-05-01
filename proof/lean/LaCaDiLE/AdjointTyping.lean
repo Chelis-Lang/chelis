@@ -152,6 +152,321 @@ theorem AdjointTermFresh.letpair {n : Nat} {x y : String} {e1 e2 : Term}
   · exact (freshInTerm_letpair (h m hm base hb)).2.2.1
   · exact (freshInTerm_letpair (h m hm base hb)).2.2.2
 
+mutual
+
+private theorem hasType_drop_diff_supported
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType (Capability.diff :: Delta) Sigma Gamma e t eps Gamma')
+    (hSupp : AdjointSupported e) :
+    HasType Delta Sigma Gamma e t eps Gamma' := by
+  have hMain :
+      ∀ {Delta0 : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+        {e : Term} {t : Typ} {eps : EffectRow},
+        HasType Delta0 Sigma Gamma e t eps Gamma' →
+        ∀ Delta, Delta0 = Capability.diff :: Delta →
+          AdjointSupported e →
+          HasType Delta Sigma Gamma e t eps Gamma' := by
+    intro Delta0 Sigma Gamma Gamma' e t eps hTyped
+    induction hTyped using HasType.rec
+      (motive_2 := fun Delta0 Sigma Gamma2 Gamma3 t epsR cls _ =>
+        ∀ Delta, Delta0 = Capability.diff :: Delta →
+          AdjointSupportedClauses cls →
+          ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls) with
+    | var Delta0 Sigma GammaPre GammaPost x tx =>
+        intro Delta hEq _hSupp
+        cases hEq
+        exact HasType.var Delta Sigma GammaPre GammaPost x tx
+    | unit Delta0 Sigma Gamma =>
+        intro Delta hEq _hSupp
+        cases hEq
+        exact HasType.unit Delta Sigma Gamma
+    | abs =>
+        intro _Delta _hEq hSupp
+        cases hSupp
+    | app =>
+        intro _Delta _hEq hSupp
+        cases hSupp
+    | letBind Delta0 Sigma Gamma1 Gamma2 Gamma3 x e1 e2 t1 t2 eps1 eps2 slot
+        h1 h2 ih1 ih2 =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSupp1, hSupp2⟩
+        exact HasType.letBind Delta Sigma Gamma1 Gamma2 Gamma3
+          x e1 e2 t1 t2 eps1 eps2 slot
+          (ih1 Delta rfl hSupp1)
+          (ih2 Delta rfl hSupp2)
+    | copy Delta0 Sigma Gamma1 Gamma2 e ds eps hBody ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.copy Delta Sigma Gamma1 Gamma2 e ds eps
+          (ih Delta rfl hSupp)
+    | letpair Delta0 Sigma Gamma1 Gamma2 Gamma3 x z e1 e2 t1 t2 t eps1 eps2 slotX slotY
+        h1 h2 ih1 ih2 =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSupp1, hSupp2⟩
+        exact HasType.letpair Delta Sigma Gamma1 Gamma2 Gamma3
+          x z e1 e2 t1 t2 t eps1 eps2 slotX slotY
+          (ih1 Delta rfl hSupp1)
+          (ih2 Delta rfl hSupp2)
+    | tpair Delta0 Sigma Gamma1 Gamma2 Gamma3 e1 e2 t1 t2 eps1 eps2
+        h1 h2 ih1 ih2 =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSupp1, hSupp2⟩
+        exact HasType.tpair Delta Sigma Gamma1 Gamma2 Gamma3
+          e1 e2 t1 t2 eps1 eps2
+          (ih1 Delta rfl hSupp1)
+          (ih2 Delta rfl hSupp2)
+    | fst Delta0 Sigma Gamma1 Gamma2 e t1 t2 eps hBody ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.fst Delta Sigma Gamma1 Gamma2 e t1 t2 eps
+          (ih Delta rfl hSupp)
+    | snd Delta0 Sigma Gamma1 Gamma2 e t1 t2 eps hBody ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.snd Delta Sigma Gamma1 Gamma2 e t1 t2 eps
+          (ih Delta rfl hSupp)
+    | const Delta0 Sigma Gamma c ds =>
+        intro Delta hEq _hSupp
+        cases hEq
+        exact HasType.const Delta Sigma Gamma c ds
+    | tadd Delta0 Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2
+        h1 h2 ih1 ih2 =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSupp1, hSupp2⟩
+        exact HasType.tadd Delta Sigma Gamma1 Gamma2 Gamma3
+          e1 e2 ds eps1 eps2
+          (ih1 Delta rfl hSupp1)
+          (ih2 Delta rfl hSupp2)
+    | tmul Delta0 Sigma Gamma1 Gamma2 Gamma3 e1 e2 ds eps1 eps2
+        h1 h2 ih1 ih2 =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSupp1, hSupp2⟩
+        exact HasType.tmul Delta Sigma Gamma1 Gamma2 Gamma3
+          e1 e2 ds eps1 eps2
+          (ih1 Delta rfl hSupp1)
+          (ih2 Delta rfl hSupp2)
+    | tsum Delta0 Sigma Gamma1 Gamma2 e ds d eps hBody hmem ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.tsum Delta Sigma Gamma1 Gamma2 e ds d eps
+          (ih Delta rfl hSupp) hmem
+    | texpand Delta0 Sigma Gamma1 Gamma2 e ds d eps hBody ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.texpand Delta Sigma Gamma1 Gamma2 e ds d eps
+          (ih Delta rfl hSupp)
+    | uniformLike Delta0 Sigma Gamma1 Gamma2 e ds lo hi eps hBody ih =>
+        intro Delta hEq hSupp
+        cases hSupp
+    | perform Delta0 Sigma Gamma1 Gamma2 op e tArg tRet eps hBody hsig ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨_hop, hSuppBody⟩
+        exact HasType.perform Delta Sigma Gamma1 Gamma2
+          op e tArg tRet eps
+          (ih Delta rfl hSuppBody) hsig
+    | handle Delta0 Sigma Gamma1 Gamma2 Gamma3 body clauses t epsH epsB
+        hBody hOpsIn hClsIn hCover hClauses ihBody ihClauses =>
+        intro Delta hEq hSupp
+        cases hEq
+        rcases hSupp with ⟨hSuppBody, hSuppClauses⟩
+        exact HasType.handle Delta Sigma Gamma1 Gamma2 Gamma3
+          body clauses t epsH epsB
+          (ihBody Delta rfl hSuppBody)
+          hOpsIn hClsIn hCover
+          (ihClauses Delta rfl hSuppClauses)
+    | tgrad Delta0 Sigma Gamma x ds dsOut e eps slot hBody hsub hSuppBody hCtxSupp ih =>
+        intro Delta hEq hSupp
+        cases hSupp
+    | tvmap Delta0 Sigma Gamma x t1 t2 e eps d slot hBody ih =>
+        intro Delta hEq hSupp
+        cases hSupp
+    | loc Delta0 Sigma Gamma ell t hlook =>
+        intro Delta hEq _hSupp
+        cases hEq
+        exact HasType.loc Delta Sigma Gamma ell t hlook
+    | subEff Delta0 Sigma Gamma Gamma' e t eps eps' hBody hsub ih =>
+        intro Delta hEq hSupp
+        cases hEq
+        exact HasType.subEff Delta Sigma Gamma Gamma' e t eps eps'
+          (ih Delta rfl hSupp) hsub
+    | nil Delta0 Sigma Gamma2 t epsR Delta hEq _hSupp =>
+        cases hEq
+        exact ClausesTyped.nil Delta Sigma Gamma2 t epsR
+    | cons Delta0 Sigma Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
+        hMatch hBody hRest ihBody ihRest Delta hEq hSupp =>
+        cases hEq
+        rcases hSupp with ⟨hSuppBody, hSuppRest⟩
+        exact ClausesTyped.cons Delta Sigma Gamma2 Gamma3
+          t tArg tRet epsR op x k hb rest slotX slotK
+          hMatch
+          (ihBody Delta rfl hSuppBody)
+          (ihRest Delta rfl hSuppRest)
+  exact hMain h Delta rfl hSupp
+
+private theorem clausesTyped_drop_diff_supported
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma2 Gamma3 : LinearCtx}
+    {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped (Capability.diff :: Delta) Sigma Gamma2 Gamma3 t epsR cls)
+    (hSupp : AdjointSupportedClauses cls) :
+    ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls := by
+  match h with
+  | ClausesTyped.nil _ _ Gamma2 t epsR =>
+      exact ClausesTyped.nil Delta Sigma Gamma2 t epsR
+  | ClausesTyped.cons _ _ Gamma2 Gamma3 t tArg tRet epsR op x k hb rest slotX slotK
+      hMatch hBody hRest =>
+      rcases hSupp with ⟨hSuppBody, hSuppRest⟩
+      exact ClausesTyped.cons Delta Sigma Gamma2 Gamma3
+        t tArg tRet epsR op x k hb rest slotX slotK hMatch
+        (hasType_drop_diff_supported hBody hSuppBody)
+        (clausesTyped_drop_diff_supported hRest hSuppRest)
+
+private theorem hasType_suffix_weaken_exact
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (suffix : LinearCtx)
+    (hSuffixFreshCtx : ∀ y, y ∈ linearCtxDom suffix → y ∉ linearCtxDom Gamma)
+    (hSuffixNoDup : NoDupNames suffix)
+    (hFreshTerm : ∀ y, y ∈ linearCtxDom suffix → freshInTerm y e) :
+    HasType Delta Sigma (Gamma ++ suffix) e t eps (Gamma' ++ suffix) := by
+  induction suffix generalizing Gamma Gamma' with
+  | nil =>
+      simpa using h
+  | cons hd rest ih =>
+      rcases hd with ⟨y, slotY⟩
+      have hNoDupDom : List.Nodup (y :: linearCtxDom rest) := by
+        simpa [NoDupNames, linearCtxDom] using hSuffixNoDup
+      have hyRest : y ∉ linearCtxDom rest := (List.nodup_cons.1 hNoDupDom).1
+      have hRestNoDup : NoDupNames rest := by
+        simpa [NoDupNames, linearCtxDom] using (List.nodup_cons.1 hNoDupDom).2
+      have hyGamma : y ∉ linearCtxDom Gamma := by
+        exact hSuffixFreshCtx y (by simp [linearCtxDom])
+      have hyFresh : freshInTerm y e := hFreshTerm y (by simp [linearCtxDom])
+      have hHead :
+          HasType Delta Sigma
+            (Gamma ++ [(y, slotY)])
+            e t eps
+            (Gamma' ++ [(y, slotY)]) := by
+        have hWeak :=
+          weakening_beforeSuffix Delta Sigma y slotY h 0
+            (by simp)
+            hyGamma
+            hyFresh
+        simpa [insertBeforeSuffix_eq_split] using hWeak
+      have hRestFreshCtx :
+          ∀ z, z ∈ linearCtxDom rest → z ∉ linearCtxDom (Gamma ++ [(y, slotY)]) := by
+        intro z hz
+        have hzSuffix : z ∈ linearCtxDom ((y, slotY) :: rest) := by
+          simpa [linearCtxDom] using List.mem_cons_of_mem y hz
+        have hzGamma : z ∉ linearCtxDom Gamma := by
+          exact hSuffixFreshCtx z hzSuffix
+        have hzy : z ≠ y := by
+          intro hEq
+          subst z
+          exact hyRest hz
+        intro hzIn
+        have hzSplit : z ∈ linearCtxDom Gamma ∨ z = y := by
+          simpa [linearCtxDom] using hzIn
+        cases hzSplit with
+        | inl hzGammaIn => exact hzGamma hzGammaIn
+        | inr hEq => exact hzy hEq
+      have hRestFreshTerm :
+          ∀ z, z ∈ linearCtxDom rest → freshInTerm z e := by
+        intro z hz
+        have hzSuffix : z ∈ linearCtxDom ((y, slotY) :: rest) := by
+          simpa [linearCtxDom] using List.mem_cons_of_mem y hz
+        exact hFreshTerm z hzSuffix
+      simpa [List.append_assoc] using
+        (ih
+          (Gamma := Gamma ++ [(y, slotY)])
+          (Gamma' := Gamma' ++ [(y, slotY)])
+          hHead
+          hRestFreshCtx
+          hRestNoDup
+          hRestFreshTerm)
+
+private theorem clausesTyped_suffix_weaken_exact
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma2 Gamma3 : LinearCtx}
+    {t : Typ} {epsR : EffectRow}
+    {cls : List (EffectLabel × String × String × Term)}
+    (h : ClausesTyped Delta Sigma Gamma2 Gamma3 t epsR cls)
+    (suffix : LinearCtx)
+    (hSuffixFreshCtx : ∀ y, y ∈ linearCtxDom suffix → y ∉ linearCtxDom Gamma2)
+    (hSuffixNoDup : NoDupNames suffix)
+    (hFreshClauses :
+      ∀ y, y ∈ linearCtxDom suffix →
+        ∀ op x k hb, (op, x, k, hb) ∈ cls →
+          y ≠ x ∧ y ≠ k ∧ freshInTerm y hb) :
+    ClausesTyped Delta Sigma (Gamma2 ++ suffix) (Gamma3 ++ suffix) t epsR cls := by
+  induction suffix generalizing Gamma2 Gamma3 with
+  | nil =>
+      simpa using h
+  | cons hd rest ih =>
+      rcases hd with ⟨y, slotY⟩
+      have hNoDupDom : List.Nodup (y :: linearCtxDom rest) := by
+        simpa [NoDupNames, linearCtxDom] using hSuffixNoDup
+      have hyRest : y ∉ linearCtxDom rest := (List.nodup_cons.1 hNoDupDom).1
+      have hRestNoDup : NoDupNames rest := by
+        simpa [NoDupNames, linearCtxDom] using (List.nodup_cons.1 hNoDupDom).2
+      have hyGamma : y ∉ linearCtxDom Gamma2 := by
+        exact hSuffixFreshCtx y (by simp [linearCtxDom])
+      have hHead :
+          ClausesTyped Delta Sigma
+            (Gamma2 ++ [(y, slotY)])
+            (Gamma3 ++ [(y, slotY)])
+            t epsR cls := by
+        have hWeak :=
+          weakening_beforeSuffix_clauses Delta Sigma y slotY h 0
+            (by simp)
+            hyGamma
+            (by
+              intro op x k hb hmem
+              exact hFreshClauses y (by simp [linearCtxDom]) op x k hb hmem)
+        simpa [insertBeforeSuffix_eq_split] using hWeak
+      have hRestFreshCtx :
+          ∀ z, z ∈ linearCtxDom rest → z ∉ linearCtxDom (Gamma2 ++ [(y, slotY)]) := by
+        intro z hz
+        have hzSuffix : z ∈ linearCtxDom ((y, slotY) :: rest) := by
+          simpa [linearCtxDom] using List.mem_cons_of_mem y hz
+        have hzGamma : z ∉ linearCtxDom Gamma2 := by
+          exact hSuffixFreshCtx z hzSuffix
+        have hzy : z ≠ y := by
+          intro hEq
+          subst z
+          exact hyRest hz
+        intro hzIn
+        have hzSplit : z ∈ linearCtxDom Gamma2 ∨ z = y := by
+          simpa [linearCtxDom] using hzIn
+        cases hzSplit with
+        | inl hzGammaIn => exact hzGamma hzGammaIn
+        | inr hEq => exact hzy hEq
+      have hRestFreshClauses :
+          ∀ z, z ∈ linearCtxDom rest →
+            ∀ op x k hb, (op, x, k, hb) ∈ cls →
+              z ≠ x ∧ z ≠ k ∧ freshInTerm z hb := by
+        intro z hz op x k hb hmem
+        have hzSuffix : z ∈ linearCtxDom ((y, slotY) :: rest) := by
+          simpa [linearCtxDom] using List.mem_cons_of_mem y hz
+        exact hFreshClauses z hzSuffix op x k hb hmem
+      simpa [List.append_assoc] using
+        (ih
+          (Gamma2 := Gamma2 ++ [(y, slotY)])
+          (Gamma3 := Gamma3 ++ [(y, slotY)])
+          hHead
+          hRestFreshCtx
+          hRestNoDup
+          hRestFreshClauses)
+
+end
+
 private theorem maxStringLength_append_mono_right
     (pre suffix : List String) :
     maxStringLength suffix ≤ maxStringLength (pre ++ suffix) := by
