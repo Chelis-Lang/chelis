@@ -1,0 +1,32 @@
+(def {span: "n_001"}
+  c
+  (app {span: "n_002"}
+    (var {} sub)
+    (app {span: "n_003"}
+      (var {} mul)
+      (var {span: "n_004"} s)
+      (app {span: "n_005"}
+        (access {} (access {} (var {} Nautilus) Special) normal_cdf)
+        (var {span: "n_006"} d_1)))
+    (app {span: "n_007"}
+      (var {} mul)
+      (app {span: "n_008"}
+        (var {} mul)
+        (var {span: "n_009"} k)
+        (app {span: "n_010"}
+          (var {} exp)
+          (app {span: "n_011"}
+            (var {} mul)
+            (app {span: "n_012"}
+              (var {} log)
+              (var {span: "n_013"} e))
+            (app {span: "n_014"}
+              (var {} mul)
+              (app {span: "n_015"}
+                (var {} sub)
+                (lit {span: "n_016"} 0)
+                (var {span: "n_017"} r))
+              (var {span: "n_018"} t)))))
+      (app {span: "n_019"}
+        (access {} (access {} (var {} Nautilus) Special) normal_cdf)
+        (var {span: "n_020"} d_2)))))

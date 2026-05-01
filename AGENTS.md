@@ -166,28 +166,70 @@ CPU-only dev box.
 - `rocm-smi` may be absent; do not assume it exists before using it in instructions or
   validation scripts
 
-**Toolchain drift — HIP gates currently broken (as of 2026-04-29).** The
-Python-installed `hipcc` 7.x compiles against the system HIP headers under
-`/usr/include/hip/`, which were installed by the older Fedora ROCm package and
-do not define `__AMDGCN_WAVEFRONT_SIZE`. Even a trivial `__global__ void noop()
-{}` kernel fails to build with:
+**Toolchain reconciled 2026-05-01 — wheel ROCm is authoritative.** The
+`_rocm_sdk_core` Python wheel (HIP 7.13) is the single authoritative HIP
+stack on this workstation. The wheel ships its own headers, clang-23,
+device libraries, and `rocminfo`/`rocm-smi`/`hipconfig` binaries; all of
+those land under
+`~/.local/lib/python3.12/site-packages/_rocm_sdk_core/`.
+
+The Fedora `rocm-hip-devel` package (HIP 6.4) is *also* installed and
+ships conflicting headers under `/usr/include/hip/`. Without
+intervention, the wheel's clang resolves `<hip/hip_runtime.h>` against
+those older system headers via clang's standard `/usr/include` search
+path (the wheel's own HIP include is added with `-idirafter`, lowest
+priority), and the HIP 6.4 headers reference an `__AMDGCN_WAVEFRONT_SIZE`
+macro that the wheel's clang-23 no longer defines:
 
 ```
 /usr/include/hip/amd_detail/amd_warp_functions.h:96:37: error: use of
 undeclared identifier '__AMDGCN_WAVEFRONT_SIZE'
 ```
 
-Consequence: `cargo test --workspace` fails its HIP-related tests, and any
-manual HIP gate that drives `hipcc` also fails until the toolchain is
-reconciled (either by aligning system HIP headers with the wheel-installed
-clang, or by routing around the Python wheel and using a single coherent ROCm
-install). This is a workstation configuration issue, not a code defect.
+Reconciliation, in order of precedence:
 
-Implication for agent work: HIP validation gates on this machine are
-**currently NOT runnable** despite the GPU and `rocminfo` being healthy. Do
-not claim a HIP gate as runnable unless `hipcc` itself actually compiles a
-trivial kernel. The reconciliation work is out of scope for any individual
-phase; flag it as a workstation prerequisite when a HIP gate is needed.
+1. **Wheel-include override (env-var, persistent in `~/.bashrc`).** The
+   shell now exports
+   `HIPCC_COMPILE_FLAGS_APPEND="-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include …"`.
+   `hipcc` honors that variable and prepends the wheel HIP include as a
+   high-priority `-isystem` path, so `<hip/...>` resolves inside the
+   wheel and the HIP 6.4 system headers are ignored. Verify with
+   `hipcc -E foo.hip | grep amd_warp_functions.h` — the resolved path
+   must be the wheel one.
+2. **Wheel `.so` symlinks added.** The wheel ships only versioned
+   `libamdhip64.so.7`, `libhiprtc.so.7`, and `libhiprtc-builtins.so.7`,
+   with no unversioned `.so` symlinks. `hipcc -lamdhip64 -lhiprtc` (used
+   by chelis HIP smoke tests) therefore fails at link time. Symlinks
+   were added under
+   `~/.local/lib/python3.12/site-packages/_rocm_sdk_core/lib/` so
+   linking finds them. If the wheel is upgraded these symlinks must be
+   recreated.
+
+Removing the system `rocm-hip-devel` package would also work but
+requires sudo; the env-var route was chosen because it is purely
+user-space, survives system updates, and only affects `hipcc`
+invocations.
+
+Acceptance check, 2026-05-01:
+
+```
+$ cat /tmp/trivial_kernel.hip
+#include <hip/hip_runtime.h>
+__global__ void noop() {}
+$ hipcc -c /tmp/trivial_kernel.hip -o /tmp/trivial_kernel.o
+$ echo $?
+0
+```
+
+`s14_generated_hip_source_compiles_when_hipcc_available` (in
+`chelis-backend-hip/tests/codegen_structure.rs`) also passes again under
+`cargo test`.
+
+Caveat: any HIP source that does not `#include <hip/hip_runtime.h>`
+fails because clang-23's auto-included
+`__clang_hip_runtime_wrapper.h` no longer pulls in the launch helpers.
+This is upstream HIP behavior, not a workstation defect — every kernel
+must include the runtime header explicitly.
 
 ## Manual Gates
 

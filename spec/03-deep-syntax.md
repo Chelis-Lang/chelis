@@ -36,6 +36,7 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
+| `span` | string | External-source span identifier (see §1.1.1) |
 
 **Reserved for later phases:**
 
@@ -43,6 +44,44 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 |---|---|---|
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
+| `span_*` | reserved | Future richer span fields (see §1.1.1) |
+
+#### 1.1.1 External-source spans (`span`, `span_*` namespace)
+
+The `span` metadata key carries a string identifier issued by an external
+producer (today: Octant's LaTeX-to-Deep translator, which writes
+`{span: "n_001"}` and ships a sidecar `<input>.spans.json` mapping each ID to
+the original LaTeX byte range). Chelis treats `span` values as opaque strings
+and preserves them end-to-end through parsing, IR lowering, optimization
+passes, and backend codegen so a generated C/HIP/Metal source line can be
+traced back to the original external source. Producer-side interpretation
+(LaTeX byte range, Surf line/col, other DSL anchor) lives in the producer's
+sidecar and is none of chelis's concern.
+
+The `span_*` prefix is reserved for future richer span data. If a need arises
+to embed byte offsets or file identifiers directly inside Deep metadata
+(rather than indirecting through a sidecar), they MUST be added under the
+`span_*` namespace (`span_start`, `span_end`, `span_file`, …). Competing keys
+that carry span-related data outside the `span_*` namespace are forbidden so
+tooling has a stable contract.
+
+**Reserved synthesized-marker shape.** When a chelis transformation pass
+introduces a node with no external-source region (gradient adjoints, lowered
+sub-nodes from a parentless intrinsic, etc.), the canonical `span` value uses
+the form `__synthesized_<pass>__` (double-underscore wrap, lowercase pass
+name). This shape is reserved — external producers MUST NOT emit span IDs
+matching `__synthesized_*__`; chelis MUST NOT mint a synthesized marker that
+omits the wrap. Currently defined markers:
+
+| Marker | Issued by |
+|---|---|
+| `__synthesized_tier2__` | Tier 2 RISC decomposition pass when the parent op had no span |
+| `__synthesized_grad__` | Automatic differentiation pass for backward (adjoint) nodes |
+
+Synthesized-marker nodes are required to also carry forward-node spans on the
+companion `merged_spans` IR field (defined in `spec/design/chelis_span_survival.md`),
+so the audit chain always resolves through at least one external-source span
+even when the canonical `span` is a synthesized marker.
 
 **Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
