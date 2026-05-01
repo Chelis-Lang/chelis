@@ -136,6 +136,68 @@ theorem AdjointTermFresh.copy {n : Nat} {e : Term}
   intro m hm base hb
   exact freshInTerm_copy (h m hm base hb)
 
+theorem AdjointTermFresh.fst {n : Nat} {tRight : Typ} {e : Term}
+    (h : AdjointTermFresh n (Term.fst tRight e)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_fst (h m hm base hb)
+
+theorem AdjointTermFresh.snd {n : Nat} {tLeft : Typ} {e : Term}
+    (h : AdjointTermFresh n (Term.snd tLeft e)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_snd (h m hm base hb)
+
+theorem AdjointTermFresh.sum {n : Nat} {e : Term} {d : Dim}
+    (h : AdjointTermFresh n (Term.sum e d)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_sum (h m hm base hb)
+
+theorem AdjointTermFresh.expand {n : Nat} {e : Term} {d : Dim}
+    (h : AdjointTermFresh n (Term.expand e d)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_expand (h m hm base hb)
+
+theorem AdjointTermFresh.perform {n : Nat} {op : EffectLabel} {e : Term}
+    (h : AdjointTermFresh n (Term.perform op e)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_perform (h m hm base hb)
+
+theorem AdjointTermFresh.uniformLike {n : Nat} {e : Term} {lo hi : Float}
+    (h : AdjointTermFresh n (Term.uniformLike e lo hi)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_uniformLike (h m hm base hb)
+
+theorem AdjointTermFresh.abs {n : Nat} {x : String} {tx : Typ} {body : Term}
+    (h : AdjointTermFresh n (Term.abs x tx body)) :
+    AdjointTermFresh n body := by
+  intro m hm base hb
+  exact (freshInTerm_abs (h m hm base hb)).2
+
+theorem AdjointTermFresh.grad {n : Nat} {x : String} {tx tOut : Typ} {body : Term}
+    (h : AdjointTermFresh n (Term.grad x tx tOut body)) :
+    AdjointTermFresh n body := by
+  intro m hm base hb
+  exact (freshInTerm_grad (h m hm base hb)).2
+
+theorem AdjointTermFresh.vmap {n : Nat} {x : String} {tx : Typ} {d : Dim} {body : Term}
+    (h : AdjointTermFresh n (Term.vmap x tx d body)) :
+    AdjointTermFresh n body := by
+  intro m hm base hb
+  exact (freshInTerm_vmap (h m hm base hb)).2
+
+theorem AdjointTermFresh.handle_body
+    {n : Nat} {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (h : AdjointTermFresh n (Term.handle epsH body clauses)) :
+    AdjointTermFresh n body := by
+  intro m hm base hb
+  exact freshInTerm_handle_body (h m hm base hb)
+
 theorem AdjointTermFresh.letBind {n : Nat} {x : String} {e1 e2 : Term}
     (h : AdjointTermFresh n (Term.letBind x e1 e2)) :
     AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
@@ -151,6 +213,87 @@ theorem AdjointTermFresh.letpair {n : Nat} {x y : String} {e1 e2 : Term}
     intro m hm base hb
   · exact (freshInTerm_letpair (h m hm base hb)).2.2.1
   · exact (freshInTerm_letpair (h m hm base hb)).2.2.2
+
+theorem adjointFreeCtxSupported.add
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.add e1 e2)) :
+    AdjointFreeCtxSupported Gamma e1 ∧ AdjointFreeCtxSupported Gamma e2 := by
+  constructor <;> intro z t hz hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+
+theorem adjointFreeCtxSupported.mul
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.mul e1 e2)) :
+    AdjointFreeCtxSupported Gamma e1 ∧ AdjointFreeCtxSupported Gamma e2 := by
+  constructor <;> intro z t hz hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+
+theorem adjointFreeCtxSupported.pair
+    {Gamma : LinearCtx} {e1 e2 : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.pair e1 e2)) :
+    AdjointFreeCtxSupported Gamma e1 ∧ AdjointFreeCtxSupported Gamma e2 := by
+  constructor <;> intro z t hz hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+  · exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
+
+theorem adjointFreeCtxSupported.copy
+    {Gamma : LinearCtx} {e : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.copy e)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.fst
+    {Gamma : LinearCtx} {tRight : Typ} {e : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.fst tRight e)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.snd
+    {Gamma : LinearCtx} {tLeft : Typ} {e : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.snd tLeft e)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.sum
+    {Gamma : LinearCtx} {e : Term} {d : Dim}
+    (h : AdjointFreeCtxSupported Gamma (Term.sum e d)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.expand
+    {Gamma : LinearCtx} {e : Term} {d : Dim}
+    (h : AdjointFreeCtxSupported Gamma (Term.expand e d)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.perform
+    {Gamma : LinearCtx} {op : EffectLabel} {e : Term}
+    (h : AdjointFreeCtxSupported Gamma (Term.perform op e)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.uniformLike
+    {Gamma : LinearCtx} {e : Term} {lo hi : Float}
+    (h : AdjointFreeCtxSupported Gamma (Term.uniformLike e lo hi)) :
+    AdjointFreeCtxSupported Gamma e := by
+  intro z t hz hLook
+  exact h z t (by simpa [freeVars] using hz) hLook
+
+theorem adjointFreeCtxSupported.handle_body
+    {Gamma : LinearCtx} {epsH : EffectRow} {body : Term}
+    {clauses : List (EffectLabel × String × String × Term)}
+    (h : AdjointFreeCtxSupported Gamma (Term.handle epsH body clauses)) :
+    AdjointFreeCtxSupported Gamma body := by
+  intro z t hz hLook
+  exact h z t (by simp [freeVars, List.mem_append, hz]) hLook
 
 mutual
 
