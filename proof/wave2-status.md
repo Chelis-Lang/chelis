@@ -36,7 +36,7 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
   - the live executable `mul` branch of the private typed helper
   - the live executable clause-list `cons` pair-seed branch of the same helper stack
   - two parallel legacy exact-output `sorry`s that remain in commented proof blocks and are no longer on the active theorem path
-  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape and explicit `AdjointTermFresh` tracking. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining live `mul` / `cons` cases.
+  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape and explicit `AdjointFreeCtxSupported` / `AdjointTermFresh` tracking. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining live `mul` / `cons` cases.
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -84,4 +84,4 @@ The current theorem-shape boundary is now explicit in Lean:
 
 1. Refine and close the current `RuntimeSafeDebt` boundary, using the direct-handler and deep-active two-step counterexamples as the acceptance tests for the remaining side conditions.
 2. Sync the paper-facing workstreams so §5 no longer promises a preservation premise that the Lean tree now falsifies and so it names the current handler-aware boundary honestly.
-3. Re-close the public AD surface against the now-updated transform domain by keeping it on `adjointTypedFrom` / `adjointTypedClausesFrom`, redesigning the `mul` replay/tape boundary and public output-context claim so that surface is honest, threading the supported-fragment premises through `T-Grad` / `E-Grad` / the public theorem, then reproving the private helper there, finishing the remaining admitted `mul` and clause-list `cons` cases, and returning to the AD-correctness wave.
+3. Re-close the private AD core against the now-updated transform domain by keeping the public surface on `adjointTypedFrom` / `adjointTypedClausesFrom`, replacing the admitted shape-only helper with a supported, source-typed induction, threading the supported-fragment premises through `T-Grad` / `E-Grad` / the public theorem, then finishing the remaining admitted `mul` and clause-list `cons` cases before returning to the AD-correctness wave.
