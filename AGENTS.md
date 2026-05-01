@@ -188,12 +188,41 @@ undeclared identifier '__AMDGCN_WAVEFRONT_SIZE'
 
 Reconciliation, in order of precedence:
 
-1. **Wheel-include override (env-var, persistent in `~/.bashrc`).** The
-   shell now exports
-   `HIPCC_COMPILE_FLAGS_APPEND="-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include …"`.
-   `hipcc` honors that variable and prepends the wheel HIP include as a
-   high-priority `-isystem` path, so `<hip/...>` resolves inside the
-   wheel and the HIP 6.4 system headers are ignored. Verify with
+1. **Wheel-include override (env-var, durable via systemd-user
+   `environment.d`).** The canonical home of the HIP include override is
+   `~/.config/environment.d/hip.conf`:
+
+   ```
+   HIPCC_COMPILE_FLAGS_APPEND=-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include
+   ```
+
+   systemd's user manager reads `environment.d/*.conf` at user-session
+   start and propagates the variable to every process the user manager
+   spawns — including login shells, graphical sessions, non-interactive
+   `bash -c` invocations, `cargo test --workspace`, and any
+   orchestrated/CI-style harness. `hipcc` honors that variable and
+   prepends the wheel HIP include as a high-priority `-isystem` path,
+   so `<hip/...>` resolves inside the wheel and the HIP 6.4 system
+   headers are ignored. A previous iteration of this fix only set the
+   variable in `~/.bashrc`, which bash sources only for **interactive**
+   shells; non-interactive contexts (the harness, CI, agent bash tools)
+   never saw it and the HIP test went red. The `environment.d` route
+   covers both. The `~/.bashrc` line may be retained as
+   belt-and-suspenders for interactive shells that bypass systemd, or
+   removed; if retained it must not conflict with the `environment.d`
+   value.
+
+   Verify the durable fix from a fresh non-interactive shell after
+   login:
+
+   ```
+   $ bash -c 'env | grep HIPCC_COMPILE_FLAGS_APPEND'
+   HIPCC_COMPILE_FLAGS_APPEND=-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include
+   $ bash -c 'cd /home/jeff/Documents/scratch/chelis && cargo test -p chelis-backend-hip --test codegen_structure s14_generated_hip_source_compiles_when_hipcc_available'
+   ... test s14_generated_hip_source_compiles_when_hipcc_available ... ok
+   ```
+
+   Also verify resolved HIP includes:
    `hipcc -E foo.hip | grep amd_warp_functions.h` — the resolved path
    must be the wheel one.
 2. **Wheel `.so` symlinks added.** The wheel ships only versioned
@@ -222,8 +251,10 @@ $ echo $?
 ```
 
 `s14_generated_hip_source_compiles_when_hipcc_available` (in
-`chelis-backend-hip/tests/codegen_structure.rs`) also passes again under
-`cargo test`.
+`chelis-backend-hip/tests/codegen_structure.rs`) passes from
+non-interactive bash (`bash -c 'cargo test ...'`) once
+`~/.config/environment.d/hip.conf` is present and the user session has
+been re-established (login or `systemctl --user import-environment`).
 
 Caveat: any HIP source that does not `#include <hip/hip_runtime.h>`
 fails because clang-23's auto-included
@@ -283,11 +314,13 @@ When writing or rewriting Surf in this repository:
 - `chelis build` emits C, header, and runtime artifacts plus compile flags (default target)
 - `chelis build --target hip` emits C/HIP host code with embedded GPU kernel strings
 - Neither target invokes the native compiler — the user runs `gcc`/`hipcc` manually
-- On this workstation specifically, the local HIP toolchain is currently
-  broken (system-headers / wheel-clang mismatch — see "Local HIP
-  Environment" above); HIP manual gates are NOT runnable until the
-  toolchain is reconciled. `rocminfo` itself is healthy and remains the
-  source of truth for environment confirmation.
+- On this workstation specifically, the local HIP toolchain was
+  reconciled 2026-05-01 (see "Local HIP Environment" above) and HIP
+  manual gates are runnable. The fix lives in
+  `~/.config/environment.d/hip.conf` so non-interactive contexts (CI,
+  agent harnesses, `cargo test --workspace`) inherit the wheel-include
+  override too. `rocminfo` remains the source of truth for environment
+  confirmation.
 
 ## Shared Local Skills
 
