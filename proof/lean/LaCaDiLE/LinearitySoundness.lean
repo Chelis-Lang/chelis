@@ -91,12 +91,11 @@ private theorem linearity_soundness_aux
       -- touch the store further.
       exact ih h_wf
 
-/-- Runtime-safety cases that remain open after the store-aware
-    handler/substitution redesign. These are exactly the steps that
-    still have config-level counterexamples under the current
-    name-based substitution/runtime surface, or depend on the
-    unresolved AD track. This is the honest public residual surface
-    for the runtime track. -/
+/-- Broad internal umbrella for runtime-safety debt. This intentionally
+    over-approximates the exported residual surface: the precise
+    source-facing theorems below use `RuntimeSafeResidualDebt`, which
+    removes the already-closed unary-context reassembly cases and
+    spells out the exact remaining context families. -/
 inductive RuntimeSafeDebt : Config → Config → Prop
   | beta
       (sigma : Store) (x : String) (t : Typ) (e v : Term)
@@ -191,6 +190,289 @@ inductive RuntimeSafeDebt : Config → Config → Prop
       RuntimeSafeDebt
         ⟨sigma, plug E e⟩
         ⟨sigma', plug E e'⟩
+
+/-- Exact contextual runtime-safety debt families that remain after the
+    broad `RuntimeSafeDebt.ctx` umbrella is removed from the exported
+    runtime-safety surface. This is a closed list of residual context
+    frames where either sibling interaction or residual-debt
+    propagation still prevents a proof that `RuntimeSafeConfig`
+    reassembles through the frame. -/
+inductive RuntimeSafeCtxDebt : Config → Config → Prop
+  | appL
+      (sigma sigma' : Store) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.appL e2) e⟩
+        ⟨sigma', plug (EvalCtx.appL e2) e'⟩
+  | appR
+      (sigma sigma' : Store) (v1 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.appR v1) e⟩
+        ⟨sigma', plug (EvalCtx.appR v1) e'⟩
+  | letBind
+      (sigma sigma' : Store) (x : String) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.letBind x e2) e⟩
+        ⟨sigma', plug (EvalCtx.letBind x e2) e'⟩
+  | copy
+      (sigma sigma' : Store) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug EvalCtx.copy e⟩
+        ⟨sigma', plug EvalCtx.copy e'⟩
+  | letpair
+      (sigma sigma' : Store) (x y : String) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.letpair x y e2) e⟩
+        ⟨sigma', plug (EvalCtx.letpair x y e2) e'⟩
+  | pairL
+      (sigma sigma' : Store) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.pairL e2) e⟩
+        ⟨sigma', plug (EvalCtx.pairL e2) e'⟩
+  | pairR
+      (sigma sigma' : Store) (v1 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.pairR v1) e⟩
+        ⟨sigma', plug (EvalCtx.pairR v1) e'⟩
+  | fst
+      (sigma sigma' : Store) (tRight : Typ) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.fst tRight) e⟩
+        ⟨sigma', plug (EvalCtx.fst tRight) e'⟩
+  | snd
+      (sigma sigma' : Store) (tLeft : Typ) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.snd tLeft) e⟩
+        ⟨sigma', plug (EvalCtx.snd tLeft) e'⟩
+  | addL
+      (sigma sigma' : Store) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.addL e2) e⟩
+        ⟨sigma', plug (EvalCtx.addL e2) e'⟩
+  | addR
+      (sigma sigma' : Store) (v1 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.addR v1) e⟩
+        ⟨sigma', plug (EvalCtx.addR v1) e'⟩
+  | mulL
+      (sigma sigma' : Store) (e2 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.mulL e2) e⟩
+        ⟨sigma', plug (EvalCtx.mulL e2) e'⟩
+  | mulR
+      (sigma sigma' : Store) (v1 e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.mulR v1) e⟩
+        ⟨sigma', plug (EvalCtx.mulR v1) e'⟩
+  | sum
+      (sigma sigma' : Store) (d : Dim) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.sum d) e⟩
+        ⟨sigma', plug (EvalCtx.sum d) e'⟩
+  | expand
+      (sigma sigma' : Store) (d : Dim) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.expand d) e⟩
+        ⟨sigma', plug (EvalCtx.expand d) e'⟩
+  | uniformLike
+      (sigma sigma' : Store) (lo hi : Float) (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.uniformLike lo hi) e⟩
+        ⟨sigma', plug (EvalCtx.uniformLike lo hi) e'⟩
+  | handle
+      (sigma sigma' : Store)
+      (epsH : EffectRow)
+      (clauses : List (EffectLabel × String × String × Term))
+      (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.handle epsH clauses) e⟩
+        ⟨sigma', plug (EvalCtx.handle epsH clauses) e'⟩
+  | perform
+      (sigma sigma' : Store)
+      (op : EffectLabel)
+      (e e' : Term)
+      (h_inner : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+      RuntimeSafeCtxDebt
+        ⟨sigma, plug (EvalCtx.perform op) e⟩
+        ⟨sigma', plug (EvalCtx.perform op) e'⟩
+
+/-- Precise exported residual surface for the current runtime-safety
+    track. Compared to the broad `RuntimeSafeDebt` umbrella, this
+    removes the arbitrary `EvalCtx` debt constructor and records only
+    the exact remaining head-rule families plus the closed
+    `RuntimeSafeCtxDebt` enumeration. -/
+inductive RuntimeSafeResidualDebt : Config → Config → Prop
+  | beta
+      (sigma : Store) (x : String) (t : Typ) (e v : Term)
+      (hv : IsValue v) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.app (Term.abs x t e) v⟩
+        ⟨sigma, subst e v x⟩
+  | letBind
+      (sigma : Store) (x : String) (v e : Term)
+      (hv : IsValue v) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.letBind x v e⟩
+        ⟨sigma, subst e v x⟩
+  | letpair
+      (sigma : Store) (x y : String) (v1 v2 e : Term)
+      (hv1 : IsValue v1) (hv2 : IsValue v2) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.letpair x y (Term.pair v1 v2) e⟩
+        ⟨sigma, subst (subst e v1 x) v2 y⟩
+  | handleOpDirect
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow)
+      (clauses : List (EffectLabel × String × String × Term))
+      (x k : String) (handlerBody : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, x, k, handlerBody) ∈ clauses) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.handle epsH (Term.perform op v) clauses⟩
+        ⟨sigma,
+          subst (subst handlerBody v x)
+            (directIdCont epsH op v clauses tRet) k⟩
+  | handleOpCtx
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (E : EvalCtx)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, xVar, kVar, hb) ∈ clauses)
+      (hop : op ∈ epsH)
+      (hE : EvalCtx.noHandleFor op E) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.handle epsH (plug E (Term.perform op v)) clauses⟩
+        ⟨sigma,
+          subst (subst hb v xVar)
+            (Term.abs (capturedContName
+              (Term.handle epsH (plug E (Term.perform op v)) clauses)) tRet
+              (Term.handle epsH
+                (plug E (Term.var (capturedContName
+                  (Term.handle epsH (plug E (Term.perform op v)) clauses))))
+                clauses)) kVar⟩
+  | handleOpCtxs
+      (sigma : Store) (op : EffectLabel) (v : Term)
+      (epsH : EffectRow) (Es : EvalCtxChain)
+      (clauses : List (EffectLabel × String × String × Term))
+      (xVar kVar : String) (hb : Term) (tRet : Typ)
+      (hv : IsValue v)
+      (hsig : ∃ tArg, OpSigMatch op tArg tRet)
+      (hmem : (op, xVar, kVar, hb) ∈ clauses)
+      (hop : op ∈ epsH)
+      (hEs : EvalCtxChain.noHandleFor op Es) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.handle epsH (multiPlug Es (Term.perform op v)) clauses⟩
+        ⟨sigma,
+          subst (subst hb v xVar)
+            (Term.abs (capturedContName
+              (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses)) tRet
+              (Term.handle epsH
+                (multiPlug Es (Term.var (capturedContName
+                  (Term.handle epsH (multiPlug Es (Term.perform op v)) clauses))))
+                clauses)) kVar⟩
+  | tgrad
+      (sigma : Store) (x : String) (tv tOut : Typ) (body : Term)
+      (hSupp : AdjointSupported body) :
+      RuntimeSafeResidualDebt
+        ⟨sigma, Term.grad x tv tOut body⟩
+        ⟨sigma,
+          Term.abs x tv
+            (Term.letpair (gradPrimalName x body) x
+              (Term.copy (Term.var x))
+              (Term.abs (gradSeedName x body) tOut
+                (Term.letBind (gradResultName x body)
+                  (Term.handle [EffectLabel.accum]
+                    (adjointTypedFrom body tOut x (Term.var (gradSeedName x body))
+                      (gradAdjointCounter x (gradSeedName x body) body))
+                    [(EffectLabel.accum, "p", "k", Term.app (Term.var "k") (Term.var "p"))])
+                  (Term.var (gradPrimalName x body)))))⟩
+  | ctx
+      {c1 c2 : Config}
+      (hCtx : RuntimeSafeCtxDebt c1 c2) :
+      RuntimeSafeResidualDebt c1 c2
+
+theorem RuntimeSafeCtxDebt.to_runtimeSafeDebt
+    {c1 c2 : Config}
+    (h : RuntimeSafeCtxDebt c1 c2) :
+    RuntimeSafeDebt c1 c2 := by
+  cases h with
+  | appL sigma sigma' e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner
+  | appR sigma sigma' v1 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner
+  | letBind sigma sigma' x e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner
+  | copy sigma sigma' e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner
+  | letpair sigma sigma' x y e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner
+  | pairL sigma sigma' e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner
+  | pairR sigma sigma' v1 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner
+  | fst sigma sigma' tRight e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner
+  | snd sigma sigma' tLeft e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner
+  | addL sigma sigma' e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner
+  | addR sigma sigma' v1 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner
+  | mulL sigma sigma' e2 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner
+  | mulR sigma sigma' v1 e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner
+  | sum sigma sigma' d e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner
+  | expand sigma sigma' d e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner
+  | uniformLike sigma sigma' lo hi e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.uniformLike lo hi) e e' h_inner
+  | handle sigma sigma' epsH clauses e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.handle epsH clauses) e e' h_inner
+  | perform sigma sigma' op e e' h_inner =>
+      exact RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner
+
+theorem RuntimeSafeResidualDebt.to_runtimeSafeDebt
+    {c1 c2 : Config}
+    (h : RuntimeSafeResidualDebt c1 c2) :
+    RuntimeSafeDebt c1 c2 := by
+  cases h with
+  | beta sigma x t e v hv =>
+      exact RuntimeSafeDebt.beta sigma x t e v hv
+  | letBind sigma x v e hv =>
+      exact RuntimeSafeDebt.letBind sigma x v e hv
+  | letpair sigma x y v1 v2 e hv1 hv2 =>
+      exact RuntimeSafeDebt.letpair sigma x y v1 v2 e hv1 hv2
+  | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
+      exact RuntimeSafeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem
+  | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
+      exact RuntimeSafeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE
+  | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
+      exact RuntimeSafeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs
+  | tgrad sigma x tv tOut body hSupp =>
+      exact RuntimeSafeDebt.tgrad sigma x tv tOut body hSupp
+  | ctx hCtx =>
+      exact hCtx.to_runtimeSafeDebt
 
 /-- Every handler-aware term still has a duplicate-free active
     footprint at its root. -/
@@ -459,30 +741,28 @@ private theorem runtimeSafeConfig_pair_right
     (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.pairR e1) (e := e2)
       (by simpa [plug] using h)).1
 
-/-- First honest config-level one-step theorem for the runtime-safety
-    sidecar. This closes the store-safe head rules and the unary
-    context frames, while leaving the remaining substitution, handler,
-    AD, and sibling-interaction cases as explicit `RuntimeSafeDebt`.
-    The residual debt now matches the known config-level blocker
-    families: beta/let-style named substitution, direct/captured
-    handler capture, the AD `tgrad` step, and contextual replugging
-    across store-changing inner steps whose siblings can lose store
-    liveness outside the active/step footprints. -/
-theorem runtimeSafeConfig_step_or_debt
+/-- Precise config-level one-step theorem for the runtime-safety
+    sidecar. This closes the store-safe head rules and removes the
+    broad arbitrary-context debt export, reporting only the exact
+    residual surface: beta/let-style named substitution,
+    direct/captured handler substitution/capture, the AD `tgrad` step,
+    and the explicit residual context families listed in
+    `RuntimeSafeCtxDebt`. -/
+theorem runtimeSafeConfig_step_or_residualDebt
     (c1 c2 : Config)
     (h_step : Step c1 c2) :
     RuntimeSafeConfig c1 →
-      RuntimeSafeConfig c2 ∨ RuntimeSafeDebt c1 c2 := by
+      RuntimeSafeConfig c2 ∨ RuntimeSafeResidualDebt c1 c2 := by
   induction h_step with
   | beta sigma x t e v hv =>
       intro _h
-      exact Or.inr (RuntimeSafeDebt.beta sigma x t e v hv)
+      exact Or.inr (RuntimeSafeResidualDebt.beta sigma x t e v hv)
   | letBind sigma x v e hv =>
       intro _h
-      exact Or.inr (RuntimeSafeDebt.letBind sigma x v e hv)
+      exact Or.inr (RuntimeSafeResidualDebt.letBind sigma x v e hv)
   | letpair sigma x y v1 v2 e hv1 hv2 =>
       intro _h
-      exact Or.inr (RuntimeSafeDebt.letpair sigma x y v1 v2 e hv1 hv2)
+      exact Or.inr (RuntimeSafeResidualDebt.letpair sigma x y v1 v2 e hv1 hv2)
   | fst sigma tRight v1 v2 hv1 hv2 =>
       intro h
       exact Or.inl <| runtimeSafeConfig_pair_left <|
@@ -587,21 +867,21 @@ theorem runtimeSafeConfig_step_or_debt
   | handleOpDirect sigma op v epsH clauses x k handlerBody tRet hv hsig hmem =>
       intro _h
       exact Or.inr
-        (RuntimeSafeDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
+        (RuntimeSafeResidualDebt.handleOpDirect sigma op v epsH clauses x k handlerBody tRet
           hv hsig hmem)
   | handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet hv hsig hmem hop hE =>
       intro _h
       exact Or.inr
-        (RuntimeSafeDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
+        (RuntimeSafeResidualDebt.handleOpCtx sigma op v epsH E clauses xVar kVar hb tRet
           hv hsig hmem hop hE)
   | handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet hv hsig hmem hop hEs =>
       intro _h
       exact Or.inr
-        (RuntimeSafeDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
+        (RuntimeSafeResidualDebt.handleOpCtxs sigma op v epsH Es clauses xVar kVar hb tRet
           hv hsig hmem hop hEs)
   | tgrad sigma x tv tOut body hSupp =>
       intro _h
-      exact Or.inr (RuntimeSafeDebt.tgrad sigma x tv tOut body hSupp)
+      exact Or.inr (RuntimeSafeResidualDebt.tgrad sigma x tv tOut body hSupp)
   | tvmap sigma x tv d body =>
       intro h
       rcases h with ⟨hSafe, hLive⟩
@@ -635,12 +915,17 @@ theorem runtimeSafeConfig_step_or_debt
         | hole =>
             exact Or.inl (by simpa [plug] using hInner')
         | appL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.appL sigma sigma' e2 e e' h_inner))
         | appR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.appR sigma sigma' v1 e e' h_inner))
         | letBind x e2 =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.letBind sigma sigma' x e2 e e' h_inner))
         | copy =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug EvalCtx.copy e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -657,11 +942,16 @@ theorem runtimeSafeConfig_step_or_debt
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | letpair x y e2 =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.letpair sigma sigma' x y e2 e e' h_inner))
         | pairL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.pairL sigma sigma' e2 e e' h_inner))
         | pairR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.pairR sigma sigma' v1 e e' h_inner))
         | fst tRight =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.fst tRight) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -691,13 +981,21 @@ theorem runtimeSafeConfig_step_or_debt
               simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | addL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.addL sigma sigma' e2 e e' h_inner))
         | addR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.addR sigma sigma' v1 e e' h_inner))
         | mulL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.mulL sigma sigma' e2 e e' h_inner))
         | mulR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.mulR sigma sigma' v1 e e' h_inner))
         | sum d =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.sum d) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -742,7 +1040,8 @@ theorem runtimeSafeConfig_step_or_debt
             exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
         | handle epsH clauses =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.handle epsH clauses) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.handle sigma sigma' epsH clauses e e' h_inner))
         | perform op =>
             have hPlug : SubstAwareHandlerRuntimeLinear (plug (EvalCtx.perform op) e') := by
               rcases hInner'.1 with ⟨hHandler, hSubst⟩
@@ -761,52 +1060,90 @@ theorem runtimeSafeConfig_step_or_debt
         | hole =>
             exact Or.inr hDebt
         | appL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.appL sigma sigma' e2 e e' h_inner))
         | appR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.appR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.appR sigma sigma' v1 e e' h_inner))
         | letBind x e2 =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letBind x e2) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.letBind sigma sigma' x e2 e e' h_inner))
         | copy =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' EvalCtx.copy e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.copy sigma sigma' e e' h_inner))
         | letpair x y e2 =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.letpair x y e2) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.letpair sigma sigma' x y e2 e e' h_inner))
         | pairL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.pairL sigma sigma' e2 e e' h_inner))
         | pairR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.pairR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.pairR sigma sigma' v1 e e' h_inner))
         | fst tRight =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.fst tRight) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.fst sigma sigma' tRight e e' h_inner))
         | snd tLeft =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.snd tLeft) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.snd sigma sigma' tLeft e e' h_inner))
         | addL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.addL sigma sigma' e2 e e' h_inner))
         | addR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.addR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.addR sigma sigma' v1 e e' h_inner))
         | mulL e2 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulL e2) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.mulL sigma sigma' e2 e e' h_inner))
         | mulR v1 =>
-            exact Or.inr (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.mulR v1) e e' h_inner)
+            exact Or.inr
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.mulR sigma sigma' v1 e e' h_inner))
         | sum d =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.sum d) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.sum sigma sigma' d e e' h_inner))
         | expand d =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.expand d) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.expand sigma sigma' d e e' h_inner))
         | uniformLike lo hi =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma'
-                (EvalCtx.uniformLike lo hi) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.uniformLike sigma sigma' lo hi e e' h_inner))
         | handle epsH clauses =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma'
-                (EvalCtx.handle epsH clauses) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.handle sigma sigma' epsH clauses e e' h_inner))
         | perform op =>
             exact Or.inr
-              (RuntimeSafeDebt.ctx sigma sigma' (EvalCtx.perform op) e e' h_inner)
+              (RuntimeSafeResidualDebt.ctx
+                (RuntimeSafeCtxDebt.perform sigma sigma' op e e' h_inner))
+
+/-- Broad compatibility wrapper around
+    `runtimeSafeConfig_step_or_residualDebt`. New call sites should use
+    the residual theorem directly. -/
+theorem runtimeSafeConfig_step_or_debt
+    (c1 c2 : Config)
+    (h_step : Step c1 c2) :
+    RuntimeSafeConfig c1 →
+      RuntimeSafeConfig c2 ∨ RuntimeSafeDebt c1 c2 := by
+  intro hSafe
+  rcases runtimeSafeConfig_step_or_residualDebt c1 c2 h_step hSafe with hSafe' | hDebt
+  · exact Or.inl hSafe'
+  · exact Or.inr hDebt.to_runtimeSafeDebt
 
 theorem linearity_soundness
     (sigma sigma' : Store) (Sigma : StoreTyp)

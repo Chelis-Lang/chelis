@@ -6867,14 +6867,38 @@ theorem preservation
     ⟨Sigma', h_typ', h_wf', _h_on⟩
   exact ⟨Sigma', h_typ', h_wf'⟩
 
-/-- Honest combined one-step boundary on the current config-level
-    runtime-safety surface. Starting from a typed, well-scoped,
-    runtime-linear source configuration that also satisfies
-    `RuntimeSafeConfig`, either the step preserves typing, store
-    well-formedness, and `RuntimeSafeConfig`, or it falls into one of
-    the explicit `RuntimeSafeDebt` constructors. This keeps the
-    remaining runtime/AD blockers out of the theorem conclusion instead
-    of silently routing through the admitted `tgrad` path. -/
+/-- Honest combined one-step boundary on the current typed runtime-safe
+    surface. Starting from a typed, well-scoped, runtime-linear source
+    configuration that also satisfies `RuntimeSafeConfig`, either the
+    step preserves typing, store well-formedness, and
+    `RuntimeSafeConfig`, or it falls into one of the explicit
+    `RuntimeSafeResidualDebt` constructors. This keeps the remaining
+    runtime/AD blockers out of the theorem conclusion without
+    over-reporting already-closed unary context frames. -/
+theorem preservation_runtimeSafeConfig_or_residualDebt
+    (sigma sigma' : Store) (Sigma : StoreTyp)
+    (e e' : Term) (t : Typ) (eps : EffectRow)
+    (h_typ : HasType [] Sigma [] e t eps [])
+    (h_scope : WellScoped e)
+    (h_linear : RuntimeLinear e)
+    (h_safe : RuntimeSafeConfig ⟨sigma, e⟩)
+    (h_wf : StoreWf sigma Sigma)
+    (h_step : Step ⟨sigma, e⟩ ⟨sigma', e'⟩) :
+    (∃ Sigma',
+      HasType [] Sigma' [] e' t eps [] ∧
+      StoreWf sigma' Sigma' ∧
+      RuntimeSafeConfig ⟨sigma', e'⟩) ∨
+      RuntimeSafeResidualDebt ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
+  rcases runtimeSafeConfig_step_or_residualDebt ⟨sigma, e⟩ ⟨sigma', e'⟩ h_step h_safe with
+    h_safe' | h_debt
+  · rcases preservation sigma sigma' Sigma e e' t eps h_typ h_scope h_linear h_wf h_step with
+      ⟨Sigma', h_typ', h_wf'⟩
+    exact Or.inl ⟨Sigma', h_typ', h_wf', h_safe'⟩
+  · exact Or.inr h_debt
+
+/-- Broad compatibility wrapper around
+    `preservation_runtimeSafeConfig_or_residualDebt`. New call sites
+    should use the residual theorem directly. -/
 theorem preservation_runtimeSafeConfig_or_debt
     (sigma sigma' : Store) (Sigma : StoreTyp)
     (e e' : Term) (t : Typ) (eps : EffectRow)
@@ -6889,12 +6913,11 @@ theorem preservation_runtimeSafeConfig_or_debt
       StoreWf sigma' Sigma' ∧
       RuntimeSafeConfig ⟨sigma', e'⟩) ∨
       RuntimeSafeDebt ⟨sigma, e⟩ ⟨sigma', e'⟩ := by
-  rcases runtimeSafeConfig_step_or_debt ⟨sigma, e⟩ ⟨sigma', e'⟩ h_step h_safe with
-    h_safe' | h_debt
-  · rcases preservation sigma sigma' Sigma e e' t eps h_typ h_scope h_linear h_wf h_step with
-      ⟨Sigma', h_typ', h_wf'⟩
-    exact Or.inl ⟨Sigma', h_typ', h_wf', h_safe'⟩
-  · exact Or.inr h_debt
+  rcases preservation_runtimeSafeConfig_or_residualDebt
+      sigma sigma' Sigma e e' t eps h_typ h_scope h_linear h_safe h_wf h_step with
+    h_ok | h_debt
+  · exact Or.inl h_ok
+  · exact Or.inr h_debt.to_runtimeSafeDebt
 -- Wave 5r: plug_preserves_typing needs slot-param + filter→tombstone update.
 -- Original proof preserved below.
 /-  -- Induction on the evaluation context. The `hole` case is a direct
