@@ -6407,7 +6407,9 @@ private theorem preservation_aux
         adjointTypedFrom_preserves_typing
           [] Sigma ([(xr, some (Typ.tensor ds))] : LinearCtx)
           x gs ds dsOut body epsBody n slot
-          hBodyXR hDiffCompat hSupp hFreshFull hFreshSmall
+          hBodyXR hDiffCompat hSupp
+          (adjointTermFresh_of_gradAdjointCounter x gs body)
+          hFreshFull hFreshSmall
       have hAdj :
           HasType [] Sigma
             ([(x, none), (xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds)),

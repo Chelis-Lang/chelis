@@ -106,6 +106,52 @@ theorem AdjointTermFresh.mono {n n' : Nat} {e : Term}
   intro m hm base hb
   exact h m (Nat.le_trans hle hm) base hb
 
+theorem AdjointTermFresh.add {n : Nat} {e1 e2 : Term}
+    (h : AdjointTermFresh n (Term.add e1 e2)) :
+    AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
+  constructor <;>
+    intro m hm base hb
+  · exact (freshInTerm_add (h m hm base hb)).1
+  · exact (freshInTerm_add (h m hm base hb)).2
+
+theorem AdjointTermFresh.mul {n : Nat} {e1 e2 : Term}
+    (h : AdjointTermFresh n (Term.mul e1 e2)) :
+    AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
+  constructor <;>
+    intro m hm base hb
+  · exact (freshInTerm_mul (h m hm base hb)).1
+  · exact (freshInTerm_mul (h m hm base hb)).2
+
+theorem AdjointTermFresh.pair {n : Nat} {e1 e2 : Term}
+    (h : AdjointTermFresh n (Term.pair e1 e2)) :
+    AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
+  constructor <;>
+    intro m hm base hb
+  · exact (freshInTerm_pair (h m hm base hb)).1
+  · exact (freshInTerm_pair (h m hm base hb)).2
+
+theorem AdjointTermFresh.copy {n : Nat} {e : Term}
+    (h : AdjointTermFresh n (Term.copy e)) :
+    AdjointTermFresh n e := by
+  intro m hm base hb
+  exact freshInTerm_copy (h m hm base hb)
+
+theorem AdjointTermFresh.letBind {n : Nat} {x : String} {e1 e2 : Term}
+    (h : AdjointTermFresh n (Term.letBind x e1 e2)) :
+    AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
+  constructor <;>
+    intro m hm base hb
+  · exact (freshInTerm_letBind (h m hm base hb)).2.1
+  · exact (freshInTerm_letBind (h m hm base hb)).2.2
+
+theorem AdjointTermFresh.letpair {n : Nat} {x y : String} {e1 e2 : Term}
+    (h : AdjointTermFresh n (Term.letpair x y e1 e2)) :
+    AdjointTermFresh n e1 ∧ AdjointTermFresh n e2 := by
+  constructor <;>
+    intro m hm base hb
+  · exact (freshInTerm_letpair (h m hm base hb)).2.2.1
+  · exact (freshInTerm_letpair (h m hm base hb)).2.2.2
+
 private theorem maxStringLength_append_mono_right
     (pre suffix : List String) :
     maxStringLength suffix ≤ maxStringLength (pre ++ suffix) := by
@@ -4640,6 +4686,7 @@ theorem adjointTypedFrom_preserves_typing
                     (Gamma ++ [(x, slot)]))
     (_h_compat : subsetEffRow eps DiffCompat = true)
     (_h_supp : AdjointSupported e)
+    (_h_termFresh : AdjointTermFresh n e)
     (_h_fresh_full : AdjointNamesFresh n
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
     (_h_fresh_small : AdjointNamesFresh n (Gamma ++ [(x, some (Typ.tensor ds))])) :
@@ -4698,6 +4745,7 @@ theorem adjointTyped_preserves_typing
                    (Gamma ++ [(x, slot)]))
     (h_compat : subsetEffRow eps DiffCompat = true)
     (h_supp : AdjointSupported e)
+    (h_termFresh : AdjointTermFresh 0 e)
     (h_fresh_full : AdjointNamesFresh 0
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
     (h_fresh_small : AdjointNamesFresh 0 (Gamma ++ [(x, some (Typ.tensor ds))])) :
@@ -4711,6 +4759,7 @@ theorem adjointTyped_preserves_typing
         (Gamma ++ [(x, slotAdj), (gs, none)]) := by
   simpa [adjointTyped] using
     (adjointTypedFrom_preserves_typing Delta Sigma Gamma
-      x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_fresh_full h_fresh_small)
+      x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_termFresh
+      h_fresh_full h_fresh_small)
 
 end LaCaDiLE

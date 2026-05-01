@@ -32,10 +32,11 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
   - a handled product-seed counterexample showing that the legacy public `adjointFrom` theorem surface is still false: `handle` still routes through the tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
   - a higher-order counterexample showing that unrestricted `adjointTypedFrom` is also false on raw terms, because the typed transform still needs an explicit supported-fragment premise to exclude `abs` / `app` / nested `grad` / nested `vmap`
   - a concrete `mul` context-gap counterexample showing that the current private shape-only helper is false on arbitrary seed-only contexts, because the transformed `mul` term replays raw source operands and therefore needs source-context information in the theorem statement
-- The branch still contains 2 executable `sorry`s on the main proof path, both in `LaCaDiLE/AdjointTyping.lean`:
-  - the `mul` branch of the private typed helper
-  - the clause-list `cons` pair-seed branch of the same helper stack
-  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining `mul` / `cons` cases.
+- The branch still contains 4 `sorry` sites in `LaCaDiLE/AdjointTyping.lean`, grouped into 2 blocker families:
+  - the live executable `mul` branch of the private typed helper
+  - the live executable clause-list `cons` pair-seed branch of the same helper stack
+  - two parallel legacy exact-output `sorry`s that remain in commented proof blocks and are no longer on the active theorem path
+  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape and explicit `AdjointTermFresh` tracking. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining live `mul` / `cons` cases.
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -43,7 +44,7 @@ The current theorem-shape boundary is now explicit in Lean:
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
 - the recursive `DeepActiveRuntimeLinear` repair is still too weak globally: a typed deep-active beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later that overlap becomes active and breaks the invariant
-- `Operational.lean` now packages the next stronger candidate as `HandlerAwareRuntimeLinear`, but the public config-level boundary has moved on: `LinearitySoundness.lean` now exports `runtimeSafeConfig_step_or_debt`, and `Preservation.lean` now exports `preservation_runtimeSafeConfig_or_debt`, which preserves typing/store/runtime safety or enters an explicit `RuntimeSafeDebt` case as an interim checkpoint only
+- `Operational.lean` now packages the next stronger candidate as `HandlerAwareRuntimeLinear`, but the public config-level boundary has moved on: `LinearitySoundness.lean` now exports `runtimeSafeConfig_step_or_residualDebt`, and `Preservation.lean` now exports `preservation_runtimeSafeConfig_or_residualDebt`, which preserves typing/store/runtime safety or enters an explicit narrowed `RuntimeSafeResidualDebt` case as an interim checkpoint only; the older `_or_debt` theorems are retained as compatibility wrappers
 - a newer config-level `RuntimeSafeConfig` wrapper is also not yet final: there is now a concrete `handleOpCtx` counterexample showing that generic closure for that public surface is false
 - `tvmap` is no longer blocked on theorem shape: typing and stepping now share the batch dimension through the explicit `vmap` term annotation, and the preservation case is closed
 
@@ -65,13 +66,13 @@ The current theorem-shape boundary is now explicit in Lean:
   - why the first captured-handler `ActiveRuntimeLinear` repair is not the final invariant
 - `AdjointTransform.lean` now threads handler seeds linearly through the clause chain, and `AdjointTyping.lean` closes the matching executable `handle` typing proof.
 - `AdjointTransform.lean` now also routes typed cotangent seeds through `pair` / `fst` / `snd` / `copy`, so the old monomorphic product/projection mismatch has been removed from the transform surface itself.
-- `LinearitySoundness.lean` now packages the current config-level runtime-safety split as `runtimeSafeConfig_step_or_debt` instead of leaving the runtime debt boundary implicit.
-- `Operational.lean` still contains the stronger internal candidate predicate `HandlerAwareRuntimeLinear`, and `Preservation.lean` now uses the config-level split to export the combined `preservation_runtimeSafeConfig_or_debt` theorem.
+- `LinearitySoundness.lean` now packages the current config-level runtime-safety split as `runtimeSafeConfig_step_or_residualDebt` instead of leaving the runtime debt boundary implicit.
+- `Operational.lean` still contains the stronger internal candidate predicate `HandlerAwareRuntimeLinear`, and `Preservation.lean` now uses the config-level split to export the combined `preservation_runtimeSafeConfig_or_residualDebt` theorem.
 
 ## Remaining Critical Path
 
 1. Runtime-safe config boundary
-   The next public theorem still cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The internal term-level candidate remains `HandlerAwareRuntimeLinear`, but the exported boundary is now config-level: `runtimeSafeConfig_step_or_debt` plus `preservation_runtimeSafeConfig_or_debt`. The remaining work is to shrink the explicit `RuntimeSafeDebt` families, especially beta/let-style substitution, direct/captured handler substitution, `tgrad`, and contextual replugging across store-changing inner steps.
+   The next public theorem still cannot be “one-step `RuntimeLinear` preservation,” and it also cannot be plain “one-step `ActiveRuntimeLinear` preservation.” The internal term-level candidate remains `HandlerAwareRuntimeLinear`, but the exported boundary is now config-level: `runtimeSafeConfig_step_or_residualDebt` plus `preservation_runtimeSafeConfig_or_residualDebt`. The remaining work is to shrink the explicit residual debt families, especially beta/let-style substitution, direct/captured handler substitution, `tgrad`, and contextual replugging across store-changing inner steps.
 
 2. `AdjointTyping.lean`
    The repaired `handle` branch is closed, the old concrete `E-Grad` routing bug is repaired, and the transform now routes typed cotangent seeds through product/projection/copy. The public typed theorem is already on the honest slot-threaded existential output surface, but the private helper is still shape-only and therefore still false on arbitrary seed-only `mul` contexts. `tgrad` preservation is therefore still not honestly settled. The remaining AD blockers are:
