@@ -1470,6 +1470,27 @@ theorem hasType_prefix_weaken
         t_ tArg tRet epsR_ op x k hb rest slotX slotK
         hmatch ih_body' ih_rest
 
+/-- The body-local supported-context premise is monotone under
+    left-prefixing when the term is already typed in the smaller
+    context. Free variables of the term still resolve in the original
+    suffix, so any additional outer bindings are ignored. -/
+theorem adjointFreeCtxSupported_prefix_weaken
+    {Delta : CapCtx} {Sigma : StoreTyp} {Gamma Gamma' outer : LinearCtx}
+    {e : Term} {t : Typ} {eps : EffectRow}
+    (h : HasType Delta Sigma Gamma e t eps Gamma')
+    (hCtxSupp : AdjointFreeCtxSupported Gamma e) :
+    AdjointFreeCtxSupported (outer ++ Gamma) e := by
+  intro z tz hz hLook
+  rcases has_type_free_lookup_aux h z hz with ⟨tzInner, hInnerLook⟩
+  have hPrefInner :
+      lookupLinearCtx (outer ++ Gamma) z = some tzInner :=
+    lookupLinearCtx_append_left_of_some (pref := outer) hInnerLook
+  have hEq : tzInner = tz := by
+    rw [hLook] at hPrefInner
+    cases hPrefInner
+    rfl
+  simpa [hEq] using hCtxSupp z tzInner hz hInnerLook
+
 theorem clausesTyped_prefix_weaken
     {Delta : CapCtx} {Sigma : StoreTyp}
     {Gamma2 Gamma3 : LinearCtx} {t : Typ} {epsR : EffectRow}

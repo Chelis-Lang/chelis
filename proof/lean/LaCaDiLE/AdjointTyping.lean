@@ -5001,6 +5001,8 @@ theorem adjointTypedFrom_preserves_typing
                     (Gamma ++ [(x, slot)]))
     (_h_compat : subsetEffRow eps DiffCompat = true)
     (_h_supp : AdjointSupported e)
+    (_h_ctxSupp : AdjointFreeCtxSupported
+      (Gamma ++ [(x, some (Typ.tensor ds))]) e)
     (_h_termFresh : AdjointTermFresh n e)
     (_h_fresh_full : AdjointNamesFresh n
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
@@ -5060,6 +5062,8 @@ theorem adjointTyped_preserves_typing
                    (Gamma ++ [(x, slot)]))
     (h_compat : subsetEffRow eps DiffCompat = true)
     (h_supp : AdjointSupported e)
+    (h_ctxSupp : AdjointFreeCtxSupported
+      (Gamma ++ [(x, some (Typ.tensor ds))]) e)
     (h_termFresh : AdjointTermFresh 0 e)
     (h_fresh_full : AdjointNamesFresh 0
         (Gamma ++ [(x, some (Typ.tensor ds)), (gs, some (Typ.tensor dsOut))]))
@@ -5074,7 +5078,7 @@ theorem adjointTyped_preserves_typing
         (Gamma ++ [(x, slotAdj), (gs, none)]) := by
   simpa [adjointTyped] using
     (adjointTypedFrom_preserves_typing Delta Sigma Gamma
-      x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_termFresh
+      x gs ds dsOut e eps 0 slot h_e h_compat h_supp h_ctxSupp h_termFresh
       h_fresh_full h_fresh_small)
 
 end LaCaDiLE

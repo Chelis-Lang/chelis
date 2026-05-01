@@ -6403,11 +6403,19 @@ private theorem preservation_aux
             ([(xr, some (Typ.tensor ds)), (x, slot)] : LinearCtx) := by
         simpa [List.append_assoc] using
           (hasType_prefix_weaken hBody ([(xr, some (Typ.tensor ds))] : LinearCtx))
+      have hCtxSuppXR :
+          AdjointFreeCtxSupported
+            ([(xr, some (Typ.tensor ds)), (x, some (Typ.tensor ds))] : LinearCtx)
+            body := by
+        simpa [List.append_assoc] using
+          (adjointFreeCtxSupported_prefix_weaken
+            (outer := ([(xr, some (Typ.tensor ds))] : LinearCtx))
+            hBody hCtxSupp)
       obtain ⟨slotAdj, _hslotAdj, hAdjBase⟩ :=
         adjointTypedFrom_preserves_typing
           [] Sigma ([(xr, some (Typ.tensor ds))] : LinearCtx)
           x gs ds dsOut body epsBody n slot
-          hBodyXR hDiffCompat hSupp
+          hBodyXR hDiffCompat hSupp hCtxSuppXR
           (adjointTermFresh_of_gradAdjointCounter x gs body)
           hFreshFull hFreshSmall
       have hAdj :
