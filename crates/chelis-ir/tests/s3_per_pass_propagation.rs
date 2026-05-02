@@ -707,6 +707,194 @@ fn tier2_lower_sub_inherits_parent_span() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3.7 — AD: backward nodes carry __synthesized_grad__ + forward span
+// ─────────────────────────────────────────────────────────────────────
+
+/// Mandatory test from spec §3 S3 (AD three-hop). Lower a span-bearing
+/// forward program (mul of two span-bearing operands), run AD, walk the
+/// resulting DAG. For each backward node, assert
+/// `span_id == "__synthesized_grad__"` AND `merged_spans` contains the
+/// corresponding forward node's `span_id`. This proves the audit chain
+/// (backward → forward → LaTeX source) is reconstructible.
+#[test]
+fn ad_backward_nodes_carry_grad_marker_and_forward_span() {
+    use grad::{GRAD_SYNTH_MARKER, grad_dag};
+
+    // Forward: y = a * b. Both literals + the mul carry distinct spans.
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        scalar_f32(),
+        Some("fwd.a".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        scalar_f32(),
+        Some("fwd.b".into()),
+    );
+    let y = dag.add_node(
+        RiscOp::Mul,
+        vec![a, b],
+        scalar_f32(),
+        Some("fwd.mul".into()),
+    );
+    dag.add_root(y);
+
+    let result = grad_dag(&dag, y, &[a, b]).expect("grad_dag should succeed on scalar mul");
+
+    // Walk the resulting DAG. Forward nodes (Load("a"), Load("b"), Mul)
+    // keep their original spans. Every other node is a backward node
+    // and must carry GRAD_SYNTH_MARKER as span_id, plus the forward
+    // span in merged_spans.
+    let forward_spans: BTreeSet<&str> = ["fwd.a", "fwd.b", "fwd.mul"].iter().copied().collect();
+    let mut saw_grad_marker = false;
+    let mut saw_fwd_mul_in_merged = false;
+
+    for node in result.dag.nodes() {
+        match node.span_id.as_deref() {
+            Some(s) if s == GRAD_SYNTH_MARKER => {
+                saw_grad_marker = true;
+                // Every grad-marker node MUST have non-empty merged_spans
+                // (per §3 S3 oracle: synthesized markers never the only
+                // provenance) — and the merged spans MUST include a
+                // forward span.
+                assert!(
+                    !node.merged_spans.is_empty(),
+                    "grad-marker node {:?} has empty merged_spans (audit invariant violated)",
+                    node.id
+                );
+                let has_forward = node
+                    .merged_spans
+                    .iter()
+                    .any(|s| forward_spans.contains(s.as_str()));
+                assert!(
+                    has_forward,
+                    "grad-marker node {:?} merged_spans {:?} contains no forward span",
+                    node.id, node.merged_spans
+                );
+                if node.merged_spans.iter().any(|s| s == "fwd.mul") {
+                    saw_fwd_mul_in_merged = true;
+                }
+            }
+            Some(s) if forward_spans.contains(s) => {
+                // Forward node — span should be preserved unchanged.
+            }
+            other => panic!(
+                "unexpected span_id {other:?} on node {:?} ({:?})",
+                node.id, node.op
+            ),
+        }
+    }
+    assert!(saw_grad_marker, "no node carried GRAD_SYNTH_MARKER");
+    // The seed (∂y/∂y = 1) and the Mul's adjoints all reference fwd.mul.
+    // That's the AD rule: backward nodes attribute to the FORWARD NODE
+    // BEING DIFFERENTIATED, not its operands. The operands' spans
+    // survive on their forward nodes (Load("a"), Load("b")), so the
+    // global audit invariant ("every input span appears as span_id or
+    // merged_spans on at least one node") still holds — just not on
+    // backward nodes specifically.
+    assert!(
+        saw_fwd_mul_in_merged,
+        "no grad-marker node folded fwd.mul into merged_spans"
+    );
+    // Confirm the global audit invariant: every forward span survives
+    // somewhere in the result DAG.
+    let result_spans = dag_spans(&result.dag);
+    for fwd in &forward_spans {
+        assert!(
+            result_spans.contains(*fwd),
+            "forward span {fwd} dropped by AD; result spans: {result_spans:?}"
+        );
+    }
+}
+
+/// Forward nodes carry their original span_id and merged_spans through
+/// AD unchanged. Per §2.3 AD row: "Forward nodes: clone span_id and
+/// merged_spans."
+#[test]
+fn ad_forward_nodes_preserve_their_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        scalar_f32(),
+        Some("fwd.a".into()),
+    );
+    // Stamp a merged_span on the forward Load to confirm it survives.
+    dag.node_mut(a).unwrap().merged_spans = vec!["fwd.a.merged".into()];
+    let y = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), Some("fwd.neg".into()));
+    dag.add_root(y);
+
+    let result = grad::grad_dag(&dag, y, &[a]).expect("grad_dag should succeed");
+    let spans = dag_spans(&result.dag);
+    assert!(
+        spans.contains("fwd.a"),
+        "forward span fwd.a lost: {spans:?}"
+    );
+    assert!(
+        spans.contains("fwd.a.merged"),
+        "forward merged_span fwd.a.merged lost: {spans:?}"
+    );
+    assert!(
+        spans.contains("fwd.neg"),
+        "forward span fwd.neg lost: {spans:?}"
+    );
+}
+
+/// Negative parity: AD on a span-less forward DAG produces backward
+/// nodes carrying ONLY GRAD_SYNTH_MARKER (no forward span to merge), so
+/// the merged_spans on grad-marker nodes is empty. Note this
+/// specifically violates the audit-invariant for synthesized markers
+/// that the spec requires — but that invariant only applies when the
+/// FORWARD DAG carries spans. With no forward spans, there's nothing
+/// to fold; this is the legitimate "unspanned input" case.
+#[test]
+fn ad_on_unspanned_forward_dag_does_not_fabricate_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let y = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+    dag.add_root(y);
+
+    let result = grad::grad_dag(&dag, y, &[a, b]).expect("grad_dag");
+    for node in result.dag.nodes() {
+        match node.span_id.as_deref() {
+            // Forward nodes inherit None.
+            None => assert!(
+                node.merged_spans.is_empty(),
+                "merged_spans on unspanned forward node should be empty"
+            ),
+            // Backward nodes still get the marker — but without forward
+            // spans, merged_spans is empty (consistent with the
+            // "audit-invariant only when input has spans" carve-out).
+            Some(s) if s == grad::GRAD_SYNTH_MARKER => {
+                assert!(
+                    node.merged_spans.is_empty(),
+                    "unspanned-forward AD fabricated merged_spans: {:?}",
+                    node.merged_spans
+                );
+            }
+            other => panic!(
+                "unexpected span_id {other:?} on AD-on-unspanned node {:?}",
+                node.id
+            ),
+        }
+    }
+}
+
 /// DCE remap variant (used by Phase F library carrier) must apply the
 /// same pure-copy rule. Locking it explicitly so an alternate code path
 /// can't drift from the headline `dead_code_eliminate`.

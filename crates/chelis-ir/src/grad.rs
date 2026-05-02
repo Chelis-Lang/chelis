@@ -99,6 +99,41 @@ pub fn grad_dag_checked(
     })
 }
 
+/// Canonical synthesized marker for AD backward (adjoint) nodes. Locked
+/// by spec/03-deep-syntax.md §1.1.1 — double-underscore wrap, lowercase
+/// pass name. Every adjoint node carries this as its `span_id` and
+/// records the corresponding forward node's `span_id` (and any of its
+/// pre-existing `merged_spans`) inside `merged_spans` so the audit
+/// chain (backward → forward → LaTeX source) is reconstructible.
+pub const GRAD_SYNTH_MARKER: &str = "__synthesized_grad__";
+
+/// Stamp the AD synthesized-marker rule onto nodes added during a
+/// single adjoint construction. `dag_size_before` is the dag length
+/// captured immediately before the adjoint helper ran; every node from
+/// that index onward is a backward node corresponding to `forward_node`
+/// (the forward operation being differentiated). Each backward node:
+///   * gets `span_id = "__synthesized_grad__"` (overwriting whatever
+///     the constructor wrote — including `__synthesized_tier2__` for
+///     adjoints that go through a Tier 2 helper),
+///   * gets the forward node's `span_id` and `merged_spans` folded into
+///     its `merged_spans` (lex-sorted, deduped) so the forward span is
+///     always present alongside the synthesized marker.
+fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNode) {
+    let new_len = dag.len();
+    for idx in dag_size_before..new_len {
+        let id = NodeId(idx);
+        if let Some(node) = dag.node_mut(id) {
+            node.span_id = Some(GRAD_SYNTH_MARKER.to_owned());
+            // Wipe any prior merged_spans (the constructor may have
+            // populated some via tier2 helpers; we overwrite with the
+            // forward-side provenance to maintain the canonical order).
+            node.merged_spans.clear();
+        }
+        crate::span_merge::append_span_to_node(dag, id, forward_node.span_id.as_deref());
+        crate::span_merge::append_spans_to_node(dag, id, &forward_node.merged_spans);
+    }
+}
+
 /// Run reverse-mode AD on `forward`, differentiating `output` with respect to each node in `wrt`.
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
@@ -110,9 +145,20 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
     if !is_scalar_float(&output_ty) {
         return None;
     }
+    // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
+    // — `forward.clone()` deep-copies the DagNodes, and the existing
+    // serde derives include the span fields. Per
+    // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
+    // clone span_id and merged_spans."
     let mut dag = forward.clone();
     let mut adjoints: HashMap<NodeId, NodeId> = HashMap::new();
+    // Seed the gradient at `output` (∂output/∂output = 1). This is a
+    // backward node corresponding to the forward `output`, so it
+    // carries the grad marker.
+    let output_node = forward.get(output).unwrap().clone();
+    let dag_before_seed = dag.len();
     let seed = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], output_ty, None);
+    stamp_grad_marker(&mut dag, dag_before_seed, &output_node);
     adjoints.insert(output, seed);
 
     // Walk forward topological order in reverse.
@@ -124,7 +170,12 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
         };
 
         let node = forward.get(node_id).unwrap().clone();
+        let dag_size_before = dag.len();
         let input_grads = compute_adjoints(&node, grad_out, forward, &mut dag)?;
+        // Every node added inside compute_adjoints is a backward
+        // (adjoint) node for `node`. Stamp the grad marker + the
+        // forward span onto each.
+        stamp_grad_marker(&mut dag, dag_size_before, &node);
 
         for (input_id, grad_node) in input_grads {
             match adjoints.entry(input_id) {
@@ -134,7 +185,13 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
                 Entry::Occupied(mut e) => {
                     let existing = *e.get();
                     let ty = dag.get(existing).unwrap().output_type.clone();
+                    // Sum-accumulator for multi-consumer forward nodes
+                    // — also a backward node, attributed to the
+                    // forward input being accumulated.
+                    let dag_before_sum = dag.len();
                     let sum = dag.add_node(RiscOp::Add, vec![existing, grad_node], ty, None);
+                    let input_forward = forward.get(input_id).unwrap().clone();
+                    stamp_grad_marker(&mut dag, dag_before_sum, &input_forward);
                     e.insert(sum);
                 }
             }
@@ -203,8 +260,22 @@ fn prune_to_requested_outputs(
                 .iter()
                 .map(|input| *id_map.get(&input.0).expect("live input must be remapped"))
                 .collect();
-            let new_id =
-                new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone(), None);
+            // Pruning is a pure copy: thread span_id and merged_spans
+            // through unchanged. Same rule as DCE/remap (§2.3 DCE row);
+            // grad's pruner is a separate code path that must not
+            // drift. Without this the AD seed/backward nodes would lose
+            // their `__synthesized_grad__` markers post-prune.
+            let new_id = new_dag.add_node(
+                node.op.clone(),
+                new_inputs,
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            if !node.merged_spans.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.merged_spans = node.merged_spans.clone();
+            }
             id_map.insert(node.id.0, new_id);
         }
     }
