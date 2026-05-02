@@ -1,6 +1,6 @@
 # Lines of Code Report
 
-Generated: 2026-05-02 14:39 UTC
+Generated: 2026-05-02 23:24 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
@@ -18,5 +18,5 @@ Generated: 2026-05-02 14:39 UTC
 | Tree-sitter Queries (.scm) | 2 | 98 | 0 | 6 | 104 | Syntax highlighting for Surf and Deep |
 | **Chelis Deep** (.dp) | **6** | **73** | **0** | **1** | **74** | **Deep test fixtures** |
 | Bash | 1 | 30 | 1 | 8 | 39 |  |
-| Markdown | 105 | 0 | 9,312 | 4,937 | 14,249 | Specs, design docs, plans |
-| **Total** | **455** | **113,109** | **15,378** | **37,287** | **165,774** | |
+| Markdown | 105 | 0 | 9,343 | 4,946 | 14,289 | Specs, design docs, plans |
+| **Total** | **455** | **113,109** | **15,409** | **37,296** | **165,814** | |
