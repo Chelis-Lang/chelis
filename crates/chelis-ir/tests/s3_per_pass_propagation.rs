@@ -456,6 +456,161 @@ fn constant_fold_does_not_fabricate_spans() {
     assert!(folded.merged_spans.is_empty());
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3.5 — CSE: survivor keeps span_id, duplicate's provenance merges in
+// ─────────────────────────────────────────────────────────────────────
+
+/// Two structurally-identical Const nodes with distinct spans collapse
+/// onto one survivor under CSE. The survivor keeps the FIRST node's
+/// `span_id`; the dropped duplicate's `span_id` lands in the survivor's
+/// `merged_spans`. Per §2.3 CSE row.
+#[test]
+fn cse_merges_duplicate_span_into_survivor() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.first".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.dup".into()),
+    );
+    let sum = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        scalar_f32(),
+        Some("cse.add".into()),
+    );
+    dag.add_root(sum);
+
+    let new_dag = optimize::common_subexpr_eliminate(&dag);
+    // The two consts collapse: 2 nodes (1 Const + 1 Add).
+    assert_eq!(new_dag.len(), 2, "CSE should collapse identical consts");
+
+    let const_node = new_dag
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Const { .. }))
+        .expect("Const survives");
+    assert_eq!(
+        const_node.span_id.as_deref(),
+        Some("cse.first"),
+        "survivor must keep first-seen span_id"
+    );
+    assert_eq!(
+        const_node.merged_spans,
+        vec!["cse.dup".to_string()],
+        "duplicate's span must land in survivor's merged_spans"
+    );
+
+    // The Add node also keeps its own span unchanged.
+    let add_node = new_dag
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Add))
+        .expect("Add survives");
+    assert_eq!(add_node.span_id.as_deref(), Some("cse.add"));
+}
+
+/// Transitive: a duplicate that already carries pre-existing
+/// `merged_spans` must fold all of them onto the survivor (not just the
+/// canonical span).
+#[test]
+fn cse_propagates_duplicate_merged_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 7.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.first".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 7.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.dup".into()),
+    );
+    // Stamp pre-existing merged_spans on the duplicate.
+    dag.node_mut(b).unwrap().merged_spans =
+        vec!["cse.dup.alias.1".into(), "cse.dup.alias.2".into()];
+    let neg = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+    let neg2 = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
+    dag.add_root(neg);
+    dag.add_root(neg2);
+
+    let new_dag = optimize::common_subexpr_eliminate(&dag);
+
+    let const_node = new_dag
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Const { .. }))
+        .expect("Const survives");
+    assert_eq!(const_node.span_id.as_deref(), Some("cse.first"));
+    assert_eq!(
+        const_node.merged_spans,
+        vec![
+            "cse.dup".to_string(),
+            "cse.dup.alias.1".to_string(),
+            "cse.dup.alias.2".to_string(),
+        ],
+        "all of duplicate's provenance (canonical + merged) must fold lex-sorted onto survivor"
+    );
+}
+
+/// Survivor's pre-existing merged_spans are preserved through CSE
+/// (i.e. CSE doesn't drop the survivor's own merged provenance when
+/// merging in a duplicate).
+#[test]
+fn cse_preserves_survivor_merged_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 5.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.first".into()),
+    );
+    dag.node_mut(a).unwrap().merged_spans = vec!["cse.first.alias".into()];
+    let b = dag.add_node(
+        RiscOp::Const { value: 5.0 },
+        vec![],
+        scalar_f32(),
+        Some("cse.dup".into()),
+    );
+    let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    dag.add_root(sum);
+
+    let new_dag = optimize::common_subexpr_eliminate(&dag);
+    let const_node = new_dag
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Const { .. }))
+        .expect("Const survives");
+    assert_eq!(
+        const_node.merged_spans,
+        vec!["cse.dup".to_string(), "cse.first.alias".to_string()],
+    );
+}
+
+/// Negative parity: CSE on unspanned input fabricates nothing.
+#[test]
+fn cse_does_not_fabricate_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    dag.add_root(sum);
+
+    let new_dag = optimize::common_subexpr_eliminate(&dag);
+    for node in new_dag.nodes() {
+        assert_eq!(node.span_id, None, "CSE fabricated span_id");
+        assert!(node.merged_spans.is_empty(), "CSE fabricated merged_spans");
+    }
+}
+
 /// DCE remap variant (used by Phase F library carrier) must apply the
 /// same pure-copy rule. Locking it explicitly so an alternate code path
 /// can't drift from the headline `dead_code_eliminate`.

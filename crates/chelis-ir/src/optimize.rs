@@ -210,6 +210,15 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 
 /// Common subexpression elimination: build a new DAG, merging nodes
 /// that have identical (op, remapped_inputs) keys.
+///
+/// Span propagation per spec/design/chelis_span_survival.md §2.3 CSE
+/// row: the survivor (first node seen with a given key) keeps its own
+/// `span_id`. When a duplicate is found, the duplicate's full
+/// provenance — its `span_id` and its existing `merged_spans` — folds
+/// into the survivor's `merged_spans` (lex-sorted, deduped) via
+/// `crate::span_merge::merge_duplicate_into_survivor`. Survivor's
+/// canonical span and any duplicate-canonical that equals it are
+/// dedup'd by the helper.
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
     let mut id_map: HashMap<usize, NodeId> = HashMap::new();
@@ -226,14 +235,30 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
         let cse_key = (op_key, remapped_inputs.clone());
 
         if let Some(&existing) = seen.get(&cse_key) {
+            // Duplicate: its full provenance (canonical + merged) folds
+            // onto the survivor so the audit chain through the dropped
+            // node is preserved.
+            crate::span_merge::merge_duplicate_into_survivor(
+                &mut new_dag,
+                existing,
+                node.span_id.as_deref(),
+                &node.merged_spans,
+            );
             id_map.insert(node.id.0, existing);
         } else {
+            // Survivor: clone its own span_id and merged_spans onto the
+            // new node so the canonical provenance flows through CSE.
             let new_id = new_dag.add_node(
                 node.op.clone(),
                 remapped_inputs,
                 node.output_type.clone(),
-                None,
+                node.span_id.clone(),
             );
+            if !node.merged_spans.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.merged_spans = node.merged_spans.clone();
+            }
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
             {
