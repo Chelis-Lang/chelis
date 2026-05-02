@@ -135,8 +135,10 @@ impl HipEmitter {
                 let input_idx = *input_slots
                     .get(name)
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                e.emit_span_comments(node);
                 e.emit_load(node.id.0, input_idx, &node.output_type);
             } else {
+                e.emit_span_comments(node);
                 e.emit_node(node, dag);
             }
         }
@@ -269,8 +271,10 @@ impl HipEmitter {
                 let input_idx = *input_slots
                     .get(name)
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                self.emit_span_comments(node);
                 self.emit_load_device(node.id.0, input_idx, &node.output_type);
             } else {
+                self.emit_span_comments(node);
                 self.emit_node(node, dag);
             }
         }
@@ -314,8 +318,20 @@ impl HipEmitter {
             }
             match &node.op {
                 RiscOp::Sum { axis } | RiscOp::MaxReduce { axis } => {
-                    for (name, source) in self.reduction_kernel_sources(node, dag, *axis) {
+                    let sources = self.reduction_kernel_sources(node, dag, *axis);
+                    for (name, source) in sources {
                         if seen.insert(name.clone()) {
+                            // Reduction kernels named `kernel_fused_<sum|maxred>_<id>`
+                            // are per-node (id encodes the originating DagNode),
+                            // so prepend that node's spans inside the kernel
+                            // source. Shared reduction kernels (e.g.
+                            // `kernel_sum_ax0`) are launched from multiple
+                            // nodes — host-side launch comments cover those.
+                            let source = if Self::is_per_node_kernel_name(&name) {
+                                Self::prepend_span_comments_to_kernel_source(node, source)
+                            } else {
+                                source
+                            };
                             self.kernel_sources.push((name, source));
                         }
                     }
@@ -338,9 +354,30 @@ impl HipEmitter {
                 && seen.insert(name.clone())
             {
                 let source = self.kernel_source_for_op(&name, &node.op, node, dag);
+                // Per-node kernels (FusedElem `kernel_fused_<id>`, fused
+                // reductions) get this node's spans embedded inside their
+                // source string so the audit chain survives into the
+                // runtime-compiled kernel. Shared kernels (kernel_neg,
+                // kernel_add, …) are launched from multiple DAG nodes so
+                // there is no single canonical span — host-side launch
+                // comments are the audit anchor for those.
+                let source = if Self::is_per_node_kernel_name(&name) {
+                    Self::prepend_span_comments_to_kernel_source(node, source)
+                } else {
+                    source
+                };
                 self.kernel_sources.push((name, source));
             }
         }
+    }
+
+    /// True when a kernel name is unique to a single DagNode (i.e. its
+    /// suffix encodes a node id). Used to decide whether prepending span
+    /// comments inside the kernel source is unambiguous.
+    fn is_per_node_kernel_name(name: &str) -> bool {
+        // FusedElem: kernel_fused_<id>
+        // Fused reductions: kernel_fused_sum_<id>, kernel_fused_maxred_<id>
+        name.starts_with("kernel_fused_")
     }
 
     fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
@@ -1652,6 +1689,63 @@ impl HipEmitter {
     fn line(&mut self, s: &str) {
         let prefix = "    ".repeat(self.indent);
         self.lines.push(format!("{prefix}{s}"));
+    }
+
+    /// Emit `// span: <id>` host-side comment lines for a node's
+    /// `span_id ∪ merged_spans`. Per `spec/design/chelis_span_survival.md`
+    /// §2.4 (S4): canonical first, then `merged_spans` lex-sorted (deduped
+    /// against `span_id`). No-op when both fields are empty.
+    fn emit_span_comments(&mut self, node: &DagNode) {
+        for line in Self::span_comment_block(node) {
+            self.line(&line);
+        }
+    }
+
+    /// Build the deduped, lex-sorted `// span:` comment block for a node.
+    /// Returns a vector of comment strings (each one a single line, no
+    /// indent prefix). Used both by host-side emission (via
+    /// `emit_span_comments`) and by per-node device-kernel string
+    /// emission (where the comments are prepended inside the embedded
+    /// kernel source so they survive into the runtime-compiled HIP).
+    fn span_comment_block(node: &DagNode) -> Vec<String> {
+        let mut out = Vec::new();
+        if node.span_id.is_none() && node.merged_spans.is_empty() {
+            return out;
+        }
+        if let Some(canonical) = node.span_id.as_deref() {
+            out.push(format!("// span: {canonical}"));
+        }
+        let mut merged: Vec<&str> = node
+            .merged_spans
+            .iter()
+            .map(String::as_str)
+            .filter(|s| node.span_id.as_deref() != Some(*s))
+            .collect();
+        merged.sort();
+        merged.dedup();
+        for span in merged {
+            out.push(format!("// span: {span}"));
+        }
+        out
+    }
+
+    /// Prepend `// span:` comment lines (followed by a newline) to a
+    /// kernel source string. Returns the augmented source. No-op when the
+    /// node carries no spans. Used for per-node kernels (FusedElem,
+    /// fused reductions) where the kernel string is unique to the
+    /// originating DAG node.
+    fn prepend_span_comments_to_kernel_source(node: &DagNode, source: String) -> String {
+        let block = Self::span_comment_block(node);
+        if block.is_empty() {
+            return source;
+        }
+        let mut out = String::new();
+        for line in block {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out.push_str(&source);
+        out
     }
 
     fn shape_literal(ty: &TensorType) -> String {
