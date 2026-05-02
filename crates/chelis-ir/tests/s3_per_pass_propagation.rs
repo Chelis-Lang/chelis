@@ -895,6 +895,325 @@ fn ad_on_unspanned_forward_dag_does_not_fabricate_spans() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3 named oracle (after S3.8 lands) — end-to-end span survival
+// ─────────────────────────────────────────────────────────────────────
+
+/// S3 named acceptance oracle (per spec §3 S3): lower a span-attributed
+/// Deep program through every enabled pass (lowering → DCE → fold →
+/// CSE → tier-2 if applicable → fusion → vmap if applicable). Walk the
+/// final IR. Assert:
+/// (a) every input Deep span appears as `span_id` or in `merged_spans`
+///     on at least one final IR node, AND
+/// (b) every `__synthesized_*__` marker has a non-empty `merged_spans`
+///     (synthesized markers are NEVER the only provenance — they always
+///     carry forward-node spans alongside).
+///
+/// AD is exercised separately in `s3_oracle_with_ad` because grad_dag
+/// requires a scalar-float root; a single span-rich program covering
+/// every pass at once would be brittle, so we split into two
+/// representative oracles.
+#[test]
+fn s3_oracle_lowering_then_optimization_passes() {
+    use chelis_deep::Expr;
+    use chelis_ir::lower_program;
+    use chelis_types::{check_linearity, check_phase0e_program};
+    use std::collections::BTreeSet;
+
+    // A small but rich program: tier-2 sub (decomposes), constants
+    // (fold-eligible if operands match), repeated subexpression
+    // (CSE-eligible). Every node carries its own span.
+    let source = r#"
+        (def {span: "src.def"} y
+          (app {type: (t-tensor {} (t-prim {} f32)) span: "src.outer_add"}
+               (var {} add)
+               (app {type: (t-tensor {} (t-prim {} f32)) span: "src.sub"}
+                    (var {} sub)
+                    (lit {type: (t-tensor {} (t-prim {} f32)) span: "src.lit_a"} 5.0)
+                    (lit {type: (t-tensor {} (t-prim {} f32)) span: "src.lit_b"} 3.0))
+               (app {type: (t-tensor {} (t-prim {} f32)) span: "src.inner_add"}
+                    (var {} add)
+                    (lit {type: (t-tensor {} (t-prim {} f32)) span: "src.lit_c"} 1.0)
+                    (lit {type: (t-tensor {} (t-prim {} f32)) span: "src.lit_d"} 2.0))))
+    "#;
+
+    fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
+        fn walk(expr: &Expr, acc: &mut BTreeSet<String>) {
+            if let Some(s) = expr.span_id() {
+                acc.insert(s.to_owned());
+            }
+            if let Expr::List(list, _) = expr {
+                for child in &list.elements {
+                    walk(child, acc);
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for e in exprs {
+            walk(e, &mut out);
+        }
+        out
+    }
+
+    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let input_spans = collect_input_spans(&exprs);
+    assert!(
+        input_spans.len() >= 7,
+        "fixture must carry many spans; got {input_spans:?}"
+    );
+
+    let checked = check_phase0e_program(&exprs).expect("Phase 0e");
+    let checked = chelis_effects::check_program(&checked).expect("effects");
+    let checked = check_linearity(&checked).expect("linearity");
+
+    // Stage 1: lowering (which already runs DCE inside lower_program_to_library).
+    let mut dag = lower_program(&checked);
+
+    // Stage 2: constant fold + CSE + a redundant DCE (all pure on already-DCE'd input).
+    optimize::constant_fold(&mut dag);
+    let dag = optimize::common_subexpr_eliminate(&dag);
+    let dag = optimize::dead_code_eliminate(&dag);
+
+    // Stage 3: fusion (turn elementwise chains into FusedElem nodes).
+    let dag = fuse::fuse(&dag);
+
+    // (a) Audit invariant: every input span appears on at least one
+    // final node (as span_id or in merged_spans).
+    let final_spans = dag_spans(&dag);
+    let missing: Vec<&String> = input_spans.difference(&final_spans).collect();
+    assert!(
+        missing.is_empty(),
+        "S3 oracle: input spans {missing:?} dropped through pipeline. \
+         Input: {input_spans:?}; final DAG: {final_spans:?}",
+    );
+
+    // (b) Every __synthesized_*__ marker has non-empty merged_spans.
+    for node in dag.nodes() {
+        if let Some(s) = &node.span_id
+            && s.starts_with("__synthesized_")
+        {
+            assert!(
+                !node.merged_spans.is_empty(),
+                "S3 oracle: synthesized marker `{s}` on node {:?} has empty merged_spans \
+                 (audit invariant violated — markers must always carry a forward span alongside)",
+                node.id
+            );
+        }
+    }
+}
+
+/// AD half of the S3 oracle: span-bearing forward program → AD → walk.
+/// Same two assertions: (a) audit invariant, (b) every synthesized
+/// marker has non-empty merged_spans.
+#[test]
+fn s3_oracle_with_ad() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        scalar_f32(),
+        Some("ad.a".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        scalar_f32(),
+        Some("ad.b".into()),
+    );
+    let y = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), Some("ad.mul".into()));
+    dag.add_root(y);
+
+    let input_spans: BTreeSet<String> = ["ad.a", "ad.b", "ad.mul"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+
+    let result = grad::grad_dag(&dag, y, &[a, b]).expect("grad_dag");
+
+    // (a) Audit invariant.
+    let final_spans = dag_spans(&result.dag);
+    let missing: Vec<&String> = input_spans.difference(&final_spans).collect();
+    assert!(
+        missing.is_empty(),
+        "S3 AD oracle: input spans {missing:?} dropped. \
+         Input: {input_spans:?}; final: {final_spans:?}",
+    );
+
+    // (b) Every synthesized marker has non-empty merged_spans.
+    for node in result.dag.nodes() {
+        if let Some(s) = &node.span_id
+            && s.starts_with("__synthesized_")
+        {
+            assert!(
+                !node.merged_spans.is_empty(),
+                "S3 AD oracle: synthesized marker `{s}` on node {:?} has empty merged_spans",
+                node.id
+            );
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// S3.8 — Fusion: FusedElem aggregates contributors' spans
+// ─────────────────────────────────────────────────────────────────────
+
+/// Build a chain of 3 fusible elementwise ops with distinct spans, run
+/// fusion, assert FusedElem `span_id == first.span_id` and
+/// `merged_spans` lex-sorted = sort_dedup(rest contributors' spans).
+/// Per spec §2.3 Fusion row.
+#[test]
+fn fusion_aggregates_contributors_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        vec_f32(4),
+        Some("fuse.a".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        vec_f32(4),
+        Some("fuse.b".into()),
+    );
+    // Three ops in chain: Add → Neg → Exp, each with its own span.
+    let add = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        vec_f32(4),
+        Some("fuse.first".into()),
+    );
+    let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), Some("fuse.mid".into()));
+    let exp = dag.add_node(RiscOp::Exp, vec![neg], vec_f32(4), Some("fuse.last".into()));
+    dag.add_root(exp);
+
+    let fused = fuse::fuse(&dag);
+
+    // Find the FusedElem.
+    let fused_elem = fused
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::FusedElem { .. }))
+        .expect("expected a FusedElem");
+    assert_eq!(
+        fused_elem.span_id.as_deref(),
+        Some("fuse.first"),
+        "FusedElem must inherit FIRST contributor's span_id"
+    );
+    assert_eq!(
+        fused_elem.merged_spans,
+        vec!["fuse.last".to_string(), "fuse.mid".to_string()],
+        "FusedElem must aggregate the rest of the chain's spans, lex-sorted"
+    );
+}
+
+/// Each contributor's pre-existing merged_spans must also flow into the
+/// FusedElem (transitive). Locks the rule's "∪ each contributor's
+/// pre-existing merged_spans" half.
+#[test]
+fn fusion_propagates_contributor_merged_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        vec_f32(4),
+        Some("fuse.a".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        vec_f32(4),
+        Some("fuse.b".into()),
+    );
+    let add = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        vec_f32(4),
+        Some("fuse.first".into()),
+    );
+    // Stamp a merged_span on the first contributor (carries through
+    // verbatim).
+    dag.node_mut(add).unwrap().merged_spans = vec!["fuse.first.alias".into()];
+    let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), Some("fuse.mid".into()));
+    // Stamp a merged_span on a non-first contributor (folds in via
+    // append_spans_to_node).
+    dag.node_mut(neg).unwrap().merged_spans = vec!["fuse.mid.alias".into()];
+    dag.add_root(neg);
+
+    let fused = fuse::fuse(&dag);
+    let fused_elem = fused
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::FusedElem { .. }))
+        .expect("expected a FusedElem");
+    assert_eq!(fused_elem.span_id.as_deref(), Some("fuse.first"));
+    assert_eq!(
+        fused_elem.merged_spans,
+        vec![
+            "fuse.first.alias".to_string(),
+            "fuse.mid".to_string(),
+            "fuse.mid.alias".to_string(),
+        ],
+    );
+}
+
+/// Non-chain nodes (consumers and inputs to a fused chain) are pure
+/// copies — span_id + merged_spans verbatim. Locks the second add_node
+/// path in `rebuild_with_fusion`.
+#[test]
+fn fusion_preserves_unfused_node_spans() {
+    let mut dag = Dag::new();
+    // Build a multi-consumer node so it can't be fused into the chain.
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("unfused.load".into()),
+    );
+    dag.node_mut(a).unwrap().merged_spans = vec!["unfused.load.alias".into()];
+    // Two consumers prevent fusion through `a`.
+    let _consumer1 = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("unfused.c1".into()));
+    let _consumer2 = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), Some("unfused.c2".into()));
+    dag.add_root(a);
+
+    let fused = fuse::fuse(&dag);
+    let load_node = fused
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Load { .. }))
+        .expect("Load survives");
+    assert_eq!(load_node.span_id.as_deref(), Some("unfused.load"));
+    assert_eq!(
+        load_node.merged_spans,
+        vec!["unfused.load.alias".to_string()]
+    );
+}
+
+/// Negative parity: fusion on unspanned input fabricates nothing.
+#[test]
+fn fusion_does_not_fabricate_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
+    dag.add_root(neg);
+
+    let fused = fuse::fuse(&dag);
+    for node in fused.nodes() {
+        assert_eq!(
+            node.span_id, None,
+            "fusion fabricated span_id on node {:?}",
+            node.id
+        );
+        assert!(
+            node.merged_spans.is_empty(),
+            "fusion fabricated merged_spans on node {:?}",
+            node.id
+        );
+    }
+}
+
 /// DCE remap variant (used by Phase F library carrier) must apply the
 /// same pure-copy rule. Locking it explicitly so an alternate code path
 /// can't drift from the headline `dead_code_eliminate`.

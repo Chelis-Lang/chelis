@@ -215,13 +215,50 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                 .collect();
 
             let output_type = dag.get(chain_out).unwrap().output_type.clone();
-            let new_id = new_dag.add_node(fused_op, remapped_inputs, output_type, None);
+            // Span propagation per spec/design/chelis_span_survival.md
+            // §2.3 Fusion row: FusedElem's span_id = first contributor's
+            // span_id; merged_spans = sort_dedup(rest contributors'
+            // spans ∪ each contributor's pre-existing merged_spans).
+            let first = dag.get(chain.nodes[0]).expect("chain head exists");
+            let new_id = new_dag.add_node(
+                fused_op,
+                remapped_inputs,
+                output_type,
+                first.span_id.clone(),
+            );
+            // Carry the first contributor's pre-existing merged_spans
+            // verbatim onto the FusedElem (they already belong to the
+            // canonical contributor's audit chain).
+            if !first.merged_spans.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.merged_spans = first.merged_spans.clone();
+            }
+            // Append every other contributor's full provenance —
+            // canonical span_id + pre-existing merged_spans — onto the
+            // FusedElem's merged_spans (the shared helper handles
+            // dedup-against-canonical and lex-sort).
+            for &nid in &chain.nodes[1..] {
+                let contributor = dag.get(nid).expect("contributor exists");
+                crate::span_merge::append_span_to_node(
+                    &mut new_dag,
+                    new_id,
+                    contributor.span_id.as_deref(),
+                );
+                crate::span_merge::append_spans_to_node(
+                    &mut new_dag,
+                    new_id,
+                    &contributor.merged_spans,
+                );
+            }
             // Map ALL chain nodes to this new ID (consumers reference chain internals).
             for &nid in &chain.nodes {
                 id_map.insert(nid.0, new_id);
             }
         } else {
             // Not part of a chain — emit as-is with remapped inputs.
+            // This is a pure copy: clone span_id and merged_spans
+            // verbatim (no cross-contributor merge for unfused nodes).
             let new_inputs: Vec<NodeId> = node
                 .inputs
                 .iter()
@@ -231,8 +268,17 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                         .unwrap_or_else(|| panic!("unmapped input {old:?}"))
                 })
                 .collect();
-            let new_id =
-                new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone(), None);
+            let new_id = new_dag.add_node(
+                node.op.clone(),
+                new_inputs,
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            if !node.merged_spans.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.merged_spans = node.merged_spans.clone();
+            }
             id_map.insert(old_id, new_id);
         }
     }
