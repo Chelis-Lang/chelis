@@ -1893,18 +1893,11 @@ impl LowerCtx {
     /// is a previously-bound `LoweredValue` — append the parent's span to
     /// the existing node so the audit invariant ("every input span appears
     /// as `span_id` or `merged_spans` on at least one node") is preserved.
-    /// No-op when `current_span_id` is `None`, when the span equals the
-    /// node's `span_id` (already canonical), or when it's already present
-    /// in `merged_spans` (deduped).
+    /// Thin wrapper over `crate::span_merge::append_span_to_node`; the
+    /// shared helper owns the None-no-op / canonical-no-op / dedup / sort
+    /// logic.
     fn append_current_span_to_existing_node(&mut self, id: NodeId) {
-        if let Some(span) = self.current_span_id.clone()
-            && let Some(node) = self.dag.node_mut(id)
-            && node.span_id.as_deref() != Some(span.as_str())
-            && !node.merged_spans.iter().any(|s| s == &span)
-        {
-            node.merged_spans.push(span);
-            node.merged_spans.sort();
-        }
+        crate::span_merge::append_span_to_node(&mut self.dag, id, self.current_span_id.as_deref());
     }
 
     /// Walk a `LoweredValue` and apply
