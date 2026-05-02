@@ -611,6 +611,102 @@ fn cse_does_not_fabricate_spans() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3.6 — Tier 2 decomposition: sub-nodes inherit parent span (or marker)
+// ─────────────────────────────────────────────────────────────────────
+
+/// When a Tier 2 helper (e.g. `lower_div`) decomposes into sub-nodes,
+/// each sub-node inherits the decomposed parent's `span_id`. Per
+/// spec/design/chelis_span_survival.md §2.3 Tier 2 row.
+#[test]
+fn tier2_sub_nodes_inherit_parent_span() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+    // Decompose div(a, b) with parent span "div.expr". Every synthesized
+    // sub-node (Log, Neg, Exp, Mul) should carry span_id="div.expr".
+    let result = tier2::lower_div(&mut dag, a, b, &scalar_f32(), Some("div.expr"));
+
+    // The two operand consts (a, b) have no span (None). The sub-nodes
+    // are nodes 2..=5: Log(b), Neg(log_b), Exp(neg_log), Mul(a, recip).
+    let mut synth_count = 0usize;
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Const { .. }) {
+            // Operand consts; not synthesized.
+            continue;
+        }
+        synth_count += 1;
+        assert_eq!(
+            node.span_id.as_deref(),
+            Some("div.expr"),
+            "Tier 2 sub-node {:?} ({:?}) should inherit parent span",
+            node.id,
+            node.op,
+        );
+    }
+    assert!(
+        synth_count >= 4,
+        "expected at least 4 tier2 sub-nodes, got {synth_count}"
+    );
+    assert!(matches!(dag.get(result).unwrap().op, RiscOp::Mul));
+}
+
+/// When the parent op had no source span (e.g. a hand-written
+/// non-span-bearing program), Tier 2 sub-nodes carry the canonical
+/// `__synthesized_tier2__` marker instead. Per §2.3 Tier 2
+/// synthesized-node rule.
+#[test]
+fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    // No parent span — sub-nodes should get __synthesized_tier2__.
+    let _ = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
+
+    // The relu decomposes into Const(0) + MaxElem. Both should carry the
+    // marker. The original Const(1) input does NOT.
+    let mut marker_count = 0usize;
+    for node in dag.nodes() {
+        match node.span_id.as_deref() {
+            Some(s) if s == tier2::TIER2_SYNTH_MARKER => {
+                marker_count += 1;
+            }
+            None => {
+                // The pre-existing operand Const(1.0). OK.
+                assert!(matches!(node.op, RiscOp::Const { value } if value == 1.0));
+            }
+            other => panic!(
+                "unexpected span_id {other:?} on node {:?} ({:?})",
+                node.id, node.op
+            ),
+        }
+    }
+    assert!(
+        marker_count >= 2,
+        "expected at least 2 sub-nodes carrying __synthesized_tier2__, got {marker_count}"
+    );
+}
+
+/// Larger decomposition (sub) — every emitted sub-node carries the
+/// parent's span. Locks the rule across multiple Tier 2 helpers.
+#[test]
+fn tier2_lower_sub_inherits_parent_span() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+    // sub(a,b) = neg(b) + add(a, neg_b). Two synthesized nodes.
+    let _ = tier2::lower_sub(&mut dag, a, b, &scalar_f32(), Some("sub.expr"));
+    for node in dag.nodes() {
+        match (&node.op, node.span_id.as_deref()) {
+            (RiscOp::Const { .. }, None) => {} // operand consts
+            (RiscOp::Neg, Some("sub.expr")) | (RiscOp::Add, Some("sub.expr")) => {}
+            (op, span) => panic!(
+                "unexpected (op={op:?}, span={span:?}) on node {:?}",
+                node.id
+            ),
+        }
+    }
+}
+
 /// DCE remap variant (used by Phase F library carrier) must apply the
 /// same pure-copy rule. Locking it explicitly so an alternate code path
 /// can't drift from the headline `dead_code_eliminate`.

@@ -3148,7 +3148,8 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
-                let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "relu" if args.len() == 1 => {
@@ -3161,7 +3162,8 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
-                let node = tier2::lower_relu(&mut self.dag, x, &out_ty);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_relu(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "sigmoid" if args.len() == 1 => {
@@ -3174,7 +3176,8 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
-                let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "div" if args.len() == 2 => {
@@ -3188,7 +3191,8 @@ impl LowerCtx {
                 } else {
                     ty.clone()
                 };
-                let node = tier2::lower_div(&mut self.dag, a, b, &out_ty);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
 
@@ -3206,7 +3210,8 @@ impl LowerCtx {
                     .get(b)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty, parent_span.as_deref())
             }
             "softmax" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "softmax input");
@@ -3216,7 +3221,9 @@ impl LowerCtx {
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let node = tier2::lower_softmax(&mut self.dag, x, axis, &x_ty);
+                let parent_span = self.current_span_id.clone();
+                let node =
+                    tier2::lower_softmax(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "mean" if args.len() == 2 => {
@@ -3227,7 +3234,8 @@ impl LowerCtx {
                     .get(x)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty);
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "layer_norm" if args.len() == 3 => {
@@ -3249,6 +3257,7 @@ impl LowerCtx {
                     .get(beta)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
+                let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_layer_norm(
                     &mut self.dag,
                     x,
@@ -3258,6 +3267,7 @@ impl LowerCtx {
                     &gamma_ty,
                     &beta_ty,
                     1e-5,
+                    parent_span.as_deref(),
                 );
                 self.attach_reuse_hint(node, app_span, &[x, gamma, beta])
             }
@@ -3282,6 +3292,7 @@ impl LowerCtx {
                     .get(kernel)
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
+                let parent_span = self.current_span_id.clone();
                 tier2::lower_conv2d(
                     &mut self.dag,
                     input,
@@ -3291,6 +3302,7 @@ impl LowerCtx {
                     ty,
                     stride,
                     padding,
+                    parent_span.as_deref(),
                 )
             }
 
@@ -3298,48 +3310,57 @@ impl LowerCtx {
             "gt" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "gt lhs");
                 let b = self.lower_expr_node(&args[1], "gt rhs");
-                tier2::lower_gt(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_gt(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "gte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "gte lhs");
                 let b = self.lower_expr_node(&args[1], "gte rhs");
-                tier2::lower_gte(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_gte(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "lte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "lte lhs");
                 let b = self.lower_expr_node(&args[1], "lte rhs");
-                tier2::lower_lte(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_lte(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "eq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "eq lhs");
                 let b = self.lower_expr_node(&args[1], "eq rhs");
-                tier2::lower_eq(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_eq(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "neq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "neq lhs");
                 let b = self.lower_expr_node(&args[1], "neq rhs");
-                tier2::lower_neq(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_neq(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
-                tier2::lower_min_elem(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_min_elem(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
 
             // H2: Boolean operators
             "and" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "and lhs");
                 let b = self.lower_expr_node(&args[1], "and rhs");
-                tier2::lower_and(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_and(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "or" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "or lhs");
                 let b = self.lower_expr_node(&args[1], "or rhs");
-                tier2::lower_or(&mut self.dag, a, b, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_or(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "not" if args.len() == 1 => {
                 let a = self.lower_expr_node(&args[0], "not input");
-                tier2::lower_not(&mut self.dag, a, ty)
+                let parent_span = self.current_span_id.clone();
+                tier2::lower_not(&mut self.dag, a, ty, parent_span.as_deref())
             }
 
             // Tier 1: reductions
@@ -3899,12 +3920,18 @@ impl LowerCtx {
                         ty,
                         self.current_span_id.clone(),
                     )),
-                    "relu" => {
-                        LoweredValue::Node(tier2::lower_relu(&mut self.dag, current_node, &ty))
-                    }
-                    "sigmoid" => {
-                        LoweredValue::Node(tier2::lower_sigmoid(&mut self.dag, current_node, &ty))
-                    }
+                    "relu" => LoweredValue::Node(tier2::lower_relu(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "sigmoid" => LoweredValue::Node(tier2::lower_sigmoid(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
                     _ => current,
                 };
                 continue;

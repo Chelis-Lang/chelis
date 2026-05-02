@@ -311,7 +311,7 @@ fn compute_adjoints(
             // d/dx log(x) = 1/x = div(g, x)
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let dx = tier2::lower_div(dag, g, x, &ty);
+            let dx = tier2::lower_div(dag, g, x, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Sin => {
@@ -337,7 +337,7 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let two = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone(), None);
             let two_sqrt = dag.add_node(RiscOp::Mul, vec![two, node.id], ty.clone(), None);
-            let dx = tier2::lower_div(dag, g, two_sqrt, &ty);
+            let dx = tier2::lower_div(dag, g, two_sqrt, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Cos => {
@@ -355,7 +355,7 @@ fn compute_adjoints(
             let ty = forward.get(x).unwrap().output_type.clone();
             let cos_x = dag.add_node(RiscOp::Cos, vec![x], ty.clone(), None);
             let cos_sq = dag.add_node(RiscOp::Mul, vec![cos_x, cos_x], ty.clone(), None);
-            let dx = tier2::lower_div(dag, g, cos_sq, &ty);
+            let dx = tier2::lower_div(dag, g, cos_sq, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Atan => {
@@ -365,7 +365,7 @@ fn compute_adjoints(
             let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
             let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], ty.clone(), None);
             let denom = dag.add_node(RiscOp::Add, vec![one, x_sq], ty.clone(), None);
-            let dx = tier2::lower_div(dag, g, denom, &ty);
+            let dx = tier2::lower_div(dag, g, denom, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Abs => {
@@ -400,7 +400,7 @@ fn compute_adjoints(
                 None,
             );
             // sign = pos - neg_cast  (tier2 sub)
-            let sign = tier2::lower_sub(dag, pos, neg_cast, &ty);
+            let sign = tier2::lower_sub(dag, pos, neg_cast, &ty, None);
             let dx = dag.add_node(RiscOp::Mul, vec![sign, g], ty, None);
             Some(vec![(x, dx)])
         }
@@ -489,7 +489,7 @@ fn compute_adjoints(
             );
 
             // Build equality mask: not(or(cmplt(x, expanded_max), cmplt(expanded_max, x)))
-            let mask_bool = tier2::lower_eq(dag, x, expanded_max, &input_ty);
+            let mask_bool = tier2::lower_eq(dag, x, expanded_max, &input_ty, None);
             let mask = dag.add_node(
                 RiscOp::Cast {
                     new_precision: input_ty.precision,
@@ -530,7 +530,7 @@ fn compute_adjoints(
                 input_ty.clone(),
                 None,
             );
-            let mask_bool = tier2::lower_eq(dag, x, expanded_min, &input_ty);
+            let mask_bool = tier2::lower_eq(dag, x, expanded_min, &input_ty, None);
             let mask = dag.add_node(
                 RiscOp::Cast {
                     new_precision: input_ty.precision,
@@ -1758,7 +1758,7 @@ mod tests {
             let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
             let denom = dag.add_node(RiscOp::Add, vec![one, exp_neg_x], ty.clone(), None);
             // div(1, denom) = 1 * recip(denom) = exp(-log(denom))
-            crate::tier2::lower_div(dag, one, denom, ty)
+            crate::tier2::lower_div(dag, one, denom, ty, None)
         });
         let x0 = -0.3;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -2152,7 +2152,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let out = crate::tier2::lower_div(&mut dag, a, b, &scalar_f32());
+        let out = crate::tier2::lower_div(&mut dag, a, b, &scalar_f32(), None);
 
         // Test d/da
         let (ana_a, num_a) = finite_diff(&dag, out, a, "a", &[("b", 3.0)], 6.0, 1e-5);

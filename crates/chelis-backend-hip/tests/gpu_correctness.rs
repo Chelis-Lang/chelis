@@ -741,7 +741,7 @@ fn g4_symbolic_softmax_gpu_matches_cpu() {
         x_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_softmax(&mut dag, x, 1, &x_ty);
+    let out = chelis_ir::tier2::lower_softmax(&mut dag, x, 1, &x_ty, None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -778,7 +778,7 @@ fn g4_symbolic_matmul_gpu_matches_cpu() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -814,7 +814,7 @@ fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
 
     let actual = compile_and_run_output_cases(

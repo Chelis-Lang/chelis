@@ -1232,7 +1232,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Const { value: -3.0 }, vec![], scalar_f32(), None);
-        let relu = tier2::lower_relu(&mut dag, x, &scalar_f32());
+        let relu = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_relu");
         assert_float_eq(&out, 0.0);
         assert!(matches!(dag.get(relu).unwrap().op, RiscOp::MaxElem));
@@ -1245,7 +1245,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
-        let _ = tier2::lower_sigmoid(&mut dag, x, &scalar_f32());
+        let _ = tier2::lower_sigmoid(&mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sigmoid");
         assert_float_eq(&out, 0.5);
     }
@@ -1629,7 +1629,7 @@ int main(void) {{
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
+        let out = tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen(&dag, "test_symbolic_matmul");
