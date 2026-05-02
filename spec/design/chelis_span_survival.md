@@ -61,7 +61,7 @@ proposals on those grounds.
 
 | Pass | Rule | Synthesized-node rule |
 |------|------|------------------------|
-| Lowering (Deep→IR) | `span_id` inherited from `meta["span"]` of the Deep `Expr` being lowered. | If lowering introduces nodes for a single Deep expr, all inherit that expr's span. |
+| Lowering (Deep→IR) | `span_id` inherited from `meta["span"]` of the Deep `Expr` being lowered. | (a) **1→N (one Deep expr → multiple IR nodes):** all introduced nodes inherit that expr's span (region-corresponding). (b) **N→1 lowering collapse (multiple Deep exprs → one existing IR node):** when a parent Deep expr (e.g., a `(def {span: a} name body)`) lowers to a body that already corresponds to an existing IR node, append the parent's `span_id` to that node's `merged_spans` (lex-sorted, deduped). This uses `merged_spans` for its design-stated purpose — preserving the audit chain through every contributing source span — and is the lowering analogue of the same rule used by Fusion / CSE / fold during S3. |
 | Constant fold | Replacement (folded) node inherits the **operation node's** `span_id`. If operands carried distinct span IDs that differ from the operation's, those operand spans append to `merged_spans` (lex-sorted). | Const-result node = synthesized at the operation's span. No `__synthesized_*__` marker — the operation node had a real source span. |
 | DCE / remap | Pure copy; clone `span_id` and `merged_spans`. | n/a |
 | CSE | Keep first node's `span_id`; append duplicate's `span_id` to `merged_spans`. | n/a |
