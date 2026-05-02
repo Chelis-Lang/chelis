@@ -55,7 +55,16 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             other => other.clone(),
         };
 
-        let new_id = out.add_node(op, node.inputs.clone(), output_type, None);
+        // Vmap is a pure clone of the per-node operator (with axis
+        // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
+        // §2.3 vmap row, span_id and merged_spans are cloned unchanged
+        // — every input span survives the pass.
+        let new_id = out.add_node(op, node.inputs.clone(), output_type, node.span_id.clone());
+        if !node.merged_spans.is_empty()
+            && let Some(new_node) = out.node_mut(new_id)
+        {
+            new_node.merged_spans = node.merged_spans.clone();
+        }
         if let Some(reusable_input) = node.reusable_input {
             out.set_reusable_input(new_id, reusable_input);
         }
