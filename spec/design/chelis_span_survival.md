@@ -81,8 +81,52 @@ Synthesized markers always carry forward-node spans alongside on
 Each backend (C / HIP / Metal) emits one `// span: <id>` line per
 `span_id ∪ merged_spans` immediately preceding the line(s) that implement
 the operation. Order: canonical first, then `merged_spans` lex-sorted
-(deterministic, reproducible across runs). HIP and Metal emit the same
-comment shape inside the embedded device-kernel source strings.
+(deterministic, reproducible across runs).
+
+#### 2.4.1 Embedded device-kernel source strings (HIP / Metal)
+
+Per-node kernels — one IR node, one kernel definition (e.g., HIP's
+`kernel_fused_<id>` and Metal's per-node entry points) — carry their
+spans inside the embedded kernel source string, immediately preceding
+the per-op kernel-side emission, with the same shape and ordering as
+the host-side comment block.
+
+Shared kernels — one kernel definition, many IR-node launchers (e.g.,
+HIP's `kernel_neg`, `kernel_add`, `kernel_sum_ax0`) — carry NO spans
+inside the kernel source string. Each IR-node launcher's host-side
+launch site carries the spans for that specific launch.
+
+#### 2.4.2 Principle — spans live wherever audit traces resolve
+
+The rule above isn't an asymmetry for its own sake. It encodes a
+principle that future backends and future kernel-emission patterns
+should also follow:
+
+> **Spans live wherever audit traces resolve.**
+
+Audit traces (a runtime event, a stack frame, a profiler hit, a
+generated source line in a debugger) resolve to host-side source
+lines — the `.c` / `.cpp` / `.mm` file that customers, profilers, and
+debuggers read. Embedded kernel source is a runtime artifact compiled
+by the GPU driver; it is not itself an audit-trace target.
+
+- Per-node kernels CAN carry meaningful spans because there is a 1:1
+  correspondence between the kernel definition and the IR node, so
+  spans inside the kernel body unambiguously attribute to the same
+  source region as the launching node.
+- Shared kernels CANNOT carry meaningful spans because the same kernel
+  body serves many launchers; aggregating launcher spans inside the
+  kernel body produces noise (every launcher's spans appear regardless
+  of which launch is currently executing) rather than per-launch
+  attribution. The host-side launch site is the unambiguous,
+  per-launch-correct place for the spans.
+
+If a future backend introduces a new artifact kind (e.g., a SPIR-V
+intermediate, a precompiled `.metallib`, a kernel cache distributed
+separately from the host source), this principle answers what should
+happen with spans there: if customers will trace through the artifact
+to find original source, spans go in it; if the artifact is a runtime
+build product not on the audit-trace path, spans don't.
 
 ### 2.5 CLI surface (S5)
 
