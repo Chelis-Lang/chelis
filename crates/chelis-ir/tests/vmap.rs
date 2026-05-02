@@ -28,8 +28,8 @@ fn eval_root(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> TensorValue {
 #[test]
 fn vmap_elementwise_vectorizes_axis_zero() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3));
-    let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3), None);
     dag.add_root(y);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -47,8 +47,13 @@ fn vmap_elementwise_vectorizes_axis_zero() {
 #[test]
 fn vmap_reduction_shifts_the_reduced_axis() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(2, 3));
-    let y = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let y = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(2), None);
     dag.add_root(y);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -71,7 +76,7 @@ fn vmap_reduction_shifts_the_reduced_axis() {
 #[test]
 fn vmap_nested_adds_multiple_batch_axes() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     dag.add_root(x);
 
     let inner = vectorize_axis0(&dag, DimInfo::Lit(3)).expect("inner vmap should succeed");
@@ -90,8 +95,18 @@ fn vmap_nested_adds_multiple_batch_axes() {
 #[test]
 fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let a_exp = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -102,6 +117,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         },
+        None,
     );
     let b_exp = dag.add_node(
         RiscOp::Expand {
@@ -113,6 +129,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         },
+        None,
     );
     let prod = dag.add_node(
         RiscOp::Mul,
@@ -121,8 +138,9 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         },
+        None,
     );
-    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![prod], mat_f32(2, 4));
+    let out = dag.add_node(RiscOp::Sum { axis: 1 }, vec![prod], mat_f32(2, 4), None);
     dag.add_root(out);
 
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(5)).expect("vmap should succeed");

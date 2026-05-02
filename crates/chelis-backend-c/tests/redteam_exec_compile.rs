@@ -182,8 +182,8 @@ static chelis_tensor make_view_1d(float* data, int n) {
 #[test]
 fn exec_math_none_exp_kernel_correct_output() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4));
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -262,9 +262,9 @@ int main() {{
 #[test]
 fn exec_sleef_kernel_scalar_fallback_correct() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(9));
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(9));
-    dag.add_node(RiscOp::Neg, vec![e], vec_f32(9)); // 2-op chain: fuses into FusedElem
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(9), None);
+    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(9), None);
+    dag.add_node(RiscOp::Neg, vec![e], vec_f32(9), None); // 2-op chain: fuses into FusedElem
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -337,8 +337,13 @@ fn exec_reduce_sum_correct_output() {
     // Using vec_f32(1) (dims=[Lit(1)]) is wrong and bypasses the chelis_sum_f32 fast path.
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(100));
-    dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_ty);
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(100),
+        None,
+    );
+    dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_ty, None);
     let dag = fuse(&dag);
 
     let result = chelis_backend_c::codegen(&dag, "test_reduce_sum");
@@ -388,8 +393,8 @@ int main() {{
 #[test]
 fn exec_zero_size_tensor_does_not_crash() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0));
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(0));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0), None);
+    dag.add_node(RiscOp::Exp, vec![a], vec_f32(0), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(

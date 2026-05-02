@@ -18,12 +18,12 @@ fn vec_f32(n: usize) -> TensorType {
 /// exp → log → sin → sqrt → exp
 fn build_five_op_math_dag(n: usize) -> Dag {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n));
-    let e1 = dag.add_node(RiscOp::Exp, vec![a], vec_f32(n));
-    let l1 = dag.add_node(RiscOp::Log, vec![e1], vec_f32(n));
-    let s1 = dag.add_node(RiscOp::Sin, vec![l1], vec_f32(n));
-    let sq = dag.add_node(RiscOp::Sqrt, vec![s1], vec_f32(n));
-    dag.add_node(RiscOp::Exp, vec![sq], vec_f32(n));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+    let e1 = dag.add_node(RiscOp::Exp, vec![a], vec_f32(n), None);
+    let l1 = dag.add_node(RiscOp::Log, vec![e1], vec_f32(n), None);
+    let s1 = dag.add_node(RiscOp::Sin, vec![l1], vec_f32(n), None);
+    let sq = dag.add_node(RiscOp::Sqrt, vec![s1], vec_f32(n), None);
+    dag.add_node(RiscOp::Exp, vec![sq], vec_f32(n), None);
     fuse(&dag)
 }
 
@@ -128,8 +128,8 @@ fn redteam_zero_size_tensor_loop_does_not_execute() {
 fn redteam_math_lib_none_uses_scalar_expf() {
     // MathLib::None: no math header, no Sleef guards, must have omp simd and expf().
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    dag.add_node(RiscOp::Exp, vec![a], vec_f32(8), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -173,9 +173,9 @@ fn redteam_math_lib_none_uses_scalar_expf() {
 fn redteam_pure_arithmetic_with_sleef_forced_uses_level1_path() {
     // Add-only kernel with Sleef forced: must NOT emit Sleef guard, MUST use omp simd.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -207,8 +207,8 @@ fn redteam_pure_arithmetic_with_sleef_forced_uses_level1_path() {
 fn redteam_vforce_single_exp_kernel() {
     // Single-op exp kernel with VForce forced: must emit vvexpf, must NOT emit Sleef guard.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    dag.add_node(RiscOp::Exp, vec![a], vec_f32(8), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -236,10 +236,10 @@ fn redteam_vforce_two_op_kernel_falls_through_to_level1() {
     // Two-op kernel (add + exp): NOT a simple vForce kernel (is_simple_vforce_kernel=false).
     // Must NOT emit vvexpf, MUST emit omp parallel for simd (Level-1 path).
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
-    dag.add_node(RiscOp::Exp, vec![add], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    dag.add_node(RiscOp::Exp, vec![add], vec_f32(8), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(

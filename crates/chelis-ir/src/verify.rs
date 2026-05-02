@@ -641,9 +641,9 @@ mod tests {
     #[test]
     fn valid_dag_no_errors() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -652,9 +652,9 @@ mod tests {
         let mut dag = Dag::new();
         // Manually create a node that references a future node (impossible via normal API,
         // but we can test via the replace_node backdoor or by constructing the scenario).
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         // Node 1 references itself (not earlier).
-        dag.add_node(RiscOp::Neg, vec![NodeId(1)], scalar_f32());
+        dag.add_node(RiscOp::Neg, vec![NodeId(1)], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs.iter().any(|e| e.contains("non-earlier node")));
@@ -664,9 +664,9 @@ mod tests {
     #[test]
     fn wrong_arity_binary() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         // Add with only 1 input.
-        dag.add_node(RiscOp::Add, vec![a], scalar_f32());
+        dag.add_node(RiscOp::Add, vec![a], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs[0].contains("binary op"));
@@ -676,7 +676,7 @@ mod tests {
     fn wrong_arity_unary() {
         let mut dag = Dag::new();
         // Neg with 0 inputs.
-        dag.add_node(RiscOp::Neg, vec![], scalar_f32());
+        dag.add_node(RiscOp::Neg, vec![], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs[0].contains("unary op"));
@@ -685,9 +685,9 @@ mod tests {
     #[test]
     fn wrong_arity_memory() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         // Const with an input (should have 0).
-        dag.add_node(RiscOp::Const { value: 2.0 }, vec![a], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 2.0 }, vec![a], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs[0].contains("memory op"));
@@ -698,13 +698,13 @@ mod tests {
     #[test]
     fn c1_mismatched_precision_binary_op() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let b_ty = TensorType {
             dims: vec![],
             precision: Prim::F64,
         };
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], b_ty);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], b_ty, None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs.iter().any(|e| e.contains("mismatched precisions")));
@@ -713,9 +713,9 @@ mod tests {
     #[test]
     fn c1_matching_precision_ok() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -732,9 +732,9 @@ mod tests {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty1);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty2);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty1, None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty2, None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -753,9 +753,9 @@ mod tests {
             dims: vec![DimInfo::Lit(5)],
             precision: Prim::F32,
         };
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty1);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty2);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty1, None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty2, None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -772,8 +772,8 @@ mod tests {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-        dag.add_node(RiscOp::Sum { axis: 5 }, vec![x], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Sum { axis: 5 }, vec![x], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("axis 5")));
     }
@@ -781,8 +781,8 @@ mod tests {
     #[test]
     fn c3_max_reduce_on_scalar() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -801,8 +801,8 @@ mod tests {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty);
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty);
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty, None);
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], out_ty, None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -815,8 +815,8 @@ mod tests {
             dims: vec![],
             precision: Prim::Int32,
         };
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], int_ty.clone());
-        dag.add_node(RiscOp::Exp, vec![x], int_ty);
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], int_ty.clone(), None);
+        dag.add_node(RiscOp::Exp, vec![x], int_ty, None);
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("transcendental")));
     }
@@ -824,8 +824,8 @@ mod tests {
     #[test]
     fn c4_sqrt_on_float_ok() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Sqrt, vec![x], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Sqrt, vec![x], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -834,10 +834,10 @@ mod tests {
     #[test]
     fn c5_cmplt_non_bool_output_is_error() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         // Wrong: output is F32 instead of Bool.
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32());
+        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -848,13 +848,13 @@ mod tests {
     #[test]
     fn c5_cmplt_bool_output_ok() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         let bool_ty = TensorType {
             dims: vec![],
             precision: Prim::Bool,
         };
-        dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty);
+        dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty, None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -867,7 +867,7 @@ mod tests {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -878,6 +878,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("expand")));
@@ -890,7 +891,7 @@ mod tests {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -901,6 +902,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         assert!(verify(&dag).is_empty());
     }
@@ -912,7 +914,7 @@ mod tests {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -923,6 +925,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(
@@ -938,7 +941,7 @@ mod tests {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Pad {
                 padding: vec![(1, 1)],
@@ -949,6 +952,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(5), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("pad")));
@@ -961,7 +965,7 @@ mod tests {
             dims: vec![DimInfo::Lit(8)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Shrink {
                 bounds: vec![(6, 2)],
@@ -971,6 +975,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("shrink")));
@@ -983,7 +988,7 @@ mod tests {
             dims: vec![DimInfo::Lit(8)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
             RiscOp::Stride { strides: vec![0] },
             vec![x],
@@ -991,6 +996,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(8)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("stride")));
@@ -1001,13 +1007,14 @@ mod tests {
     #[test]
     fn store_correct_arity() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
             RiscOp::Store {
                 name: "out".to_string(),
             },
             vec![x],
             scalar_f32(),
+            None,
         );
         assert!(verify(&dag).is_empty());
     }
@@ -1021,6 +1028,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         let errs = verify(&dag);
         assert!(!errs.is_empty());
@@ -1030,14 +1038,15 @@ mod tests {
     #[test]
     fn store_wrong_arity_two_inputs() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(
             RiscOp::Store {
                 name: "out".to_string(),
             },
             vec![a, b],
             scalar_f32(),
+            None,
         );
         let errs = verify(&dag);
         assert!(!errs.is_empty());
@@ -1047,8 +1056,8 @@ mod tests {
     #[test]
     fn dangling_nonfinal_node_is_error() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("dangling")));
     }
@@ -1056,8 +1065,8 @@ mod tests {
     #[test]
     fn root_nodes_are_not_dangling() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_root(a);
         dag.add_root(b);
         assert!(verify(&dag).is_empty());
@@ -1075,6 +1084,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(2)],
                 precision: Prim::F32,
             },
+            None,
         );
         dag.add_node(
             RiscOp::Load {
@@ -1085,6 +1095,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(3)],
                 precision: Prim::F32,
             },
+            None,
         );
         let errs = verify(&dag);
         assert!(

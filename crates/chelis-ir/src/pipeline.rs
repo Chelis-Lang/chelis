@@ -95,11 +95,11 @@ mod tests {
     #[test]
     fn grad_then_fuse_matches_unfused_grad() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-        let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
-        let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4));
-        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![neg], scalar_f32());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+        let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
+        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![neg], scalar_f32(), None);
         dag.add_root(sum);
 
         let unfused_grad = grad_dag(&dag, sum, &[x]).expect("grad should succeed");
@@ -127,11 +127,11 @@ mod tests {
     #[test]
     fn grad_rejects_fused_input_but_grad_then_fuse_succeeds() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-        let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
-        let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4));
-        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![neg], scalar_f32());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+        let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
+        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![neg], scalar_f32(), None);
         dag.add_root(sum);
 
         let fused_forward = crate::fuse::fuse(&dag);

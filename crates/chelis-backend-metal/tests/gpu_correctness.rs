@@ -338,9 +338,9 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
 #[ignore]
 fn m6_elementwise_add_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -356,9 +356,9 @@ fn m6_elementwise_add_matches_evaluator() {
 #[ignore]
 fn m6_elementwise_mul_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let s = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -374,8 +374,8 @@ fn m6_elementwise_mul_matches_evaluator() {
 #[ignore]
 fn m6_unary_neg_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4));
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.5, -2.5, 0.0, 3.25])];
@@ -388,8 +388,8 @@ fn m6_unary_neg_matches_evaluator() {
 #[ignore]
 fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4));
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     dag.add_root(e);
 
     let inputs = vec![TestInput::new("a", &[4], &[0.0, 0.5, 1.0, 1.5])];
@@ -403,8 +403,8 @@ fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
 #[ignore]
 fn m6_unary_sqrt_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4));
-    let s = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let s = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4), None);
     dag.add_root(s);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.0, 4.0, 9.0, 16.0])];
@@ -418,12 +418,12 @@ fn m6_unary_sqrt_matches_evaluator() {
 fn m6_chained_elementwise_matches_evaluator() {
     // exp(add(mul(a, b), c)) — three kernels, single output.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8));
-    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8));
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8), None);
+    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8), None);
+    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -441,8 +441,13 @@ fn m6_chained_elementwise_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_sum_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64));
-    let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let s = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     dag.add_root(s);
 
     let mut data = Vec::with_capacity(64);
@@ -465,8 +470,13 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
     // n=50 returned 32, n=100 returned 64, n=200 returned 128.
     for &n in &[33usize, 50, 100, 200, 333, 1000] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n));
-        let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+        let s = dag.add_node(
+            RiscOp::Sum { axis: 0 },
+            vec![a],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_root(s);
 
         // All-ones input → expected sum = n. Easy to verify by inspection.
@@ -488,11 +498,12 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_max_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     let m = dag.add_node(
         RiscOp::MaxReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
+        None,
     );
     dag.add_root(m);
 
@@ -510,11 +521,12 @@ fn m6_full_axis_max_reduction_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_min_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     let m = dag.add_node(
         RiscOp::MinReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
+        None,
     );
     dag.add_root(m);
 
@@ -550,8 +562,18 @@ fn m6_tiled_matmul_matches_evaluator() {
     let k = 16usize;
     let n = 16usize;
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(m, k));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(k, n));
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f32(m, k),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f32(k, n),
+        None,
+    );
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -559,6 +581,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         },
         vec![a],
         tensor3_f32(m, k, n),
+        None,
     );
     let eb = dag.add_node(
         RiscOp::Expand {
@@ -567,9 +590,10 @@ fn m6_tiled_matmul_matches_evaluator() {
         },
         vec![b],
         tensor3_f32(m, k, n),
+        None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n));
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n));
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n), None);
     dag.add_root(sum);
 
     let mut a_data = Vec::with_capacity(m * k);

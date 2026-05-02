@@ -125,9 +125,9 @@ fn host_entry_source<'a>(source: &'a str, func_name: &str) -> &'a str {
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     dag
 }
@@ -135,9 +135,9 @@ fn dag_add_consts() -> Dag {
 /// Build a DAG with a Load input
 fn dag_with_load() -> Dag {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-    let out = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
     dag.add_root(out);
     dag
 }
@@ -200,7 +200,7 @@ fn s2_kernel_strings_escape_embedded_quotes() {
 #[test]
 fn s2_neg_const_only_dag_only_fill_kernel() {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
+    let c = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_s2_neg");
     // A const-only DAG should only have the fill kernel, no compute kernels
@@ -228,9 +228,9 @@ fn s3_all_elementwise_ops_emit_kernels() {
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(op.clone(), vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(op.clone(), vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let result = codegen_hip(&dag, &format!("test_{name}"));
         assert!(
@@ -251,8 +251,8 @@ fn s3_all_unary_ops_emit_kernels() {
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let c = dag.add_node(op.clone(), vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(op.clone(), vec![a], scalar_f32(), None);
         dag.add_root(c);
         let result = codegen_hip(&dag, &format!("test_{name}"));
         assert!(
@@ -269,8 +269,8 @@ fn s3_all_unary_ops_emit_kernels() {
 #[test]
 fn s4_sum_reduction_emits_kernel() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let s = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let s = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
     dag.add_root(s);
     let result = codegen_hip(&dag, "test_sum");
     assert!(
@@ -282,8 +282,8 @@ fn s4_sum_reduction_emits_kernel() {
 #[test]
 fn s4_max_reduce_emits_kernel() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], vec_f32(4));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], vec_f32(4), None);
     dag.add_root(m);
     let result = codegen_hip(&dag, "test_max_reduce");
     assert!(
@@ -299,13 +299,14 @@ fn s4_max_reduce_emits_kernel() {
 #[test]
 fn s5_reshape_no_kernel_launch() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
     let r = dag.add_node(
         RiscOp::Reshape {
             new_shape: vec![DimInfo::Lit(6)],
         },
         vec![x],
         vec_f32(6),
+        None,
     );
     dag.add_root(r);
     let result = codegen_hip(&dag, "test_reshape");
@@ -319,8 +320,13 @@ fn s5_reshape_no_kernel_launch() {
 #[test]
 fn s5_permute_no_kernel_launch() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-    let p = dag.add_node(RiscOp::Permute { axes: vec![1, 0] }, vec![x], mat_f32(3, 2));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let p = dag.add_node(
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![x],
+        mat_f32(3, 2),
+        None,
+    );
     dag.add_root(p);
     let result = codegen_hip(&dag, "test_permute");
     assert!(
@@ -332,7 +338,7 @@ fn s5_permute_no_kernel_launch() {
 #[test]
 fn s5_expand_no_kernel_launch() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
     let e = dag.add_node(
         RiscOp::Expand {
             axis: 0,
@@ -340,6 +346,7 @@ fn s5_expand_no_kernel_launch() {
         },
         vec![x],
         mat_f32(4, 3),
+        None,
     );
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_expand");
@@ -352,9 +359,14 @@ fn s5_expand_no_kernel_launch() {
 #[test]
 fn s5_realize_materializes_with_kernel_not_view() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6));
-    let s = dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
-    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let s = dag.add_node(
+        RiscOp::Stride { strides: vec![2] },
+        vec![x],
+        vec_f32(3),
+        None,
+    );
+    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
     dag.add_root(r);
 
     let result = codegen_hip(&dag, "test_realize");
@@ -392,11 +404,11 @@ fn s6_grid_block_in_launch() {
 #[test]
 fn s7_topo_order_preserved() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
-    let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-    let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+    let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_topo");
     let src = &result.c_source;
@@ -428,9 +440,9 @@ fn s8_output_labels_root() {
 #[test]
 fn s8_duplicate_load_single_slot() {
     let mut dag = Dag::new();
-    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let x2 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let out = dag.add_node(RiscOp::Add, vec![x1, x2], vec_f32(4));
+    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let x2 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Add, vec![x1, x2], vec_f32(4), None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_dup_load");
     assert_eq!(
@@ -447,8 +459,8 @@ fn s8_duplicate_load_single_slot() {
 #[test]
 fn s9_cmplt_float_result() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
     let c = dag.add_node(
         RiscOp::CmpLt,
         vec![a, b],
@@ -456,6 +468,7 @@ fn s9_cmplt_float_result() {
             dims: vec![],
             precision: Prim::Bool,
         },
+        None,
     );
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_cmplt");
@@ -571,9 +584,9 @@ fn s12_transfer_order() {
 #[test]
 fn s12_duplicate_load_transfers_once() {
     let mut dag = Dag::new();
-    let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4));
+    let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "test_dup_transfer_once");
@@ -605,7 +618,12 @@ fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
         dims: vec![DimInfo::Named("batch".into(), None)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        symbolic.clone(),
+        None,
+    );
     dag.add_root(x);
 
     let result = codegen_hip(&dag, "test_symbolic_peak");
@@ -629,11 +647,26 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
         dims: vec![DimInfo::Named("batch".into(), None)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], symbolic.clone());
-    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], symbolic.clone());
-    let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone());
-    let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        symbolic.clone(),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        symbolic.clone(),
+        None,
+    );
+    let z = dag.add_node(
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        symbolic.clone(),
+        None,
+    );
+    let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone(), None);
+    let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic, None);
     dag.add_root(xyz);
 
     let result = codegen_hip(&dag, "test_symbolic_repeats");
@@ -651,11 +684,11 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
 #[test]
 fn s12_reused_slots_iterate_over_logical_size() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(8));
-    let _wide = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
-    let small = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(4));
-    let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4));
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(8), None);
+    let _wide = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let small = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "test_logical_size");
@@ -682,9 +715,9 @@ fn s12_reused_slots_iterate_over_logical_size() {
 #[test]
 fn s13_cleanup_frees_intermediates() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_cleanup");
     // a (t0) and b (t1) are intermediates, so both their wrappers and slot owners are freed.
@@ -740,10 +773,15 @@ fn s13_input_copies_are_freed() {
 #[test]
 fn s13_views_use_view_free() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-    let p = dag.add_node(RiscOp::Permute { axes: vec![1, 0] }, vec![x], mat_f32(3, 2));
-    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(3, 2));
-    let out = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(3, 2));
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let p = dag.add_node(
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![x],
+        mat_f32(3, 2),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(3, 2), None);
+    let out = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(3, 2), None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_view_free");
     // Permute (t1) is a view — must use chelis_gpu_free_view, NOT chelis_gpu_free
@@ -817,8 +855,8 @@ int main(void) {
 #[test]
 fn s15_segmented_reduction_strategy_names_track_axis_size() {
     let mut tiny = Dag::new();
-    let x_tiny = tiny.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 8));
-    let sum_tiny = tiny.add_node(RiscOp::Sum { axis: 1 }, vec![x_tiny], vec_f32(3));
+    let x_tiny = tiny.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 8), None);
+    let sum_tiny = tiny.add_node(RiscOp::Sum { axis: 1 }, vec![x_tiny], vec_f32(3), None);
     tiny.add_root(sum_tiny);
     let tiny_result = codegen_hip(&tiny, "test_tiny_reduce");
     assert!(
@@ -827,8 +865,8 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     );
 
     let mut small = Dag::new();
-    let x_small = small.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 16));
-    let sum_small = small.add_node(RiscOp::Sum { axis: 1 }, vec![x_small], vec_f32(3));
+    let x_small = small.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 16), None);
+    let sum_small = small.add_node(RiscOp::Sum { axis: 1 }, vec![x_small], vec_f32(3), None);
     small.add_root(sum_small);
     let small_result = codegen_hip(&small, "test_small_reduce");
     assert!(
@@ -837,8 +875,8 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     );
 
     let mut large = Dag::new();
-    let x_large = large.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 128));
-    let sum_large = large.add_node(RiscOp::Sum { axis: 1 }, vec![x_large], vec_f32(3));
+    let x_large = large.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 128), None);
+    let sum_large = large.add_node(RiscOp::Sum { axis: 1 }, vec![x_large], vec_f32(3), None);
     large.add_root(sum_large);
     let large_result = codegen_hip(&large, "test_large_reduce");
     assert!(
@@ -856,8 +894,8 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
 #[test]
 fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024));
-    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32());
+    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], scalar_f32(), None);
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_scalar_stage");
 
@@ -875,8 +913,8 @@ fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
 #[test]
 fn s15_matmul_emits_hipblas_and_link_flag() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -884,6 +922,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         },
         vec![a],
         tensor3_f32(2, 3, 4),
+        None,
     );
     let eb = dag.add_node(
         RiscOp::Expand {
@@ -892,9 +931,10 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         },
         vec![b],
         tensor3_f32(2, 3, 4),
+        None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_hipblas_matmul");
 
@@ -911,13 +951,14 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
 #[test]
 fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let mut dag = Dag::new();
-    let base_a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 2));
+    let base_a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 2), None);
     let a = dag.add_node(
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
+        None,
     );
-    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+    let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -925,6 +966,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         },
         vec![a],
         tensor3_f32(2, 3, 4),
+        None,
     );
     let eb = dag.add_node(
         RiscOp::Expand {
@@ -933,9 +975,10 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         },
         vec![b],
         tensor3_f32(2, 3, 4),
+        None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
     dag.add_root(sum);
     let result = codegen_hip(&dag, "test_generic_matmul");
 
@@ -978,10 +1021,10 @@ fn sf1_fused_elem_single_kernel_launch() {
     // The fused chain should produce exactly 1 kernel launch for the fused ops
     // (plus 2 fill launches for the constants).
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -1006,10 +1049,10 @@ fn sf1_fused_elem_single_kernel_launch() {
 fn sf2_fused_kernel_chained_computation() {
     // The generated fused kernel source should contain chained register operations.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -1037,10 +1080,10 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
     // Between the fused kernel alloc and its launch, there should be no extra
     // chelis_gpu_alloc calls (the intermediate is computed in registers).
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -1065,11 +1108,16 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
     // add(x, const) → neg → sum should fuse: add→neg becomes FusedElem,
     // then the FusedElem feeds sum as sole consumer → inlined into reduction.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = fuse(&dag);
@@ -1106,11 +1154,21 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
 #[test]
 fn sfr2_fused_elem_into_max_reduce() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let maxed = dag.add_node(RiscOp::MaxReduce { axis: 1 }, vec![negated], vec_f32(3));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let maxed = dag.add_node(
+        RiscOp::MaxReduce { axis: 1 },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(maxed);
 
     let fused = fuse(&dag);
@@ -1137,12 +1195,17 @@ fn sfr2_fused_elem_into_max_reduce() {
 fn sfr3_multi_consumer_fused_elem_not_inlined() {
     // If the FusedElem has multiple consumers, it must be materialized.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of the fused chain output:
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(negated); // negated is also a root → 2 consumers
     dag.add_root(summed);
 
@@ -1165,11 +1228,11 @@ fn sfr3_multi_consumer_fused_elem_not_inlined() {
 #[test]
 fn sfr4_realize_blocks_fused_kernel_emission() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
-    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4));
-    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4), None);
     dag.add_root(negated);
 
     let fused = fuse(&dag);

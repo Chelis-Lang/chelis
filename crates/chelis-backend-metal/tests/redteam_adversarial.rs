@@ -63,9 +63,9 @@ fn m7_zero_element_tensor_does_not_panic() {
     // pipeline shouldn't crash; the kernel's `if (tid >= n) return;` guard
     // means no thread does work.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(0));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(0));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(0), None);
+    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(0), None);
     dag.add_root(s);
 
     let result = codegen_metal(&dag, "zero");
@@ -81,8 +81,13 @@ fn m7_zero_element_tensor_does_not_panic() {
 #[test]
 fn m7_single_element_reduction_emits_real_kernel() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(1));
-    let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(1), None);
+    let s = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     dag.add_root(s);
 
     let result = codegen_metal(&dag, "tiny");
@@ -100,12 +105,12 @@ fn m7_chain_of_elementwise_does_not_collapse_to_one_kernel() {
     // one MSL kernel per node — not silently merge them. This catches a
     // class of regressions where a future fusion pass over-merges.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8));
-    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8));
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8), None);
+    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8), None);
+    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let result = codegen_metal(&dag, "chain");
@@ -130,8 +135,18 @@ fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
     }
 
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(16, 16));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(16, 16));
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f32(16, 16),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f32(16, 16),
+        None,
+    );
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -139,6 +154,7 @@ fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
         },
         vec![a],
         tensor3_f32(16, 16, 16),
+        None,
     );
     let eb = dag.add_node(
         RiscOp::Expand {
@@ -147,9 +163,10 @@ fn m7_matmul_at_tile_boundary_routes_to_tiled_kernel() {
         },
         vec![b],
         tensor3_f32(16, 16, 16),
+        None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(16, 16, 16));
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(16, 16));
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(16, 16, 16), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(16, 16), None);
     dag.add_root(sum);
 
     let result = codegen_metal(&dag, "mm_tile");
@@ -171,8 +188,13 @@ fn m7_partial_axis_reduction_falls_through_to_stub() {
     // reduction is M4.next territory. Emitter must not silently emit a
     // full-axis kernel and lie about the result.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let r = dag.add_node(RiscOp::Sum { axis: 1 }, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let r = dag.add_node(
+        RiscOp::Sum { axis: 1 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     dag.add_root(r);
 
     let result = codegen_metal(&dag, "axis1");
@@ -184,8 +206,18 @@ fn m7_oversized_reduction_falls_through_to_stub() {
     // n > 4096 exceeds the single-threadgroup wrap-loop ceiling. Two-pass
     // reduction is M4.next; until then, this MUST fall through.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8192));
-    let r = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8192),
+        None,
+    );
+    let r = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     dag.add_root(r);
 
     let result = codegen_metal(&dag, "big");
@@ -202,8 +234,13 @@ fn m7_non_power_of_two_reduction_emits_real_kernel() {
     // emitter still produces real code for the awkward sizes.
     for &n in &[33usize, 50, 100, 200, 333, 1000, 4095] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n));
-        let r = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+        let r = dag.add_node(
+            RiscOp::Sum { axis: 0 },
+            vec![a],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_root(r);
 
         let result = codegen_metal(&dag, &format!("sum_{n}"));
@@ -226,9 +263,19 @@ fn m7_rank2_elementwise_without_matmul_falls_through_to_stub() {
     // M-phase emits rank-2 only in the matmul subgraph specialization.
     // A bare rank-2 add has no broadcast/stride machinery yet.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(4, 4));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(4, 4));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], mat_f32(4, 4));
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f32(4, 4),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f32(4, 4),
+        None,
+    );
+    let s = dag.add_node(RiscOp::Add, vec![a, b], mat_f32(4, 4), None);
     dag.add_root(s);
 
     let result = codegen_metal(&dag, "rank2add");
@@ -242,7 +289,7 @@ fn m7_bool_load_through_where_falls_through_to_stub() {
     // M-phase emitter doesn't yet wire bool inputs through `where` or
     // any other op.
     let mut dag = Dag::new();
-    let _cond = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_bool(8));
+    let _cond = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_bool(8), None);
     // `where` doesn't exist as a RiscOp variant in this IR; the closest
     // unsupported case is loading a bool tensor and trying to add it to
     // a float, which the type checker would reject upstream — but a
@@ -276,8 +323,13 @@ fn m7_no_silent_miscompile_for_unsupported_unary_with_int_precision() {
         precision: Prim::Int32,
     };
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], int_ty.clone());
-    let n = dag.add_node(RiscOp::Neg, vec![a], int_ty);
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        int_ty.clone(),
+        None,
+    );
+    let n = dag.add_node(RiscOp::Neg, vec![a], int_ty, None);
     dag.add_root(n);
 
     // Either the emitter falls through to stub, OR it panics. Both are

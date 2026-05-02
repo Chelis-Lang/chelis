@@ -117,11 +117,30 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
                 .iter()
                 .map(|&old| *id_map.get(&old.0).unwrap())
                 .collect();
-            let new_id = new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone());
+            // DCE is a pure copy of surviving nodes — clone span_id and
+            // merged_spans verbatim per `spec/design/chelis_span_survival.md`
+            // §2.3 (DCE/remap row). This is required for the S2 oracle
+            // (`lower_program` runs DCE inside `lower_program_to_library`,
+            // and the audit invariant says input Deep spans must appear
+            // on at least one IR node post-pipeline).
+            let new_id = new_dag.add_node(
+                node.op.clone(),
+                new_inputs,
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
             {
                 new_dag.set_reusable_input(new_id, mapped_input);
+            }
+            // Preserve merged_spans across DCE (S3 will populate them but
+            // the invariant of pure-copy DCE means they must survive when
+            // present).
+            if !node.merged_spans.is_empty()
+                && let Some(new_node) = new_dag.node_mut(new_id)
+            {
+                new_node.merged_spans = node.merged_spans.clone();
             }
             id_map.insert(old_id, new_id);
         }
@@ -160,8 +179,12 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
         if let Some(&existing) = seen.get(&cse_key) {
             id_map.insert(node.id.0, existing);
         } else {
-            let new_id =
-                new_dag.add_node(node.op.clone(), remapped_inputs, node.output_type.clone());
+            let new_id = new_dag.add_node(
+                node.op.clone(),
+                remapped_inputs,
+                node.output_type.clone(),
+                None,
+            );
             if let Some(reusable_input) = node.reusable_input
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
             {
@@ -193,9 +216,9 @@ mod tests {
     #[test]
     fn constant_fold_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -207,9 +230,9 @@ mod tests {
     #[test]
     fn constant_fold_mul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -220,8 +243,8 @@ mod tests {
     #[test]
     fn constant_fold_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -232,9 +255,9 @@ mod tests {
     #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32());
-        let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32(), None);
+        let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
@@ -245,10 +268,15 @@ mod tests {
     #[test]
     fn dce_keeps_store_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Store { name: "out".into() }, vec![a], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::Store { name: "out".into() },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
         dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
@@ -259,9 +287,9 @@ mod tests {
     #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(sum);
 
         let new_dag = common_subexpr_eliminate(&dag);
@@ -276,8 +304,8 @@ mod tests {
     #[test]
     fn dce_keeps_all_roots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_root(a);
         dag.add_root(b);
 

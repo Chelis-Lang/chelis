@@ -22,11 +22,11 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
 fn c_fused_codegen_compiles() {
     // Build a fusible DAG
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4));
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
     dag.add_root(c);
 
     // Fuse and codegen
@@ -108,11 +108,16 @@ fn c_fused_reduce_sum_no_intermediate() {
     // add(x, const) → neg → sum(axis=1): add→neg fuses into FusedElem,
     // then the FusedElem feeds sum as sole consumer → inlined into reduction.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = fuse(&dag);
@@ -143,11 +148,21 @@ fn c_fused_reduce_sum_no_intermediate() {
 #[test]
 fn c_fused_reduce_max_no_intermediate() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let maxed = dag.add_node(RiscOp::MaxReduce { axis: 1 }, vec![negated], vec_f32(3));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let maxed = dag.add_node(
+        RiscOp::MaxReduce { axis: 1 },
+        vec![negated],
+        vec_f32(3),
+        None,
+    );
     dag.add_root(maxed);
 
     let fused = fuse(&dag);
@@ -174,11 +189,16 @@ fn c_fused_reduce_max_no_intermediate() {
 fn c_fused_reduce_compiles() {
     // Verify the fused reduction C code compiles with gcc -fsyntax-only.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = fuse(&dag);

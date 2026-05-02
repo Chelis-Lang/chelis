@@ -8,36 +8,36 @@ use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 
 /// `sub(a, b)` = `add(a, neg(b))`
 pub fn lower_sub(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId {
-    let neg_b = dag.add_node(RiscOp::Neg, vec![b], ty.clone());
-    dag.add_node(RiscOp::Add, vec![a, neg_b], ty.clone())
+    let neg_b = dag.add_node(RiscOp::Neg, vec![b], ty.clone(), None);
+    dag.add_node(RiscOp::Add, vec![a, neg_b], ty.clone(), None)
 }
 
 /// `relu(x)` = `max_elem(x, const(0))`
 pub fn lower_relu(dag: &mut Dag, x: NodeId, ty: &TensorType) -> NodeId {
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone());
-    dag.add_node(RiscOp::MaxElem, vec![x, zero], ty.clone())
+    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone(), None);
+    dag.add_node(RiscOp::MaxElem, vec![x, zero], ty.clone(), None)
 }
 
 /// `sigmoid(x)` = `1 / (1 + exp(-x))`
 ///
 /// Lowered as: `exp(neg(log(add(const(1), exp(neg(x))))))`
 pub fn lower_sigmoid(dag: &mut Dag, x: NodeId, ty: &TensorType) -> NodeId {
-    let neg_x = dag.add_node(RiscOp::Neg, vec![x], ty.clone());
-    let exp_neg = dag.add_node(RiscOp::Exp, vec![neg_x], ty.clone());
-    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-    let sum = dag.add_node(RiscOp::Add, vec![one, exp_neg], ty.clone());
+    let neg_x = dag.add_node(RiscOp::Neg, vec![x], ty.clone(), None);
+    let exp_neg = dag.add_node(RiscOp::Exp, vec![neg_x], ty.clone(), None);
+    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
+    let sum = dag.add_node(RiscOp::Add, vec![one, exp_neg], ty.clone(), None);
     // recip(sum) = exp(neg(log(sum)))
-    let log_sum = dag.add_node(RiscOp::Log, vec![sum], ty.clone());
-    let neg_log = dag.add_node(RiscOp::Neg, vec![log_sum], ty.clone());
-    dag.add_node(RiscOp::Exp, vec![neg_log], ty.clone())
+    let log_sum = dag.add_node(RiscOp::Log, vec![sum], ty.clone(), None);
+    let neg_log = dag.add_node(RiscOp::Neg, vec![log_sum], ty.clone(), None);
+    dag.add_node(RiscOp::Exp, vec![neg_log], ty.clone(), None)
 }
 
 /// `div(a, b)` = `mul(a, recip(b))` where `recip(b) = exp(neg(log(b)))`
 pub fn lower_div(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId {
-    let log_b = dag.add_node(RiscOp::Log, vec![b], ty.clone());
-    let neg_log = dag.add_node(RiscOp::Neg, vec![log_b], ty.clone());
-    let recip_b = dag.add_node(RiscOp::Exp, vec![neg_log], ty.clone());
-    dag.add_node(RiscOp::Mul, vec![a, recip_b], ty.clone())
+    let log_b = dag.add_node(RiscOp::Log, vec![b], ty.clone(), None);
+    let neg_log = dag.add_node(RiscOp::Neg, vec![log_b], ty.clone(), None);
+    let recip_b = dag.add_node(RiscOp::Exp, vec![neg_log], ty.clone(), None);
+    dag.add_node(RiscOp::Mul, vec![a, recip_b], ty.clone(), None)
 }
 
 /// H1: `gt(a, b)` = `cmplt(b, a)` (swap args)
@@ -46,7 +46,7 @@ pub fn lower_gt(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId 
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty)
+    dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty, None)
 }
 
 /// H1: `gte(a, b)` = `neg(cmplt(a, b))` — not (a < b)
@@ -56,10 +56,10 @@ pub fn lower_gte(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let lt = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone());
+    let lt = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone(), None);
     // not(lt): cmplt(lt, const(1)) — if lt==0 then 0<1=true, if lt==1 then 1<1=false
-    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone());
-    dag.add_node(RiscOp::CmpLt, vec![lt, one], bool_ty)
+    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone(), None);
+    dag.add_node(RiscOp::CmpLt, vec![lt, one], bool_ty, None)
 }
 
 /// H1: `lte(a, b)` = `neg(cmplt(b, a))` — not (b < a)
@@ -68,9 +68,9 @@ pub fn lower_lte(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let lt = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone());
-    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone());
-    dag.add_node(RiscOp::CmpLt, vec![lt, one], bool_ty)
+    let lt = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone(), None);
+    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone(), None);
+    dag.add_node(RiscOp::CmpLt, vec![lt, one], bool_ty, None)
 }
 
 /// H1: `eq(a, b)` = not(or(cmplt(a,b), cmplt(b,a)))
@@ -80,11 +80,11 @@ pub fn lower_eq(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId 
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let lt_ab = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone());
-    let lt_ba = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone());
-    let or = dag.add_node(RiscOp::MaxElem, vec![lt_ab, lt_ba], bool_ty.clone());
-    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone());
-    dag.add_node(RiscOp::CmpLt, vec![or, one], bool_ty)
+    let lt_ab = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone(), None);
+    let lt_ba = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone(), None);
+    let or = dag.add_node(RiscOp::MaxElem, vec![lt_ab, lt_ba], bool_ty.clone(), None);
+    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone(), None);
+    dag.add_node(RiscOp::CmpLt, vec![or, one], bool_ty, None)
 }
 
 /// H1: `neq(a, b)` = `or(cmplt(a,b), cmplt(b,a))`
@@ -93,17 +93,17 @@ pub fn lower_neq(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let lt_ab = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone());
-    let lt_ba = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone());
-    dag.add_node(RiscOp::MaxElem, vec![lt_ab, lt_ba], bool_ty)
+    let lt_ab = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty.clone(), None);
+    let lt_ba = dag.add_node(RiscOp::CmpLt, vec![b, a], bool_ty.clone(), None);
+    dag.add_node(RiscOp::MaxElem, vec![lt_ab, lt_ba], bool_ty, None)
 }
 
 /// H1: `min_elem(a, b)` = `neg(max_elem(neg(a), neg(b)))`
 pub fn lower_min_elem(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId {
-    let neg_a = dag.add_node(RiscOp::Neg, vec![a], ty.clone());
-    let neg_b = dag.add_node(RiscOp::Neg, vec![b], ty.clone());
-    let max = dag.add_node(RiscOp::MaxElem, vec![neg_a, neg_b], ty.clone());
-    dag.add_node(RiscOp::Neg, vec![max], ty.clone())
+    let neg_a = dag.add_node(RiscOp::Neg, vec![a], ty.clone(), None);
+    let neg_b = dag.add_node(RiscOp::Neg, vec![b], ty.clone(), None);
+    let max = dag.add_node(RiscOp::MaxElem, vec![neg_a, neg_b], ty.clone(), None);
+    dag.add_node(RiscOp::Neg, vec![max], ty.clone(), None)
 }
 
 /// H2: `and(a, b)` on bools = `mul(a, b)`
@@ -112,7 +112,7 @@ pub fn lower_and(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    dag.add_node(RiscOp::Mul, vec![a, b], bool_ty)
+    dag.add_node(RiscOp::Mul, vec![a, b], bool_ty, None)
 }
 
 /// H2: `or(a, b)` on bools = `max_elem(a, b)`
@@ -121,7 +121,7 @@ pub fn lower_or(dag: &mut Dag, a: NodeId, b: NodeId, ty: &TensorType) -> NodeId 
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    dag.add_node(RiscOp::MaxElem, vec![a, b], bool_ty)
+    dag.add_node(RiscOp::MaxElem, vec![a, b], bool_ty, None)
 }
 
 /// H2: `not(a)` on bools = `cmplt(a, const(1))` — flips 0->1, 1->0
@@ -130,8 +130,8 @@ pub fn lower_not(dag: &mut Dag, a: NodeId, ty: &TensorType) -> NodeId {
         dims: ty.dims.clone(),
         precision: Prim::Bool,
     };
-    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone());
-    dag.add_node(RiscOp::CmpLt, vec![a, one], bool_ty)
+    let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], bool_ty.clone(), None);
+    dag.add_node(RiscOp::CmpLt, vec![a, one], bool_ty, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +221,7 @@ fn expand_to_match(
             },
             vec![node],
             next_ty.clone(),
+            None,
         );
         ty = next_ty;
     }
@@ -276,6 +277,7 @@ pub fn lower_matmul(
         },
         vec![a],
         expanded_ty.clone(),
+        None,
     );
 
     // 2. Expand B: add dim for i at axis 0 -> [i, j, k]
@@ -286,13 +288,14 @@ pub fn lower_matmul(
         },
         vec![b],
         expanded_ty.clone(),
+        None,
     );
 
     // 3. Elementwise multiply -> [i, j, k]
-    let product = dag.add_node(RiscOp::Mul, vec![a_expanded, b_expanded], expanded_ty);
+    let product = dag.add_node(RiscOp::Mul, vec![a_expanded, b_expanded], expanded_ty, None);
 
     // 4. Sum over axis 1 (j) -> [i, k]
-    dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], result_ty)
+    dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], result_ty, None)
 }
 
 /// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
@@ -303,7 +306,7 @@ pub fn lower_softmax(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> 
     let size = DimExpr::from(&require_dim(ty.dims.get(axis), "softmax axis"));
 
     // 1. max_reduce(x, axis)
-    let max_val = dag.add_node(RiscOp::MaxReduce { axis }, vec![x], red_ty.clone());
+    let max_val = dag.add_node(RiscOp::MaxReduce { axis }, vec![x], red_ty.clone(), None);
 
     // 2. expand max back to original shape
     let max_expanded = dag.add_node(
@@ -313,19 +316,25 @@ pub fn lower_softmax(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> 
         },
         vec![max_val],
         ty.clone(),
+        None,
     );
 
     // 3. shifted = x - max (numerical stability)
     let shifted = lower_sub(dag, x, max_expanded, ty);
 
     // 4. exp(shifted)
-    let exp_shifted = dag.add_node(RiscOp::Exp, vec![shifted], ty.clone());
+    let exp_shifted = dag.add_node(RiscOp::Exp, vec![shifted], ty.clone(), None);
 
     // 5. sum(exp, axis)
-    let sum_exp = dag.add_node(RiscOp::Sum { axis }, vec![exp_shifted], red_ty);
+    let sum_exp = dag.add_node(RiscOp::Sum { axis }, vec![exp_shifted], red_ty, None);
 
     // 6. expand sum back to original shape
-    let sum_expanded = dag.add_node(RiscOp::Expand { axis, size }, vec![sum_exp], ty.clone());
+    let sum_expanded = dag.add_node(
+        RiscOp::Expand { axis, size },
+        vec![sum_exp],
+        ty.clone(),
+        None,
+    );
 
     // 7. exp / sum
     lower_div(dag, exp_shifted, sum_expanded, ty)
@@ -339,7 +348,7 @@ pub fn lower_mean(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> Nod
     let dim_size_val = require_axis_size(ty, axis, "mean") as f64;
 
     // sum(x, axis)
-    let sum_node = dag.add_node(RiscOp::Sum { axis }, vec![x], red_ty.clone());
+    let sum_node = dag.add_node(RiscOp::Sum { axis }, vec![x], red_ty.clone(), None);
 
     // const(dim_size)
     let size_const = dag.add_node(
@@ -348,6 +357,7 @@ pub fn lower_mean(dag: &mut Dag, x: NodeId, axis: usize, ty: &TensorType) -> Nod
         },
         vec![],
         red_ty.clone(),
+        None,
     );
 
     // sum / dim_size
@@ -376,9 +386,10 @@ pub fn lower_layer_norm(
         },
         vec![mean],
         x_ty.clone(),
+        None,
     );
     let centered = lower_sub(dag, x, mean_expanded, x_ty);
-    let squared = dag.add_node(RiscOp::Mul, vec![centered, centered], x_ty.clone());
+    let squared = dag.add_node(RiscOp::Mul, vec![centered, centered], x_ty.clone(), None);
     let var = lower_mean(dag, squared, axis, x_ty);
     let var_expanded = dag.add_node(
         RiscOp::Expand {
@@ -387,16 +398,22 @@ pub fn lower_layer_norm(
         },
         vec![var],
         x_ty.clone(),
+        None,
     );
-    let eps_const = dag.add_node(RiscOp::Const { value: eps }, vec![], x_ty.clone());
-    let denom_sq = dag.add_node(RiscOp::Add, vec![var_expanded, eps_const], x_ty.clone());
-    let denom = dag.add_node(RiscOp::Sqrt, vec![denom_sq], x_ty.clone());
+    let eps_const = dag.add_node(RiscOp::Const { value: eps }, vec![], x_ty.clone(), None);
+    let denom_sq = dag.add_node(
+        RiscOp::Add,
+        vec![var_expanded, eps_const],
+        x_ty.clone(),
+        None,
+    );
+    let denom = dag.add_node(RiscOp::Sqrt, vec![denom_sq], x_ty.clone(), None);
     let normed = lower_div(dag, centered, denom, x_ty);
 
     let gamma_node = expand_to_match(dag, gamma, gamma_ty.clone(), &x_ty.dims);
     let beta_node = expand_to_match(dag, beta, beta_ty.clone(), &x_ty.dims);
-    let scaled = dag.add_node(RiscOp::Mul, vec![normed, gamma_node], x_ty.clone());
-    dag.add_node(RiscOp::Add, vec![scaled, beta_node], x_ty.clone())
+    let scaled = dag.add_node(RiscOp::Mul, vec![normed, gamma_node], x_ty.clone(), None);
+    dag.add_node(RiscOp::Add, vec![scaled, beta_node], x_ty.clone(), None)
 }
 
 /// conv2d(input, kernel, stride, padding) via a coarse im2col-style decomposition.
@@ -484,6 +501,7 @@ pub fn lower_conv2d(
         },
         vec![input],
         padded_ty.clone(),
+        None,
     );
 
     let sample_h = h_out_size.saturating_sub(1) * stride + 1;
@@ -543,7 +561,7 @@ pub fn lower_conv2d(
             );
 
             acc = Some(match acc {
-                Some(prev) => dag.add_node(RiscOp::Add, vec![prev, term], output_ty.clone()),
+                Some(prev) => dag.add_node(RiscOp::Add, vec![prev, term], output_ty.clone(), None),
                 None => term,
             });
         }
@@ -585,6 +603,7 @@ fn lower_conv2d_sample(
         },
         vec![padded],
         sampled_window_ty.clone(),
+        None,
     );
 
     let sampled_ty = TensorType {
@@ -602,6 +621,7 @@ fn lower_conv2d_sample(
         },
         vec![sampled_window],
         sampled_ty,
+        None,
     )
 }
 
@@ -633,6 +653,7 @@ fn lower_conv2d_kernel_slice(
             ],
             precision,
         },
+        None,
     )
 }
 
@@ -665,6 +686,7 @@ fn lower_conv2d_pointwise(
         },
         vec![input],
         permuted_ty.clone(),
+        None,
     );
 
     let h_out_size = require_dim_extent(&h_out, "conv2d output height axis");
@@ -680,6 +702,7 @@ fn lower_conv2d_pointwise(
         },
         vec![permuted],
         cols_ty.clone(),
+        None,
     );
 
     let kernel_flat_ty = TensorType {
@@ -692,6 +715,7 @@ fn lower_conv2d_pointwise(
         },
         vec![kernel],
         kernel_flat_ty.clone(),
+        None,
     );
 
     let product = lower_matmul(dag, kernel_flat, cols, &kernel_flat_ty, &cols_ty);
@@ -710,6 +734,7 @@ fn lower_conv2d_pointwise(
         },
         vec![product],
         product_4d_ty,
+        None,
     );
     dag.add_node(
         RiscOp::Permute {
@@ -717,6 +742,7 @@ fn lower_conv2d_pointwise(
         },
         vec![product_4d],
         output_ty.clone(),
+        None,
     )
 }
 
@@ -733,8 +759,8 @@ mod tests {
     #[test]
     fn sub_produces_add_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_sub(&mut dag, a, b, &scalar_f32());
         assert!(verify::verify(&dag).is_empty());
 
@@ -750,7 +776,7 @@ mod tests {
     #[test]
     fn relu_produces_max_elem_const_zero() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32(), None);
         let result = lower_relu(&mut dag, x, &scalar_f32());
         assert!(verify::verify(&dag).is_empty());
 
@@ -765,7 +791,7 @@ mod tests {
     #[test]
     fn sigmoid_produces_correct_chain() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let result = lower_sigmoid(&mut dag, x, &scalar_f32());
         assert!(verify::verify(&dag).is_empty());
 
@@ -778,8 +804,8 @@ mod tests {
     #[test]
     fn div_produces_mul_recip() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_div(&mut dag, a, b, &scalar_f32());
         assert!(verify::verify(&dag).is_empty());
 
@@ -801,8 +827,8 @@ mod tests {
     #[test]
     fn gt_swaps_args_to_cmplt() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_gt(&mut dag, a, b, &scalar_f32());
 
         let node = dag.get(result).unwrap();
@@ -815,8 +841,8 @@ mod tests {
     #[test]
     fn gte_produces_not_cmplt() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_gte(&mut dag, a, b, &scalar_f32());
 
         // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
@@ -829,8 +855,8 @@ mod tests {
     #[test]
     fn lte_produces_not_cmplt_ba() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
         let result = lower_lte(&mut dag, a, b, &scalar_f32());
 
         assert_eq!(dag.len(), 5);
@@ -842,8 +868,8 @@ mod tests {
     #[test]
     fn eq_produces_not_or_cmplt() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_eq(&mut dag, a, b, &scalar_f32());
 
         // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
@@ -856,8 +882,8 @@ mod tests {
     #[test]
     fn neq_produces_or_cmplt() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
         let result = lower_neq(&mut dag, a, b, &scalar_f32());
 
         // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem
@@ -870,8 +896,8 @@ mod tests {
     #[test]
     fn min_elem_produces_neg_max_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let result = lower_min_elem(&mut dag, a, b, &scalar_f32());
         assert!(verify::verify(&dag).is_empty());
 
@@ -886,8 +912,8 @@ mod tests {
     #[test]
     fn and_produces_mul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool());
-        let b = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_bool());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool(), None);
+        let b = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_bool(), None);
         let result = lower_and(&mut dag, a, b, &scalar_bool());
 
         let node = dag.get(result).unwrap();
@@ -898,8 +924,8 @@ mod tests {
     #[test]
     fn or_produces_max_elem() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_bool());
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_bool(), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool(), None);
         let result = lower_or(&mut dag, a, b, &scalar_bool());
 
         let node = dag.get(result).unwrap();
@@ -910,7 +936,7 @@ mod tests {
     #[test]
     fn not_produces_cmplt_with_one() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_bool(), None);
         let result = lower_not(&mut dag, a, &scalar_bool());
 
         // a, Const(1), CmpLt(a, 1)
@@ -948,8 +974,18 @@ mod tests {
         let mut dag = Dag::new();
         let a_ty = matrix_2x3();
         let b_ty = matrix_3x4();
-        let a = dag.add_node(RiscOp::Load { name: "A".into() }, vec![], a_ty.clone());
-        let b = dag.add_node(RiscOp::Load { name: "B".into() }, vec![], b_ty.clone());
+        let a = dag.add_node(
+            RiscOp::Load { name: "A".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "B".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
         let result = lower_matmul(&mut dag, a, b, &a_ty, &b_ty);
 
         // A, B, Expand(A), Expand(B), Mul, Sum
@@ -982,7 +1018,7 @@ mod tests {
     fn softmax_produces_maxreduce_sub_exp_sum_div() {
         let mut dag = Dag::new();
         let ty = vec_5();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let result = lower_softmax(&mut dag, x, 0, &ty);
 
         // Check the chain of ops produced.
@@ -1015,7 +1051,7 @@ mod tests {
     fn mean_produces_sum_div() {
         let mut dag = Dag::new();
         let ty = vec_5();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let result = lower_mean(&mut dag, x, 0, &ty);
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -1046,13 +1082,19 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            x_ty.clone(),
+            None,
+        );
         let gamma = dag.add_node(
             RiscOp::Load {
                 name: "gamma".into(),
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let beta = dag.add_node(
             RiscOp::Load {
@@ -1060,6 +1102,7 @@ mod tests {
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let result = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
 
@@ -1095,13 +1138,19 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            x_ty.clone(),
+            None,
+        );
         let gamma = dag.add_node(
             RiscOp::Load {
                 name: "gamma".into(),
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let beta = dag.add_node(
             RiscOp::Load {
@@ -1109,6 +1158,7 @@ mod tests {
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let _ = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
         assert!(
@@ -1151,8 +1201,18 @@ mod tests {
             ],
             precision: Prim::F32,
         };
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty.clone());
-        let kernel = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], kernel_ty.clone());
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let kernel = dag.add_node(
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            kernel_ty.clone(),
+            None,
+        );
         let result = lower_conv2d(
             &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 0,
         );
@@ -1182,7 +1242,7 @@ mod tests {
             dims: vec![DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let out = lower_softmax(&mut dag, x, 0, &ty);
         let expand_sizes: Vec<_> = dag
             .nodes()
@@ -1215,13 +1275,19 @@ mod tests {
             dims: vec![DimInfo::Named("hidden".into(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty.clone());
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            x_ty.clone(),
+            None,
+        );
         let gamma = dag.add_node(
             RiscOp::Load {
                 name: "gamma".into(),
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let beta = dag.add_node(
             RiscOp::Load {
@@ -1229,6 +1295,7 @@ mod tests {
             },
             vec![],
             scale_ty.clone(),
+            None,
         );
         let _ = lower_layer_norm(&mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5);
     }
@@ -1259,8 +1326,18 @@ mod tests {
             dims: vec![DimInfo::Lit(1), DimInfo::Lit(16)],
             precision: Prim::F32,
         };
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty.clone());
-        let kernel = dag.add_node(RiscOp::Load { name: "w".into() }, vec![], kernel_ty.clone());
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let kernel = dag.add_node(
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            kernel_ty.clone(),
+            None,
+        );
         let _ = lower_conv2d(
             &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 1,
         );

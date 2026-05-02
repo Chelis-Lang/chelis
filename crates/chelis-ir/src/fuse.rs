@@ -215,7 +215,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                 .collect();
 
             let output_type = dag.get(chain_out).unwrap().output_type.clone();
-            let new_id = new_dag.add_node(fused_op, remapped_inputs, output_type);
+            let new_id = new_dag.add_node(fused_op, remapped_inputs, output_type, None);
             // Map ALL chain nodes to this new ID (consumers reference chain internals).
             for &nid in &chain.nodes {
                 id_map.insert(nid.0, new_id);
@@ -231,7 +231,8 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
                         .unwrap_or_else(|| panic!("unmapped input {old:?}"))
                 })
                 .collect();
-            let new_id = new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone());
+            let new_id =
+                new_dag.add_node(node.op.clone(), new_inputs, node.output_type.clone(), None);
             id_map.insert(old_id, new_id);
         }
     }
@@ -352,9 +353,9 @@ mod tests {
     #[test]
     fn consumer_counts_basic() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[a.0], 1); // consumed by c
@@ -365,11 +366,11 @@ mod tests {
     #[test]
     fn multi_consumer_blocks_chain() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-        let _left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4));
-        let _right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let _left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4), None);
+        let _right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4), None);
 
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[shared.0], 2); // two consumers
@@ -387,10 +388,10 @@ mod tests {
     #[test]
     fn simple_chain_found() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-        let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
         dag.add_root(d);
 
         let counts = build_consumer_counts(&dag);

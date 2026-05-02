@@ -776,9 +776,9 @@ mod tests {
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let vals = eval_scalar(&dag, &HashMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
@@ -786,9 +786,9 @@ mod tests {
     #[test]
     fn eval_vector_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32());
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32());
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32(), None);
         let mut inputs = HashMap::new();
         inputs.insert(
             "a".into(),
@@ -816,7 +816,7 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         let y = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -824,6 +824,7 @@ mod tests {
             },
             vec![x],
             out_ty,
+            None,
         );
         let mut inputs = HashMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
@@ -838,10 +839,10 @@ mod tests {
     fn eval_root_scoped_does_not_require_unrelated_inputs() {
         let mut dag = Dag::new();
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone());
-        let sum = dag.add_node(RiscOp::Add, vec![x, x], ty.clone());
-        let dead = dag.add_node(RiscOp::Add, vec![y, y], ty.clone());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
+        let sum = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
+        let dead = dag.add_node(RiscOp::Add, vec![y, y], ty.clone(), None);
         dag.add_root(sum);
         dag.add_root(dead);
 
@@ -864,7 +865,7 @@ mod tests {
     #[test]
     fn eval_strict_missing_input_is_error() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32());
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32(), None);
         let err = eval_tensor_with_strict(&dag, |_| None).unwrap_err();
         assert!(err.contains("missing required input `x`"));
         assert_eq!(x, NodeId(0));
@@ -874,10 +875,10 @@ mod tests {
     fn eval_root_scoped_strict_only_requires_live_inputs() {
         let mut dag = Dag::new();
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone());
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone());
-        let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone());
-        let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
+        let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
+        let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty, None);
 
         let vals = eval_tensor_roots_with_strict(&dag, &[live], |name| match name {
             "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
@@ -1125,7 +1126,12 @@ mod tests {
     ///   [ 3.0, -1.0,  5.0]
     fn build_2x3_with(op: RiscOp) -> (Dag, NodeId) {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], mat_f32(2, 3));
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
         let out_ty = match &op {
             RiscOp::MinReduce { axis }
             | RiscOp::ProdReduce { axis }
@@ -1139,7 +1145,7 @@ mod tests {
             }
             _ => panic!("unexpected op"),
         };
-        let y = dag.add_node(op, vec![x], out_ty);
+        let y = dag.add_node(op, vec![x], out_ty, None);
         (dag, y)
     }
 
@@ -1255,8 +1261,8 @@ mod tests {
             RiscOp::Argmin { axis: 7 },
         ] {
             let mut dag = Dag::new();
-            let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], row_f32(3));
-            dag.add_node(op, vec![x], scalar_f32());
+            let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], row_f32(3), None);
+            dag.add_node(op, vec![x], scalar_f32(), None);
             let errs = verify(&dag);
             assert!(
                 errs.iter().any(|e| e.contains("axis 7")),

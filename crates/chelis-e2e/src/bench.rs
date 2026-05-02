@@ -940,6 +940,7 @@ fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
         },
         vec![input],
         ty,
+        None,
     );
 }
 
@@ -950,6 +951,7 @@ fn dag_without_roots(dag: &Dag) -> Dag {
             node.op.clone(),
             node.inputs.clone(),
             node.output_type.clone(),
+            None,
         );
     }
     out

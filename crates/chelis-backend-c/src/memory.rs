@@ -50,9 +50,9 @@ mod tests {
     #[test]
     fn cleanup_skips_output_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         let lines = emit_cleanup(&dag, &[c]);
         assert_eq!(lines.len(), 2);
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn cleanup_all_outputs_means_no_frees() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let lines = emit_cleanup(&dag, &[a]);
         assert!(lines.is_empty());
     }
@@ -79,9 +79,9 @@ mod tests {
     #[test]
     fn cleanup_multiple_outputs() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         let lines = emit_cleanup(&dag, &[a, c]);
         assert_eq!(lines.len(), 1);
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn cleanup_format_matches_indent() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let lines = emit_cleanup(&dag, &[]);
         assert!(lines[0].starts_with("    chelis_free(t0)"));
     }
@@ -105,6 +105,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         let lines = emit_cleanup(&dag, &[]);
         assert!(lines.is_empty());

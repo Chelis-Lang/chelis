@@ -140,8 +140,18 @@ mod tests {
     #[test]
     fn detects_canonical_matmul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -149,6 +159,7 @@ mod tests {
             },
             vec![a],
             tensor3_f32(2, 3, 4),
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -157,9 +168,10 @@ mod tests {
             },
             vec![b],
             tensor3_f32(2, 3, 4),
+            None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
 
         let info = detect_matmul_pattern(&dag, sum).expect("matmul should be detected");
         assert_eq!(info.a, a);
@@ -172,8 +184,18 @@ mod tests {
     #[test]
     fn rejects_wrong_sum_axis() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(3, 4));
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -181,6 +203,7 @@ mod tests {
             },
             vec![a],
             tensor3_f32(2, 3, 4),
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -189,10 +212,11 @@ mod tests {
             },
             vec![b],
             tensor3_f32(2, 3, 4),
+            None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
+        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
         // sum axis=0 is the wrong axis; matmul detector should bail.
-        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![mul], mat_f32(3, 4));
+        let sum = dag.add_node(RiscOp::Sum { axis: 0 }, vec![mul], mat_f32(3, 4), None);
 
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }
@@ -200,8 +224,18 @@ mod tests {
     #[test]
     fn rejects_mismatched_inner_dims() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(5, 4));
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            mat_f32(5, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -209,6 +243,7 @@ mod tests {
             },
             vec![a],
             tensor3_f32(2, 3, 4),
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -217,9 +252,10 @@ mod tests {
             },
             vec![b],
             tensor3_f32(2, 5, 4),
+            None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
 
         assert!(detect_matmul_pattern(&dag, sum).is_none());
     }

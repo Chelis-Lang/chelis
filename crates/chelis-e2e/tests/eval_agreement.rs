@@ -178,9 +178,9 @@ fn agreement_add() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32());
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+    dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
     let c_result = parse_c_output(&compile_and_run(&dag, "test_add"));
@@ -195,9 +195,9 @@ fn agreement_mul() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32());
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 6.0 }, vec![], scalar_f32(), None);
+    dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
     let c_result = parse_c_output(&compile_and_run(&dag, "test_mul"));
@@ -212,8 +212,8 @@ fn agreement_neg() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 7.0 }, vec![], scalar_f32());
-    dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 7.0 }, vec![], scalar_f32(), None);
+    dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
     let c_result = parse_c_output(&compile_and_run(&dag, "test_neg"));
@@ -231,9 +231,9 @@ fn agreement_relu() {
     // relu(x) = max(x, 0) -- test with negative input
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32());
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
         let eval_result = eval_last(&dag);
         let c_result = parse_c_output(&compile_and_run(&dag, "test_relu_neg"));
@@ -244,9 +244,9 @@ fn agreement_relu() {
     // relu with positive input
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
         let eval_result = eval_last(&dag);
         let c_result = parse_c_output(&compile_and_run(&dag, "test_relu_pos"));
@@ -262,8 +262,8 @@ fn agreement_exp() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-    dag.add_node(RiscOp::Exp, vec![a], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+    dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
     let c_result = parse_c_output(&compile_and_run(&dag, "test_exp"));

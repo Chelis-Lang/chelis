@@ -2228,7 +2228,7 @@ mod tests {
     #[test]
     fn const_emits_alloc_and_fill() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_alloc"));
         assert!(c.contains("chelis_fill_f32"));
@@ -2238,9 +2238,9 @@ mod tests {
     #[test]
     fn add_emits_stride_aware_loop() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_flat_to_indices"));
         assert!(c.contains("chelis_indices_to_flat"));
@@ -2250,8 +2250,8 @@ mod tests {
     #[test]
     fn neg_emits_unary_minus() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t0->data)[idx]"));
@@ -2260,8 +2260,8 @@ mod tests {
     #[test]
     fn exp_emits_expf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Exp, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("expf("));
     }
@@ -2269,8 +2269,8 @@ mod tests {
     #[test]
     fn log_emits_logf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Log, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Log, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("logf("));
     }
@@ -2278,8 +2278,8 @@ mod tests {
     #[test]
     fn sin_emits_sinf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Sin, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Sin, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("sinf("));
     }
@@ -2287,8 +2287,8 @@ mod tests {
     #[test]
     fn sqrt_emits_sqrtf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("sqrtf("));
     }
@@ -2296,9 +2296,9 @@ mod tests {
     #[test]
     fn cmplt_emits_ternary_float() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("1.0f : 0.0f"));
     }
@@ -2306,9 +2306,9 @@ mod tests {
     #[test]
     fn omp_pragma_in_elementwise() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("#pragma omp parallel for"));
     }
@@ -2316,8 +2316,8 @@ mod tests {
     #[test]
     fn sum_emits_reduction_loop() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         assert!(c.contains("for (int __reduce_i"));
@@ -2326,8 +2326,8 @@ mod tests {
     #[test]
     fn max_reduce_emits_fmaxf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("fmaxf(acc"));
         assert!(c.contains("-INFINITY"));
@@ -2336,9 +2336,9 @@ mod tests {
     #[test]
     fn mul_emits_star_op() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("*"));
     }
@@ -2346,9 +2346,9 @@ mod tests {
     #[test]
     fn max_elem_emits_fmaxf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::MaxElem, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::MaxElem, vec![a, b], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("fmaxf("));
     }
@@ -2356,13 +2356,14 @@ mod tests {
     #[test]
     fn reshape_emits_contiguous_check() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
         dag.add_node(
             RiscOp::Reshape {
                 new_shape: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
             },
             vec![a],
             mat_f32(2, 3),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_is_contiguous"));
@@ -2372,8 +2373,13 @@ mod tests {
     #[test]
     fn permute_emits_stride_swap() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-        dag.add_node(RiscOp::Permute { axes: vec![1, 0] }, vec![a], mat_f32(3, 2));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+        dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![a],
+            mat_f32(3, 2),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("strides[0] = t0->strides[1]"));
         assert!(c.contains("strides[1] = t0->strides[0]"));
@@ -2382,7 +2388,7 @@ mod tests {
     #[test]
     fn expand_sets_stride_zero() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1), None);
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -2390,6 +2396,7 @@ mod tests {
             },
             vec![a],
             vec_f32(4),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("strides[0] = 0"));
@@ -2398,13 +2405,14 @@ mod tests {
     #[test]
     fn store_is_alias() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
             RiscOp::Store {
                 name: "out".to_string(),
             },
             vec![a],
             scalar_f32(),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_contiguous(t0); /* store: out */"));
@@ -2413,13 +2421,14 @@ mod tests {
     #[test]
     fn cast_emits_memcpy() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
             vec![a],
             scalar_f32(),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("memcpy"));
@@ -2428,9 +2437,14 @@ mod tests {
     #[test]
     fn realize_emits_materialization_loop() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6));
-        let s = dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![x], vec_f32(3));
-        dag.add_node(RiscOp::Realize, vec![s], vec_f32(3));
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+        let s = dag.add_node(
+            RiscOp::Stride { strides: vec![2] },
+            vec![x],
+            vec_f32(3),
+            None,
+        );
+        dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
 
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_tensor *t2 = chelis_alloc("));
@@ -2447,6 +2461,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("inputs[0]"));
@@ -2461,6 +2476,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         let x1 = dag.add_node(
             RiscOp::Load {
@@ -2468,8 +2484,9 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
-        dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32());
+        dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("if (n_in != 1)"));
         assert!(c.contains("chelis_tensor *t0 = inputs[0];"));
@@ -2485,6 +2502,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         dag.add_node(
             RiscOp::Load {
@@ -2492,6 +2510,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         dag.add_node(
             RiscOp::Load {
@@ -2499,6 +2518,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         assert_eq!(CEmitter::input_labels(&dag), vec!["b", "a"]);
     }
@@ -2506,7 +2526,7 @@ mod tests {
     #[test]
     fn function_signature_correct() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "my_func");
         assert!(c.contains(
             "void my_func(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out)"
@@ -2516,7 +2536,7 @@ mod tests {
     #[test]
     fn includes_runtime_header() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("#include \"chelis_runtime.h\""));
     }
@@ -2524,7 +2544,7 @@ mod tests {
     #[test]
     fn pad_emits_fill_and_copy() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
         dag.add_node(
             RiscOp::Pad {
                 padding: vec![(1, 1)],
@@ -2532,6 +2552,7 @@ mod tests {
             },
             vec![a],
             vec_f32(5),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_fill_f32"));
@@ -2541,13 +2562,14 @@ mod tests {
     #[test]
     fn shrink_emits_offset_copy() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Shrink {
                 bounds: vec![(1, 4)],
             },
             vec![a],
             vec_f32(3),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("src_indices[0] = dst_indices[0] + 1"));
@@ -2556,8 +2578,13 @@ mod tests {
     #[test]
     fn stride_emits_stride_multiply() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Stride { strides: vec![2] }, vec![a], vec_f32(2));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        dag.add_node(
+            RiscOp::Stride { strides: vec![2] },
+            vec![a],
+            vec_f32(2),
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("strides[0] = t0->strides[0] * 2"));
     }
@@ -2565,11 +2592,11 @@ mod tests {
     #[test]
     fn add_then_mul_chains() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
-        let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
         let code = CEmitter::emit_dag(&dag, "test_fn");
         // t2 is add result, t4 is mul result
         assert!(code.contains("t2->data"));
@@ -2579,9 +2606,9 @@ mod tests {
     #[test]
     fn vector_add_uses_correct_shape() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("(int[]){ 4 }"));
     }
@@ -2589,9 +2616,9 @@ mod tests {
     #[test]
     fn sum_then_neg_chains() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3));
-        let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32());
-        dag.add_node(RiscOp::Neg, vec![s], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
+        let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("acc +="));
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
@@ -2607,6 +2634,7 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(!c.contains("chelis_free(t0);"));
@@ -2616,8 +2644,8 @@ mod tests {
     #[test]
     fn roots_are_emitted_as_multiple_outputs() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_root(a);
         dag.add_root(b);
         let c = CEmitter::emit_dag(&dag, "test_fn");
@@ -2629,8 +2657,8 @@ mod tests {
     #[test]
     fn bool_outputs_use_bool_dtype() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(
             RiscOp::CmpLt,
             vec![a, b],
@@ -2638,6 +2666,7 @@ mod tests {
                 dims: vec![],
                 precision: Prim::Bool,
             },
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("chelis_alloc(1, (int[]){1}, CHELIS_BOOL);"));
@@ -2654,6 +2683,7 @@ mod tests {
                 dims: vec![],
                 precision: Prim::Int64,
             },
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(
@@ -2679,6 +2709,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F64,
             },
+            None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(
@@ -2704,9 +2735,9 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F64,
         };
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone());
-        dag.add_node(RiscOp::Add, vec![a, b], ty);
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], ty, None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("CHELIS_F64"), "generated C must use CHELIS_F64");
         assert!(
@@ -2724,8 +2755,8 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F64,
         };
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone());
-        dag.add_node(RiscOp::Exp, vec![a], ty);
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Exp, vec![a], ty, None);
         let c = CEmitter::emit_dag_with_options(
             &dag,
             "test_fn",
@@ -2752,9 +2783,9 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::Int64,
         };
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone());
-        dag.add_node(RiscOp::Add, vec![a, b], ty);
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Add, vec![a, b], ty, None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("CHELIS_I64"), "generated C must use CHELIS_I64");
         assert!(
@@ -2766,8 +2797,8 @@ mod tests {
     #[test]
     fn matmul_pattern_emits_cblas_call() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -2778,6 +2809,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -2789,6 +2821,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let mul = dag.add_node(
             RiscOp::Mul,
@@ -2797,8 +2830,9 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
         let c = CEmitter::emit_dag_with_options(
             &dag,
             "test_fn",
@@ -2813,8 +2847,8 @@ mod tests {
     #[test]
     fn default_codegen_uses_generic_matmul_path() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -2825,6 +2859,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -2836,6 +2871,7 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
         let mul = dag.add_node(
             RiscOp::Mul,
@@ -2844,8 +2880,9 @@ mod tests {
                 dims: vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
                 precision: Prim::F32,
             },
+            None,
         );
-        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(!c.contains("cblas_sgemm("));
         assert!(c.contains("for (int __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
@@ -2865,6 +2902,7 @@ mod tests {
                 dims: vec![],
                 precision: Prim::Bf16,
             },
+            None,
         );
         let _ = CEmitter::emit_dag(&dag, "test_fn");
     }
@@ -2876,9 +2914,9 @@ mod tests {
     #[test]
     fn binary_add_fast_path_emits_restrict_and_simd() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(
             c.contains("restrict"),
@@ -2901,7 +2939,7 @@ mod tests {
     fn binary_add_with_expanded_input_includes_slow_path() {
         let mut dag = Dag::new();
         // Build a broadcast-style input: Const [1] expanded to [4] via stride=0
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1), None);
         let a_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -2909,9 +2947,10 @@ mod tests {
             },
             vec![a],
             vec_f32(4),
+            None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Add, vec![a_exp, b], vec_f32(4));
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Add, vec![a_exp, b], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         // The slow path (index-conversion fallback) must always be present in the
         // emitted C; at runtime, chelis_is_contiguous(t_expanded) == 0 directs
@@ -2932,8 +2971,8 @@ mod tests {
     #[test]
     fn unary_neg_fast_path_emits_restrict_and_simd() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], vec_f32(4));
-        dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("restrict"), "unary fast path must use restrict");
         assert!(
@@ -2951,14 +2990,14 @@ mod tests {
     fn fused_elem_fast_path_emits_restrict_and_simd() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4));
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
         // Fused: add(a, b)
         let ops = vec![FusedStep {
             op: FusedStepOp::Add,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], vec_f32(4));
+        dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(
             c.contains("restrict"),
@@ -2984,8 +3023,8 @@ mod tests {
     #[test]
     fn cos_emits_cosf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Cos, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Cos, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("cosf("), "expected cosf( in:\n{c}");
     }
@@ -2993,8 +3032,8 @@ mod tests {
     #[test]
     fn tan_emits_tanf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Tan, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Tan, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("tanf("), "expected tanf( in:\n{c}");
     }
@@ -3002,8 +3041,8 @@ mod tests {
     #[test]
     fn atan_emits_atanf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Atan, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Atan, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("atanf("), "expected atanf( in:\n{c}");
     }
@@ -3011,8 +3050,8 @@ mod tests {
     #[test]
     fn abs_emits_fabsf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Abs, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Abs, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("fabsf("), "expected fabsf( in:\n{c}");
     }
@@ -3020,8 +3059,8 @@ mod tests {
     #[test]
     fn floor_emits_floorf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.7 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Floor, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.7 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Floor, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("floorf("), "expected floorf( in:\n{c}");
     }
@@ -3029,8 +3068,8 @@ mod tests {
     #[test]
     fn ceil_emits_ceilf() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.3 }, vec![], scalar_f32());
-        dag.add_node(RiscOp::Ceil, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.3 }, vec![], scalar_f32(), None);
+        dag.add_node(RiscOp::Ceil, vec![a], scalar_f32(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn");
         assert!(c.contains("ceilf("), "expected ceilf( in:\n{c}");
     }
@@ -3049,8 +3088,9 @@ mod tests {
             },
             vec![],
             scalar_f32(),
+            None,
         );
-        let out = dag.add_node(RiscOp::Cos, vec![x], scalar_f32());
+        let out = dag.add_node(RiscOp::Cos, vec![x], scalar_f32(), None);
         dag.add_root(out);
         let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
         let val = results[&out] as f32;
@@ -3064,8 +3104,8 @@ mod tests {
     fn abs_numerical_correctness() {
         // abs(-2.0) == 2.0
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32());
-        let out = dag.add_node(RiscOp::Abs, vec![x], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: -2.0 }, vec![], scalar_f32(), None);
+        let out = dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
         dag.add_root(out);
         let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
         let val = results[&out] as f32;

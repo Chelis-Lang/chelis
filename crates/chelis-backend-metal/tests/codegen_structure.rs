@@ -20,10 +20,15 @@ fn vec_f32(n: usize) -> TensorType {
 
 fn build_simple_add_dag() -> Dag {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
-    let stored = dag.add_node(RiscOp::Store { name: "out".into() }, vec![s], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![s],
+        vec_f32(8),
+        None,
+    );
     dag.add_root(stored);
     dag
 }
@@ -196,11 +201,16 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
     // exp(add(a, b)) — three compute nodes (add + exp), so two kernel
     // declarations and two dispatch sites until M4 fusion lands.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8));
-    let stored = dag.add_node(RiscOp::Store { name: "out".into() }, vec![e], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![e],
+        vec_f32(8),
+        None,
+    );
     dag.add_root(stored);
 
     let result = codegen_metal(&dag, "chain");
@@ -233,9 +243,14 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
 #[test]
 fn m2_unary_neg_uses_prefix_op_not_function() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4));
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
-    let stored = dag.add_node(RiscOp::Store { name: "out".into() }, vec![n], vec_f32(4));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let stored = dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![n],
+        vec_f32(4),
+        None,
+    );
     dag.add_root(stored);
 
     let result = codegen_metal(&dag, "negf");
@@ -254,12 +269,13 @@ fn m2_unary_neg_uses_prefix_op_not_function() {
 
 fn build_reduce_dag(reduce_op: RiscOp, n: usize) -> Dag {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n));
-    let r = dag.add_node(reduce_op, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+    let r = dag.add_node(reduce_op, vec![a], TensorType::scalar_f32(), None);
     let stored = dag.add_node(
         RiscOp::Store { name: "out".into() },
         vec![r],
         TensorType::scalar_f32(),
+        None,
     );
     dag.add_root(stored);
     dag
@@ -364,9 +380,9 @@ fn m2_root_without_store_writes_output_back() {
     // emitter must synthesize a write-back to outputs[idx] in that case,
     // not silently skip the materialization.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8));
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
+    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
     dag.add_root(s); // root, but no Store
 
     let result = codegen_metal(&dag, "f");
@@ -398,8 +414,18 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
     // scalar — not `chelis_alloc(1, {1}, CHELIS_F32)` which would lie
     // about ndim to the host.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(256));
-    let r = dag.add_node(RiscOp::Sum { axis: 0 }, vec![a], TensorType::scalar_f32());
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(256),
+        None,
+    );
+    let r = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     dag.add_root(r);
 
     let result = codegen_metal(&dag, "sumv");
@@ -433,8 +459,18 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
 fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat_f32(m, k));
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat_f32(k, n));
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_f32(m, k),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_f32(k, n),
+        None,
+    );
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -442,6 +478,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         },
         vec![a],
         tensor3_f32(m, k, n),
+        None,
     );
     let eb = dag.add_node(
         RiscOp::Expand {
@@ -450,9 +487,10 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
         },
         vec![b],
         tensor3_f32(m, k, n),
+        None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n));
-    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n));
+    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
+    let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(m, n), None);
     dag.add_root(sum);
     dag
 }
@@ -535,14 +573,20 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
     // The M4 first cut handles full-axis reduce only (axis=0 on rank-1).
     // axis-nonzero falls through to the stub.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64));
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     // Construct an axis=1 sum even though our input is rank-1; this
     // simulates a partial-axis reduction the M4 first cut should reject.
-    let r = dag.add_node(RiscOp::Sum { axis: 1 }, vec![a], TensorType::scalar_f32());
+    let r = dag.add_node(
+        RiscOp::Sum { axis: 1 },
+        vec![a],
+        TensorType::scalar_f32(),
+        None,
+    );
     let stored = dag.add_node(
         RiscOp::Store { name: "out".into() },
         vec![r],
         TensorType::scalar_f32(),
+        None,
     );
     dag.add_root(stored);
 

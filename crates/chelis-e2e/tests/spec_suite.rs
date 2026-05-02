@@ -479,9 +479,9 @@ fn spec_generated_c_compiles() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let result = chelis_backend_c::codegen(&dag, "spec_test");
@@ -500,9 +500,9 @@ fn spec_add_numerical_correctness() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let out = compile_and_run_dag(&dag, "spec_add");
@@ -522,9 +522,9 @@ fn spec_relu_numerical_correctness() {
     // relu(const(-1)) -> 0.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32());
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_neg");
@@ -534,9 +534,9 @@ fn spec_relu_numerical_correctness() {
     // relu(const(5)) -> 5.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32());
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32());
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32());
+        let x = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_pos");
@@ -556,9 +556,19 @@ fn spec_relu_numerical_correctness() {
 fn spec_grad_add_is_one() {
     // f(x,y) = x + y => df/dx = 1, df/dy = 1
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], scalar_f32());
-    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f32());
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f32(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -600,9 +610,19 @@ fn spec_grad_add_is_one() {
 fn spec_grad_mul_is_cross() {
     // f(x,y) = x * y => df/dx = y, df/dy = x
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], scalar_f32());
-    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f32());
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f32(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -642,9 +662,14 @@ fn spec_grad_mul_is_cross() {
 fn spec_grad_composed_chain() {
     // f(x) = exp(neg(x)) = exp(-x), df/dx = -exp(-x)
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], scalar_f32());
-    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f32());
-    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f32());
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f32(), None);
+    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f32(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x]).expect("grad_dag failed");
@@ -709,6 +734,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
             dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
             precision: chelis_types::types::Prim::F32,
         },
+        None,
     );
     let sq = single.add_node(
         RiscOp::Mul,
@@ -717,8 +743,14 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
             dims: vec![chelis_ir::dag::DimInfo::Lit(4)],
             precision: chelis_types::types::Prim::F32,
         },
+        None,
     );
-    let loss = single.add_node(RiscOp::Sum { axis: 0 }, vec![sq], TensorType::scalar_f32());
+    let loss = single.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![sq],
+        TensorType::scalar_f32(),
+        None,
+    );
     single.add_root(loss);
     let grad = grad_dag(&single, loss, &[x]).expect("single-example grad baseline should exist");
     let grad_root = grad.grad_nodes[&x];

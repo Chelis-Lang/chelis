@@ -31,11 +31,11 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
 }
 
 fn const_vec(dag: &mut Dag, value: f64, n: usize) -> NodeId {
-    dag.add_node(RiscOp::Const { value }, vec![], vec_f32(n))
+    dag.add_node(RiscOp::Const { value }, vec![], vec_f32(n), None)
 }
 
 fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty)
+    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
 /// Evaluate a DAG with given inputs and return root outputs.
@@ -71,8 +71,8 @@ fn f1_add_neg_fuses() {
     let mut dag = Dag::new();
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -103,12 +103,12 @@ fn f2_three_way_chain_fuses() {
     let mut dag = Dag::new();
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
     // relu = max_elem(x, 0)
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4));
-    let relu = dag.add_node(RiscOp::MaxElem, vec![c, zero], vec_f32(4));
+    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
+    let relu = dag.add_node(RiscOp::MaxElem, vec![c, zero], vec_f32(4), None);
     let d = const_vec(&mut dag, 3.0, 4);
-    let e = dag.add_node(RiscOp::Mul, vec![relu, d], vec_f32(4));
+    let e = dag.add_node(RiscOp::Mul, vec![relu, d], vec_f32(4), None);
     dag.add_root(e);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -131,8 +131,8 @@ fn f3_fused_matches_unfused_evaluator() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let c = const_vec(&mut dag, 2.0, 4);
-    let added = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], vec_f32(4));
+    let added = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], vec_f32(4), None);
     dag.add_root(negated);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -159,11 +159,11 @@ fn f4_multi_consumer_not_fused() {
     let mut dag = Dag::new();
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
-    let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4));
+    let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
     // Two consumers of `shared`
-    let left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4));
-    let right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4));
-    let out = dag.add_node(RiscOp::Add, vec![left, right], vec_f32(4));
+    let left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4), None);
+    let right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::Add, vec![left, right], vec_f32(4), None);
     dag.add_root(out);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -203,9 +203,9 @@ fn f5_elementwise_into_reduction_fuses() {
     // that the emitter can detect). But more importantly: correctness.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -227,8 +227,8 @@ fn f5_elementwise_into_reduction_fuses() {
 fn f5_neg_reduction_into_elementwise_does_not_fuse() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3));
-    let negated = dag.add_node(RiscOp::Neg, vec![summed], vec_f32(3));
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![x], vec_f32(3), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![summed], vec_f32(3), None);
     dag.add_root(negated);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -261,10 +261,11 @@ fn f6_movement_ops_pass_through() {
         },
         vec![x],
         mat_f32(2, 3),
+        None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-    let added = dag.add_node(RiscOp::Add, vec![reshaped, c], mat_f32(2, 3));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(2, 3));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let added = dag.add_node(RiscOp::Add, vec![reshaped, c], mat_f32(2, 3), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(2, 3), None);
     dag.add_root(negated);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -296,10 +297,10 @@ fn f7_mnist_fusion_reduces_nodes() {
     let c1 = const_vec(&mut dag, 0.5, 4);
     let c2 = const_vec(&mut dag, 0.1, 4);
     // add → neg → exp → add (chain of 4 elementwise)
-    let a = dag.add_node(RiscOp::Add, vec![x, c1], vec_f32(4));
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
-    let d = dag.add_node(RiscOp::Add, vec![c, c2], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, c1], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Add, vec![c, c2], vec_f32(4), None);
     dag.add_root(d);
 
     let original_len = dag.len();
@@ -320,7 +321,7 @@ fn f7_mnist_fusion_reduces_nodes() {
 #[test]
 fn f8_trivial_dag_unchanged() {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32());
+    let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
     dag.add_root(c);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -351,13 +352,13 @@ fn f10_multi_consumer_downstream_chain_fuses() {
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
     // A = add(x, y), has 2 consumers: B and D
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
     // B = neg(A), single consumer: C
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     // C = exp(B), single consumer (root)
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
+    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
     // D = sqrt(A), single consumer (root) — second consumer of A
-    let d = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4));
+    let d = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4), None);
     dag.add_root(c);
     dag.add_root(d);
 
@@ -403,15 +404,15 @@ fn f11_double_multi_consumer_no_fusion() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     // A = neg(x), 2 consumers: B and E
-    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4));
+    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
     // B = exp(A), 2 consumers: C and D
-    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     // C = sqrt(B)
-    let c = dag.add_node(RiscOp::Sqrt, vec![b], vec_f32(4));
+    let c = dag.add_node(RiscOp::Sqrt, vec![b], vec_f32(4), None);
     // D = neg(B) — second consumer of B
-    let d = dag.add_node(RiscOp::Neg, vec![b], vec_f32(4));
+    let d = dag.add_node(RiscOp::Neg, vec![b], vec_f32(4), None);
     // E = sin(A) — second consumer of A (use sin to avoid NaN from log of negatives)
-    let e = dag.add_node(RiscOp::Sin, vec![a], vec_f32(4));
+    let e = dag.add_node(RiscOp::Sin, vec![a], vec_f32(4), None);
     dag.add_root(c);
     dag.add_root(d);
     dag.add_root(e);
@@ -455,13 +456,13 @@ fn f12_multi_consumer_at_chain_tail() {
     let x = load(&mut dag, "x", vec_f32(4));
     let c1 = const_vec(&mut dag, 2.0, 4);
     // A = add(x, c1), single consumer: B
-    let a = dag.add_node(RiscOp::Add, vec![x, c1], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, c1], vec_f32(4), None);
     // B = neg(A), 2 consumers: C and D
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     // C = exp(B)
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
+    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
     // D = sin(B) — second consumer of B (use sin to avoid NaN from sqrt of negatives)
-    let d = dag.add_node(RiscOp::Sin, vec![b], vec_f32(4));
+    let d = dag.add_node(RiscOp::Sin, vec![b], vec_f32(4), None);
     dag.add_root(c);
     dag.add_root(d);
 
@@ -509,15 +510,15 @@ fn f13_multi_consumer_as_external_input() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     // A = neg(x), single consumer: B
-    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4));
+    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
     // B = exp(A), 2 consumers: C and E
-    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     // C = sqrt(B), single consumer: D
-    let c = dag.add_node(RiscOp::Sqrt, vec![b], vec_f32(4));
+    let c = dag.add_node(RiscOp::Sqrt, vec![b], vec_f32(4), None);
     // D = neg(C), single consumer (root)
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     // E = log(B), single consumer (root) — second consumer of B
-    let e = dag.add_node(RiscOp::Log, vec![b], vec_f32(4));
+    let e = dag.add_node(RiscOp::Log, vec![b], vec_f32(4), None);
     dag.add_root(d);
     dag.add_root(e);
 
@@ -563,8 +564,8 @@ fn f9_fan_in_two_inputs() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], vec_f32(4));
+    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], vec_f32(4), None);
     dag.add_root(negated);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -595,9 +596,9 @@ fn f9_fan_in_two_inputs() {
 fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![added], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -635,11 +636,11 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
 fn fr2_multi_consumer_fused_elem_not_inlined() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of negated: root + sum
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(negated);
     dag.add_root(summed);
 
@@ -658,10 +659,10 @@ fn fr3_chain_into_sum_correctness() {
     // add→neg→sum: the add→neg chain fuses into FusedElem, which then feeds sum.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4));
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4));
-    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3));
+    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let summed = dag.add_node(RiscOp::Sum { axis: 1 }, vec![negated], vec_f32(3), None);
     dag.add_root(summed);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -689,9 +690,9 @@ fn fr4_realize_is_fusion_barrier() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4));
-    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4));
+    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4), None);
     dag.add_root(negated);
 
     let fused = chelis_ir::fuse::fuse(&dag);

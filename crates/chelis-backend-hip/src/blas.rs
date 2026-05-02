@@ -125,8 +125,8 @@ mod tests {
     #[test]
     fn detects_matmul_pattern() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3));
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4));
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -134,6 +134,7 @@ mod tests {
             },
             vec![a],
             tensor3_f32(2, 3, 4),
+            None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
@@ -142,9 +143,10 @@ mod tests {
             },
             vec![b],
             tensor3_f32(2, 3, 4),
+            None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4));
-        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4));
+        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat_f32(2, 4), None);
 
         let info = detect_matmul_pattern(&dag, sum).expect("matmul should be detected");
         assert_eq!(info.a, a);

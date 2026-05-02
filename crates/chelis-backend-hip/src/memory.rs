@@ -389,11 +389,11 @@ mod tests {
     #[test]
     fn planner_reuses_non_overlapping_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
-        let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32());
-        let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
+        let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
         dag.add_root(e);
 
         let plan = build_plan(&dag, &[e]);
@@ -413,10 +413,10 @@ mod tests {
     #[test]
     fn planner_keeps_overlapping_values_separate() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
-        let y = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(4));
-        let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-        let mul = dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4));
+        let x = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let y = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+        let mul = dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4), None);
         dag.add_root(add);
         dag.add_root(mul);
 
@@ -436,9 +436,9 @@ mod tests {
     #[test]
     fn planner_dedups_repeated_loads() {
         let mut dag = Dag::new();
-        let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-        let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4));
-        let add = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4));
+        let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4), None);
         dag.add_root(add);
 
         let plan = build_plan(&dag, &[add]);
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn cleanup_frees_wrappers_then_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_root(a);
 
         let plan = build_plan(&dag, &[a]);
@@ -480,11 +480,11 @@ mod tests {
             dims: vec![DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], symbolic.clone());
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], symbolic.clone());
-        let add = dag.add_node(RiscOp::Add, vec![a, b], symbolic.clone());
-        let two = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], symbolic.clone());
-        let neg = dag.add_node(RiscOp::Neg, vec![two], symbolic.clone());
+        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], symbolic.clone(), None);
+        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], symbolic.clone(), None);
+        let add = dag.add_node(RiscOp::Add, vec![a, b], symbolic.clone(), None);
+        let two = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], symbolic.clone(), None);
+        let neg = dag.add_node(RiscOp::Neg, vec![two], symbolic.clone(), None);
         dag.add_root(neg);
 
         let plan = build_plan(&dag, &[neg]);
@@ -510,7 +510,12 @@ mod tests {
             dims: vec![DimInfo::Named("batch".into(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic.clone());
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic.clone(),
+            None,
+        );
         dag.add_root(x);
 
         let plan = build_plan(&dag, &[x]);

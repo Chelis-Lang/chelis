@@ -15,7 +15,7 @@ fn vec_f32(n: usize) -> TensorType {
 }
 
 fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty)
+    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
 fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
@@ -46,12 +46,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
 fn adv1_long_chain_5_ops() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 0.1 }, vec![], vec_f32(4));
-    let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
-    let e = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
-    let f = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4));
-    let g = dag.add_node(RiscOp::Add, vec![f, c], vec_f32(4));
+    let c = dag.add_node(RiscOp::Const { value: 0.1 }, vec![], vec_f32(4), None);
+    let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let e = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
+    let f = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Add, vec![f, c], vec_f32(4), None);
     dag.add_root(g);
 
     let fused = fuse(&dag);
@@ -86,10 +86,10 @@ fn adv2_mixed_unary_binary_chain() {
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
     let z = load(&mut dag, "z", vec_f32(4));
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let b = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4));
-    let c = dag.add_node(RiscOp::Mul, vec![b, z], vec_f32(4));
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Mul, vec![b, z], vec_f32(4), None);
+    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -123,11 +123,11 @@ fn adv2_mixed_unary_binary_chain() {
 fn adv3_external_input_used_by_multiple_steps() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4));
+    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
     // add(x, c) → mul(result, c)
     // Both steps use 'c' as an external input
-    let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4));
-    let b = dag.add_node(RiscOp::Mul, vec![a, c], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Mul, vec![a, c], vec_f32(4), None);
     dag.add_root(b);
 
     let fused = fuse(&dag);
@@ -153,10 +153,15 @@ fn adv4_fused_and_unfused_feed_same_output() {
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
     // Fusible chain: add → neg
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     // Non-fusible: sum
-    let s = dag.add_node(RiscOp::Sum { axis: 0 }, vec![x], TensorType::scalar_f32());
+    let s = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![x],
+        TensorType::scalar_f32(),
+        None,
+    );
     // Both b and s are roots
     dag.add_root(b);
     dag.add_root(s);
@@ -189,12 +194,12 @@ fn adv5_intermediate_multi_consumer_splits_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     // Use values where all ops produce finite results
-    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4));
-    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     // Use Sqrt instead of Log to avoid NaN on negative inputs
-    let c = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let c = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     // a has 2 consumers (b and c) — a→b and a→c should NOT form one chain
-    let d = dag.add_node(RiscOp::Add, vec![b, c], vec_f32(4));
+    let d = dag.add_node(RiscOp::Add, vec![b, c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -230,9 +235,9 @@ fn adv6_entire_dag_is_fusible() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4));
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4));
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4));
+    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
     dag.add_root(c);
 
     let fused = fuse(&dag);
@@ -269,15 +274,16 @@ fn adv6_entire_dag_is_fusible() {
 fn adv7_store_in_middle_of_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4));
+    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
     let _s = dag.add_node(
         RiscOp::Store {
             name: "intermediate".into(),
         },
         vec![a],
         vec_f32(4),
+        None,
     );
-    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4));
+    let b = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
     dag.add_root(b);
 
     let fused = fuse(&dag);
@@ -302,15 +308,16 @@ fn adv7_store_in_middle_of_chain() {
 fn adv8_cast_not_fusible() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4));
+    let a = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
     let cast = dag.add_node(
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
         vec![a],
         vec_f32(4),
+        None,
     );
-    let b = dag.add_node(RiscOp::Exp, vec![cast], vec_f32(4));
+    let b = dag.add_node(RiscOp::Exp, vec![cast], vec_f32(4), None);
     dag.add_root(b);
 
     let fused = fuse(&dag);
@@ -338,8 +345,8 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_f32(4));
-    let result = dag.add_node(RiscOp::Neg, vec![cmp], vec_f32(4));
+    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_f32(4), None);
+    let result = dag.add_node(RiscOp::Neg, vec![cmp], vec_f32(4), None);
     dag.add_root(result);
 
     let fused = fuse(&dag);
@@ -376,10 +383,10 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 fn adv10_maxelem_in_fused_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4));
+    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
     // relu = max(x, 0)
-    let relu = dag.add_node(RiscOp::MaxElem, vec![x, zero], vec_f32(4));
-    let result = dag.add_node(RiscOp::Neg, vec![relu], vec_f32(4));
+    let relu = dag.add_node(RiscOp::MaxElem, vec![x, zero], vec_f32(4), None);
+    let result = dag.add_node(RiscOp::Neg, vec![relu], vec_f32(4), None);
     dag.add_root(result);
 
     let fused = fuse(&dag);

@@ -319,6 +319,31 @@ pub struct DagNode {
     pub inputs: Vec<NodeId>,
     pub output_type: TensorType,
     pub reusable_input: Option<NodeId>,
+    /// Canonical span ID, populated by lowering from the Deep `Expr`'s
+    /// `meta["span"]` value. Threaded through later passes per the rules
+    /// in `spec/design/chelis_span_survival.md` §2.3.
+    ///
+    /// `None` is the normal case for hand-written Chelis or for nodes
+    /// synthesized in places where the source-region rule does not apply.
+    /// Non-empty synthesized markers (e.g. `__synthesized_grad__`) are
+    /// emitted by S3 passes; S2 only populates real source spans.
+    ///
+    /// `#[serde(default)]` keeps existing serialized DAGs (which lack
+    /// this field) deserializable for JSON/YAML callers; bincode is a
+    /// positional format that always emits both new fields, so its
+    /// on-disk shape is the new shape — old caches will fail to decode
+    /// and be regenerated.
+    #[serde(default)]
+    pub span_id: Option<String>,
+    /// Additional spans accumulated when N→1 merge passes (Fusion, CSE,
+    /// constant fold, lowering's def-collapses-to-body case) collapse
+    /// multiple source nodes into a single result node.
+    ///
+    /// Backend codegen (S4) will emit one `// span:` line per
+    /// `span_id ∪ merged_spans` so the audit invariant holds: every span
+    /// ID present on any input Deep node appears on at least one IR node.
+    #[serde(default)]
+    pub merged_spans: Vec<String>,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -334,7 +359,20 @@ impl Dag {
     }
 
     /// Append a new node and return its [`NodeId`].
-    pub fn add_node(&mut self, op: RiscOp, inputs: Vec<NodeId>, output_type: TensorType) -> NodeId {
+    ///
+    /// `span_id` is REQUIRED (not defaulted) so the type system enforces
+    /// the greppable invariant from `spec/design/chelis_span_survival.md`
+    /// S2: zero `add_node(` callsites elide an explicit span argument.
+    /// Pass `None` for nodes synthesized by passes that don't have a
+    /// natural source region in S2 — S3 will populate spans on those
+    /// per pass-specific rules.
+    pub fn add_node(
+        &mut self,
+        op: RiscOp,
+        inputs: Vec<NodeId>,
+        output_type: TensorType,
+        span_id: Option<String>,
+    ) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(DagNode {
             id,
@@ -342,6 +380,8 @@ impl Dag {
             inputs,
             output_type,
             reusable_input: None,
+            span_id,
+            merged_spans: Vec::new(),
         });
         id
     }
@@ -366,6 +406,13 @@ impl Dag {
 
     pub fn nodes(&self) -> &[DagNode] {
         &self.nodes
+    }
+
+    /// Mutable access to a node by id. Used by passes that need to
+    /// stamp post-construction metadata on a node (e.g. DCE preserving
+    /// `merged_spans` per `spec/design/chelis_span_survival.md` §2.3).
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut DagNode> {
+        self.nodes.get_mut(id.0)
     }
 
     pub fn add_root(&mut self, id: NodeId) {
@@ -502,7 +549,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
             },
             other => other.clone(),
         };
-        let new_id = rebound.add_node(op, node.inputs.clone(), output_type);
+        let new_id = rebound.add_node(op, node.inputs.clone(), output_type, None);
         if dag.is_root(node.id) {
             rebound.add_root(new_id);
         }
@@ -529,7 +576,7 @@ mod tests {
     #[test]
     fn add_const_node() {
         let mut dag = Dag::new();
-        let id = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32());
+        let id = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
         assert_eq!(id, NodeId(0));
         assert_eq!(dag.len(), 1);
         let node = dag.get(id).unwrap();
@@ -540,9 +587,9 @@ mod tests {
     #[test]
     fn add_binary_op() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32());
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
@@ -551,8 +598,8 @@ mod tests {
     #[test]
     fn topological_order() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
-        let b = dag.add_node(RiscOp::Neg, vec![a], scalar_f32());
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         let order = dag.topological_order();
         assert_eq!(order, vec![a, b]);
     }
@@ -566,7 +613,7 @@ mod tests {
     #[test]
     fn roots_can_be_registered() {
         let mut dag = Dag::new();
-        let id = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32());
+        let id = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_root(id);
         dag.add_root(id);
         assert_eq!(dag.roots(), &[id]);
@@ -584,8 +631,8 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty_x);
-        dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty_y);
+        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty_x, None);
+        dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
 
         assert_eq!(symbolic_params(&dag), vec!["batch"]);
         assert_eq!(
@@ -621,6 +668,7 @@ mod tests {
                 dims: vec![DimInfo::Named("batch".into(), None)],
                 precision: Prim::F32,
             },
+            None,
         );
         let y = dag.add_node(
             RiscOp::Expand {
@@ -635,6 +683,7 @@ mod tests {
                 ],
                 precision: Prim::F32,
             },
+            None,
         );
         dag.add_root(y);
 
