@@ -142,8 +142,10 @@ impl CEmitter {
                 let input_idx = *input_slots
                     .get(name)
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
+                e.emit_span_comments(node);
                 e.emit_load(node.id.0, input_idx);
             } else {
+                e.emit_span_comments(node);
                 e.emit_node(node, dag);
             }
         }
@@ -347,6 +349,36 @@ impl CEmitter {
     fn line(&mut self, s: &str) {
         let prefix = "    ".repeat(self.indent);
         self.lines.push(format!("{prefix}{s}"));
+    }
+
+    /// Emit `// span: <id>` comment lines for a node's `span_id ∪ merged_spans`.
+    ///
+    /// Per `spec/design/chelis_span_survival.md` §2.4 (S4):
+    ///   * canonical `span_id` first (if present),
+    ///   * then `merged_spans` lex-sorted (deduped against `span_id`).
+    ///
+    /// `merged_spans` are already kept lex-sorted/deduped by the
+    /// `chelis_ir::span_merge` helpers, so we sort defensively here.
+    /// No-op when both fields are empty (the common case for hand-written
+    /// Chelis or for span-free Deep input).
+    fn emit_span_comments(&mut self, node: &DagNode) {
+        if node.span_id.is_none() && node.merged_spans.is_empty() {
+            return;
+        }
+        if let Some(canonical) = node.span_id.as_deref() {
+            self.line(&format!("// span: {canonical}"));
+        }
+        let mut merged: Vec<&str> = node
+            .merged_spans
+            .iter()
+            .map(String::as_str)
+            .filter(|s| node.span_id.as_deref() != Some(*s))
+            .collect();
+        merged.sort();
+        merged.dedup();
+        for span in merged {
+            self.line(&format!("// span: {span}"));
+        }
     }
 
     fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
