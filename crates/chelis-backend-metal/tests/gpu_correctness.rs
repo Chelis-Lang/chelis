@@ -613,3 +613,110 @@ fn m6_tiled_matmul_matches_evaluator() {
     // Matmul accumulates k=16 multiplies; allow modest absolute tolerance.
     assert_close(&actual, &expected, 1e-3, 1e-3, "tiled matmul 32x16x16");
 }
+
+// ===========================================================================
+// S4.3 — span-attributed program compile-success on Mac (manual gate).
+//
+// The S4.3 oracle has two halves: structural grep (covered in default-CI
+// `tests/s4_span_comments.rs`) and compile-success via `xcrun -sdk macosx
+// clang++` (covered here, as `#[ignore]` per the existing M6 manual-gate
+// pattern). This test complements the M3 macOS-smoke step, which today
+// only exercises a Surf input (metadata-lossy) — span coverage on Mac
+// would otherwise fall entirely to S5's `--deep` work.
+//
+// Manual-gate command (run on a Mac with Xcode CLI tools installed):
+//   cargo test -p chelis-backend-metal --test gpu_correctness -- \
+//     --ignored --test-threads=1
+//
+// Asserts (a) `xcrun -sdk macosx clang++` exits 0 against the generated
+// `.mm` (load-bearing compile-success), AND (b) the emitted `.mm`
+// contains span comments host-side AND inside the embedded MSL kernel
+// raw-string literals.
+// ===========================================================================
+
+#[test]
+#[ignore]
+fn m6_span_attributed_program_compiles_and_matches_evaluator() {
+    // Hand-craft a span-attributed IR with a mix of (span_id only,
+    // merged_spans only, both, neither) — same shape as the structural
+    // S4 oracle, but with shapes/ops that all hit the M2/M4 supported
+    // surface so compile-success is meaningful.
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        Some("op.load_a".into()),
+    );
+    let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(8), Some("op.neg".into()));
+    {
+        let node = dag.node_mut(neg).unwrap();
+        node.merged_spans = vec!["op.merged_b".into(), "op.merged_a".into()];
+    }
+    let exp = dag.add_node(RiscOp::Exp, vec![neg], vec_f32(8), None);
+    {
+        // merged_spans only (no canonical) — the defensive case the
+        // emitter must still handle correctly.
+        let node = dag.node_mut(exp).unwrap();
+        node.merged_spans = vec!["op.exp_merged".into()];
+    }
+    dag.add_root(exp);
+
+    let inputs = vec![TestInput::new(
+        "a",
+        &[8],
+        &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    )];
+
+    // The compile path is the load-bearing assertion: xcrun -sdk macosx
+    // clang++ must accept the generated .mm with embedded span
+    // comments. compile_and_run_single_output asserts this internally.
+    let actual = compile_and_run_single_output(&dag, "span_test", &inputs);
+    let expected = evaluator_single_output(&dag, &inputs);
+    // Tail op is exp — fastmath tolerance.
+    assert_close(
+        &actual,
+        &expected,
+        1e-3,
+        1e-3,
+        "span-attributed exp(neg(a))",
+    );
+
+    // Structural assertion: regenerate the source and verify the spans
+    // landed in both host-side and kernel-side. This catches a
+    // regression where span emission landed in only one side of the
+    // emitter.
+    let result = codegen_metal(&dag, "span_test_2");
+    let src = &result.mm_source;
+    for span in &[
+        "op.load_a",
+        "op.neg",
+        "op.merged_a",
+        "op.merged_b",
+        "op.exp_merged",
+    ] {
+        assert!(
+            src.contains(&format!("// span: {span}")),
+            "missing `// span: {span}` in generated .mm:\n{src}"
+        );
+    }
+    // The Neg kernel must embed the canonical+merged block inside its
+    // MSL raw-string literal.
+    let neg_kernel_marker = format!("static NSString *const pso_{}_src = @R\"MSL(", neg.0);
+    let kernel_block_start = src
+        .find(&neg_kernel_marker)
+        .expect("Neg kernel raw-string marker missing");
+    let kernel_block_end = src[kernel_block_start..]
+        .find(")MSL\"")
+        .expect("Neg kernel raw-string terminator missing");
+    let kernel_block = &src[kernel_block_start..kernel_block_start + kernel_block_end];
+    assert!(
+        kernel_block.contains("// span: op.neg"),
+        "Neg kernel string must embed `// span: op.neg` inside the MSL raw-string literal:\n{kernel_block}"
+    );
+    assert!(
+        kernel_block.contains("// span: op.merged_a")
+            && kernel_block.contains("// span: op.merged_b"),
+        "Neg kernel string must embed both merged spans:\n{kernel_block}"
+    );
+}

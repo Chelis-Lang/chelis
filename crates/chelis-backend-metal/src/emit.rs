@@ -176,6 +176,67 @@ impl Emitter {
         }
     }
 
+    /// Build the deduped, lex-sorted `// span:` comment block for a node.
+    /// Returns a vector of comment strings (each one a single line, no
+    /// indent prefix). Used both by host-side emission (via
+    /// `push_span_comments`) and by per-node MSL kernel string emission
+    /// (where the comments are prepended inside the embedded kernel source
+    /// so they survive into the runtime-compiled MSL).
+    ///
+    /// Per `spec/design/chelis_span_survival.md` §2.4 (S4):
+    ///   * canonical `span_id` first (if present),
+    ///   * then `merged_spans` lex-sorted (deduped against `span_id`).
+    ///
+    /// No-op when both fields are empty.
+    fn span_comment_block(node: &DagNode) -> Vec<String> {
+        let mut out = Vec::new();
+        if node.span_id.is_none() && node.merged_spans.is_empty() {
+            return out;
+        }
+        if let Some(canonical) = node.span_id.as_deref() {
+            out.push(format!("// span: {canonical}"));
+        }
+        let mut merged: Vec<&str> = node
+            .merged_spans
+            .iter()
+            .map(String::as_str)
+            .filter(|s| node.span_id.as_deref() != Some(*s))
+            .collect();
+        merged.sort();
+        merged.dedup();
+        for span in merged {
+            out.push(format!("// span: {span}"));
+        }
+        out
+    }
+
+    /// Push host-side `// span:` comment lines for a node onto `self.body`.
+    /// Called at the top of every per-node emit_* method so the launch
+    /// site is preceded by the span block. No-op for span-free nodes.
+    fn push_span_comments(&mut self, node: &DagNode) {
+        for line in Self::span_comment_block(node) {
+            self.body.push(line);
+        }
+    }
+
+    /// Prepend `// span:` comment lines (followed by a newline) to an
+    /// MSL kernel source string. Used for per-node kernels — every Metal
+    /// kernel is per-node (`k_unary_<id>`, `k_binary_<id>`, …), so this
+    /// applies uniformly. No-op when the node carries no spans.
+    fn prepend_span_comments_to_kernel_source(node: &DagNode, source: String) -> String {
+        let block = Self::span_comment_block(node);
+        if block.is_empty() {
+            return source;
+        }
+        let mut out = String::new();
+        for line in block {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out.push_str(&source);
+        out
+    }
+
     fn emit(&mut self, dag: &Dag) -> Result<(), String> {
         self.plans.resize(dag.nodes().len(), None);
         let inputs = input_labels(dag);
@@ -427,6 +488,7 @@ impl Emitter {
             .ok_or_else(|| format!("Load `{name}` not registered in input_labels"))?;
         let buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = Load {name}", node.id.0));
         self.body.push(format!(
@@ -448,6 +510,7 @@ impl Emitter {
         let (n, msl_ty) = self.require_static_rank1(&node.output_type, "Const")?;
         let buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = Const {value}", node.id.0));
         self.body.push(format!(
@@ -509,11 +572,13 @@ impl Emitter {
             kernels::output_param(1, msl_ty, "out"),
         ];
         let src = kernels::elementwise_kernel(&kernel_name, &params, &body);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = unary {:?}", node.id.0, node.op));
         self.body.push(format!(
@@ -578,11 +643,13 @@ impl Emitter {
         ];
         let body = format!("    out[tid] = a[tid] {op} b[tid];");
         let src = kernels::elementwise_kernel(&kernel_name, &params, &body);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = binary {:?}", node.id.0, node.op));
         self.body.push(format!(
@@ -670,12 +737,14 @@ impl Emitter {
         let kernel_name = format!("k_reduce_{}_{}", kind.label(), node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
         let src = kernels::reduce_full_kernel(&kernel_name, kind);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
         // Output is one float scalar.
         let bytes = "1u * sizeof(float)".to_string();
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = reduce_{}", node.id.0, kind.label()));
         self.body.push(format!(
@@ -748,11 +817,13 @@ impl Emitter {
         let kernel_name = format!("k_matmul_{}", node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
         let src = kernels::matmul_tiled_kernel(&kernel_name);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_n = info.m * info.n;
         let out_buf = format!("buf_{}", node.id.0);
+        self.push_span_comments(node);
         self.body.push(format!(
             "// node {} = matmul {}x{}*{}x{}",
             node.id.0, info.m, info.k, info.k, info.n
@@ -819,6 +890,7 @@ impl Emitter {
                 ));
             }
         };
+        self.push_span_comments(node);
         self.body
             .push(format!("// node {} = Store `{name}`", node.id.0));
         if in_plan.shape.is_empty() {
