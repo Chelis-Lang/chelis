@@ -99,6 +99,121 @@ fn vmap_preserves_span_id_and_merged_spans() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3.2 — DCE / remap: pure copy of span_id + merged_spans
+// ─────────────────────────────────────────────────────────────────────
+
+/// DCE preserves span_id and merged_spans on every surviving node. Per
+/// spec/design/chelis_span_survival.md §2.3 DCE/remap row: "Pure copy;
+/// clone `span_id` and `merged_spans` to the remapped node." The S2
+/// cleanup already implemented this (optimize.rs:120-144); this test
+/// locks that the invariant holds and that the pre-pass grep wasn't
+/// missing a pure-copy site.
+#[test]
+fn dce_preserves_span_id_and_merged_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("dce.a".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        scalar_f32(),
+        Some("dce.b".into()),
+    );
+    let live = dag.add_node(
+        RiscOp::Add,
+        vec![a, b],
+        scalar_f32(),
+        Some("dce.live".into()),
+    );
+    // Stamp a merged_span on the live node to confirm DCE preserves it.
+    dag.node_mut(live).unwrap().merged_spans = vec!["dce.merged".into()];
+    // Add a dead node with its own span — it should be dropped entirely.
+    let _dead = dag.add_node(
+        RiscOp::Const { value: 99.0 },
+        vec![],
+        scalar_f32(),
+        Some("dce.dead".into()),
+    );
+    dag.add_root(live);
+
+    let new_dag = optimize::dead_code_eliminate(&dag);
+
+    // Live spans survive.
+    let spans = dag_spans(&new_dag);
+    assert!(spans.contains("dce.a"), "DCE dropped live span: {spans:?}");
+    assert!(spans.contains("dce.b"), "DCE dropped live span: {spans:?}");
+    assert!(
+        spans.contains("dce.live"),
+        "DCE dropped live span: {spans:?}"
+    );
+    assert!(
+        spans.contains("dce.merged"),
+        "DCE dropped merged_spans: {spans:?}"
+    );
+    // Dead node's span is correctly gone.
+    assert!(
+        !spans.contains("dce.dead"),
+        "DCE preserved a dead-only span: {spans:?}"
+    );
+
+    // The surviving Add node should still have span_id="dce.live" and
+    // merged_spans=["dce.merged"].
+    let surviving_add = new_dag
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Add))
+        .expect("Add survives");
+    assert_eq!(surviving_add.span_id.as_deref(), Some("dce.live"));
+    assert_eq!(surviving_add.merged_spans, vec!["dce.merged"]);
+}
+
+/// Negative parity: DCE on unspanned input fabricates nothing.
+#[test]
+fn dce_does_not_fabricate_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+    dag.add_root(live);
+
+    let new_dag = optimize::dead_code_eliminate(&dag);
+    for node in new_dag.nodes() {
+        assert_eq!(node.span_id, None, "DCE fabricated span_id");
+        assert!(
+            node.merged_spans.is_empty(),
+            "DCE fabricated merged_spans: {:?}",
+            node.merged_spans,
+        );
+    }
+}
+
+/// DCE remap variant (used by Phase F library carrier) must apply the
+/// same pure-copy rule. Locking it explicitly so an alternate code path
+/// can't drift from the headline `dead_code_eliminate`.
+#[test]
+fn dce_with_remap_preserves_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("dcer.a".into()),
+    );
+    let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), Some("dcer.live".into()));
+    dag.node_mut(live).unwrap().merged_spans = vec!["dcer.merged".into()];
+    dag.add_root(live);
+
+    let (new_dag, _remap) = optimize::dead_code_eliminate_with_remap(&dag);
+    let spans = dag_spans(&new_dag);
+    assert!(spans.contains("dcer.a"));
+    assert!(spans.contains("dcer.live"));
+    assert!(spans.contains("dcer.merged"));
+}
+
 /// Negative parity: vmap on an unspanned DAG produces no spans (no
 /// fabrication).
 #[test]
