@@ -792,6 +792,16 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
             // `{span: "n_001"}`) would be misclassified as host-runtime
             // and silently dropped from lowering, breaking the S2 audit
             // invariant.
+            //
+            // NOTE: This skip is load-bearing for span propagation. The
+            // N→1 collapse rule's reachability silently depends on it:
+            // if a Map at element index 1 is not skipped here,
+            // span-bearing nodes (Octant emits `{span: "..."}` at
+            // element 1) get classified as host-runtime and silently
+            // dropped before lowering, so the §2.3 audit invariant
+            // never gets the chance to fire. The greppable invariant
+            // catches a regression only indirectly via downstream test
+            // failures; keep this skip in place.
             let meta_idx = if matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
                 Some(1usize)
             } else {
@@ -1874,6 +1884,45 @@ impl LowerCtx {
         result
     }
 
+    /// Append `current_span_id` (if any) to a single existing IR node's
+    /// `merged_spans`, lex-sorted and deduped. This implements the N→1
+    /// lowering collapse rule from `spec/design/chelis_span_survival.md`
+    /// §2.3 (rule b): when a parent Deep expr lowers to a body that already
+    /// corresponds to an existing IR node — for example, a `(def {span: a})`
+    /// whose body is an existing node, or a `(var {span: u} a)` whose body
+    /// is a previously-bound `LoweredValue` — append the parent's span to
+    /// the existing node so the audit invariant ("every input span appears
+    /// as `span_id` or `merged_spans` on at least one node") is preserved.
+    /// No-op when `current_span_id` is `None`, when the span equals the
+    /// node's `span_id` (already canonical), or when it's already present
+    /// in `merged_spans` (deduped).
+    fn append_current_span_to_existing_node(&mut self, id: NodeId) {
+        if let Some(span) = self.current_span_id.clone()
+            && let Some(node) = self.dag.node_mut(id)
+            && node.span_id.as_deref() != Some(span.as_str())
+            && !node.merged_spans.iter().any(|s| s == &span)
+        {
+            node.merged_spans.push(span);
+            node.merged_spans.sort();
+        }
+    }
+
+    /// Walk a `LoweredValue` and apply
+    /// `append_current_span_to_existing_node` to every contained node id.
+    /// Used at every site that returns a cached/aliased `LoweredValue`
+    /// from a name → value map (e.g. `bindings`) — those returns are N→1
+    /// lowering collapses that must still record the parent expr's span.
+    fn append_current_span_to_lowered_value(&mut self, value: &LoweredValue) {
+        match value {
+            LoweredValue::Node(id) => self.append_current_span_to_existing_node(*id),
+            LoweredValue::Tuple(items) => {
+                for item in items {
+                    self.append_current_span_to_lowered_value(item);
+                }
+            }
+        }
+    }
+
     fn add_named_roots(&mut self, prefix: &str, value: &LoweredValue) {
         match value {
             LoweredValue::Node(id) if !prefix.contains('.') => {
@@ -1881,21 +1930,13 @@ impl LowerCtx {
                 // node — no new Store is emitted. This is a region-merge
                 // during lowering: the def's source region and the
                 // body's source region collapse onto one IR node. Per
-                // spec/design/chelis_span_survival.md §2.3, N→1 region
-                // merges record the additional span(s) in
-                // `merged_spans` (the body node already owns
-                // `span_id`). We append the def's span_id (if any) to
-                // the existing node's merged_spans, lex-sorted and
-                // deduped, so the audit invariant ("every input span
-                // appears on at least one IR node") still holds.
-                if let Some(def_span) = self.current_span_id.clone()
-                    && let Some(node) = self.dag.node_mut(*id)
-                    && node.span_id.as_deref() != Some(def_span.as_str())
-                    && !node.merged_spans.iter().any(|s| s == &def_span)
-                {
-                    node.merged_spans.push(def_span);
-                    node.merged_spans.sort();
-                }
+                // spec/design/chelis_span_survival.md §2.3 rule (b), N→1
+                // region merges record the additional span(s) in
+                // `merged_spans` (the body node already owns `span_id`),
+                // lex-sorted and deduped, so the audit invariant ("every
+                // input span appears on at least one IR node") still
+                // holds.
+                self.append_current_span_to_existing_node(*id);
                 self.dag.add_root(*id);
             }
             LoweredValue::Node(id) => {
@@ -1926,7 +1967,16 @@ impl LowerCtx {
         match atom {
             Atom::Symbol(name) => {
                 if let Some(value) = self.bindings.get(name) {
-                    value.clone()
+                    let cached = value.clone();
+                    // N→1 lowering collapse per
+                    // spec/design/chelis_span_survival.md §2.3 rule (b):
+                    // returning a cached `LoweredValue` for a span-bearing
+                    // parent expr (e.g. an `Atom::Symbol` whose enclosing
+                    // node carries a `span:` meta) must still record the
+                    // parent's span on the existing node so the audit
+                    // chain doesn't drop it.
+                    self.append_current_span_to_lowered_value(&cached);
+                    cached
                 } else {
                     LoweredValue::Node(self.dag.add_node(
                         RiscOp::Load { name: name.clone() },
@@ -2139,7 +2189,17 @@ impl LowerCtx {
 
         if let Some(Expr::Atom(Atom::Symbol(name), _)) = elems.get(2) {
             if let Some(id) = self.bindings.get(name) {
-                return id.clone();
+                let cached = id.clone();
+                // N→1 lowering collapse per
+                // spec/design/chelis_span_survival.md §2.3 rule (b):
+                // returning a cached `LoweredValue` for a span-bearing
+                // `(var {span: u} a)` must still record the var-ref's
+                // span on the existing node. Without this append, a
+                // var-ref to a let-bound name would drop its own span
+                // and break the audit chain (the Load branch below
+                // honors the rule via `current_span_id` on add_node).
+                self.append_current_span_to_lowered_value(&cached);
+                return cached;
             }
             // Reject `(var X)` where X is a known builtin name. The DAG
             // emits a Load when it encounters a free var, but a builtin
