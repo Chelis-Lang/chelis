@@ -5,9 +5,24 @@ use std::collections::HashMap;
 use crate::dag::{Dag, NodeId, RiscOp};
 
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
+///
+/// Span propagation per spec/design/chelis_span_survival.md §2.3
+/// Constant fold row: the replacement node inherits the **operation
+/// node's** `span_id` (preserved automatically by `replace_node`, which
+/// rewrites op/inputs/output_type but leaves span metadata in place).
+/// Operand spans (canonical and merged_spans) that differ from the
+/// operation's `span_id` append to the folded node's `merged_spans`,
+/// lex-sorted and deduped. No `__synthesized_*__` marker is minted —
+/// the operation node had a real source span (or `None`) before the
+/// fold, and that's what survives.
 pub fn constant_fold(dag: &mut Dag) {
     // Collect fold candidates first, then apply (to avoid borrow issues).
-    let mut replacements: Vec<(NodeId, f64)> = Vec::new();
+    // Each entry is (op_node_id, folded_value, operand_spans_to_merge).
+    // operand_spans_to_merge = the union of each operand's `span_id`
+    // (when distinct from the operation's) and each operand's existing
+    // `merged_spans` — i.e. the operand's full provenance flowing onto
+    // the folded result.
+    let mut replacements: Vec<(NodeId, f64, Vec<String>)> = Vec::new();
 
     for node in dag.nodes() {
         if node.inputs.len() == 2 {
@@ -24,7 +39,8 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result {
-                    replacements.push((node.id, val));
+                    let merge_spans = collect_operand_spans(node, &[l, r]);
+                    replacements.push((node.id, val, merge_spans));
                 }
             }
         }
@@ -49,16 +65,49 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result {
-                    replacements.push((node.id, val));
+                    let merge_spans = collect_operand_spans(node, &[inp]);
+                    replacements.push((node.id, val, merge_spans));
                 }
             }
         }
     }
 
-    for (id, val) in replacements {
+    for (id, val, operand_spans) in replacements {
         let ty = dag.get(id).unwrap().output_type.clone();
         dag.replace_node(id, RiscOp::Const { value: val }, vec![], ty);
+        // The operation's own `span_id` is preserved by `replace_node`
+        // (it rewrites op/inputs/output_type, never span metadata).
+        // Append each operand's full provenance to the folded node's
+        // `merged_spans`. The shared helper handles None-no-op,
+        // canonical-no-op (operand span equal to the op's own
+        // `span_id`), dedup, and lex-sort.
+        crate::span_merge::append_spans_to_node(dag, id, &operand_spans);
     }
+}
+
+/// Collect operand provenance to merge onto a folded result. For each
+/// operand: include its `span_id` (if any) and its existing
+/// `merged_spans`. The shared helper later dedups against the operation
+/// node's own `span_id`, so we don't filter that here — we just collect
+/// every operand-side span.
+fn collect_operand_spans(
+    _op_node: &crate::dag::DagNode,
+    operands: &[&crate::dag::DagNode],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for operand in operands {
+        if let Some(s) = &operand.span_id
+            && !out.contains(s)
+        {
+            out.push(s.clone());
+        }
+        for s in &operand.merged_spans {
+            if !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Dead code elimination: build a new DAG with only reachable nodes.

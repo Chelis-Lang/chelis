@@ -290,6 +290,172 @@ fn eval_does_not_mutate_spans() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S3.4 — Constant fold: op span survives, operand spans merge in
+// ─────────────────────────────────────────────────────────────────────
+
+/// Mandatory test from spec §3 S3 (constant-fold three-source). Fold an
+/// expression where the operation and its operands carry distinct span
+/// IDs. Assert the folded result carries `span_id = "<op-span>"` and
+/// `merged_spans` contains every operand span (lex-sorted, deduped).
+#[test]
+fn constant_fold_inherits_op_span_and_merges_operands() {
+    let mut dag = Dag::new();
+    // 2 + 3 with three distinct spans on (literal, literal, op).
+    let lit_a = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        scalar_f32(),
+        Some("lit.a".into()),
+    );
+    let lit_b = dag.add_node(
+        RiscOp::Const { value: 3.0 },
+        vec![],
+        scalar_f32(),
+        Some("lit.b".into()),
+    );
+    let op = dag.add_node(
+        RiscOp::Add,
+        vec![lit_a, lit_b],
+        scalar_f32(),
+        Some("op.plus".into()),
+    );
+    dag.add_root(op);
+
+    optimize::constant_fold(&mut dag);
+
+    let folded = dag.get(op).expect("op node exists");
+    assert!(
+        matches!(folded.op, RiscOp::Const { value } if (value - 5.0).abs() < f64::EPSILON),
+        "fold should have produced Const(5.0); got {:?}",
+        folded.op
+    );
+    assert_eq!(
+        folded.span_id.as_deref(),
+        Some("op.plus"),
+        "folded result must inherit the operation node's span_id"
+    );
+    assert_eq!(
+        folded.merged_spans,
+        vec!["lit.a".to_string(), "lit.b".to_string()],
+        "operand spans must merge into folded result lex-sorted"
+    );
+}
+
+/// Negative parity: when operands share the operation's span (or the
+/// operation has no span), the operand spans STILL flow into
+/// `merged_spans` only when they're distinct from the canonical and not
+/// already present. This locks the dedup semantics.
+#[test]
+fn constant_fold_dedups_operand_span_matching_op_span() {
+    let mut dag = Dag::new();
+    // Both operands carry the SAME span as the op. After fold,
+    // merged_spans should be empty (canonical-no-op dedup).
+    let a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("shared".into()),
+    );
+    let b = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        scalar_f32(),
+        Some("shared".into()),
+    );
+    let op = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), Some("shared".into()));
+    dag.add_root(op);
+
+    optimize::constant_fold(&mut dag);
+
+    let folded = dag.get(op).expect("op node exists");
+    assert_eq!(folded.span_id.as_deref(), Some("shared"));
+    assert!(
+        folded.merged_spans.is_empty(),
+        "expected dedup against canonical span; got {:?}",
+        folded.merged_spans
+    );
+}
+
+/// Unary fold variant: neg of a span-bearing const. The operand's span
+/// flows into merged_spans even when the op carries its own.
+#[test]
+fn constant_fold_unary_merges_operand_span() {
+    let mut dag = Dag::new();
+    let lit = dag.add_node(
+        RiscOp::Const { value: 5.0 },
+        vec![],
+        scalar_f32(),
+        Some("u.lit".into()),
+    );
+    let op = dag.add_node(RiscOp::Neg, vec![lit], scalar_f32(), Some("u.neg".into()));
+    dag.add_root(op);
+
+    optimize::constant_fold(&mut dag);
+
+    let folded = dag.get(op).expect("op node exists");
+    assert!(matches!(folded.op, RiscOp::Const { value } if (value + 5.0).abs() < f64::EPSILON));
+    assert_eq!(folded.span_id.as_deref(), Some("u.neg"));
+    assert_eq!(folded.merged_spans, vec!["u.lit".to_string()]);
+}
+
+/// Operand's pre-existing merged_spans must also flow onto the folded
+/// node (transitive — important when fold runs after another pass that
+/// already populated merged_spans).
+#[test]
+fn constant_fold_propagates_operand_merged_spans() {
+    let mut dag = Dag::new();
+    let lit_a = dag.add_node(
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        scalar_f32(),
+        Some("lit.a".into()),
+    );
+    dag.node_mut(lit_a).unwrap().merged_spans = vec!["lit.a.alias".into()];
+    let lit_b = dag.add_node(
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        scalar_f32(),
+        Some("lit.b".into()),
+    );
+    let op = dag.add_node(
+        RiscOp::Add,
+        vec![lit_a, lit_b],
+        scalar_f32(),
+        Some("op.plus".into()),
+    );
+    dag.add_root(op);
+
+    optimize::constant_fold(&mut dag);
+
+    let folded = dag.get(op).expect("op node exists");
+    assert_eq!(folded.span_id.as_deref(), Some("op.plus"));
+    assert_eq!(
+        folded.merged_spans,
+        vec![
+            "lit.a".to_string(),
+            "lit.a.alias".to_string(),
+            "lit.b".to_string()
+        ],
+    );
+}
+
+/// Negative parity: fold on unspanned input fabricates nothing.
+#[test]
+fn constant_fold_does_not_fabricate_spans() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let op = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    dag.add_root(op);
+
+    optimize::constant_fold(&mut dag);
+
+    let folded = dag.get(op).expect("op node exists");
+    assert_eq!(folded.span_id, None);
+    assert!(folded.merged_spans.is_empty());
+}
+
 /// DCE remap variant (used by Phase F library carrier) must apply the
 /// same pure-copy rule. Locking it explicitly so an alternate code path
 /// can't drift from the headline `dead_code_eliminate`.
