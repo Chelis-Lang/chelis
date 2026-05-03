@@ -1,0 +1,145 @@
+; Wrapped Black-Scholes call-price function: typecheckable tensor-typed
+; fixture for the chelis span-survival full-pipeline tests (S5+).
+;
+; Construction. The bodies of d_1, d_2, and c are taken from Octant's
+; translation of `references/black_scholes_call_function.tex` (multi-
+; equation .tex; sequence of three `(def {span} name body)` nodes).
+; Span IDs `eq:d1_*`, `eq:d2_*`, `eq:c_*` come straight from Octant.
+; The OUTER wrapper — `def call_price(...)`, `let (bind ...)` binding
+; copies of the multi-use inputs and `d_1`/`d_2`, and the local
+; `normal_cdf` stub — is hand-authored because Octant currently emits
+; each LaTeX equation as a top-level value binding and does not factor
+; free vars into function parameters or wrap multi-equation programs
+; into a single function def. See
+; `spec/upstream-bugs/octant-no-function-def-emission.md` in the
+; Octant repo for the upstream tracking entry.
+;
+; Type-shape choice: rank-0 tensors `(t-tensor {} (t-prim {} f32))`
+; throughout (parameters, locals, literals). This makes the program
+; route through the DAG ingestion path in `chelis build`, which is
+; the path that emits per-node `// span:` comments per S4. A pure-
+; scalar `(t-prim {} f32)` shape would route through the host
+; backend, which today does NOT emit span comments — the audit chain
+; would break at codegen. Rank-0 tensors are semantically equivalent
+; to scalars (single f32 value).
+;
+; Linearity wrinkle. Tensor values are linear (consume-on-use) per
+; spec/04-type-system.md §8. The formula reuses `s`, `k`, `r`, `t`,
+; `sigma`, and `d_1` multiple times, so the wrapper inserts explicit
+; `(copy {} (var {} x))` calls before each non-final use. The copies
+; are hand-authored book-keeping; they don't carry source spans.
+;
+; The local `normal_cdf` stub is identity over rank-0 tensors. The
+; fixture exists to drive the chelis Deep ingestion path; the
+; numerical body of `Phi` is irrelevant to span survival. The Surf
+; reference `references/black_scholes_call.ch` imports the real
+; `Nautilus.Special.normal_cdf`; this fixture inlines a stub so the
+; .dp is self-contained.
+
+(def {span: "wrap_normal_cdf"}
+  normal_cdf
+  (fn {}
+    (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
+    (var {} x)))
+
+(def {span: "wrap_call_price"}
+  call_price
+  (fn {}
+    (params {}
+      (s     {type: (t-tensor {} (t-prim {} f32))})
+      (k     {type: (t-tensor {} (t-prim {} f32))})
+      (r     {type: (t-tensor {} (t-prim {} f32))})
+      (t     {type: (t-tensor {} (t-prim {} f32))})
+      (sigma {type: (t-tensor {} (t-prim {} f32))})
+      (e     {type: (t-tensor {} (t-prim {} f32))}))
+    (let {}
+      (bind {}
+        ; Copies of multi-use inputs. Each use of `s`, `k`, `r`, `t`,
+        ; `sigma` consumes the binding under linearity; we pre-bind
+        ; one fresh copy per intended subsequent use.
+        s_for_d1   (copy {} (var {} s))
+        k_for_d1   (copy {} (var {} k))
+        r_for_d1   (copy {} (var {} r))
+        t_for_d1   (copy {} (var {} t))
+        t_for_d1_sqrt (copy {} (var {} t))
+        sigma_for_d1_sq_a (copy {} (var {} sigma))
+        sigma_for_d1_sq_b (copy {} (var {} sigma))
+        sigma_for_d1_sqrt (copy {} (var {} sigma))
+        ; d_1 itself is consumed by Phi(d_1) and by d_2 = d_1 - sigma*sqrt(t).
+        d_1
+        (app {span: "eq:d1_002"}
+          (var {} div)
+          (app {span: "eq:d1_003"}
+            (var {} add)
+            (app {span: "eq:d1_004"}
+              (var {} log)
+              (app {span: "eq:d1_005"}
+                (var {} div)
+                (var {span: "eq:d1_006"} s_for_d1)
+                (var {span: "eq:d1_007"} k_for_d1)))
+            (app {span: "eq:d1_008"}
+              (var {} mul)
+              (app {span: "eq:d1_009"}
+                (var {} add)
+                (var {span: "eq:d1_010"} r_for_d1)
+                (app {span: "eq:d1_011"}
+                  (var {} div)
+                  (app {span: "eq:d1_012"}
+                    (var {} mul)
+                    (var {span: "eq:d1_013"} sigma_for_d1_sq_a)
+                    (var {span: "eq:d1_014"} sigma_for_d1_sq_b))
+                  (lit {span: "eq:d1_015" type: (t-tensor {} (t-prim {} f32))} 2.0)))
+              (var {span: "eq:d1_016"} t_for_d1)))
+          (app {span: "eq:d1_017"}
+            (var {} mul)
+            (var {span: "eq:d1_018"} sigma_for_d1_sqrt)
+            (app {span: "eq:d1_019"}
+              (var {} sqrt)
+              (var {span: "eq:d1_020"} t_for_d1_sqrt))))
+        ; d_1 is reused twice: d_2 references it, and Phi(d_1) does too.
+        d_1_for_d2 (copy {} (var {} d_1))
+        ; sigma and t remain after d_1 ⇒ make copies for d_2.
+        sigma_for_d2 (copy {} (var {} sigma))
+        t_for_d2     (copy {} (var {} t))
+        d_2
+        (app {span: "eq:d2_002"}
+          (var {} sub)
+          (var {span: "eq:d2_003"} d_1_for_d2)
+          (app {span: "eq:d2_004"}
+            (var {} mul)
+            (var {span: "eq:d2_005"} sigma_for_d2)
+            (app {span: "eq:d2_006"}
+              (var {} sqrt)
+              (var {span: "eq:d2_007"} t_for_d2)))))
+      ; Body of `c`. Free vars used here (no further reuse needed):
+      ;   s (1x), k (1x), e (1x), r (1x), t (1x), d_1, d_2.
+      (app {span: "eq:c_002"}
+        (var {} sub)
+        (app {span: "eq:c_003"}
+          (var {} mul)
+          (var {span: "eq:c_004"} s)
+          (app {span: "eq:c_005"}
+            (var {} normal_cdf)
+            (var {span: "eq:c_006"} d_1)))
+        (app {span: "eq:c_007"}
+          (var {} mul)
+          (app {span: "eq:c_008"}
+            (var {} mul)
+            (var {span: "eq:c_009"} k)
+            (app {span: "eq:c_010"}
+              (var {} exp)
+              (app {span: "eq:c_011"}
+                (var {} mul)
+                (app {span: "eq:c_012"}
+                  (var {} log)
+                  (var {span: "eq:c_013"} e))
+                (app {span: "eq:c_014"}
+                  (var {} mul)
+                  (app {span: "eq:c_015"}
+                    (var {} sub)
+                    (lit {span: "eq:c_016" type: (t-tensor {} (t-prim {} f32))} 0.0)
+                    (var {span: "eq:c_017"} r))
+                  (var {span: "eq:c_018"} t)))))
+          (app {span: "eq:c_019"}
+            (var {} normal_cdf)
+            (var {span: "eq:c_020"} d_2)))))))

@@ -1,0 +1,148 @@
+//! S5.0 fixture verification — the wrapped Black-Scholes Deep fixture
+//! must (a) parse cleanly, (b) round-trip through `chelis fmt`, (c)
+//! typecheck via `chelis_types::check_phase0e_program`, and (d) carry
+//! the expected span IDs end-to-end.
+//!
+//! `call_price.dp` (the Octant-emitted equation-only fixture) and
+//! `call_price_wrapped.dp` (the hand-authored typecheckable wrapper)
+//! are both kept under
+//! `crates/chelis-cli/tests/fixtures/octant/black_scholes/`. The
+//! wrapper inlines the Octant-emitted bodies as `let` bindings inside
+//! a single function def so the program is self-contained and
+//! typecheckable; see the fixture README and
+//! `spec/upstream-bugs/octant-no-function-def-emission.md` in the
+//! Octant repo for why hand-wrapping is needed today.
+
+use chelis_deep::Expr;
+use chelis_deep::parser::{parse_str, parse_str_strict};
+use chelis_deep::printer::print_canonical;
+use std::collections::BTreeSet;
+
+const WRAPPED_DP: &str = include_str!("fixtures/octant/black_scholes/call_price_wrapped.dp");
+const WRAPPED_SPANS_JSON: &str =
+    include_str!("fixtures/octant/black_scholes/call_price_wrapped.spans.json");
+
+fn collect_span_ids(exprs: &[Expr]) -> Vec<String> {
+    let mut acc = Vec::new();
+    for expr in exprs {
+        collect_one(expr, &mut acc);
+    }
+    acc
+}
+
+fn collect_one(expr: &Expr, acc: &mut Vec<String>) {
+    if let Some(id) = expr.span_id() {
+        acc.push(id.to_string());
+    }
+    if let Expr::List(list, _) = expr {
+        for child in &list.elements {
+            collect_one(child, acc);
+        }
+    }
+}
+
+#[test]
+fn wrapped_fixture_parses_strict() {
+    parse_str_strict(WRAPPED_DP).expect("wrapped fixture must parse strictly");
+}
+
+#[test]
+fn wrapped_fixture_round_trips_through_fmt() {
+    let exprs1 = parse_str(WRAPPED_DP).expect("first parse");
+    let printed = print_canonical(&exprs1);
+    let exprs2 = parse_str(&printed).expect("re-parse after fmt");
+    let reprinted = print_canonical(&exprs2);
+    assert_eq!(
+        printed, reprinted,
+        "fmt must be a fixed point on the wrapped fixture"
+    );
+    let ids1 = collect_span_ids(&exprs1);
+    let ids2 = collect_span_ids(&exprs2);
+    assert_eq!(
+        ids1, ids2,
+        "round-trip through fmt must preserve every span ID in order"
+    );
+}
+
+#[test]
+fn wrapped_fixture_typechecks_phase0e() {
+    let exprs = parse_str_strict(WRAPPED_DP).expect("parse");
+    match chelis_types::check_phase0e_program(&exprs) {
+        Ok(_) => {}
+        Err(report) => {
+            let msgs: Vec<String> = report
+                .errors
+                .iter()
+                .map(|e| format!("{:?}: {}", e.kind, e.message))
+                .collect();
+            panic!(
+                "wrapped Black-Scholes fixture must Phase 0e typecheck; errors:\n  {}",
+                msgs.join("\n  ")
+            );
+        }
+    }
+}
+
+#[test]
+fn wrapped_fixture_span_ids_match_sidecar() {
+    // Spec contract: every span ID present in the .dp must appear in
+    // the .spans.json sidecar (the audit chain), and vice versa.
+    let exprs = parse_str(WRAPPED_DP).expect("parse");
+    let dp_ids: BTreeSet<String> = collect_span_ids(&exprs).into_iter().collect();
+
+    // Parse the .spans.json minimally — extract every "deep_node_id"
+    // value via serde_json without pulling in a full schema.
+    let v: serde_json::Value = serde_json::from_str(WRAPPED_SPANS_JSON).expect("sidecar JSON");
+    let arr = v
+        .get("spans")
+        .and_then(|s| s.as_array())
+        .expect("sidecar has `spans` array");
+    let sidecar_ids: BTreeSet<String> = arr
+        .iter()
+        .filter_map(|s| {
+            s.get("deep_node_id")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    assert_eq!(
+        dp_ids,
+        sidecar_ids,
+        "every span ID in call_price_wrapped.dp must appear in \
+         call_price_wrapped.spans.json (and vice versa); dp_only={:?}, \
+         sidecar_only={:?}",
+        dp_ids.difference(&sidecar_ids).collect::<Vec<_>>(),
+        sidecar_ids.difference(&dp_ids).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn wrapped_fixture_includes_octant_emitted_spans() {
+    // Sanity: the bodies inlined into the wrapper carry the verbatim
+    // Octant-emitted span IDs (eq:d1_*, eq:d2_*, eq:c_*). If the
+    // fixture is regenerated from a different .tex, this list updates.
+    let exprs = parse_str(WRAPPED_DP).expect("parse");
+    let ids: BTreeSet<String> = collect_span_ids(&exprs).into_iter().collect();
+    for octant_id in [
+        "eq:d1_002",
+        "eq:d1_006",
+        "eq:d1_017",
+        "eq:d2_003",
+        "eq:c_002",
+        "eq:c_020",
+    ] {
+        assert!(
+            ids.contains(octant_id),
+            "wrapped fixture must inline the Octant-emitted span {octant_id} \
+             (got: {ids:?})"
+        );
+    }
+    // And the wrapper-introduced spans:
+    for wrap_id in ["wrap_normal_cdf", "wrap_call_price"] {
+        assert!(
+            ids.contains(wrap_id),
+            "wrapped fixture must mark the wrapper def with span {wrap_id}"
+        );
+    }
+}

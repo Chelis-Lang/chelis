@@ -1,22 +1,88 @@
 # Black-Scholes Octant Fixture
 
-Span-attributed Deep + spans manifest produced by Octant from
-`references/black_scholes_call.tex` (the canonical hero-example LaTeX in the
-Octant repo). Used by the chelis span-survival pipeline tests as the
-load-bearing audit canary: every span ID in `call_price.dp` must round-trip
-through the chelis compile pipeline and surface in the generated C output.
+Span-attributed Deep + spans manifest produced by Octant. Used by the
+chelis span-survival pipeline tests as the load-bearing audit canary:
+every span ID in the `.dp` must round-trip through the chelis compile
+pipeline and surface in the generated C output.
+
+The directory ships TWO fixtures with different roles.
+
+## `call_price.dp` — equation-only audit canary (S0–S4)
+
+Octant's verbatim translation of `references/black_scholes_call.tex`
+(the canonical hero-example LaTeX in the Octant repo). The body is
+just the Black-Scholes equation `c = s * Phi(d_1) - k * exp(-r*t) *
+Phi(d_2)` with free variables `s, d_1, k, e, r, t, d_2` — it does NOT
+typecheck on its own (the free vars are unbound) and is **not** routed
+through `chelis check` / `chelis build`. It is used by:
+
+- `chelis-deep/tests/span_metadata.rs` — round-trip every span through
+  parse → reprint → re-parse, lock the 20 expected `n_001..n_020` IDs
+  in place. This is the parse-and-print audit canary that proved the
+  S0 oracle and continues to be the regression backstop for any
+  metadata-handling change in `chelis-deep`.
+
+Keep this fixture exactly as Octant emits it; do not normalize, fold,
+or annotate. It is the unaltered upstream artifact that downstream
+chelis tools must accept.
+
+## `call_price_wrapped.dp` — typecheckable function-shape fixture (S5+)
+
+A hand-authored wrapper around Octant's translation of
+`references/black_scholes_call_function.tex` (the multi-equation
+companion file in the Octant repo). The wrapper inlines Octant's
+emitted `d_1`, `d_2`, and `c` bodies as `let` bindings inside a single
+function def:
+
+```
+(def {span: "wrap_call_price"} call_price
+  (fn {} (params {} (s {type: ...}) ...)
+    (let {} (bind {} d_1 <octant-d_1-body> d_2 <octant-d_2-body>)
+      <octant-c-body>)))
+```
+
+Every Octant-emitted span ID (`eq:d1_*`, `eq:d2_*`, `eq:c_*`) is
+inlined verbatim; only the outermost `def`/`fn`/`let`/`params` shell
+is hand-authored. Two wrapper-introduced spans (`wrap_normal_cdf` and
+`wrap_call_price`) annotate the synthesized outer nodes. A local
+`normal_cdf` stub is included so the fixture is self-contained and
+does not depend on `Nautilus.Special` (the Surf reference imports
+`normal_cdf` from there; the Deep fixture inlines a typecheck-only
+stub).
+
+Used by:
+
+- `chelis-cli/tests/wrapped_black_scholes_fixture.rs` — fmt round-trip,
+  Phase 0e typecheck, span-vs-sidecar parity (S5.0 oracle).
+- `chelis-cli/tests/...` — `chelis build --deep` / `--target c|hip|metal`
+  full-pipeline tests (S5.2+).
+
+Hand-wrapping is necessary because Octant currently does not emit
+function-shape `(def name (fn (params ...) body))` Deep — see the
+upstream-bug entry at
+`spec/upstream-bugs/octant-no-function-def-emission.md` in the
+Octant repo. Once Octant grows a `--wrap-as-function` translation
+surface, this fixture can drop the manual wrapper and consume
+Octant's output directly.
 
 ## Files
 
-- `call_price.dp` — span-attributed Deep AST (20 nodes, IDs `n_001`..`n_020`)
-- `call_price.spans.json` — sidecar mapping each `deep_node_id` to its LaTeX byte range
-- `README.md` — this file
+- `call_price.dp` — Octant's raw 20-node equation-only Deep
+  (IDs `n_001`..`n_020`).
+- `call_price.spans.json` — Octant's sidecar mapping each
+  `deep_node_id` to its LaTeX byte range.
+- `call_price_wrapped.dp` — hand-authored typecheckable wrapper,
+  46 unique span IDs.
+- `call_price_wrapped.spans.json` — wrapper sidecar; reuses Octant's
+  byte-range entries for inlined span IDs and adds synthesized
+  entries for the two `wrap_*` IDs (with `latex_text` set to
+  `__synthesized_wrap__` and zero byte ranges).
+- `README.md` — this file.
 
 ## Regeneration
 
-These artifacts are produced by Octant's `translate` subcommand. They are
-committed as static fixtures so chelis tests do not depend on Octant being
-installed. To regenerate:
+`call_price.dp` and `call_price.spans.json` come straight from
+Octant's `translate` subcommand:
 
 ```
 octant translate <octant>/references/black_scholes_call.tex \
@@ -24,12 +90,26 @@ octant translate <octant>/references/black_scholes_call.tex \
   --spans call_price.spans.json
 ```
 
-Then sanitize `source` in `call_price.spans.json` from an absolute path to
-`references/black_scholes_call.tex` (relative to the Octant repo). The
-`source_hash` field stays as Octant emitted it.
+After running, sanitize `source` in `call_price.spans.json` from the
+absolute path Octant emits to `references/black_scholes_call.tex`
+(relative to the Octant repo). The `source_hash` field stays as
+Octant emitted it.
+
+`call_price_wrapped.spans.json` is generated by
+`scripts/build_wrapped_spans_sidecar.py`, which:
+
+1. Runs `octant translate` on
+   `<octant>/references/black_scholes_call_function.tex` in a temp
+   dir to capture the canonical sidecar.
+2. Filters that sidecar to just the span IDs that appear in
+   `call_price_wrapped.dp` (in appearance order).
+3. Adds synthesized entries for the wrapper-introduced span IDs.
+
+`call_price_wrapped.dp` itself is hand-authored; if the wrapper shape
+changes, hand-edit the `.dp` and re-run the script.
 
 ## Spec
 
-See `spec/design/chelis_span_survival.md` for the contract this fixture
-exercises and `spec/03-deep-syntax.md` §1.1 for the documented `span` metadata
-key.
+See `spec/design/chelis_span_survival.md` for the contract this
+fixture exercises and `spec/03-deep-syntax.md` §1.1.1 for the
+documented `span` metadata key.
