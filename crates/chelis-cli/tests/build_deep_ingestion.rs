@@ -106,28 +106,23 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
     let auto_src = fs::read_to_string(&auto).expect("read auto");
     let flag_src = fs::read_to_string(&flagged).expect("read flagged");
 
-    // Both invocations took the Deep path. Existing host-program
-    // codegen has known HashMap-iteration-order non-determinism in
-    // input-validation block ordering, so byte equality is too
-    // strong an assertion. Instead lock the load-bearing invariant:
-    // both produce identical UNIQUE `// span:` sets.
-    fn unique_span_set(src: &str) -> std::collections::BTreeSet<String> {
-        src.lines()
-            .filter_map(|l| {
-                let l = l.trim_start();
-                l.strip_prefix("// span: ").map(str::to_string)
-            })
-            .collect()
-    }
-    let auto_spans = unique_span_set(&auto_src);
-    let flag_spans = unique_span_set(&flag_src);
-    assert!(
-        !auto_spans.is_empty(),
-        "`.dp` auto-detect must emit at least one span"
-    );
+    // Both invocations took the Deep path. Byte equality is the
+    // strongest correct assertion for "flag is a no-op": same input,
+    // same path, same output. Previously a HashMap-iteration-order
+    // non-determinism bug in `emit_input_shape_preamble` forced this
+    // test to drop down to span-set equality; that bug was fixed by
+    // sorting the iteration over input labels (see
+    // spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md
+    // and crates/chelis-backend-c/tests/codegen_determinism.rs for the
+    // dedicated regression test).
     assert_eq!(
-        auto_spans, flag_spans,
-        "`--deep` on a `.dp` file must produce the same span set as auto-detect"
+        auto_src, flag_src,
+        "`--deep` on a `.dp` file must produce byte-identical C as auto-detect"
+    );
+    let span_count = auto_src.matches("// span:").count();
+    assert!(
+        span_count >= 1,
+        "`.dp` auto-detect must emit at least one span (got {span_count})"
     );
 }
 

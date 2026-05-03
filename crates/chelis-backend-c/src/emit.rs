@@ -509,8 +509,16 @@ impl CEmitter {
         input_slots: &std::collections::HashMap<String, usize>,
         func_name: &str,
     ) {
+        // Iteration order over `input_types` (a HashMap) must be
+        // deterministic so the emitted C is byte-identical across runs
+        // for the same input. Sort by label; the lookup is by name and
+        // the emitted lines are independent per label.
+        // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        for (label, ty) in &input_types {
+        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
+        sorted_labels.sort();
+        for label in sorted_labels {
+            let ty = &input_types[label];
             let slot = input_slots[label];
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
