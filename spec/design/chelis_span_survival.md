@@ -262,7 +262,7 @@ chelis build /tmp/bs.dp --deep --target c --output /tmp/bs.c
 
 # Audit chain is recoverable from /tmp/bs.c alone
 grep -c '// span:' /tmp/bs.c        # ≥ jq '.spans | length' /tmp/bs.spans.json
-SPAN_ID=$(grep -o '// span: [a-z0-9._]*' /tmp/bs.c | head -1 | cut -d' ' -f3)
+SPAN_ID=$(grep -o '// span: [a-zA-Z0-9._:]*' /tmp/bs.c | head -1 | cut -d' ' -f3)
 jq ".spans[] | select(.deep_node_id == \"$SPAN_ID\") | .latex_text" \
    /tmp/bs.spans.json
 # Outputs the original LaTeX substring.
