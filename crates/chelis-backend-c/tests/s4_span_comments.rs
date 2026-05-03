@@ -323,3 +323,110 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
     // Load-bearing: compile success.
     compile_kernel_only("oracle_c", src).expect("S4 oracle: generated C must compile via gcc");
 }
+
+// ── Span-charset defense in depth (post-S4 red-team finding) ──────────
+//
+// Per `spec/03-deep-syntax.md` §1.1.1, span ID strings carrying ASCII
+// control characters are spec-illegal and the Deep parser rejects them.
+// Programmatic IR construction bypasses the parser, so the C backend
+// applies a defense-in-depth sanitizer
+// (`chelis_ir::span_sanitize::sanitize_for_comment`) before interpolating
+// spans into `// span: <id>` line comments. These tests cover that fallback
+// directly: build a `DagNode` with a forbidden span_id and assert the
+// emitted C is comment-safe (no `\n` terminating the comment line) and
+// compiles cleanly via gcc.
+
+#[test]
+fn s4_c_forbidden_newline_in_span_is_escaped_at_emit() {
+    // The injection probe from the red-team gate. Without escaping,
+    // `// span: op\nint INJECTED = 42;` would compile with INJECTED as a
+    // real top-level declaration. With the sanitizer, the `\n` becomes a
+    // literal `\n` two-char sequence inside the comment.
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("op\nint INJECTED_C_CODE = 42;".into()),
+    );
+    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+
+    let result = codegen(&dag, "s4_c_forbidden_newline");
+    let src = &result.c_source;
+
+    // Escaped form present.
+    assert!(
+        src.contains("// span: op\\nint INJECTED_C_CODE = 42;"),
+        "expected escaped `\\n` form in `// span:` comment; source:\n{src}"
+    );
+    // No raw injected line.
+    assert!(
+        !src.contains("\nint INJECTED_C_CODE = 42;"),
+        "raw injected line escaped the sanitizer; source:\n{src}"
+    );
+
+    compile_kernel_only("forbidden_newline", src)
+        .expect("sanitized output must still compile via gcc");
+}
+
+#[test]
+fn s4_c_forbidden_newline_in_merged_spans_is_escaped_at_emit() {
+    // Same probe but via `merged_spans` rather than `span_id` — the
+    // sanitizer must apply to both code paths in `emit_span_comments`.
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.clean".into()));
+    {
+        let node = dag.node_mut(neg_id).unwrap();
+        node.merged_spans = vec!["op\nint INJECTED_VIA_MERGED = 1;".into()];
+    }
+
+    let result = codegen(&dag, "s4_c_forbidden_merged");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("// span: op\\nint INJECTED_VIA_MERGED = 1;"),
+        "merged-span path missing escape; source:\n{src}"
+    );
+    assert!(
+        !src.contains("\nint INJECTED_VIA_MERGED = 1;"),
+        "merged-span injection escaped the sanitizer; source:\n{src}"
+    );
+    compile_kernel_only("forbidden_merged", src)
+        .expect("sanitized output (via merged_spans) must still compile via gcc");
+}
+
+#[test]
+fn s4_c_clean_span_emitted_verbatim_audit_invariant() {
+    // Audit invariant lock: a clean span ID (no forbidden chars) must
+    // emit byte-identical to its input. The customer's `.spans.json`
+    // sidecar entry must match the `// span: <id>` text in the .c file
+    // verbatim for well-behaved producers.
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("eq1.σ_body".into()),
+    );
+    dag.add_node(
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("__synthesized_grad__".into()),
+    );
+
+    let result = codegen(&dag, "s4_c_clean");
+    let src = &result.c_source;
+
+    // Both verbatim — no escapes inserted.
+    assert!(
+        src.contains("// span: eq1.σ_body"),
+        "Unicode span ID not preserved verbatim; source:\n{src}"
+    );
+    assert!(
+        src.contains("// span: __synthesized_grad__"),
+        "synthesized marker not preserved verbatim; source:\n{src}"
+    );
+    compile_kernel_only("clean_audit", src).expect("clean span must compile via gcc");
+}

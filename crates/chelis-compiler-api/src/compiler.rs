@@ -1455,6 +1455,7 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> 
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
+        chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
     };
     Some(Span { offset, len: 0 })
 }

@@ -332,3 +332,113 @@ fn s4_metal_oracle_richer_combinations_grep() {
     let _ = (n1, n4, n5);
     let _ = NodeId(0);
 }
+
+// ── Span-charset defense in depth (post-S4 red-team finding) ──────────
+//
+// Mirror of the C and HIP backend tests. Per `spec/03-deep-syntax.md`
+// §1.1.1 the parser rejects forbidden span chars; programmatic IR
+// construction bypasses that check, so the Metal backend's sanitizer
+// (`chelis_ir::span_sanitize::sanitize_for_comment`) must escape forbidden
+// bytes inside `// span:` comments — both host-side and inside embedded
+// MSL kernel raw-string literals — before emitting `.mm` source.
+//
+// Compile-success for Metal lives in `gpu_correctness.rs` (#[ignore] M6
+// manual gate) and runs only on macOS via `xcrun -sdk macosx`. This file
+// stays structural so it runs on every platform in default CI.
+
+#[test]
+fn s4_metal_forbidden_newline_in_span_is_escaped_at_emit() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("op\nint INJECTED_METAL_CODE = 42;".into()),
+    );
+    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    dag.add_root(n);
+
+    let result = codegen_metal(&dag, "s4_metal_forbidden_newline");
+    let src = &result.mm_source;
+
+    assert!(
+        src.contains("// span: op\\nint INJECTED_METAL_CODE = 42;"),
+        "expected escaped `\\n` form in `// span:` comment; source:\n{src}"
+    );
+    assert!(
+        !src.contains("\nint INJECTED_METAL_CODE = 42;"),
+        "raw injected line escaped the sanitizer; source:\n{src}"
+    );
+}
+
+#[test]
+fn s4_metal_forbidden_newline_in_per_node_kernel_string_is_escaped() {
+    // Metal emits one MSL kernel per DAG node, embedded inside a
+    // raw-string literal `@R"MSL(...)MSL"`. A forbidden byte in the span
+    // ID must be escaped before it enters the literal so the runtime
+    // metallib compile sees a comment-safe identifier (and so the host
+    // .mm source itself remains parseable).
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("op.load".into()),
+    );
+    let n = dag.add_node(
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.neg\nINJECTED_METAL_KERNEL".into()),
+    );
+    dag.add_root(n);
+
+    let result = codegen_metal(&dag, "s4_metal_forbidden_kernel");
+    let src = &result.mm_source;
+
+    assert!(
+        src.contains("// span: op.neg\\nINJECTED_METAL_KERNEL"),
+        "expected escaped `\\n` form host-side; source:\n{src}"
+    );
+    let kernel = extract_kernel_string(src, &format!("pso_{}", n.0))
+        .expect("Neg kernel string block missing");
+    assert!(
+        kernel.contains("// span: op.neg\\nINJECTED_METAL_KERNEL"),
+        "expected escaped span inside MSL kernel raw-string literal; body:\n{kernel}"
+    );
+    // Raw newline must NOT split the kernel-side comment line.
+    assert!(
+        !kernel.contains("// span: op.neg\nINJECTED_METAL_KERNEL"),
+        "raw newline leaked into kernel raw-string literal; body:\n{kernel}"
+    );
+}
+
+#[test]
+fn s4_metal_clean_span_emitted_verbatim_audit_invariant() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("eq1.σ_body".into()),
+    );
+    let n = dag.add_node(
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("__synthesized_grad__".into()),
+    );
+    dag.add_root(n);
+
+    let result = codegen_metal(&dag, "s4_metal_clean");
+    let src = &result.mm_source;
+
+    assert!(
+        src.contains("// span: eq1.σ_body"),
+        "Unicode span ID not preserved verbatim; source:\n{src}"
+    );
+    assert!(
+        src.contains("// span: __synthesized_grad__"),
+        "synthesized marker not preserved verbatim; source:\n{src}"
+    );
+}

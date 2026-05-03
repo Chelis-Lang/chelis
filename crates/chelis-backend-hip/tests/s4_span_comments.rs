@@ -419,3 +419,140 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
 
     compile_hip_kernel_only("oracle_hip", src).expect("S4 oracle: HIP source must compile");
 }
+
+// ── Span-charset defense in depth (post-S4 red-team finding) ──────────
+//
+// Mirror of the C backend tests in `chelis-backend-c/tests/s4_span_comments.rs`.
+// Per `spec/03-deep-syntax.md` §1.1.1 the parser rejects forbidden span
+// chars; this test class exercises programmatic IR construction that
+// bypasses the parser, so the HIP backend's sanitizer
+// (`chelis_ir::span_sanitize::sanitize_for_comment`) must escape forbidden
+// bytes inside `// span:` comments — both host-side and inside embedded
+// kernel source strings — before emitting C/HIP source.
+
+#[test]
+fn s4_hip_forbidden_newline_in_span_is_escaped_at_emit() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("op\nint INJECTED_HIP_CODE = 42;".into()),
+    );
+    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    dag.add_root(n);
+
+    let result = codegen_hip(&dag, "s4_hip_forbidden_newline");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("// span: op\\nint INJECTED_HIP_CODE = 42;"),
+        "expected escaped `\\n` form in `// span:` comment; source:\n{src}"
+    );
+    assert!(
+        !src.contains("\nint INJECTED_HIP_CODE = 42;"),
+        "raw injected line escaped the sanitizer; source:\n{src}"
+    );
+    compile_hip_kernel_only("forbidden_newline", src)
+        .expect("sanitized HIP output must still compile via hipcc");
+}
+
+#[test]
+fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
+    // FusedElem (after `fuse()`) gets a per-node kernel and embeds the
+    // node's spans inside the source string literal. A forbidden byte in
+    // the span ID must be escaped before it enters the string literal,
+    // both for host-side correctness and so the runtime-compiled HIP
+    // kernel sees a comment-safe identifier.
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("op.load".into()),
+    );
+    let e = dag.add_node(
+        RiscOp::Exp,
+        vec![a],
+        vec_f32(4),
+        Some("op.exp\nINJECTED_HIP_KERNEL".into()),
+    );
+    let n = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), Some("op.neg".into()));
+    dag.add_root(n);
+    let fused = fuse(&dag);
+
+    let result = codegen_hip(&fused, "s4_hip_forbidden_kernel");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("op.exp\\nINJECTED_HIP_KERNEL"),
+        "expected escaped form for the embedded forbidden span; source:\n{src}"
+    );
+    // Find the embedded kernel-source declaration and confirm the raw
+    // newline didn't leak into it.
+    let mut fused_kernel_name: Option<String> = None;
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("const char *")
+            && let Some(end) = rest.find("_src =")
+        {
+            let name = &rest[..end];
+            if name.starts_with("kernel_fused_") {
+                fused_kernel_name = Some(name.to_string());
+                break;
+            }
+        }
+    }
+    if let Some(kname) = fused_kernel_name {
+        let body = extract_kernel_string(src, &kname).expect("could not extract fused body");
+        // The kernel string emitter escapes backslashes once when writing
+        // the source into a `const char *_src = "..."` C string literal,
+        // so the sanitizer's `\n` two-char sequence becomes `\\n` in the
+        // literal text we extract here.
+        assert!(
+            body.contains("op.exp\\\\nINJECTED_HIP_KERNEL")
+                || body.contains("op.exp\\nINJECTED_HIP_KERNEL"),
+            "fused kernel string must carry the escaped span; body:\n{body}"
+        );
+        // The raw newline must NOT appear unescaped after the `// span:`
+        // prefix inside the string literal.
+        assert!(
+            !body.contains("// span: op.exp\nINJECTED_HIP_KERNEL"),
+            "raw newline leaked into kernel string literal; body:\n{body}"
+        );
+    }
+
+    compile_hip_kernel_only("forbidden_kernel", src)
+        .expect("sanitized HIP source (per-node kernel) must compile via hipcc");
+}
+
+#[test]
+fn s4_hip_clean_span_emitted_verbatim_audit_invariant() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        Some("eq1.σ_body".into()),
+    );
+    let n = dag.add_node(
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("__synthesized_grad__".into()),
+    );
+    dag.add_root(n);
+
+    let result = codegen_hip(&dag, "s4_hip_clean");
+    let src = &result.c_source;
+
+    assert!(
+        src.contains("// span: eq1.σ_body"),
+        "Unicode span ID not preserved verbatim; source:\n{src}"
+    );
+    assert!(
+        src.contains("// span: __synthesized_grad__"),
+        "synthesized marker not preserved verbatim; source:\n{src}"
+    );
+    compile_hip_kernel_only("clean_audit", src).expect("clean span must compile via hipcc");
+}

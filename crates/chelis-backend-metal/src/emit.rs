@@ -194,7 +194,8 @@ impl Emitter {
             return out;
         }
         if let Some(canonical) = node.span_id.as_deref() {
-            out.push(format!("// span: {canonical}"));
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            out.push(format!("// span: {safe}"));
         }
         let mut merged: Vec<&str> = node
             .merged_spans
@@ -205,7 +206,8 @@ impl Emitter {
         merged.sort();
         merged.dedup();
         for span in merged {
-            out.push(format!("// span: {span}"));
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            out.push(format!("// span: {safe}"));
         }
         out
     }

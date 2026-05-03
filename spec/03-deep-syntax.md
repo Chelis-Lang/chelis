@@ -90,6 +90,49 @@ companion `merged_spans` IR field (defined in `spec/design/chelis_span_survival.
 so the audit chain always resolves through at least one external-source span
 even when the canonical `span` is a synthesized marker.
 
+**Span ID character set (forbidden code points).** Span ID strings MUST NOT
+contain ASCII control characters in the range U+0000 through U+001F EXCEPT
+space (U+0020). U+007F (DELETE) is also forbidden. Concretely, the
+following are forbidden: `\0` (U+0000 NUL), `\t` (U+0009 TAB), `\n` (U+000A
+LF), `\r` (U+000D CR), and every other code point in U+0001..=U+001F (the
+remaining C0 control characters), plus U+007F (DEL). All other code points,
+including any printable Unicode at U+0020 or above (except U+007F), are
+permitted.
+
+*Rationale.* Span IDs are interpolated as comment-safe identifier strings
+into generated C / HIP / Metal source (`// span: <id>`). Forbidden
+characters can terminate `//` line comments (notably `\n` and `\r`),
+embed in C string contexts, or otherwise corrupt the generated source
+and produce compiling-but-semantically-altered output (a real injection
+class, not a theoretical one). The constraint exists so emit code can
+interpolate spans into comments without per-emit escaping. Defense in
+depth: emitters apply backslash-escape sanitization (`\\n`, `\\r`, `\\0`,
+`\\xNN`) as a backstop for forbidden code points that reach emit through
+programmatic IR construction (which bypasses the parser); the spec-level
+contract is still that producers MUST NOT emit forbidden characters in
+the first place.
+
+*Producer obligation.* Producers (e.g., Octant) MUST emit span ID values
+containing only allowed characters. Producers MAY include any printable
+Unicode (U+0020 and above, except U+007F) — Greek letters, mathematical
+symbols, dot-paths, and similar identifier conventions are all permitted.
+
+*Parser obligation.* The Deep parser MUST reject `span` metadata values
+containing forbidden characters. The diagnostic MUST identify the offending
+byte position and code point, and MUST point at this section
+(`spec/03-deep-syntax.md` §1.1.1) so authors can find the rule.
+
+*Empty span ID.* The empty string (`{span: ""}`) is a **valid** span ID.
+Producers MAY emit `{span: ""}` as a "no provenance" sentinel without
+needing to elide the metadata key entirely. Tooling MUST NOT silently
+coerce `Some("")` to `None`.
+
+*Leading/trailing whitespace.* Span IDs MAY contain leading or trailing
+ASCII space (U+0020), e.g. `" eq1.body "`. Such IDs are valid but
+discouraged; emit code does NOT trim them. Producers SHOULD avoid
+incidental whitespace, but the spec treats span IDs as opaque strings and
+does not normalize them.
+
 **Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.

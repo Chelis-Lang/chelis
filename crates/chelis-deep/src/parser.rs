@@ -2,6 +2,33 @@ use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use crate::lexer::{self, Token, TokenKind};
 use thiserror::Error;
 
+/// Returns true when `b` is a forbidden ASCII byte in a `span` metadata
+/// value per `spec/03-deep-syntax.md` §1.1.1: U+0000..=U+001F (except
+/// U+0020 space) or U+007F (DEL).
+///
+/// Mirrored in `chelis_ir::span_sanitize::is_forbidden_byte`. The two
+/// definitions are kept in sync via the spec — any change to the
+/// forbidden set must update both `spec/03-deep-syntax.md` §1.1.1 and
+/// both implementations together.
+#[inline]
+fn is_forbidden_span_byte(b: u8) -> bool {
+    b <= 0x1F || b == 0x7F
+}
+
+/// Render a forbidden byte for diagnostic messages, using a printable
+/// canonical form. `\n`, `\r`, `\t`, `\0` get their backslash form;
+/// other forbidden bytes (other C0 controls and U+007F) are shown as
+/// `\xNN` two-digit lowercase hex.
+fn forbidden_byte_repr(b: u8) -> String {
+    match b {
+        0x00 => "\\0".to_string(),
+        0x09 => "\\t".to_string(),
+        0x0A => "\\n".to_string(),
+        0x0D => "\\r".to_string(),
+        other => format!("\\x{other:02x}"),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("lex error: {0}")]
@@ -19,6 +46,27 @@ pub enum ParseError {
 
     #[error("empty list at byte {offset}")]
     EmptyList { offset: usize },
+
+    /// A `span` metadata value contains a forbidden character per
+    /// `spec/03-deep-syntax.md` §1.1.1. Span IDs must not contain ASCII
+    /// control characters (U+0000..=U+001F except U+0020) or U+007F (DEL).
+    /// Forbidden code points can terminate `//` line comments in generated
+    /// C/HIP/Metal source and inject live code into the build artifact.
+    ///
+    /// `value_offset` is the byte offset of the string literal in the
+    /// Deep source. `byte_in_value` is the offset of the offending byte
+    /// inside the decoded span string (after escape processing). `repr`
+    /// is the canonical printable form of the offending byte (`\n`,
+    /// `\xNN`, …) and `code_point` is the U+NNNN form for the diagnostic.
+    #[error(
+        "span metadata value contains forbidden character at byte {byte_in_value} ({repr}, U+{code_point:04X}) at byte {value_offset}; span IDs must not contain ASCII control characters; see spec/03-deep-syntax.md §1.1.1"
+    )]
+    ForbiddenSpanChar {
+        value_offset: usize,
+        byte_in_value: usize,
+        code_point: u32,
+        repr: String,
+    },
 }
 
 struct Parser<'a> {
@@ -202,6 +250,28 @@ impl<'a> Parser<'a> {
 
             // Value is any expression
             let value = self.parse_expr()?;
+
+            // Span-charset enforcement (spec §1.1.1): same rule as in
+            // `parse_map`, applied to the legacy `^{:span "..."}` prefix
+            // metadata form so producers cannot bypass the forbidden-char
+            // check via this entry point.
+            if key == "span"
+                && let Expr::Atom(Atom::Str(s), value_span) = &value
+                && let Some((idx, b)) = s
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, b)| is_forbidden_span_byte(*b))
+            {
+                return Err(ParseError::ForbiddenSpanChar {
+                    value_offset: value_span.offset,
+                    byte_in_value: idx,
+                    code_point: u32::from(b),
+                    repr: forbidden_byte_repr(b),
+                });
+            }
+
             entries.push((key, value));
         }
 
@@ -278,6 +348,30 @@ impl<'a> Parser<'a> {
 
             // Value: any expression
             let value = self.parse_expr()?;
+
+            // Span-charset enforcement (spec §1.1.1): when the key is
+            // `span` and the value is a string atom, reject any forbidden
+            // ASCII control character. The constraint exists so backend
+            // emitters can interpolate spans into `//` line comments
+            // without a forbidden byte (notably `\n`) terminating the
+            // comment and turning the rest of the value into live code.
+            if key == "span"
+                && let Expr::Atom(Atom::Str(s), value_span) = &value
+                && let Some((idx, b)) = s
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, b)| is_forbidden_span_byte(*b))
+            {
+                return Err(ParseError::ForbiddenSpanChar {
+                    value_offset: value_span.offset,
+                    byte_in_value: idx,
+                    code_point: u32::from(b),
+                    repr: forbidden_byte_repr(b),
+                });
+            }
+
             entries.push((key, value));
 
             // Optional comma between entries

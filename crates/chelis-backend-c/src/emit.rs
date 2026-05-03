@@ -366,7 +366,8 @@ impl CEmitter {
             return;
         }
         if let Some(canonical) = node.span_id.as_deref() {
-            self.line(&format!("// span: {canonical}"));
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            self.line(&format!("// span: {safe}"));
         }
         let mut merged: Vec<&str> = node
             .merged_spans
@@ -377,7 +378,8 @@ impl CEmitter {
         merged.sort();
         merged.dedup();
         for span in merged {
-            self.line(&format!("// span: {span}"));
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            self.line(&format!("// span: {safe}"));
         }
     }
 

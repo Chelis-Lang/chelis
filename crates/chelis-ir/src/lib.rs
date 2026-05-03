@@ -16,6 +16,7 @@ pub mod lower;
 pub mod optimize;
 pub mod pipeline;
 pub mod span_merge;
+pub mod span_sanitize;
 pub mod tier2;
 pub mod verify;
 pub mod vmap;
