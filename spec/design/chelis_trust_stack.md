@@ -213,6 +213,28 @@ For the strongest guarantee, the customer writes the properties themselves. They
 
 ---
 
+## Trust Stack Implications for Editing Tools
+
+The trust stack guarantees apply equally to human-authored and agent-authored
+code. A function written by an AI agent and a function written by a quant
+both go through the same type checker, the same effect inference, the same
+property checks. The compiler doesn't distinguish authorship.
+
+This has implications for editing tools: a structural editing primitive that
+modifies Chelis code (changes a function body, renames a symbol, changes
+a signature) preserves the trust stack invariants automatically. The edit
+either produces type-correct, effect-correct, property-satisfying code or
+the compiler rejects it. Agents can iterate on edits with the trust stack
+as the validation layer; the trust stack doesn't need separate "is this
+edit acceptable" tooling because the compiler already answers that question.
+
+This is one rationale for the exploratory Agent Editing Surface direction
+(see `spec/design/chelis_agent_editing_surface.md`). Structural editing
+tools are the natural integration point for agent-driven code modification
+because they ride the trust stack as their validation surface.
+
+---
+
 ## Limits of the current trust stack
 
 This section keeps future readers from claiming more than is built. Each bullet records a property that is sometimes ascribed to the trust stack but is not actually shipped today.

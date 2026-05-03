@@ -46,6 +46,13 @@ The meta map carries compiler-relevant annotations. An agent MAY include metadat
 | `doc` | string | Documentation |
 | `span_*` | reserved | Future richer span fields (see §1.1.1) |
 
+**Metadata propagation through transformations.** Metadata fields are
+preserved by all spec-defined transformations and round-trip through the
+canonical form (§6). Cross-tool provenance (the `span` field in
+particular) is intended to survive the full compile pipeline once the
+in-flight span survival work lands; see
+`spec/design/chelis_span_survival.md` for the phased S0–S5 plan.
+
 #### 1.1.1 External-source spans (`span`, `span_*` namespace)
 
 The `span` metadata key carries a string identifier issued by an external
@@ -111,6 +118,20 @@ The universal 3-tuple means every node has identical shape. An agent constructin
 - Clojure reader metadata (`^{} expr`): prefix position requires lookahead during generation.
 - Explicit meta wrapper (`(meta {} expr)`): redundant nesting.
 - No metadata in `.dp` text: forces annotation into `.chb` only, making Deep text useless for constrained generation.
+
+### 1.3 Deep as an Editing Target
+
+The same properties that make Deep a stable generation target make it a
+stable target for *structural edits* by tooling. A small closed
+vocabulary makes pattern-match operations (find every `app` whose head
+is `var foo`) unambiguous. The 3-tuple uniformity means an editor never
+has to special-case where to attach metadata after a rewrite. Canonical
+form (§6) means two structurally identical programs serialize identically,
+so diffs reflect semantic change rather than incidental formatting drift.
+
+These properties are what the exploratory Agent Editing Surface direction
+(`spec/design/chelis_agent_editing_surface.md`) builds on. This spec
+documents the substrate; that doc covers the tooling layer.
 
 ---
 

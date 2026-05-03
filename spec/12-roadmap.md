@@ -77,3 +77,21 @@ depends on Phase B. Phase D is post-launch.
 Cross-references: `spec/design/effect_taxonomy_expansion.md` for the
 detailed design of Phases B and C; `spec/design/reef_distribution.md` for
 Phase A and the post-launch Phase D registry-server endgame.
+
+## Exploratory: Agent Editing Surface
+
+**Status:** Exploratory. One bounded proof-of-concept tool, then evaluate.
+Detailed design in `spec/design/chelis_agent_editing_surface.md`.
+
+The agent-first design of Chelis (small Deep vocabulary, fast compiler with
+fitness-oracle output, dual Surf/Deep syntax) suggests structural editing
+primitives could be more reliable than text-based file editing for AI
+coding agents. This direction explores whether that hypothesis holds
+empirically with one bounded proof-of-concept tool
+(`chelis_replace_body`), followed by a comparative benchmark. The full
+toolset (`chelis_define`, `chelis_change_signature`, `chelis_rename`,
+transactions) is gated on those two items succeeding.
+
+Independent of the language phases and of the trust-stack/reef tracks
+above. Rides on top of shipped Tide MCP infrastructure and the in-flight
+span survival work.

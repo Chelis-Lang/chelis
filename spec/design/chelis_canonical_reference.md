@@ -102,6 +102,14 @@ Macros are a human authoring convenience that compiles away before LLMs touch th
 Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
 public Deep and are rejected by strict Deep validation.
 
+The same properties that make Deep a stable generation target for agents
+also make it a stable editing target. The 60-tag closed vocabulary, the
+3-tuple uniformity, and the metadata-map slot for provenance mean
+structural edits (replace a function body, rename a symbol, change a
+signature) are well-defined operations rather than character-level
+gambles. This is the architectural foundation for the exploratory Agent
+Editing Surface direction (`spec/design/chelis_agent_editing_surface.md`).
+
 ### Serialization
 
 Chelis currently has three named artifact forms:
@@ -683,6 +691,17 @@ shapes, dtypes, and dimension constraints; it generates random valid inputs, run
 function, and verifies output shapes, determinism (for pure functions), and gradient
 correctness (for differentiable functions). No test code written by anyone — the type
 signature is the test specification.
+
+### Editing Surface (Exploratory)
+
+Tracks 1 and 2 above cover code *generation*. A separate exploratory
+direction covers structural *editing* — tooling that modifies existing
+Chelis source through Deep-AST operations rather than text patches. One
+bounded proof-of-concept tool (`chelis_replace_body`) is the gate;
+expansion to the full toolset is conditional on that PoC plus a
+comparative benchmark. Detailed design in
+`spec/design/chelis_agent_editing_surface.md`. Status: exploratory, no
+tools shipped.
 
 ---
 
