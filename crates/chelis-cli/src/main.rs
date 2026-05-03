@@ -187,6 +187,14 @@ enum Command {
         file: PathBuf,
     },
     /// Compile to C (default) or HIP GPU code
+    ///
+    /// Auto-detects the input language from the file extension: `.dp`
+    /// inputs are routed through the Deep ingestion path; everything else
+    /// (`.ch`, no-extension, etc.) goes through the Surf path. Pass
+    /// `--deep` to force the Deep path on a non-`.dp` file. There is no
+    /// `--no-deep` flag — to force a `.dp` file through Surf, rename it
+    /// or pipe through `chelis surf` first. Conflict resolution rules
+    /// are documented in `spec/design/chelis_span_survival.md` §2.5.
     Build {
         file: PathBuf,
         #[arg(long, short)]
@@ -194,6 +202,10 @@ enum Command {
         /// Backend target: "c" (default), "hip" (AMD GPU), or "metal" (Apple GPU)
         #[arg(long, default_value = "c")]
         target: String,
+        /// Force the Deep ingestion path. Auto-on for `.dp` inputs;
+        /// override for non-`.dp` inputs that happen to be Deep source.
+        #[arg(long, action = ArgAction::SetTrue)]
+        deep: bool,
     },
     /// Interactive REPL, HTTP API, and MCP server
     Tide {
@@ -326,7 +338,8 @@ fn main() {
             file,
             output,
             target,
-        }) => cmd_build(&file, output.as_deref(), &target),
+            deep,
+        }) => cmd_build_dispatch(&file, output.as_deref(), &target, deep),
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
@@ -808,6 +821,60 @@ fn reject_with_seed_for_build_target(
     Ok(())
 }
 
+/// Dispatch between the Surf and Deep ingestion paths per the rules in
+/// `spec/design/chelis_span_survival.md` §2.5.
+///
+/// | Invocation               | Path |
+/// |--------------------------|------|
+/// | `chelis build foo.dp`    | Deep (auto-detect) |
+/// | `chelis build foo.dp --deep` | Deep (flag agrees with extension) |
+/// | `chelis build foo.ch --deep` | Deep (flag overrides) |
+/// | `chelis build foo.ch`    | Surf (today's behavior) |
+///
+/// `--no-deep` is intentionally absent. To force a `.dp` file through
+/// Surf, rename it or pipe through `chelis surf`.
+fn cmd_build_dispatch(
+    file: &std::path::Path,
+    output: Option<&std::path::Path>,
+    target: &str,
+    deep_flag: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let extension_is_dp = file
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dp"));
+    let route_through_deep = deep_flag || extension_is_dp;
+    if route_through_deep {
+        if deep_flag && !extension_is_dp {
+            // Override case: warn if the file is clearly Surf source. The
+            // strict-parse step below produces the authoritative error if
+            // the contents really are not Deep; this is just a friendly
+            // heads-up so a user who fat-fingered `--deep` on a `.ch` file
+            // doesn't get a confusing parse error first.
+            let preview = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|s| s.lines().take(3).collect::<Vec<_>>().join("\n").into());
+            if let Some(text) = preview
+                && (text.starts_with("import ")
+                    || text.starts_with("module ")
+                    || text.starts_with("def ")
+                    || text.starts_with("export "))
+            {
+                eprintln!(
+                    "warning: `--deep` was passed but {} looks like Surf source \
+                     (starts with `import`/`module`/`def`/`export`). Routing through \
+                     the Deep ingestion path anyway; rename to `.dp` or drop `--deep` \
+                     to silence this warning.",
+                    file.display()
+                );
+            }
+        }
+        cmd_build_deep(file, output, target)
+    } else {
+        cmd_build(file, output, target)
+    }
+}
+
 fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
@@ -1000,6 +1067,208 @@ fn cmd_build(
                 // Host-only programs fall through to the C backend, exactly
                 // like the HIP path. The metal path doesn't have a separate
                 // host wrapper today; reuse cmd_build_hip_host for parity.
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_hip_host(result, func_name, output)
+            } else {
+                let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
+                    entry_dag
+                } else if !dag.roots().is_empty() {
+                    dag.clone()
+                } else {
+                    chelis_ir::lower::lower_program(&checked)
+                };
+                metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
+                reject_unsupported_effect_ops(&metal_dag, "metal")?;
+                reject_unsupported_metal_ops(&metal_dag)?;
+                let fused = chelis_ir::fuse::fuse(&metal_dag);
+                cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
+            }
+        }
+        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
+    }
+}
+
+/// Deep-source ingestion path for `chelis build`.
+///
+/// Mirrors the shape of `cmd_build` but reads Deep s-expression text
+/// directly via `chelis_deep::parser::parse_str_strict` and skips the
+/// Surf desugar / macro-expand phase (Deep is canonical post-expansion
+/// per `spec/03-deep-syntax.md` §2). All metadata — including span IDs
+/// — flows through the existing `chelis_types::check_phase0e_program`
+/// → `chelis_ir::lower::lower_program` → optimization → backend
+/// codegen path; this function is plumbing, not new semantics.
+///
+/// The S5 oracle: span-attributed Deep produces span-annotated
+/// C/HIP/Metal output (the per-op `// span: <id>` comments emitted by
+/// every backend in S4). Span-free Deep produces output equivalent to
+/// the Surf path for the same logical program, modulo absent spans.
+fn cmd_build_deep(
+    file: &std::path::Path,
+    output: Option<&std::path::Path>,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source = fs::read_to_string(file)?;
+    let deep_exprs = chelis_deep::parser::parse_str_strict(&source)
+        .map_err(|err| format!("Deep parse error: {err}"))?;
+
+    // Deep ingestion has no separate "entry decls" concept — the whole
+    // .dp file is the program. Treat every top-level def as an entry
+    // candidate; the existing pruner (`prune_build_program_to_reachable_defs`)
+    // will trim unreachable defs.
+    let entry_deep_exprs = deep_exprs.clone();
+    let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
+    let preserve_host_library_surface =
+        if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
+            let full_checked = checked_program_with_effects(&deep_exprs)
+                .map_err(|e| format!("Check errors: {e}"))?;
+            chelis_ir::host::lower_compiled_program(&full_checked)
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+    let final_deep_exprs = if preserve_host_library_surface {
+        deep_exprs.clone()
+    } else {
+        pruned_deep_exprs
+    };
+    let symbolic_dims = collect_symbolic_dims_from_deep(&final_deep_exprs);
+    let checked = checked_program_with_effects(&final_deep_exprs)
+        .map_err(|e| format!("Check errors: {e}"))?;
+    chelis_effects::validate_build_target(&checked, target)
+        .map_err(|errors| format_effect_errors(&errors))?;
+    let mut compiled_program = chelis_ir::host::lower_compiled_program(&checked);
+    let mut dag = chelis_ir::lower::lower_program(&checked);
+    let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
+    let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
+    let entry_display_root_names = root_names_from_exprs(&entry_deep_exprs, checked.type_env())
+        .into_iter()
+        .map(|name| {
+            name.rsplit_once("__")
+                .map(|(_, tail)| tail.to_string())
+                .unwrap_or(name)
+        })
+        .collect::<Vec<_>>();
+    if let Some(host_program) = compiled_program.host.as_mut() {
+        host_program.globals = host_program
+            .globals
+            .iter()
+            .map(|binding| {
+                let mut binding = binding.clone();
+                binding.display_name = match binding.ty {
+                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
+                        || {
+                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                                host_display_tuple_root_prefix(
+                                    &binding.name,
+                                    &entry_display_root_names,
+                                )
+                            } else {
+                                None
+                            }
+                        },
+                    ),
+                };
+                binding
+            })
+            .collect();
+    }
+    let selected = all_root_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            if entry_root_names.iter().any(|entry| entry == name) {
+                dag.roots().get(index).copied()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    dag.set_roots(selected);
+    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let func_name = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("chelis_main");
+
+    match target {
+        "c" => {
+            if let Some(host_program) = compiled_program.host.as_ref()
+                && (chelis_ir::host::host_program_requires_host_backend(host_program)
+                    || dag.roots().is_empty()
+                    || !host_program.functions.is_empty())
+            {
+                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                if !unresolved.is_empty() {
+                    return Err(format!(
+                        "`chelis build --deep --target c` can't lower these defs — \
+                         they apply/bind `grad` (or `vmap`) in a position the host \
+                         lane can't resolve. Affected defs: {}",
+                        unresolved.join(", ")
+                    )
+                    .into());
+                }
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_c_result(result, func_name, output, &symbolic_dims)
+            } else {
+                reject_unsupported_effect_ops(&dag, "c")?;
+                reject_unsupported_c_precisions(&dag)?;
+                let fused = chelis_ir::fuse::fuse(&dag);
+                cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
+            }
+        }
+        "hip" => {
+            let host_requires_host_backend = compiled_program
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+            let preferred_entry_dag = compiled_program
+                .host
+                .as_ref()
+                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+            if dag.roots().is_empty()
+                && preferred_entry_dag.is_none()
+                && host_requires_host_backend
+                && let Some(host_program) = compiled_program.host.as_ref()
+            {
+                let result = chelis_backend_c::codegen_host_program(host_program, func_name);
+                cmd_build_hip_host(result, func_name, output)
+            } else {
+                let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
+                    entry_dag
+                } else if !dag.roots().is_empty() {
+                    dag.clone()
+                } else {
+                    chelis_ir::lower::lower_program(&checked)
+                };
+                hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+                reject_unsupported_effect_ops(&hip_dag, "hip")?;
+                reject_unsupported_hip_ops(&hip_dag)?;
+                let fused = chelis_ir::fuse::fuse(&hip_dag);
+                cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
+            }
+        }
+        "metal" => {
+            let host_requires_host_backend = compiled_program
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false);
+            let preferred_entry_dag = compiled_program
+                .host
+                .as_ref()
+                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+            if dag.roots().is_empty()
+                && preferred_entry_dag.is_none()
+                && host_requires_host_backend
+                && let Some(host_program) = compiled_program.host.as_ref()
+            {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name);
                 cmd_build_hip_host(result, func_name, output)
             } else {
