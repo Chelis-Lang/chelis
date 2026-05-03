@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """macOS smoke test for `chelis build --target metal`.
 
-Drives a fixed-shape elementwise program through the Metal backend, then
-runs `clang++ -fobjc-arc -framework Metal -framework Foundation` against
-the emitted `.mm` to prove that:
+Drives two fixed-shape elementwise programs through the Metal backend
+— a Surf source and a span-attributed Deep source — then runs
+`clang++ -fobjc-arc -framework Metal -framework Foundation` against
+each emitted `.mm` to prove that:
 
   1. `chelis build --target metal` produces a `.mm`, a header, and the
-     Metal runtime header
-  2. Apple's clang++ accepts the emitted Objective-C++ + embedded MSL
-     kernel strings
-  3. The Metal framework symbols resolve at link time
+     Metal runtime header.
+  2. `chelis build --target metal --deep` accepts span-attributed
+     Deep input (S5 ingestion path) and the emitted `.mm` carries
+     `// span:` comments derived from the input metadata.
+  3. Apple's clang++ accepts the emitted Objective-C++ + embedded MSL
+     kernel strings on both code paths.
+  4. The Metal framework symbols resolve at link time.
 
 The smoke is **intentionally compile-and-link only, no execution**.
 
@@ -30,23 +34,202 @@ The smoke is **intentionally compile-and-link only, no execution**.
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 
-PROGRAM = """\
+SURF_PROGRAM = """\
 def simple_add(a: tensor[8, f32], b: tensor[8, f32]) -> tensor[8, f32] = add(a, b)
 """
+
+# Span-attributed Deep equivalent of the Surf program. Span IDs use
+# distinct opaque strings so the post-build grep can lock the audit
+# chain. Mirrors the shape of `simple_add(a, b) = add(a, b)` but
+# routed through the Deep parser via `--deep`.
+DEEP_PROGRAM = """\
+(def {span: "wrap_simple_add"}
+  simple_add
+  (fn {}
+    (params {}
+      (a {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))})
+      (b {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+    (app {span: "src.add"}
+      (var {} add)
+      (var {span: "src.a"} a)
+      (var {span: "src.b"} b))))
+"""
+
+# Minimum number of `// span:` lines we expect from the span-attributed
+# Deep input. The current S4 emit path produces both source spans
+# (`src.*`) AND optimization-pass synthesized markers
+# (`__synthesized_tier2__` etc.) in non-trivial DAG shapes. We don't
+# pin the exact count because optimizer changes can legitimately move
+# it; we just lock that the count is non-zero.
+MIN_DEEP_SPAN_COUNT = 1
 
 
 def run(cmd, **kwargs):
     """Run `cmd`, echoing it, and check exit status."""
     print("+ " + " ".join(str(c) for c in cmd))
     return subprocess.run(cmd, check=True, **kwargs)
+
+
+def smoke_one(
+    chelis: Path,
+    tmpdir: Path,
+    *,
+    label: str,
+    src_name: str,
+    program: str,
+    extra_args: list[str],
+    expect_spans: bool,
+) -> int:
+    """Run one Metal smoke iteration. Returns 0 on success, non-zero
+    on the first failure (mirroring the original single-case shape so
+    callers can short-circuit on the first failure)."""
+    src = tmpdir / src_name
+    out_dir = tmpdir / f"metal-output-{label}"
+    out_dir.mkdir()
+    src.write_text(program)
+
+    run(
+        [
+            str(chelis),
+            "build",
+            str(src),
+            *extra_args,
+            "--target",
+            "metal",
+            "--output",
+            str(out_dir),
+        ],
+        timeout=60,
+    )
+
+    mm_path = out_dir / "simple_add_metal.mm"
+    h_path = out_dir / "simple_add_metal.h"
+    runtime_h = out_dir / "chelis_metal_runtime.h"
+    for required in (mm_path, h_path, runtime_h, out_dir / "chelis_runtime.h"):
+        if not required.exists():
+            print(
+                f"smoke_macos_metal[{label}]: expected output {required} missing",
+                file=sys.stderr,
+            )
+            return 3
+
+    mm_text = mm_path.read_text()
+    if "M1 fallback stub" in mm_text:
+        print(
+            f"smoke_macos_metal[{label}]: emitted .mm is the M1 stub (M2 emission "
+            "did not handle this DAG)",
+            file=sys.stderr,
+        )
+        return 4
+    for marker in ("kernel void", "[[thread_position_in_grid]]", "chelis_metal_launch"):
+        if marker not in mm_text:
+            print(
+                f"smoke_macos_metal[{label}]: emitted .mm missing required MSL marker: {marker!r}",
+                file=sys.stderr,
+            )
+            return 4
+    if "chelis_metal_device_to_host(outputs[" not in mm_text:
+        print(
+            f"smoke_macos_metal[{label}]: emitted .mm does not write any output via "
+            "chelis_metal_device_to_host(outputs[...]); function returns "
+            "with uninitialized outputs",
+            file=sys.stderr,
+        )
+        return 4
+
+    if expect_spans:
+        # S5.3 audit-chain assertion: span-attributed Deep input must
+        # produce `// span:` lines in the emitted .mm. Closes the
+        # macOS-side audit-chain loop for the Metal backend.
+        span_count = mm_text.count("// span:")
+        if span_count < MIN_DEEP_SPAN_COUNT:
+            print(
+                f"smoke_macos_metal[{label}]: span-attributed Deep input "
+                f"produced {span_count} `// span:` lines in emitted .mm "
+                f"(expected at least {MIN_DEEP_SPAN_COUNT}). The audit "
+                "chain on macOS Metal is broken or codegen has regressed.",
+                file=sys.stderr,
+            )
+            return 6
+
+    driver = tmpdir / f"driver_{label}.mm"
+    driver.write_text(
+        """\
+#import <Foundation/Foundation.h>
+#include "chelis_runtime.h"
+#include <stdio.h>
+
+extern "C" void simple_add(chelis_tensor **inputs, int n_in,
+                           chelis_tensor **outputs, int n_out);
+
+int main(void) {
+    // Compile-and-link smoke: don't actually call simple_add (which
+    // would need a real Metal device). Just hold a function pointer to
+    // force the linker to keep the symbol live. See the file-level
+    // comment for the rationale and the contract for ever loosening it.
+    void (*fp)(chelis_tensor**, int, chelis_tensor**, int) = &simple_add;
+    if (fp == NULL) return 1;
+    printf("simple_add resolved at %p\\n", (void *)fp);
+    return 0;
+}
+"""
+    )
+
+    bin_path = tmpdir / f"metal_smoke_bin_{label}"
+    run(
+        [
+            "xcrun",
+            "-sdk",
+            "macosx",
+            "clang++",
+            "-std=c++17",
+            "-fobjc-arc",
+            "-O2",
+            str(mm_path),
+            str(driver),
+            f"-I{out_dir}",
+            f"-L{out_dir}",
+            "-lchelis_runtime",
+            "-framework",
+            "Metal",
+            "-framework",
+            "Foundation",
+            "-o",
+            str(bin_path),
+        ],
+        timeout=120,
+    )
+
+    nm = subprocess.run(
+        ["nm", str(bin_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if not any(
+        tok in nm.stdout
+        for tok in ("MTLCreateSystemDefaultDevice", "MTLDevice", "_OBJC_CLASS_$_NSString")
+    ):
+        print(
+            f"smoke_macos_metal[{label}]: nm output does not reference any Metal "
+            "symbol; compile-and-link likely fell through to a no-op",
+            file=sys.stderr,
+        )
+        print(nm.stdout, file=sys.stderr)
+        return 5
+
+    print(
+        f"smoke_macos_metal[{label}]: compile + link succeeded; Metal symbols resolved"
+        + (" (with span comments)" if expect_spans else "")
+    )
+    return 0
 
 
 def main() -> int:
@@ -72,144 +255,34 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="chelis_metal_smoke_") as tmp:
         tmpdir = Path(tmp)
-        src = tmpdir / "simple_add.ch"
-        out_dir = tmpdir / "metal-output"
-        out_dir.mkdir()
-        src.write_text(PROGRAM)
 
-        # 1) chelis build --target metal
-        run(
-            [
-                str(chelis),
-                "build",
-                str(src),
-                "--target",
-                "metal",
-                "--output",
-                str(out_dir),
-            ],
-            timeout=60,
+        # Surf path (existing M-phase smoke).
+        rc = smoke_one(
+            chelis,
+            tmpdir,
+            label="surf",
+            src_name="simple_add.ch",
+            program=SURF_PROGRAM,
+            extra_args=[],
+            expect_spans=False,
         )
+        if rc != 0:
+            return rc
 
-        mm_path = out_dir / "simple_add_metal.mm"
-        h_path = out_dir / "simple_add_metal.h"
-        runtime_h = out_dir / "chelis_metal_runtime.h"
-        for required in (mm_path, h_path, runtime_h, out_dir / "chelis_runtime.h"):
-            if not required.exists():
-                print(
-                    f"smoke_macos_metal: expected output {required} missing",
-                    file=sys.stderr,
-                )
-                return 3
-
-        # Sanity-check the emitted .mm shape — fail closed if codegen
-        # silently fell through to the C backend or to the M1 stub.
-        mm_text = mm_path.read_text()
-        if "M1 fallback stub" in mm_text:
-            print(
-                "smoke_macos_metal: emitted .mm is the M1 stub (M2 emission "
-                "did not handle this DAG)",
-                file=sys.stderr,
-            )
-            return 4
-        for marker in ("kernel void", "[[thread_position_in_grid]]", "chelis_metal_launch"):
-            if marker not in mm_text:
-                print(
-                    f"smoke_macos_metal: emitted .mm missing required MSL marker: {marker!r}",
-                    file=sys.stderr,
-                )
-                return 4
-        # ABI invariant: the function MUST materialize at least one output
-        # back to the `outputs` array, otherwise it computes a result into
-        # a device buffer and returns without writing anything the caller
-        # can see. This catches the red-team M0-M4 defect where the CLI
-        # lowering path produced root-without-Store DAGs and the emitter
-        # silently skipped the writeback.
-        if "chelis_metal_device_to_host(outputs[" not in mm_text:
-            print(
-                "smoke_macos_metal: emitted .mm does not write any output via "
-                "chelis_metal_device_to_host(outputs[...]); function returns "
-                "with uninitialized outputs",
-                file=sys.stderr,
-            )
-            return 4
-
-        # 2) Build a tiny driver that calls the emitted entrypoint, link
-        # everything together with -framework Metal/Foundation. We don't
-        # call MTLCreateSystemDefaultDevice() so we don't need a real
-        # Metal device available on the CI runner.
-        driver = tmpdir / "driver.mm"
-        driver.write_text(
-            """\
-#import <Foundation/Foundation.h>
-#include "chelis_runtime.h"
-#include <stdio.h>
-
-extern "C" void simple_add(chelis_tensor **inputs, int n_in,
-                           chelis_tensor **outputs, int n_out);
-
-int main(void) {
-    // Compile-and-link smoke: don't actually call simple_add (which
-    // would need a real Metal device). Just hold a function pointer to
-    // force the linker to keep the symbol live. See the file-level
-    // comment for the rationale and the contract for ever loosening it.
-    void (*fp)(chelis_tensor**, int, chelis_tensor**, int) = &simple_add;
-    if (fp == NULL) return 1;
-    printf("simple_add resolved at %p\\n", (void *)fp);
-    return 0;
-}
-"""
+        # Deep path (S5.3): span-attributed Deep input through `--deep`.
+        rc = smoke_one(
+            chelis,
+            tmpdir,
+            label="deep",
+            src_name="simple_add.dp",
+            program=DEEP_PROGRAM,
+            extra_args=["--deep"],
+            expect_spans=True,
         )
+        if rc != 0:
+            return rc
 
-        bin_path = tmpdir / "metal_smoke_bin"
-        run(
-            [
-                "xcrun",
-                "-sdk",
-                "macosx",
-                "clang++",
-                "-std=c++17",
-                "-fobjc-arc",
-                "-O2",
-                str(mm_path),
-                str(driver),
-                f"-I{out_dir}",
-                f"-L{out_dir}",
-                "-lchelis_runtime",
-                "-framework",
-                "Metal",
-                "-framework",
-                "Foundation",
-                "-o",
-                str(bin_path),
-            ],
-            timeout=120,
-        )
-
-        # 3) Confirm Metal symbols are actually referenced in the linked
-        # binary — proves the .mm produced real Metal calls, not a no-op
-        # that happened to link.
-        nm = subprocess.run(
-            ["nm", str(bin_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if not any(
-            tok in nm.stdout
-            for tok in ("MTLCreateSystemDefaultDevice", "MTLDevice", "_OBJC_CLASS_$_NSString")
-        ):
-            print(
-                "smoke_macos_metal: nm output does not reference any Metal symbol; "
-                "compile-and-link likely fell through to a no-op",
-                file=sys.stderr,
-            )
-            print(nm.stdout, file=sys.stderr)
-            return 5
-
-        print("smoke_macos_metal: compile + link succeeded; Metal symbols resolved")
-        return 0
+    return 0
 
 
 if __name__ == "__main__":
