@@ -1,6 +1,8 @@
 # host-emit-hashmap-iteration-nondeterminism: input-validation block ordering varies across builds
 
-**Status:** open; not blocking the audit chain semantically
+**Status:** RESOLVED 2026-05-01 at commit `17a28b9`. Actual sites were in `chelis-backend-c::emit::emit_input_shape_preamble` (not `host_emit` as this filing originally said) plus systematic-bug-search siblings in `chelis-backend-hip::emit::emit_input_shape_preamble` and `emit_input_shape_preamble_device`. Fix: collect keys into Vec, sort lex, iterate. Regression tests added at `crates/chelis-backend-c/tests/codegen_determinism.rs`. Original filing kept below for historical reference.
+
+**Original status:** open; not blocking the audit chain semantically
 **Filed:** 2026-05-01
 **Owning phase:** chelis-core (`chelis-backend-c::host_emit`)
 **Discovered by:** S5.1+S5.2 implementation (build_deep_ingestion test wiring)
