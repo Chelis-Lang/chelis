@@ -100,9 +100,7 @@ mod tests {
     fn cleanup_skips_borrowed_loads() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,

@@ -12,6 +12,7 @@ pub mod eval;
 pub mod fuse;
 pub mod grad;
 pub mod host;
+pub mod load_store_name;
 pub mod lower;
 pub mod optimize;
 pub mod pipeline;
@@ -23,6 +24,7 @@ pub mod vmap;
 
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use host::CompiledProgram;
+pub use load_store_name::{LoadStoreName, LoadStoreNameError};
 pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
     lower_subexpr_program, tensor_type_from_deep,

@@ -22,7 +22,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         if let RiscOp::Load { name } = &node.op {
-            if let Some(prev_ty) = load_types.get(name) {
+            if let Some(prev_ty) = load_types.get(name.as_str()) {
                 if prev_ty != &node.output_type {
                     errors.push(format!(
                         "load '{}' has inconsistent tensor types: {:?} vs {:?}",
@@ -30,7 +30,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             } else {
-                load_types.insert(name.clone(), node.output_type.clone());
+                load_types.insert(name.as_str().to_string(), node.output_type.clone());
             }
         }
     }
@@ -1009,9 +1009,7 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
-            RiscOp::Store {
-                name: "out".to_string(),
-            },
+            RiscOp::Store { name: "out".into() },
             vec![x],
             scalar_f32(),
             None,
@@ -1023,9 +1021,7 @@ mod tests {
     fn store_wrong_arity_zero_inputs() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Store {
-                name: "out".to_string(),
-            },
+            RiscOp::Store { name: "out".into() },
             vec![],
             scalar_f32(),
             None,
@@ -1041,9 +1037,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
         dag.add_node(
-            RiscOp::Store {
-                name: "out".to_string(),
-            },
+            RiscOp::Store { name: "out".into() },
             vec![a, b],
             scalar_f32(),
             None,
@@ -1076,9 +1070,7 @@ mod tests {
     fn load_name_type_mismatch_is_error() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
                 dims: vec![DimInfo::Lit(2)],
@@ -1087,9 +1079,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
                 dims: vec![DimInfo::Lit(3)],

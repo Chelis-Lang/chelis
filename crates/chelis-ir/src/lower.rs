@@ -1660,7 +1660,9 @@ impl LowerCtx {
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type);
             let load = subctx.dag.add_node(
-                RiscOp::Load { name: name.clone() },
+                RiscOp::Load {
+                    name: name.as_str().into(),
+                },
                 vec![],
                 ty,
                 subctx.current_span_id.clone(),
@@ -1940,7 +1942,7 @@ impl LowerCtx {
                     .unwrap_or_else(Self::default_type);
                 let stored = self.dag.add_node(
                     RiscOp::Store {
-                        name: prefix.to_string(),
+                        name: prefix.into(),
                     },
                     vec![*id],
                     output_type,
@@ -1972,7 +1974,9 @@ impl LowerCtx {
                     cached
                 } else {
                     LoweredValue::Node(self.dag.add_node(
-                        RiscOp::Load { name: name.clone() },
+                        RiscOp::Load {
+                            name: name.as_str().into(),
+                        },
                         vec![],
                         Self::default_type(),
                         self.current_span_id.clone(),
@@ -2215,7 +2219,9 @@ impl LowerCtx {
                 explicit_ty
             };
             return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Load { name: name.clone() },
+                RiscOp::Load {
+                    name: name.as_str().into(),
+                },
                 vec![],
                 ty,
                 self.current_span_id.clone(),
@@ -2462,7 +2468,9 @@ impl LowerCtx {
             .enumerate()
         {
             let load = subctx.dag.add_node(
-                RiscOp::Load { name: name.clone() },
+                RiscOp::Load {
+                    name: name.as_str().into(),
+                },
                 vec![],
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
@@ -2648,7 +2656,9 @@ impl LowerCtx {
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
             let load = subctx.dag.add_node(
-                RiscOp::Load { name: name.clone() },
+                RiscOp::Load {
+                    name: name.as_str().into(),
+                },
                 vec![],
                 param_expr,
                 subctx.current_span_id.clone(),
@@ -2798,7 +2808,9 @@ impl LowerCtx {
             .enumerate()
         {
             let load = subctx.dag.add_node(
-                RiscOp::Load { name: name.clone() },
+                RiscOp::Load {
+                    name: name.as_str().into(),
+                },
                 vec![],
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
@@ -2919,7 +2931,7 @@ impl LowerCtx {
         for node in dag.nodes() {
             let new_id = match &node.op {
                 RiscOp::Load { name } => {
-                    if let Some(existing) = arg_map.get(name) {
+                    if let Some(existing) = arg_map.get(name.as_str()) {
                         *existing
                     } else {
                         // Preserve the source DAG node's span_id verbatim
@@ -3565,7 +3577,7 @@ impl LowerCtx {
                 }
                 self.dag.add_node(
                     RiscOp::Load {
-                        name: func_name.to_string(),
+                        name: func_name.into(),
                     },
                     vec![],
                     Self::default_type(),
@@ -3821,9 +3833,7 @@ impl LowerCtx {
             .map(Self::type_from_type_expr)
             .unwrap_or_else(Self::default_type);
         LoweredValue::Node(self.dag.add_node(
-            RiscOp::Load {
-                name: name.to_string(),
-            },
+            RiscOp::Load { name: name.into() },
             vec![],
             ty,
             self.current_span_id.clone(),
@@ -4375,7 +4385,7 @@ mod tests {
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
             RiscOp::Load {
-                name: "weights".to_string()
+                name: "weights".into()
             }
         );
         assert!(verify::verify(&dag).is_empty());
@@ -5501,7 +5511,7 @@ mod regression_tests {
         assert!(
             !dag.nodes()
                 .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.contains("__unrepresentable"))),
+                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str().contains("__unrepresentable"))),
             "grad(named_fn)(x) must not leave an unresolved placeholder Load in the DAG"
         );
         assert!(verify::verify(&dag).is_empty());

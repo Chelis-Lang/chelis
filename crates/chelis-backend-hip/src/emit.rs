@@ -133,7 +133,7 @@ impl HipEmitter {
             }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
-                    .get(name)
+                    .get(name.as_str())
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
                 e.emit_span_comments(node);
                 e.emit_load(node.id.0, input_idx, &node.output_type);
@@ -156,7 +156,7 @@ impl HipEmitter {
             if is_load {
                 // Load is already a host tensor — look up the correct input slot by name
                 let load_name = match &dag.get(output.id).unwrap().op {
-                    RiscOp::Load { name } => name.clone(),
+                    RiscOp::Load { name } => name.as_str().to_string(),
                     _ => unreachable!(),
                 };
                 let input_idx = input_slots
@@ -269,7 +269,7 @@ impl HipEmitter {
             }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
-                    .get(name)
+                    .get(name.as_str())
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
                 self.emit_span_comments(node);
                 self.emit_load_device(node.id.0, input_idx, &node.output_type);
@@ -285,7 +285,7 @@ impl HipEmitter {
             let line = match &dag.get(output.id).unwrap().op {
                 RiscOp::Load { name } => {
                     let input_idx = input_slots
-                        .get(name)
+                        .get(name.as_str())
                         .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
                     format!("outputs[{slot}] = chelis_gpu_clone(inputs[{input_idx}]);")
                 }
@@ -384,7 +384,7 @@ impl HipEmitter {
         let mut seen = std::collections::HashMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
-                seen.entry(name.clone())
+                seen.entry(name.as_str().to_string())
                     .or_insert_with(|| node.output_type.clone());
             }
         }
@@ -853,7 +853,9 @@ impl HipEmitter {
             RiscOp::Cast { .. } => {
                 self.emit_unary_launch(id, "kernel_cast", &node.inputs, &node.output_type);
             }
-            RiscOp::Store { name } => self.emit_store(id, name, &node.inputs, &node.output_type),
+            RiscOp::Store { name } => {
+                self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
+            }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
                 self.emit_fused_launch(
@@ -1814,9 +1816,9 @@ impl HipEmitter {
         let mut seen = std::collections::HashSet::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op
-                && seen.insert(name.clone())
+                && seen.insert(name.as_str().to_string())
             {
-                labels.push(name.clone());
+                labels.push(name.as_str().to_string());
             }
         }
         labels
@@ -1839,7 +1841,7 @@ impl HipEmitter {
             {
                 specs.push(OutputSpec {
                     id: node.id,
-                    label: name.clone(),
+                    label: name.as_str().to_string(),
                     is_store: true,
                 });
             }

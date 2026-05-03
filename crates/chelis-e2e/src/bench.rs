@@ -934,14 +934,7 @@ fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
         .unwrap_or_else(|| panic!("missing node for store `{name}`"))
         .output_type
         .clone();
-    dag.add_node(
-        RiscOp::Store {
-            name: name.to_string(),
-        },
-        vec![input],
-        ty,
-        None,
-    );
+    dag.add_node(RiscOp::Store { name: name.into() }, vec![input], ty, None);
 }
 
 fn dag_without_roots(dag: &Dag) -> Dag {

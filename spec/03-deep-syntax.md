@@ -133,6 +133,34 @@ discouraged; emit code does NOT trim them. Producers SHOULD avoid
 incidental whitespace, but the spec treats span IDs as opaque strings and
 does not normalize them.
 
+#### 1.1.2 Trust-boundary pattern for producer-supplied strings
+
+Span values are validated at the **parse boundary** (§1.1.1: parser
+rejection plus emit-side `chelis_ir::span_sanitize` defense in depth).
+The parallel construction-side rule applies to producer-supplied strings
+that reach the IR through programmatic DAG construction without going
+through the parser:
+
+- `RiscOp::Load { name }` and `RiscOp::Store { name }` use the
+  validating newtype `chelis_ir::LoadStoreName`. Its constructor enforces
+  the Deep parser's identifier grammar (`is_ident_start` /
+  `is_ident_continue` from `crates/chelis-deep/src/lexer.rs`) extended
+  with `.` to admit the synthesized tuple-flatten names (`foo.0`,
+  `grads.1`, `lib_double.0`) that lowering legitimately produces. The
+  accepted alphabet is `[A-Za-z_][A-Za-z0-9_.-]*`; control bytes,
+  whitespace, `%`, `/`, and non-ASCII characters are rejected at
+  construction time. Empty strings are rejected.
+
+The architectural rule, applied uniformly: **every producer-supplied
+string that flows into generated source must be validated at its trust
+boundary** — at parse time when the value enters via Deep text, or at
+construction time when the value enters via direct IR construction.
+Future IR fields that admit producer-supplied strings (module names,
+type names, effect names, etc.) must follow the same pattern. The
+deferred per-emission-context defense-in-depth work (comment-context
+shared sanitizer, format-string-context sanitizer, comprehensive backend
+audit) is tracked at `spec/upstream-bugs/producer-string-sanitization.md`.
+
 **Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.

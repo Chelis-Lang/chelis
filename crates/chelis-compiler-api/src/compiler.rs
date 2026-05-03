@@ -479,7 +479,9 @@ fn compile_new_source_in_context(
     let mut forward_nodes_by_name = named_roots.clone();
     for node in composed_dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
-            forward_nodes_by_name.entry(name.clone()).or_insert(node.id);
+            forward_nodes_by_name
+                .entry(name.as_str().to_string())
+                .or_insert(node.id);
         }
     }
 
@@ -975,7 +977,9 @@ fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSourc
     let mut forward_nodes_by_name = named_roots.clone();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
-            forward_nodes_by_name.entry(name.clone()).or_insert(node.id);
+            forward_nodes_by_name
+                .entry(name.as_str().to_string())
+                .or_insert(node.id);
         }
     }
 
@@ -1275,7 +1279,7 @@ fn execution_input_specs(dag: &Dag, labels: &[String]) -> Vec<ExecutionTensorSpe
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
             load_types
-                .entry(name.clone())
+                .entry(name.as_str().to_string())
                 .or_insert_with(|| node.output_type.clone());
         }
     }
@@ -2030,8 +2034,12 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             strides: strides.clone(),
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
-        RiscOp::Load { name } => WireRiscOp::Load { name: name.clone() },
-        RiscOp::Store { name } => WireRiscOp::Store { name: name.clone() },
+        RiscOp::Load { name } => WireRiscOp::Load {
+            name: name.as_str().to_string(),
+        },
+        RiscOp::Store { name } => WireRiscOp::Store {
+            name: name.as_str().to_string(),
+        },
         RiscOp::Realize => WireRiscOp::Realize,
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
             new_precision: new_precision.name().to_string(),

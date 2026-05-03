@@ -450,10 +450,12 @@ dependencies = [
 name = "chelis-ir"
 version = "0.4.1"
 dependencies = [
+ "bincode",
  "chelis-deep",
  "chelis-effects",
  "chelis-types",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

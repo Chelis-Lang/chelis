@@ -140,7 +140,7 @@ impl CEmitter {
             }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
-                    .get(name)
+                    .get(name.as_str())
                     .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
                 e.emit_span_comments(node);
                 e.emit_load(node.id.0, input_idx);
@@ -339,7 +339,7 @@ impl CEmitter {
             }
             RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type),
-            RiscOp::Store { name } => self.emit_store(id, name, &node.inputs),
+            RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type);
             }
@@ -393,7 +393,7 @@ impl CEmitter {
             {
                 specs.push(OutputSpec {
                     id: node.id,
-                    label: name.clone(),
+                    label: name.as_str().to_string(),
                     is_store: true,
                 });
             }
@@ -432,9 +432,9 @@ impl CEmitter {
         let mut seen = std::collections::HashSet::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op
-                && seen.insert(name.clone())
+                && seen.insert(name.as_str().to_string())
             {
-                labels.push(name.clone());
+                labels.push(name.as_str().to_string());
             }
         }
         labels
@@ -479,14 +479,14 @@ impl CEmitter {
         let mut seen = std::collections::HashMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
-                if let Some(prev_ty) = seen.get(name) {
+                if let Some(prev_ty) = seen.get(name.as_str()) {
                     assert_eq!(
                         prev_ty, &node.output_type,
                         "Load name '{}' used with inconsistent tensor types in C codegen",
                         name
                     );
                 } else {
-                    seen.insert(name.clone(), node.output_type.clone());
+                    seen.insert(name.as_str().to_string(), node.output_type.clone());
                 }
             }
         }
@@ -496,7 +496,7 @@ impl CEmitter {
         let mut seen = std::collections::HashMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
-                seen.entry(name.clone())
+                seen.entry(name.as_str().to_string())
                     .or_insert_with(|| node.output_type.clone());
             }
         }
@@ -2441,9 +2441,7 @@ mod tests {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
-            RiscOp::Store {
-                name: "out".to_string(),
-            },
+            RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
@@ -2490,9 +2488,7 @@ mod tests {
     fn load_emits_input_reference() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
@@ -2505,17 +2501,13 @@ mod tests {
     fn repeated_load_names_share_one_input_slot() {
         let mut dag = Dag::new();
         let x0 = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let x1 = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
@@ -2531,25 +2523,19 @@ mod tests {
     fn input_labels_follow_first_load_occurrence() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Load {
-                name: "b".to_string(),
-            },
+            RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
-            RiscOp::Load {
-                name: "a".to_string(),
-            },
+            RiscOp::Load { name: "a".into() },
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
-            RiscOp::Load {
-                name: "b".to_string(),
-            },
+            RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
             None,
@@ -2663,9 +2649,7 @@ mod tests {
     fn load_is_borrowed_not_freed() {
         let mut dag = Dag::new();
         dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,

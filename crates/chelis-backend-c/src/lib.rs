@@ -396,9 +396,7 @@ mod tests {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         dag.add_node(
-            RiscOp::Store {
-                name: "out".to_string(),
-            },
+            RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
@@ -411,25 +409,19 @@ mod tests {
     fn codegen_surfaces_distinct_input_labels() {
         let mut dag = Dag::new();
         let x0 = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let x1 = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let y = dag.add_node(
-            RiscOp::Load {
-                name: "y".to_string(),
-            },
+            RiscOp::Load { name: "y".into() },
             vec![],
             scalar_f32(),
             None,
@@ -1414,14 +1406,7 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
-            vec![],
-            vec_f32(3),
-            None,
-        );
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
         dag.add_node(
             RiscOp::Pad {
                 padding: vec![(1, 2)],
@@ -1449,14 +1434,7 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
-            vec![],
-            vec_f32(5),
-            None,
-        );
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Shrink {
                 bounds: vec![(1, 4)],
@@ -1480,14 +1458,7 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
-            vec![],
-            vec_f32(5),
-            None,
-        );
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
             RiscOp::Stride { strides: vec![2] },
             vec![x],
@@ -1524,9 +1495,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
@@ -1556,17 +1525,13 @@ int main(void) {{
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             batch_vec.clone(),
             None,
         );
         let y = dag.add_node(
-            RiscOp::Load {
-                name: "y".to_string(),
-            },
+            RiscOp::Load { name: "y".into() },
             vec![],
             batch_vec.clone(),
             None,
@@ -1614,17 +1579,13 @@ int main(void) {{
             precision: Prim::F32,
         };
         let a = dag.add_node(
-            RiscOp::Load {
-                name: "a".to_string(),
-            },
+            RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
-            RiscOp::Load {
-                name: "b".to_string(),
-            },
+            RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
@@ -1668,25 +1629,19 @@ int main(void) {{
             precision: Prim::F32,
         };
         let x = dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
+            RiscOp::Load { name: "x".into() },
             vec![],
             symbolic.clone(),
             None,
         );
         let y = dag.add_node(
-            RiscOp::Load {
-                name: "y".to_string(),
-            },
+            RiscOp::Load { name: "y".into() },
             vec![],
             symbolic.clone(),
             None,
         );
         let z = dag.add_node(
-            RiscOp::Load {
-                name: "z".to_string(),
-            },
+            RiscOp::Load { name: "z".into() },
             vec![],
             symbolic.clone(),
             None,
@@ -1754,14 +1709,7 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        dag.add_node(
-            RiscOp::Load {
-                name: "x".to_string(),
-            },
-            vec![],
-            vec_f32(2),
-            None,
-        );
+        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
         let result = codegen(&dag, "test_load_copy");
 
         let tmp = tempfile::tempdir().unwrap();

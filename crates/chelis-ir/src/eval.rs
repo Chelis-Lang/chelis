@@ -104,7 +104,7 @@ fn infer_symbolic_bindings_from_inputs(
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
             load_types
-                .entry(name.clone())
+                .entry(name.as_str().to_string())
                 .or_insert_with(|| node.output_type.clone());
         }
     }
@@ -183,12 +183,12 @@ where
         let RiscOp::Load { name } = &node.op else {
             continue;
         };
-        if inputs.contains_key(name) {
+        if inputs.contains_key(name.as_str()) {
             continue;
         }
-        match load_input(name) {
+        match load_input(name.as_str()) {
             Some(value) => {
-                inputs.insert(name.clone(), value);
+                inputs.insert(name.as_str().to_string(), value);
             }
             None if strict_loads => return Err(format!("missing required input `{name}`")),
             None => {}
@@ -534,7 +534,7 @@ where
                     shape,
                 }
             }
-            RiscOp::Load { name } => match resolved_inputs.get(name) {
+            RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => value.clone(),
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),

@@ -19,9 +19,9 @@ pub fn input_labels(dag: &Dag) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op
-            && seen.insert(name.clone())
+            && seen.insert(name.as_str().to_string())
         {
-            labels.push(name.clone());
+            labels.push(name.as_str().to_string());
         }
     }
     labels
@@ -52,7 +52,7 @@ fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
         {
             specs.push(OutputSpec {
                 id: node.id,
-                label: name.clone(),
+                label: name.as_str().to_string(),
                 is_store: true,
             });
         }
@@ -383,8 +383,8 @@ impl Emitter {
     ) -> Result<(), String> {
         let id = node.id.0;
         match &node.op {
-            RiscOp::Load { name } => self.emit_load(node, name, inputs),
-            RiscOp::Store { name } => self.emit_store(dag, node, name, outputs),
+            RiscOp::Load { name } => self.emit_load(node, name.as_str(), inputs),
+            RiscOp::Store { name } => self.emit_store(dag, node, name.as_str(), outputs),
             RiscOp::Const { value } => self.emit_const(node, *value),
 
             // Unary elementwise (M2 first cut).

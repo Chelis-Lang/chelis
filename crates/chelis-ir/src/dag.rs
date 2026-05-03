@@ -9,6 +9,8 @@ use std::fmt;
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
+use crate::load_store_name::LoadStoreName;
+
 /// Index into the DAG node array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
@@ -292,10 +294,10 @@ pub enum RiscOp {
         value: f64,
     },
     Load {
-        name: String,
+        name: LoadStoreName,
     },
     Store {
-        name: String,
+        name: LoadStoreName,
     },
     Realize,
 
@@ -462,14 +464,14 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         let RiscOp::Load { name } = &node.op else {
             continue;
         };
-        if !seen_inputs.insert(name.clone()) {
+        if !seen_inputs.insert(name.as_str().to_string()) {
             continue;
         }
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if let DimInfo::Named(symbol, None) = dim {
                 occurrences.push(SymbolicDimOccurrence {
                     name: symbol.clone(),
-                    input_label: name.clone(),
+                    input_label: name.as_str().to_string(),
                     axis,
                 });
             }

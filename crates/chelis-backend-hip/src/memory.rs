@@ -108,13 +108,13 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
         } else {
             match &node.op {
                 RiscOp::Load { name } => {
-                    if let Some(&canonical_load) = first_load_by_name.get(name) {
+                    if let Some(&canonical_load) = first_load_by_name.get(name.as_str()) {
                         NodeMemoryKind::RepeatedLoadAlias { canonical_load }
                     } else {
-                        first_load_by_name.insert(name.clone(), node.id);
+                        first_load_by_name.insert(name.as_str().to_string(), node.id);
                         NodeMemoryKind::UniqueInput {
                             slot: usize::MAX,
-                            input_name: name.clone(),
+                            input_name: name.as_str().to_string(),
                         }
                     }
                 }

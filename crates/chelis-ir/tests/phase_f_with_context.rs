@@ -90,9 +90,9 @@ fn eval_named_roots(
     for &root in roots {
         if let Some(node) = dag.get(root)
             && let RiscOp::Store { name } = &node.op
-            && interesting.iter().any(|n| *n == name)
+            && interesting.iter().any(|n| *n == name.as_str())
         {
-            out.insert(name.clone(), values[&root].clone());
+            out.insert(name.as_str().to_string(), values[&root].clone());
         }
     }
     out

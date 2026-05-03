@@ -3286,10 +3286,12 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
     dag.nodes()
         .iter()
         .filter_map(|node| match &node.op {
-            crate::RiscOp::Load { name } if seen.insert(name.clone()) => Some(HostTensorInput {
-                name: name.clone(),
-                ty: node.output_type.clone(),
-            }),
+            crate::RiscOp::Load { name } if seen.insert(name.as_str().to_string()) => {
+                Some(HostTensorInput {
+                    name: name.as_str().to_string(),
+                    ty: node.output_type.clone(),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -3396,7 +3398,7 @@ fn actualize_tensor_helper_types(
     for node in dag.nodes() {
         let actual = match &node.op {
             crate::dag::RiscOp::Load { name } => {
-                Some(inferred_load_type(name, scope, &node.output_type))
+                Some(inferred_load_type(name.as_str(), scope, &node.output_type))
             }
             crate::dag::RiscOp::Add
             | crate::dag::RiscOp::Mul
