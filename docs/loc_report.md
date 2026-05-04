@@ -1,10 +1,10 @@
 # Lines of Code Report
 
-Generated: 2026-05-03 23:33 UTC
+Generated: 2026-05-04 14:08 UTC
 
 | Language | Files | Code | Comments | Blanks | Total | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| Rust | 166 | 76,350 | 5,225 | 28,648 | 110,223 | Compiler, CLI, runtime, backends, type checker |
+| Rust | 167 | 76,830 | 5,284 | 28,855 | 110,969 | Compiler, CLI, runtime, backends, type checker |
 | C | 13 | 27,929 | 200 | 668 | 28,797 | Generated runtime, headers |
 | JSON | 20 | 3,823 | 0 | 2,575 | 6,398 | Package metadata, test fixtures |
 | **Chelis Surf** (.ch) | **91** | **2,716** | **475** | **47** | **3,238** | **Examples, std library, test fixtures** |
@@ -18,5 +18,5 @@ Generated: 2026-05-03 23:33 UTC
 | Objective-C | 1 | 143 | 63 | 46 | 252 |  |
 | Tree-sitter Queries (.scm) | 2 | 98 | 0 | 6 | 104 | Syntax highlighting for Surf and Deep |
 | Bash | 1 | 30 | 1 | 8 | 39 |  |
-| Markdown | 108 | 0 | 9,717 | 5,082 | 14,799 | Specs, design docs, plans |
-| **Total** | **467** | **115,157** | **16,093** | **38,110** | **169,360** | |
+| Markdown | 108 | 0 | 9,730 | 5,086 | 14,816 | Specs, design docs, plans |
+| **Total** | **468** | **115,637** | **16,165** | **38,321** | **170,123** | |
