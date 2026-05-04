@@ -847,7 +847,7 @@ fn lower_host_function(
     let any_callable_param = params
         .iter()
         .any(|param| matches!(param.ty, HostType::Fn(_, _)));
-    let host_body = if let HostType::Tensor(expected) = ret_ty.clone()
+    let mut host_body = if let HostType::Tensor(expected) = ret_ty.clone()
         && !any_callable_param
         && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
         && !should_keep_tensor_expr_in_host_lane(&body_expr)
@@ -857,6 +857,27 @@ fn lower_host_function(
     } else {
         lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers)
     };
+    // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
+    // "Tensor-helper extraction" and "Lowering — fn-body" rules: every
+    // input Deep span must surface as `span_id` or in `merged_spans` on at
+    // least one HostExpr node. Two paths above bypass the
+    // `lower_host_expr` wrapper's region-corresponding stamping:
+    //
+    // (1) `try_lower_tensor_helper_call(&body_expr, …)` at the success
+    //     branch returns a `TensorCall` constructed via `HostExpr::new(…)`
+    //     directly — `body_expr.span_id()` (the fn-body inner expr's
+    //     span) is dropped.
+    // (2) When `body` is a `(fn {span: …} (params …) body_expr)` form,
+    //     all three subpaths above lower `body_expr` (kids[1]) but
+    //     never see `body` itself — so the `(fn …)` form's own
+    //     `meta["span"]` is dropped on every path.
+    //
+    // Append both spans to `host_body.merged_spans`. The
+    // `append_merged_span` helper handles None-noop, dedup, lex-sort,
+    // and canonical-equal-noop, so paths that already have the span as
+    // canonical (the wrapper-routed lowering) are a no-op.
+    host_body.append_merged_span(body_expr.span_id());
+    host_body.append_merged_span(body.span_id());
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty == HostType::Unknown {
         host_expr_type(&host_body)

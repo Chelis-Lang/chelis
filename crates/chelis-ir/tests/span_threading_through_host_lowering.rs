@@ -788,3 +788,158 @@ fn synthesized_markers_with_provenance_are_well_formed() {
     assert_eq!(node.merged_spans, vec!["alt_src", "forward_src"]);
     assert!(!node_violates_synthesized_marker_invariant(&node));
 }
+
+// ── lower_host_function tensor-helper-extraction span survival ────────
+//
+// Regression tests for the S6 architectural-foundation red-team's MEDIUM
+// finding: `lower_host_function` lowers `body_expr = kids[1]` (the
+// inner fn-body) but never observes `body` itself (the surrounding
+// `(fn …)` form). Two distinct dropped-span shapes:
+//
+// (1) `try_lower_tensor_helper_call(&body_expr, …)` returns a
+//     `TensorCall` constructed via `HostExpr::new(…)` directly — the
+//     `body_expr.span_id()` (the fn-body inner expr's span) drops on
+//     the success branch because the wrapper that normally stamps it
+//     (`lower_host_expr` at host.rs:~1018) is bypassed.
+// (2) The `(fn {span: …} (params …) body_expr)` form's own
+//     `meta["span"]` drops on EVERY subpath (success, fallback, and
+//     the non-tensor branch) because none of them inspect `body`.
+//
+// Audit invariant from §2.2: every input Deep span must surface as
+// `span_id` or in `merged_spans` on at least one HostExpr node. The
+// fix in `lower_host_function` appends both `body_expr.span_id()` and
+// `body.span_id()` to `host_body.merged_spans` after the if/else.
+
+/// To exercise `lower_host_function` (host wrapper path), the program
+/// needs a `(fn …)` body def AND a host-lane sibling so the
+/// `has_any_host_lane_def` gate fires (host.rs:~514, ~556). A
+/// string-typed top-level binding satisfies that.
+fn fixture_with_tensor_fn(fn_span: &str, body_inner_span: &str) -> String {
+    format!(
+        r#"
+        (def {{}} host_marker
+          (lit {{type: (t-prim {{}} string)}} "host"))
+        (defsig {{}} double
+          (t-fn {{}} (t-tensor {{}} (t-prim {{}} f32)) (t-tensor {{}} (t-prim {{}} f32))))
+        (def {{span: "outer_def"}} double
+          (fn {{span: "{fn_span}"}}
+              (params {{}} (x {{type: (t-tensor {{}} (t-prim {{}} f32))}}))
+            (app {{type: (t-tensor {{}} (t-prim {{}} f32)) span: "{body_inner_span}"}}
+                 (var {{}} mul)
+                 (var {{type: (t-tensor {{}} (t-prim {{}} f32))}} x)
+                 (lit {{type: (t-tensor {{}} (t-prim {{}} f32))}} 2.0))))
+        "#
+    )
+}
+
+/// Positive-parity regression: the `(fn …)` form's own meta-span
+/// surfaces somewhere in the host program after `lower_host_function`
+/// produces a `HostFunction`. This was the dropped-span shape the S6
+/// architectural-foundation red-team flagged as MEDIUM.
+#[test]
+fn fn_form_span_surfaces_through_lower_host_function() {
+    let source = fixture_with_tensor_fn("fn_form_span", "body_inner_span");
+
+    let exprs = chelis_deep::parser::parse_str(&source).expect("deep parse");
+    let input_spans = collect_input_spans(&exprs);
+    assert!(
+        input_spans.contains("fn_form_span"),
+        "fixture must carry the (fn …) form's span"
+    );
+    assert!(
+        input_spans.contains("body_inner_span"),
+        "fixture must carry the fn-body inner expr's span"
+    );
+
+    let checked = check(&source);
+    let compiled = lower_compiled_program(&checked);
+    let host_program = compiled
+        .host
+        .as_ref()
+        .expect("host_marker forces host-lane wrapper for `double`");
+    assert!(
+        host_program.functions.iter().any(|f| f.name == "double"),
+        "expected `double` to lower through `lower_host_function` to host.functions; \
+         host program: {host_program:#?}"
+    );
+    let host_spans = collect_host_program_spans(host_program);
+
+    assert!(
+        host_spans.contains("fn_form_span"),
+        "(fn …) form's own meta-span dropped: {host_spans:?}",
+    );
+    assert!(
+        host_spans.contains("body_inner_span"),
+        "fn-body inner expr's span dropped: {host_spans:?}",
+    );
+    assert!(
+        host_spans.contains("outer_def"),
+        "def's outer span dropped (existing host.rs:~581 invariant): {host_spans:?}",
+    );
+
+    // No fabrication: all surfaced spans came from the input.
+    walk_host_program(host_program, &mut |node| {
+        if let Some(s) = &node.span_id {
+            assert!(
+                input_spans.contains(s),
+                "host lowering fabricated a span_id `{s}` not present in input"
+            );
+        }
+        for s in &node.merged_spans {
+            assert!(
+                input_spans.contains(s),
+                "host lowering fabricated a merged_span `{s}` not present in input"
+            );
+        }
+    });
+}
+
+/// Negative-parity regression: when the `(fn …)` form has NO span,
+/// the lowering does not invent one. The wrapper / lowering must not
+/// fabricate a `fn_form_span` where none was given.
+#[test]
+fn unspanned_fn_form_does_not_fabricate_a_span_in_host_function() {
+    let source = r#"
+        (def {} host_marker
+          (lit {type: (t-prim {} string)} "host"))
+        (defsig {} double
+          (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
+        (def {} double
+          (fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
+            (app {type: (t-tensor {} (t-prim {} f32))}
+                 (var {} mul)
+                 (var {type: (t-tensor {} (t-prim {} f32))} x)
+                 (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))))
+    "#;
+
+    let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    assert!(
+        collect_input_spans(&exprs).is_empty(),
+        "fixture must have ZERO spans"
+    );
+
+    let checked = check(source);
+    let compiled = lower_compiled_program(&checked);
+    let host_program = compiled
+        .host
+        .as_ref()
+        .expect("host_marker forces host-lane wrapper for `double`");
+    assert!(
+        host_program.functions.iter().any(|f| f.name == "double"),
+        "expected `double` to lower through `lower_host_function`"
+    );
+
+    walk_host_program(host_program, &mut |node| {
+        assert_eq!(
+            node.span_id, None,
+            "host node `{:?}` carries fabricated span_id despite unspanned input",
+            node.kind,
+        );
+        assert!(
+            node.merged_spans.is_empty(),
+            "host node `{:?}` fabricated merged_spans `{:?}` despite unspanned input",
+            node.kind,
+            node.merged_spans,
+        );
+    });
+}
