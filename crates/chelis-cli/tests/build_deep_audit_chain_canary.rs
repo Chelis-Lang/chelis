@@ -146,11 +146,16 @@ fn s6_oracle_audit_chain_resolves_span_to_latex_text() {
          (start={start_byte}, end={end_byte})"
     );
 
-    // S6 backward-compat lock: the emitted C must compile via gcc.
+    // S6 backward-compat lock: the emitted C must compile via the platform's
+    // default C compiler. Drop `-fopenmp` for cross-platform portability —
+    // Apple's clang (which `gcc` resolves to on macOS CI) doesn't support
+    // OpenMP without libomp, and the audit-chain assertion is about span
+    // comments surviving emission as valid C, not about OpenMP runtime
+    // wiring. Linux gcc silently ignores `#pragma omp …` directives without
+    // `-fopenmp`; the compile-success check still holds.
     let compile = std::process::Command::new("gcc")
         .args([
             "-O0",
-            "-fopenmp",
             "-c",
             out.to_str().unwrap(),
             "-I",
