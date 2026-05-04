@@ -3,25 +3,10 @@
   "source_hash": "sha256:8bb8ea12f7cf95640e3a4ab64b11556824fc2b2c36cc7372d108e4ac2d9bbbce",
   "spans": [
     {
-      "deep_node_id": "wrap_normal_cdf",
+      "deep_node_id": "__synthesized_wrap__",
       "deep_path": "__synthesized_wrap__",
       "latex": {
-        "source_id": -1,
-        "start_byte": 0,
-        "end_byte": 0,
-        "start_line": 0,
-        "start_column": 0,
-        "end_line": 0,
-        "end_column": 0,
-        "label": null
-      },
-      "latex_text": "__synthesized_wrap__"
-    },
-    {
-      "deep_node_id": "wrap_call_price",
-      "deep_path": "__synthesized_wrap__",
-      "latex": {
-        "source_id": -1,
+        "source_id": 0,
         "start_byte": 0,
         "end_byte": 0,
         "start_line": 0,

@@ -40,13 +40,13 @@
 ; `Nautilus.Special.normal_cdf`; this fixture inlines a stub so the
 ; .dp is self-contained.
 
-(def {span: "wrap_normal_cdf"}
+(def {span: "__synthesized_wrap__"}
   normal_cdf
   (fn {}
     (params {} (x {type: (t-prim {} f32)}))
     (var {} x)))
 
-(def {span: "wrap_call_price"}
+(def {span: "__synthesized_wrap__"}
   call_price
   (fn {}
     (params {}

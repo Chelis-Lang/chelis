@@ -9,9 +9,9 @@ The wrapped fixture inlines bodies from Octant's translation of
    the canonical sidecar in a temp dir.
 2. Filters that sidecar to just the span IDs that appear in
    `call_price_wrapped.dp`.
-3. Adds wrapper-introduced span entries (`wrap_normal_cdf`,
-   `wrap_call_price`) as synthesized entries with `latex_text` set
-   to a sentinel (`__synthesized_wrap__`).
+3. Adds a single synthesized entry for the canonical
+   `__synthesized_wrap__` marker (per
+   `spec/03-deep-syntax.md` §1.1.1) shared by both wrapper defs.
 4. Writes `call_price_wrapped.spans.json` next to the wrapped `.dp`.
 
 The script is idempotent: running it again regenerates the sidecar
@@ -36,7 +36,7 @@ OCTANT_REPO = Path("/home/jeff/Documents/scratch/octant")
 OCTANT_BIN = OCTANT_REPO / "target/release/octant"
 OCTANT_TEX = OCTANT_REPO / "references/black_scholes_call_function.tex"
 
-WRAPPER_SPAN_IDS = ("wrap_normal_cdf", "wrap_call_price")
+SYNTHESIZED_WRAP_MARKER = "__synthesized_wrap__"
 
 
 def collect_span_ids_in_dp(dp_path: Path) -> list[str]:
@@ -73,16 +73,18 @@ def run_octant_translate() -> dict:
         return json.loads(out_spans.read_text())
 
 
-def synthesized_wrapper_entry(span_id: str) -> dict:
-    """An entry for a hand-authored wrapper span that has no LaTeX
-    counterpart. The sidecar consumers only need `deep_node_id` and
-    `latex_text`; we still emit the rest of the schema with sentinel
-    values for shape compatibility."""
+def synthesized_wrapper_entry() -> dict:
+    """An entry for the canonical `__synthesized_wrap__` marker shared
+    by multiple wrapper-shell nodes in the .dp. The sidecar consumers
+    only need `deep_node_id` and `latex_text`; we still emit the rest
+    of the schema with sentinel values for shape compatibility.
+    `source_id: 0` is required because Octant's `SourceId` is a `u32`
+    (it cannot represent a `-1` sentinel)."""
     return {
-        "deep_node_id": span_id,
+        "deep_node_id": SYNTHESIZED_WRAP_MARKER,
         "deep_path": "__synthesized_wrap__",
         "latex": {
-            "source_id": -1,
+            "source_id": 0,
             "start_byte": 0,
             "end_byte": 0,
             "start_line": 0,
@@ -105,14 +107,15 @@ def build_sidecar() -> dict:
         if span_id in seen:
             continue
         seen.add(span_id)
-        if span_id in WRAPPER_SPAN_IDS:
-            spans_out.append(synthesized_wrapper_entry(span_id))
+        if span_id == SYNTHESIZED_WRAP_MARKER:
+            spans_out.append(synthesized_wrapper_entry())
         elif span_id in octant_entries:
             spans_out.append(octant_entries[span_id])
         else:
             raise SystemExit(
                 f"span {span_id!r} in {WRAPPED_DP.name} is not in the Octant "
-                f"sidecar and is not a wrapper-introduced ID; refusing to drop it"
+                f"sidecar and is not the canonical synthesized-wrap marker; "
+                f"refusing to drop it"
             )
     return {
         "source": "references/black_scholes_call_function.tex",

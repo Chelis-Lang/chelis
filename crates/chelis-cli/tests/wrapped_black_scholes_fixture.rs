@@ -4,14 +4,15 @@
 //! the expected span IDs end-to-end.
 //!
 //! `call_price.dp` (the Octant-emitted equation-only fixture) and
-//! `call_price_wrapped.dp` (the hand-authored typecheckable wrapper)
-//! are both kept under
+//! `call_price_wrapped.dp` (the typecheckable wrapper, mostly produced
+//! by Octant's `--wrap-as-function` translation surface as of Octant
+//! commit 468bdc6) are both kept under
 //! `crates/chelis-cli/tests/fixtures/octant/black_scholes/`. The
 //! wrapper inlines the Octant-emitted bodies as `let` bindings inside
 //! a single function def so the program is self-contained and
-//! typecheckable; see the fixture README and
-//! `spec/upstream-bugs/octant-no-function-def-emission.md` in the
-//! Octant repo for why hand-wrapping is needed today.
+//! typecheckable; see the fixture README for the regeneration recipe
+//! and the rationale for keeping a local `normal_cdf` stub instead of
+//! Octant's natural `Nautilus.Special.normal_cdf` access chain.
 
 use chelis_deep::Expr;
 use chelis_deep::parser::{parse_str, parse_str_strict};
@@ -138,11 +139,13 @@ fn wrapped_fixture_includes_octant_emitted_spans() {
              (got: {ids:?})"
         );
     }
-    // And the wrapper-introduced spans:
-    for wrap_id in ["wrap_normal_cdf", "wrap_call_price"] {
-        assert!(
-            ids.contains(wrap_id),
-            "wrapped fixture must mark the wrapper def with span {wrap_id}"
-        );
-    }
+    // And the canonical synthesized-wrap marker (spec/03-deep-syntax.md
+    // §1.1.1: reserved `__synthesized_<pass>__` form). Both wrapper
+    // defs in the fixture share this single canonical marker, matching
+    // Octant's `--wrap-as-function` natural output (commit 468bdc6).
+    assert!(
+        ids.contains("__synthesized_wrap__"),
+        "wrapped fixture must mark wrapper defs with the canonical \
+         `__synthesized_wrap__` marker (got: {ids:?})"
+    );
 }
