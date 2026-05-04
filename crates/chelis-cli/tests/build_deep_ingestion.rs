@@ -279,10 +279,14 @@ fn build_deep_emitted_c_compiles_via_gcc() {
         .assert()
         .success();
 
+    // Drop `-fopenmp` for cross-platform portability — Apple's clang
+    // (resolved as `gcc` on macOS CI) doesn't support it without libomp.
+    // The compile-success check still holds: Linux gcc silently ignores
+    // `#pragma omp …` without `-fopenmp`. See the parallel fix in
+    // build_deep_audit_chain_canary.rs.
     let compile = std::process::Command::new("gcc")
         .args([
             "-O0",
-            "-fopenmp",
             "-c",
             out.to_str().unwrap(),
             "-I",
