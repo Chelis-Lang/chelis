@@ -1,6 +1,6 @@
 # Chelis Span Survival: End-to-End Audit Chain
 
-**Status:** active design — implementation phased S0–S5 (see "Phasing").
+**Status:** active design — implementation phased S0–S5 plus S6 host-side emission (see "Phasing").
 **Owners:** chelis-core (this repo). Octant ships span-attributed Deep upstream.
 **Companion specs:** `spec/03-deep-syntax.md` §1.1.1 (the `span` key + `span_*` namespace + synthesized markers); `spec/design/chelis_trust_stack.md` (audit story).
 
@@ -111,12 +111,36 @@ mirroring the same invariant the S3 grad/Tier 2 passes enforce on
 `DagNode`. Locked via a test that constructs such a HostExpr
 programmatically and asserts the invariant.
 
-### 2.4 Backend emission (S4)
+### 2.4 Backend emission (S4 + S6)
 
-Each backend (C / HIP / Metal) emits one `// span: <id>` line per
-`span_id ∪ merged_spans` immediately preceding the line(s) that implement
-the operation. Order: canonical first, then `merged_spans` lex-sorted
-(deterministic, reproducible across runs).
+Each backend emits one `// span: <id>` line per `span_id ∪ merged_spans`
+immediately preceding the line(s) that implement the operation. Order:
+canonical first, then `merged_spans` lex-sorted (deterministic,
+reproducible across runs).
+
+There are two emission paths:
+
+| Path | Reads | Owning module | Phase |
+|------|-------|---------------|-------|
+| DAG path | `DagNode.span_id` + `DagNode.merged_spans` | `chelis-backend-c::emit::CEmitter::emit_span_comments` | S4.1 (C), S4.2 (HIP), S4.3 (Metal) |
+| Host path | `HostExpr.span_id` + `HostExpr.merged_spans` | `chelis-backend-c::host_emit::HostEmitter::emit_span_comments` | S6 step 5 |
+
+The two helpers share the same shape, ordering rule, and
+defense-in-depth sanitizer
+(`chelis_ir::span_sanitize::sanitize_for_comment`). Programs lower into
+both worlds: the DAG path runs for tensor-shaped operations
+(elementwise tensor algebra, reductions, matmul, etc.) and the host
+path runs for scalar / list / ADT / control-flow code (the ambient
+glue around tensor cores). Per spec §2.4.2, both paths emit on the
+host-side `.c` / `.cpp` / `.mm` source — the audit-trace resolution
+target — so the audit chain is recoverable regardless of which path a
+particular operation lowers through.
+
+HIP and Metal currently emit DAG-path spans only (per S4.2 and S4.3);
+host-path emission for HIP / Metal is not in S6 scope. If a future
+pure-scalar program routes through HIP or Metal host-side scaffolding,
+extending host-path emission to those backends is a forward-looking
+hardening item.
 
 #### 2.4.1 Embedded device-kernel source strings (HIP / Metal)
 
@@ -144,6 +168,13 @@ generated source line in a debugger) resolve to host-side source
 lines — the `.c` / `.cpp` / `.mm` file that customers, profilers, and
 debuggers read. Embedded kernel source is a runtime artifact compiled
 by the GPU driver; it is not itself an audit-trace target.
+
+This is also why §2.4 has both a DAG path and a host path: a scalar /
+control-flow / glue operation lowered to a `HostExpr` resolves to the
+exact same host-side `.c` line a tensor operation lowered to a
+`DagNode` does. Both paths emit `// span:` comments immediately
+preceding the implementing C statement so the audit chain is
+recoverable from either.
 
 - Per-node kernels CAN carry meaningful spans because there is a 1:1
   correspondence between the kernel definition and the IR node, so
@@ -282,6 +313,35 @@ End-to-end Black-Scholes canary: verify `// span:` count in `.c` matches
 `.spans.json` count, pick a span ID and traverse back to original LaTeX
 substring via `jq`. Conversion of "audit story conditional" → "audit story
 shipped."
+
+### S6 — Host-side `HostExpr` span schema + emission
+
+Per the host-side table in §2.3, the host AST mirrors the DAG schema:
+`HostExpr` carries `span_id: Option<String>` + `merged_spans:
+Vec<String>`, threaded through host-side lowering/rewriting passes
+(steps 1–4, landed at `46ed812`/`e590fec`). Backend host-side emission
+(step 5) prepends `// span:` lines per `span_id ∪ merged_spans` to the
+implementing C statement(s), reusing the same shape and sanitizer as
+the DAG-path helper.
+
+**Oracle:** end-to-end Black-Scholes audit chain on the natural
+scalar form of `call_price_wrapped.dp` (S6 step 6 rewrote that
+fixture from rank-0 tensors to scalar `(t-prim {} f32)` so the
+program routes through host_emit). Lock command:
+
+```sh
+cargo test -p chelis-cli --test build_deep_audit_chain_canary
+```
+
+The oracle test asserts (a) emitted `// span:` count >= sidecar
+entries, (b) every sidecar `deep_node_id` appears as a `// span:`
+line in the emitted C (the at-the-emission-level audit invariant),
+(c) a representative span resolves to the canonical LaTeX byte
+range, and (d) the emitted C compiles via gcc.
+
+🔴 **Red-team gate after S6.** Fresh local subagent. Same shipping
+bar as S5: span-survival is a customer-visible audit promise; any
+gap between sidecar and emitted C breaks the trust stack.
 
 ## 4. Canary verification
 

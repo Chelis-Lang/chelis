@@ -422,7 +422,46 @@ impl HostEmitter {
         self.assign_expr(target, expr, ty);
     }
 
+    /// Emit `// span:` comment lines for a `HostExpr`'s `span_id ∪ merged_spans`,
+    /// per `spec/design/chelis_span_survival.md` §2.3 host-side table (host
+    /// emit row) and §2.4 (host-path emission rule).
+    ///
+    /// Order: canonical `span_id` first (if present), then `merged_spans`
+    /// lex-sorted and deduped against `span_id`. Same shape as the DAG-side
+    /// helper at `chelis_backend_c::emit::CEmitter::emit_span_comments`
+    /// (S4.1). Span IDs are sanitized via
+    /// `chelis_ir::span_sanitize::sanitize_for_comment` before
+    /// interpolation so a forbidden control byte cannot break out of the
+    /// `// ` line comment, mirroring the DAG-side path.
+    ///
+    /// No-op when both fields are empty (the common case for hand-written
+    /// Chelis or for span-free Deep input). This locks the
+    /// backward-compatibility invariant: span-free programs emit zero
+    /// `// span:` comments on the host path.
+    fn emit_span_comments(&mut self, expr: &HostExpr) {
+        if expr.span_id.is_none() && expr.merged_spans.is_empty() {
+            return;
+        }
+        if let Some(canonical) = expr.span_id.as_deref() {
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(canonical);
+            self.lines.push(format!("{}// span: {safe}", self.indent));
+        }
+        let mut merged: Vec<&str> = expr
+            .merged_spans
+            .iter()
+            .map(String::as_str)
+            .filter(|s| expr.span_id.as_deref() != Some(*s))
+            .collect();
+        merged.sort();
+        merged.dedup();
+        for span in merged {
+            let safe = chelis_ir::span_sanitize::sanitize_for_comment(span);
+            self.lines.push(format!("{}// span: {safe}", self.indent));
+        }
+    }
+
     fn assign_expr(&mut self, target: &str, expr: &HostExpr, ty: &HostType) {
+        self.emit_span_comments(expr);
         match &expr.kind {
             HostExprKind::Int(value) => self
                 .lines

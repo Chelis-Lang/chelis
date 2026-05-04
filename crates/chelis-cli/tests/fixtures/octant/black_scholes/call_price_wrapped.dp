@@ -1,71 +1,63 @@
-; Wrapped Black-Scholes call-price function: typecheckable tensor-typed
-; fixture for the chelis span-survival full-pipeline tests (S5+).
+; Wrapped Black-Scholes call-price function: typecheckable scalar-f32
+; fixture for the chelis span-survival full-pipeline tests (S5+, S6).
 ;
 ; Construction. The bodies of d_1, d_2, and c are taken from Octant's
 ; translation of `references/black_scholes_call_function.tex` (multi-
 ; equation .tex; sequence of three `(def {span} name body)` nodes).
 ; Span IDs `eq:d1_*`, `eq:d2_*`, `eq:c_*` come straight from Octant.
 ; The OUTER wrapper — `def call_price(...)`, `let (bind ...)` binding
-; copies of the multi-use inputs and `d_1`/`d_2`, and the local
-; `normal_cdf` stub — is hand-authored because Octant currently emits
-; each LaTeX equation as a top-level value binding and does not factor
-; free vars into function parameters or wrap multi-equation programs
-; into a single function def. See
+; `d_1`/`d_2`, and the local `normal_cdf` stub — is hand-authored because
+; Octant currently emits each LaTeX equation as a top-level value
+; binding and does not factor free vars into function parameters or
+; wrap multi-equation programs into a single function def. See
 ; `spec/upstream-bugs/octant-no-function-def-emission.md` in the
 ; Octant repo for the upstream tracking entry.
 ;
-; Type-shape choice: rank-0 tensors `(t-tensor {} (t-prim {} f32))`
-; throughout (parameters, locals, literals). This makes the program
-; route through the DAG ingestion path in `chelis build`, which is
-; the path that emits per-node `// span:` comments per S4. A pure-
-; scalar `(t-prim {} f32)` shape would route through the host
-; backend, which today does NOT emit span comments — the audit chain
-; would break at codegen. Rank-0 tensors are semantically equivalent
-; to scalars (single f32 value).
+; Type-shape choice (S6, post-step-6 rewrite): natural scalar
+; `(t-prim {} f32)` throughout (parameters, locals, literals). This
+; routes the program through the host-side codegen path
+; (`chelis-backend-c::host_emit`), which now emits `// span:` comments
+; per S6 step 5. This is the canonical customer-shape program — Black-
+; Scholes is naturally scalar — and the audit chain test exercises it
+; on the host_emit path end-to-end.
 ;
-; Linearity wrinkle. Tensor values are linear (consume-on-use) per
-; spec/04-type-system.md §8. The formula reuses `s`, `k`, `r`, `t`,
-; `sigma`, and `d_1` multiple times, so the wrapper inserts explicit
-; `(copy {} (var {} x))` calls before each non-final use. The copies
-; are hand-authored book-keeping; they don't carry source spans.
+; Pre-S6 history: this fixture used rank-0 tensors `(t-tensor {} (t-prim
+; {} f32))` to force routing through the DAG codegen path (which
+; emitted span comments before host_emit did). With S6 step 5 landing
+; host-path span emission, the rank-0-tensor workaround is obsolete and
+; the fixture was rewritten to its natural scalar shape.
 ;
-; The local `normal_cdf` stub is identity over rank-0 tensors. The
-; fixture exists to drive the chelis Deep ingestion path; the
-; numerical body of `Phi` is irrelevant to span survival. The Surf
-; reference `references/black_scholes_call.ch` imports the real
+; Linearity wrinkle: scalars are non-linear (consume rules in
+; spec/04-type-system.md §8.1 only apply to tensor values), so the
+; reuse of `s`, `k`, `r`, `t`, `sigma`, and `d_1` in multiple places
+; no longer requires the `(copy {} (var {} x))` helper bindings the
+; rank-0-tensor form needed.
+;
+; The local `normal_cdf` stub is identity over f32 scalars. The fixture
+; exists to drive the chelis Deep ingestion path; the numerical body of
+; `Phi` is irrelevant to span survival. The Surf reference
+; `references/black_scholes_call.ch` imports the real
 ; `Nautilus.Special.normal_cdf`; this fixture inlines a stub so the
 ; .dp is self-contained.
 
 (def {span: "wrap_normal_cdf"}
   normal_cdf
   (fn {}
-    (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
+    (params {} (x {type: (t-prim {} f32)}))
     (var {} x)))
 
 (def {span: "wrap_call_price"}
   call_price
   (fn {}
     (params {}
-      (s     {type: (t-tensor {} (t-prim {} f32))})
-      (k     {type: (t-tensor {} (t-prim {} f32))})
-      (r     {type: (t-tensor {} (t-prim {} f32))})
-      (t     {type: (t-tensor {} (t-prim {} f32))})
-      (sigma {type: (t-tensor {} (t-prim {} f32))})
-      (e     {type: (t-tensor {} (t-prim {} f32))}))
+      (s     {type: (t-prim {} f32)})
+      (k     {type: (t-prim {} f32)})
+      (r     {type: (t-prim {} f32)})
+      (t     {type: (t-prim {} f32)})
+      (sigma {type: (t-prim {} f32)})
+      (e     {type: (t-prim {} f32)}))
     (let {}
       (bind {}
-        ; Copies of multi-use inputs. Each use of `s`, `k`, `r`, `t`,
-        ; `sigma` consumes the binding under linearity; we pre-bind
-        ; one fresh copy per intended subsequent use.
-        s_for_d1   (copy {} (var {} s))
-        k_for_d1   (copy {} (var {} k))
-        r_for_d1   (copy {} (var {} r))
-        t_for_d1   (copy {} (var {} t))
-        t_for_d1_sqrt (copy {} (var {} t))
-        sigma_for_d1_sq_a (copy {} (var {} sigma))
-        sigma_for_d1_sq_b (copy {} (var {} sigma))
-        sigma_for_d1_sqrt (copy {} (var {} sigma))
-        ; d_1 itself is consumed by Phi(d_1) and by d_2 = d_1 - sigma*sqrt(t).
         d_1
         (app {span: "eq:d1_002"}
           (var {} div)
@@ -75,43 +67,38 @@
               (var {} log)
               (app {span: "eq:d1_005"}
                 (var {} div)
-                (var {span: "eq:d1_006"} s_for_d1)
-                (var {span: "eq:d1_007"} k_for_d1)))
+                (var {span: "eq:d1_006"} s)
+                (var {span: "eq:d1_007"} k)))
             (app {span: "eq:d1_008"}
               (var {} mul)
               (app {span: "eq:d1_009"}
                 (var {} add)
-                (var {span: "eq:d1_010"} r_for_d1)
+                (var {span: "eq:d1_010"} r)
                 (app {span: "eq:d1_011"}
                   (var {} div)
                   (app {span: "eq:d1_012"}
                     (var {} mul)
-                    (var {span: "eq:d1_013"} sigma_for_d1_sq_a)
-                    (var {span: "eq:d1_014"} sigma_for_d1_sq_b))
-                  (lit {span: "eq:d1_015" type: (t-tensor {} (t-prim {} f32))} 2.0)))
-              (var {span: "eq:d1_016"} t_for_d1)))
+                    (var {span: "eq:d1_013"} sigma)
+                    (var {span: "eq:d1_014"} sigma))
+                  (lit {span: "eq:d1_015" type: (t-prim {} f32)} 2.0)))
+              (var {span: "eq:d1_016"} t)))
           (app {span: "eq:d1_017"}
             (var {} mul)
-            (var {span: "eq:d1_018"} sigma_for_d1_sqrt)
+            (var {span: "eq:d1_018"} sigma)
             (app {span: "eq:d1_019"}
               (var {} sqrt)
-              (var {span: "eq:d1_020"} t_for_d1_sqrt))))
-        ; d_1 is reused twice: d_2 references it, and Phi(d_1) does too.
-        d_1_for_d2 (copy {} (var {} d_1))
-        ; sigma and t remain after d_1 ⇒ make copies for d_2.
-        sigma_for_d2 (copy {} (var {} sigma))
-        t_for_d2     (copy {} (var {} t))
+              (var {span: "eq:d1_020"} t))))
         d_2
         (app {span: "eq:d2_002"}
           (var {} sub)
-          (var {span: "eq:d2_003"} d_1_for_d2)
+          (var {span: "eq:d2_003"} d_1)
           (app {span: "eq:d2_004"}
             (var {} mul)
-            (var {span: "eq:d2_005"} sigma_for_d2)
+            (var {span: "eq:d2_005"} sigma)
             (app {span: "eq:d2_006"}
               (var {} sqrt)
-              (var {span: "eq:d2_007"} t_for_d2)))))
-      ; Body of `c`. Free vars used here (no further reuse needed):
+              (var {span: "eq:d2_007"} t)))))
+      ; Body of `c`. Free vars used here:
       ;   s (1x), k (1x), e (1x), r (1x), t (1x), d_1, d_2.
       (app {span: "eq:c_002"}
         (var {} sub)
@@ -137,7 +124,7 @@
                   (var {} mul)
                   (app {span: "eq:c_015"}
                     (var {} sub)
-                    (lit {span: "eq:c_016" type: (t-tensor {} (t-prim {} f32))} 0.0)
+                    (lit {span: "eq:c_016" type: (t-prim {} f32)} 0.0)
                     (var {span: "eq:c_017"} r))
                   (var {span: "eq:c_018"} t)))))
           (app {span: "eq:c_019"}

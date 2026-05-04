@@ -26,7 +26,7 @@ Keep this fixture exactly as Octant emits it; do not normalize, fold,
 or annotate. It is the unaltered upstream artifact that downstream
 chelis tools must accept.
 
-## `call_price_wrapped.dp` — typecheckable function-shape fixture (S5+)
+## `call_price_wrapped.dp` — typecheckable function-shape fixture (S5+, S6)
 
 A hand-authored wrapper around Octant's translation of
 `references/black_scholes_call_function.tex` (the multi-equation
@@ -36,7 +36,7 @@ function def:
 
 ```
 (def {span: "wrap_call_price"} call_price
-  (fn {} (params {} (s {type: ...}) ...)
+  (fn {} (params {} (s {type: (t-prim {} f32)}) ...)
     (let {} (bind {} d_1 <octant-d_1-body> d_2 <octant-d_2-body>)
       <octant-c-body>)))
 ```
@@ -50,12 +50,31 @@ does not depend on `Nautilus.Special` (the Surf reference imports
 `normal_cdf` from there; the Deep fixture inlines a typecheck-only
 stub).
 
+Type shape (S6 step 6): natural scalar `(t-prim {} f32)` throughout —
+parameters, locals, and literals. Black-Scholes is a scalar formula;
+the canonical customer-shape program. With S6 step 5 landing host-path
+span emission in `chelis-backend-c::host_emit`, the audit chain is
+exercised end-to-end on `host_emit` for this fixture. Pre-S6 the
+fixture used rank-0 tensors `(t-tensor {} (t-prim {} f32))` to force
+routing through the DAG codegen path (which was the only path that
+emitted span comments at the time); that workaround is obsolete and
+the fixture was rewritten to its natural scalar shape.
+
+Linearity wrinkle: scalars are non-linear (the consume-by-default
+rules in `spec/04-type-system.md` §8.1 only apply to tensors), so the
+post-S6 form drops the `(copy {} (var {} x))` helper bindings the
+rank-0-tensor form needed for multi-use of `s`, `k`, `r`, `t`,
+`sigma`, and `d_1`.
+
 Used by:
 
 - `chelis-cli/tests/wrapped_black_scholes_fixture.rs` — fmt round-trip,
   Phase 0e typecheck, span-vs-sidecar parity (S5.0 oracle).
-- `chelis-cli/tests/...` — `chelis build --deep` / `--target c|hip|metal`
-  full-pipeline tests (S5.2+).
+- `chelis-cli/tests/build_deep_ingestion.rs` — `chelis build --deep`
+  end-to-end tests including the S5 audit chain canary and gcc
+  compile-success on the emitted host-side C.
+- `chelis-cli/tests/build_deep_audit_chain_canary.rs` — S6 named
+  oracle: §9 canary exercised through `host_emit` end-to-end.
 
 Hand-wrapping is necessary because Octant currently does not emit
 function-shape `(def name (fn (params ...) body))` Deep — see the
@@ -71,8 +90,8 @@ Octant's output directly.
   (IDs `n_001`..`n_020`).
 - `call_price.spans.json` — Octant's sidecar mapping each
   `deep_node_id` to its LaTeX byte range.
-- `call_price_wrapped.dp` — hand-authored typecheckable wrapper,
-  46 unique span IDs.
+- `call_price_wrapped.dp` — hand-authored typecheckable wrapper
+  (natural scalar `(t-prim {} f32)` throughout); 46 unique span IDs.
 - `call_price_wrapped.spans.json` — wrapper sidecar; reuses Octant's
   byte-range entries for inlined span IDs and adds synthesized
   entries for the two `wrap_*` IDs (with `latex_text` set to

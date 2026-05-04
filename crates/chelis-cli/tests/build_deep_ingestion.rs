@@ -63,9 +63,14 @@ fn build_dp_extension_auto_detects_deep_path() {
 
     let src = fs::read_to_string(&out).expect("read emitted C");
     let span_count = src.matches("// span:").count();
+    let sidecar_text = fs::read_to_string(wrapped_spans_json()).expect("read spans sidecar");
+    let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
+    let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
-        span_count >= 1,
-        ".dp auto-detect must produce span-annotated C (got {span_count} `// span:` lines)"
+        span_count >= sidecar_entries,
+        ".dp auto-detect must produce >= sidecar entry count `// span:` lines \
+         (S6: scalar fixture routes through host_emit which now emits per-node spans); \
+         got {span_count} emitted vs {sidecar_entries} sidecar entries"
     );
 }
 
@@ -120,9 +125,13 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
         "`--deep` on a `.dp` file must produce byte-identical C as auto-detect"
     );
     let span_count = auto_src.matches("// span:").count();
+    let sidecar_text = fs::read_to_string(wrapped_spans_json()).expect("read spans sidecar");
+    let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
+    let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
-        span_count >= 1,
-        "`.dp` auto-detect must emit at least one span (got {span_count})"
+        span_count >= sidecar_entries,
+        "`.dp` auto-detect must emit >= sidecar entry count `// span:` lines \
+         (S6: host_emit now per-node-emits); got {span_count} vs {sidecar_entries}"
     );
 }
 
@@ -350,39 +359,43 @@ fn build_deep_audit_chain_is_recoverable_from_emitted_c() {
     let src = fs::read_to_string(&out).expect("read emitted C");
     let sidecar_text = fs::read_to_string(wrapped_spans_json()).expect("read spans sidecar");
 
-    // Count: emitted-C span comments must be >= sidecar entries that
-    // are actually inside the program (so excluding the wrapper-only
-    // `wrap_*` synthesized markers which don't lower to DAG nodes).
+    // Count: emitted-C span comments must be >= sidecar entry count.
+    // S6 step 6 rewrote this fixture to its natural scalar shape, which
+    // routes through `chelis-backend-c::host_emit` (S6 step 5 now emits
+    // per-`HostExpr` spans on that path); every sidecar entry surfaces
+    // on at least one emitted node, so the strict equality holds.
     let emitted_count = src.matches("// span:").count();
     let sidecar: serde_json::Value = serde_json::from_str(&sidecar_text).expect("parse spans json");
     let sidecar_entries: usize = sidecar["spans"].as_array().map(Vec::len).unwrap_or(0);
     assert!(
-        emitted_count >= 1,
-        "audit canary: at least one `// span:` line must appear in C \
+        emitted_count >= sidecar_entries,
+        "audit canary: emitted `// span:` count must be >= sidecar entry count \
          (emitted={emitted_count}, sidecar entries={sidecar_entries})"
     );
 
-    // Pick the first span ID and verify it has a sidecar entry.
-    let first_span: String = src
+    // Audit invariant: every sidecar `deep_node_id` appears verbatim
+    // as a `// span: <id>` line in the emitted C. This is the S6
+    // sharpening of the old "first-span-resolves" check; with
+    // host-path emission the full audit chain is recoverable, not
+    // just the first contributor.
+    let emitted_spans: std::collections::BTreeSet<String> = src
         .lines()
         .filter_map(|l| {
             let l = l.trim_start();
             l.strip_prefix("// span: ").map(str::to_string)
         })
-        .next()
-        .expect("at least one `// span:` line in emitted C");
-    let entry = sidecar["spans"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["deep_node_id"].as_str() == Some(&first_span));
-    assert!(
-        entry.is_some(),
-        "audit canary: span ID `{first_span}` from emitted C must resolve in spans.json sidecar"
-    );
-    let latex_text = entry.unwrap()["latex_text"].as_str().unwrap_or("");
-    assert!(
-        !latex_text.is_empty(),
-        "audit canary: sidecar entry for `{first_span}` must carry a non-empty `latex_text`"
-    );
+        .collect();
+    for entry in sidecar["spans"].as_array().unwrap() {
+        let deep_id = entry["deep_node_id"].as_str().unwrap();
+        assert!(
+            emitted_spans.contains(deep_id),
+            "audit canary: sidecar span `{deep_id}` must appear in emitted C \
+             (emitted spans: {emitted_spans:?})"
+        );
+        let latex_text = entry["latex_text"].as_str().unwrap_or("");
+        assert!(
+            !latex_text.is_empty(),
+            "audit canary: sidecar entry for `{deep_id}` must carry a non-empty `latex_text`"
+        );
+    }
 }
