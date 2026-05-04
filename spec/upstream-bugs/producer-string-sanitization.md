@@ -1,9 +1,147 @@
 # producer-string-sanitization: extend defense-in-depth to all producer-supplied strings flowing into generated source
 
-**Status:** open; partial fix in S4 close-out (constructor-side validation for `Load`/`Store` names); deferred to a future hardening workstream
+**Status:** RESOLVED 2026-05-01. Three deferred pieces landed in a single
+atomic commit; see "Resolution summary" below for sanitizer locations,
+callsite-update count, and tests added. The original "deferred deeper
+work" entry follows for historical reference.
+
+**Original status:** open; partial fix in S4 close-out (constructor-side validation for `Load`/`Store` names); deferred to a future hardening workstream
 **Filed:** 2026-05-01
 **Owning phase:** chelis-core (chelis-ir + all backends)
 **Discovered by:** S4 re-red-team gate (post span-injection fix), F.2 sibling-class probe
+
+## Resolution summary
+
+### Sanitizer surface (`crates/chelis-ir/src/span_sanitize.rs`)
+
+- `sanitize_for_comment(&str) -> Cow<'_, str>` — generalised from the
+  S4 span-only helper. Module docs broadened; parameter renamed `span`
+  → `s` to reflect the broadened scope. The function body is unchanged
+  (the comment-context invariant — escape control bytes, preserve
+  everything else verbatim — is identical for any producer-supplied
+  string).
+- `sanitize_for_format_string(&str) -> Cow<'_, str>` — new sanitizer
+  for the C/HIP `printf`/`fprintf` compile-time format-string emission
+  context. Escapes control bytes plus `%` (positional specifier doubling),
+  `\\` (string-literal escape leader doubling), and `"` (string-literal
+  terminator backslash-escape). Returns `Cow::Borrowed` for clean inputs
+  (verbatim-preservation contract). 17 unit tests in the same module.
+
+### Callsites updated
+
+- **Comment-context (`sanitize_for_comment`)** — 4 net additions
+  beyond the existing `// span:` callsites:
+  - `crates/chelis-backend-metal/src/emit.rs::emit_load` (Load name in
+    `// node N = Load <name>`).
+  - `crates/chelis-backend-metal/src/emit.rs::emit_store` (Store name in
+    `` // node N = Store `<name>` ``).
+  - `crates/chelis-backend-metal/src/emit.rs::emit_root_writeback`
+    (root label in `` // root output N = `<label>` ``).
+  - `crates/chelis-backend-hip/src/emit.rs::emit_store` (Store name in
+    `/* store: <name> */` block comment, with a documented residual
+    note that block-comment `*/` injection is a separate concern not
+    addressed by the comment-control-byte sanitizer).
+
+- **Format-string-context (`sanitize_for_format_string`)** — 22 net
+  additions across both backends:
+  - `crates/chelis-backend-c/src/emit.rs` host entrypoint preamble:
+    `func_name` and Load `label` in 7 `fprintf` format-string sites
+    plus `binding.name` and `occurrence.input_label` in the symbolic-
+    dim mismatch site.
+  - `crates/chelis-backend-hip/src/emit.rs` host entrypoint preamble:
+    same 7 sites + symbolic-dim mismatch.
+  - `crates/chelis-backend-hip/src/emit.rs` device entrypoint preamble
+    (`emit_input_shape_preamble_device`): mirror set of 7 sites +
+    symbolic-dim mismatch.
+  - `crates/chelis-backend-c/src/host_emit.rs::emit_labeled_root`:
+    producer-supplied `name` lands in a `printf("%s = ", "<name>")` C
+    string literal as a runtime arg via `%s`. Rust's `{:?}` debug
+    format previously emitted `\u{XX}` for control bytes, which is
+    NOT valid C. Replaced with `sanitize_for_format_string` + manual
+    `"…"` wrapping so the C string-literal lexer sees only valid
+    escapes.
+
+### Tests added
+
+- `crates/chelis-ir/src/span_sanitize.rs` — 17 unit tests for
+  `sanitize_for_format_string` covering: clean Borrowed fast path,
+  Unicode preservation, `%` doubling, `\\` doubling, `"` escape, every
+  comment-context control byte still escapes (newline, CR, NUL, tab,
+  other C0, DEL, space passthrough, empty-string Borrowed), combined
+  attack vectors, and the single-pass invariant.
+- `crates/chelis-backend-metal/tests/producer_string_sanitization.rs`
+  — 4 tests covering Load name / Store name / root label comment-
+  context sanitization (via the `serde_json` deserialize bypass to
+  smuggle a forbidden byte past `LoadStoreName::new`) plus a clean-
+  input-emitted-verbatim audit lock.
+- `crates/chelis-backend-c/tests/producer_string_sanitization.rs`
+  — 8 tests covering `func_name` `%`/newline/`"`-escape, Load name
+  `%`-escape, symbolic-dim binding.name verbatim verification, the
+  `codegen_with_options` API parity, the audit-invariant clean
+  passthrough, and a `gcc -fsyntax-only` compile-success harness on
+  the dirty-Load-name + clean-func-name input.
+- `crates/chelis-backend-hip/tests/producer_string_sanitization.rs`
+  — 4 tests covering the host AND device entrypoints' format-string
+  sanitization for `func_name` and Load `label`.
+
+### Audit findings (Piece 3)
+
+A grep across `crates/chelis-backend-{c,hip,metal}/src/` for every
+`format!` callsite that interpolates a producer-supplied string into
+generated source was performed. Each finding is classified below by
+emission context with disposition:
+
+| Site (file:line) | Producer-supplied string | Context | Disposition |
+|---|---|---|---|
+| `metal/emit.rs:494` | `Load { name }` (LoadStoreName) | `// node N = Load <name>` line comment | sanitize_for_comment (new) |
+| `metal/emit.rs:897` | `Store { name }` (LoadStoreName) | `` // node N = Store `<name>` `` line comment | sanitize_for_comment (new) |
+| `metal/emit.rs:316` | OutputSpec.label (LoadStoreName or `rootN` synth) | `` // root output N = `<label>` `` line comment | sanitize_for_comment (new) |
+| `metal/emit.rs:198,210` | DagNode.span_id / merged_spans (parser-validated) | `// span: <id>` line comment | sanitize_for_comment (existing, S4) |
+| `c/emit.rs:370,382` | DagNode.span_id / merged_spans | `// span: <id>` line comment | sanitize_for_comment (existing, S4) |
+| `hip/emit.rs:1735,1747` | DagNode.span_id / merged_spans | `// span: <id>` line comment | sanitize_for_comment (existing, S4) |
+| `hip/emit.rs:1551` | `Store { name }` (LoadStoreName) | `/* store: <name> */` block comment | sanitize_for_comment (new) — control-byte coverage; `*/` injection documented as residual concern (LoadStoreName grammar excludes `*` and `/`, deserialize-bypass is hypothetical) |
+| `c/emit.rs:99,108,118,127` | CLI-derived `func_name` | `fprintf` format-string | sanitize_for_format_string (new) |
+| `c/emit.rs:526,537,550` | CLI-derived `func_name` + Load `label` (LoadStoreName) | `fprintf` format-string | sanitize_for_format_string (new) |
+| `c/emit.rs:573` | CLI-derived `func_name` + binding.name (SymbolicDimBinding, plain String) + occurrence.input_label (Load, LoadStoreName) | `fprintf` format-string | sanitize_for_format_string (new) |
+| `hip/emit.rs:96,105` | CLI-derived `func_name` | host-entrypoint `fprintf` format-string | sanitize_for_format_string (new) |
+| `hip/emit.rs:231,240` | CLI-derived `func_name` | device-entrypoint `fprintf` format-string | sanitize_for_format_string (new) |
+| `hip/emit.rs:414,425,438,461` | CLI-derived `func_name` + Load `label` + binding.name + occurrence.input_label | host-preamble `fprintf` format-string | sanitize_for_format_string (new) |
+| `hip/emit.rs:496,507,520,543` | (same set) | device-preamble `fprintf` format-string | sanitize_for_format_string (new) |
+| `c/host_emit.rs:2276` | HostBinding.display_name (plain String, producer-supplied) | C-string-literal-as-printf-runtime-arg | sanitize_for_format_string (new) — replaces `{:?}` Rust-debug |
+| `metal/emit.rs:585,656,751` | RiscOp variant Debug (`unary {:?}` etc) | `// node N = unary <op>` line comment | NOT producer-supplied — RiscOp Debug only emits enum variant identifiers and validated LoadStoreName fields. Out of scope. |
+| `metal/emit.rs:494,889,892,897` | `Err(format!("Load \`{name}\` not registered..."))` | `Result::Err` propagation, NEVER reaches generated source | Out of scope — the bug class targets generated-source emission, not in-process diagnostic strings. |
+| `hip/emit.rs:126,262,760` | kernel name (`k_unary_<id>` synthesized by emitter) | identifier in declarator | NOT producer-supplied — compiler-internal. |
+| `metal/kernels.rs:64,70` | tensor parameter name (`t<id>` synthesized) | identifier in MSL declarator | NOT producer-supplied — compiler-internal. |
+
+**Surface-area note on `SymbolicDimBinding.name`.** This field is plain
+`String` with no constructor-side validation today (>100 callsites
+across `chelis-ir`, backends, and tests construct `DimInfo::Named(name,
+size)` directly). Per the orchestrator's "escalate structural blockers"
+constraint and the audit's >100-site cascade rule, adding a
+`SymbolicDimName` newtype is intentionally out of scope for this
+hardening workstream — the emit-side format-string sanitizer is the
+defense-in-depth seat belt today, and a future workstream tracking
+`SymbolicDimName` newtype + parser-side validation can layer on top
+without invalidating the architectural pattern this work establishes.
+
+### Architectural pattern locked
+
+After this work, the rule for any future producer-supplied-string
+emission site is uniform:
+
+1. Identify the emission context (line comment / block comment /
+   compile-time format string / runtime printf arg via `%s` / C
+   identifier / etc.).
+2. Route through the matching sanitizer once at the emission boundary
+   (`sanitize_for_comment` for `// ...`, `sanitize_for_format_string`
+   for any string flowing into a `"..."` C string literal — including
+   compile-time format-string interpolation AND `printf %s` runtime
+   arguments).
+3. Identifier contexts continue to rely on parser-side or
+   construction-side validation (`LoadStoreName`, future
+   `SymbolicDimName`); the validation may legitimately reject and
+   propagate as a real error, while the emit-side sanitizer is a
+   silent safety net for the C string literal.
 
 ## Summary
 

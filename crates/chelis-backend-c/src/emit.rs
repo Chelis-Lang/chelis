@@ -82,6 +82,16 @@ impl CEmitter {
         e.line("");
 
         let linkage = if options.static_entry { "static " } else { "" };
+        // Producer-supplied `func_name` (typically the source filename's
+        // stem) flows into both an identifier context (the `void {name}(...)`
+        // declarator) and a format-string context (the `fprintf(stderr,
+        // "{name}: ...")` runtime-error reports). The format-string context
+        // requires escaping `%`, `\\`, `"`, and control bytes per
+        // spec/upstream-bugs/producer-string-sanitization.md. The identifier
+        // context inherits whatever the upstream chooses; if `func_name`
+        // contains non-identifier bytes the emitted C will fail to compile,
+        // which is the desired outcome (loud failure, not silent injection).
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         e.line(&format!(
             "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
         ));
@@ -96,7 +106,7 @@ impl CEmitter {
         e.line(&format!("if (n_in != {expected_inputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -105,7 +115,7 @@ impl CEmitter {
             e.line("if (inputs == NULL) {");
             e.indent += 1;
             e.line(&format!(
-                "fprintf(stderr, \"{func_name}: inputs array is NULL but %d inputs are required\\n\", {expected_inputs});"
+                "fprintf(stderr, \"{func_name_fmt}: inputs array is NULL but %d inputs are required\\n\", {expected_inputs});"
             ));
             e.line("abort();");
             e.indent -= 1;
@@ -115,7 +125,7 @@ impl CEmitter {
         e.line(&format!("if (n_out != {expected_outputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -124,7 +134,7 @@ impl CEmitter {
             e.line("if (outputs == NULL) {");
             e.indent += 1;
             e.line(&format!(
-                "fprintf(stderr, \"{func_name}: outputs array is NULL but %d outputs are required\\n\", {expected_outputs});"
+                "fprintf(stderr, \"{func_name_fmt}: outputs array is NULL but %d outputs are required\\n\", {expected_outputs});"
             ));
             e.line("abort();");
             e.indent -= 1;
@@ -517,13 +527,22 @@ impl CEmitter {
         let input_types = Self::input_types(dag);
         let mut sorted_labels: Vec<&String> = input_types.keys().collect();
         sorted_labels.sort();
+        // Producer-supplied strings flowing into the fprintf format string
+        // baked into a `"..."` C string literal. Sanitize once per emission
+        // boundary per spec/upstream-bugs/producer-string-sanitization.md.
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         for label in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
+            // `label` originates as `LoadStoreName::as_str()` (validated)
+            // but we route through the format-string sanitizer to lock the
+            // architectural pattern: every producer-supplied string into a
+            // format-string context goes through `sanitize_for_format_string`.
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}: input `{label}` at slot {slot} is NULL\\n\");"
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` at slot {slot} is NULL\\n\");"
             ));
             self.line("abort();");
             self.indent -= 1;
@@ -534,7 +553,7 @@ impl CEmitter {
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -547,7 +566,7 @@ impl CEmitter {
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name}: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -558,23 +577,32 @@ impl CEmitter {
 
         for binding in symbolic_bindings(dag) {
             let canonical_slot = input_slots[&binding.canonical.input_label];
+            // `binding.name` flows into BOTH an identifier context (the
+            // emitted `int {name} = ...;` declarator) and a format-string
+            // context (the fprintf below). The identifier emission is
+            // guarded by parser/IR construction; the format-string
+            // emission needs `%`/`\\`/`"`/control sanitization here.
+            // `occurrence.input_label` is a Load name (LoadStoreName-
+            // validated) but we route both through the format-string
+            // sanitizer to lock the architectural pattern.
+            let binding_name_fmt =
+                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
                 "int {} = inputs[{canonical_slot}]->shape[{}];",
                 binding.name, binding.canonical.axis
             ));
             for occurrence in binding.others {
                 let slot = input_slots[&occurrence.input_label];
+                let occ_label_fmt =
+                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
                 self.line(&format!(
                     "if (inputs[{slot}]->shape[{}] != {}) {{",
                     occurrence.axis, binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name}: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    binding.name,
-                    occurrence.input_label,
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
                     occurrence.axis,
-                    binding.name,
                     occurrence.axis,
                     binding.name
                 ));

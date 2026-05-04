@@ -10,4 +10,5 @@ chelis-types = { path = "../chelis-types" }
 
 [dev-dependencies]
 chelis-runtime = { path = "../chelis-runtime" }
+serde_json = "1"
 tempfile = "3"

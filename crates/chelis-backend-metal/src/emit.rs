@@ -310,9 +310,13 @@ impl Emitter {
             }
         };
         let bytes = format!("{}u * sizeof({})", plan.n, plan.msl_ty);
+        // `spec.label` is producer-supplied (Store name from LoadStoreName,
+        // or `root{N}` synthesized internally). Comment-context sanitize
+        // for the LoadStoreName case (synthesized labels are clean ASCII).
+        let safe_label = chelis_ir::span_sanitize::sanitize_for_comment(&spec.label);
         self.body.push(format!(
-            "// root output {idx} = `{}` (node {})",
-            spec.label, spec.id.0
+            "// root output {idx} = `{safe_label}` (node {})",
+            spec.id.0
         ));
         if plan.shape.is_empty() {
             // Scalar output — chelis_alloc(0, NULL, dtype) per chelis_runtime.h.
@@ -491,8 +495,17 @@ impl Emitter {
         let buf = format!("buf_{}", node.id.0);
         let bytes = format!("{n}u * sizeof({msl_ty})");
         self.push_span_comments(node);
+        // Producer-supplied `name` (LoadStoreName) flows into a `// ...`
+        // comment context. Even though LoadStoreName's constructor enforces
+        // identifier-grammar (so newlines / NUL / DEL cannot reach here),
+        // route through the shared comment-context sanitizer to lock the
+        // architectural pattern from
+        // spec/upstream-bugs/producer-string-sanitization.md: every
+        // producer-supplied string into a comment context goes through
+        // `sanitize_for_comment`.
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
         self.body
-            .push(format!("// node {} = Load {name}", node.id.0));
+            .push(format!("// node {} = Load {safe_name}", node.id.0));
         self.body.push(format!(
             "id<MTLBuffer> {buf} = chelis_metal_alloc({bytes});"
         ));
@@ -893,8 +906,11 @@ impl Emitter {
             }
         };
         self.push_span_comments(node);
+        // Comment-context sanitization for producer-supplied Store name.
+        // See `emit_load` for the architectural-pattern rationale.
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
         self.body
-            .push(format!("// node {} = Store `{name}`", node.id.0));
+            .push(format!("// node {} = Store `{safe_name}`", node.id.0));
         if in_plan.shape.is_empty() {
             // Rank-0 scalar Store: chelis_alloc takes (0, NULL, dtype).
             self.body

@@ -2272,8 +2272,20 @@ impl HostEmitter {
             }
             return;
         }
-        self.lines
-            .push(format!("{}printf(\"%s = \", {:?});", self.indent, name));
+        // `name` is producer-supplied (HostProgram binding display_name).
+        // It lands inside a `"..."` C string literal as a `printf %s`
+        // RUNTIME argument. Even though %s substitution is itself safe
+        // (the runtime never reinterprets the data as a format), the
+        // SURROUNDING C string literal must lex correctly. Rust's `{:?}`
+        // emits `\u{XX}` for forbidden bytes, which is NOT valid C —
+        // route through the format-string sanitizer (which emits
+        // C-compatible `\xNN`/`\\`/`\"` escapes) per
+        // spec/upstream-bugs/producer-string-sanitization.md.
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        self.lines.push(format!(
+            "{}printf(\"%s = \", \"{safe_name}\");",
+            self.indent
+        ));
         match ty {
             HostType::String => self.lines.push(format!(
                 "{}printf(\"%s\", chelis_string_data({}));",

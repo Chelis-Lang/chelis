@@ -89,11 +89,18 @@ impl HipEmitter {
         ));
         e.indent = 1;
 
+        // Producer-supplied `func_name` flows into the format-string
+        // context of the fprintf below; sanitize per
+        // spec/upstream-bugs/producer-string-sanitization.md so a
+        // forbidden byte cannot break the C string literal or be misread
+        // as a `%`-specifier.
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+
         // Input/output count validation
         e.line(&format!("if (n_in != {expected_inputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -102,7 +109,7 @@ impl HipEmitter {
         e.line(&format!("if (n_out != {expected_outputs}) {{"));
         e.indent += 1;
         e.line(&format!(
-            "fprintf(stderr, \"{func_name}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+            "fprintf(stderr, \"{func_name_fmt}: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
         ));
         e.line("abort();");
         e.indent -= 1;
@@ -225,10 +232,14 @@ impl HipEmitter {
         ));
         self.indent = 1;
 
+        // Format-string-context sanitization for `func_name` per
+        // spec/upstream-bugs/producer-string-sanitization.md.
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+
         self.line(&format!("if (n_in != {expected_inputs}) {{"));
         self.indent += 1;
         self.line(&format!(
-            "fprintf(stderr, \"{func_name}_device: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
+            "fprintf(stderr, \"{func_name_fmt}_device: expected %d inputs, got %d\\n\", {expected_inputs}, n_in);"
         ));
         self.line("abort();");
         self.indent -= 1;
@@ -237,7 +248,7 @@ impl HipEmitter {
         self.line(&format!("if (n_out != {expected_outputs}) {{"));
         self.indent += 1;
         self.line(&format!(
-            "fprintf(stderr, \"{func_name}_device: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
+            "fprintf(stderr, \"{func_name_fmt}_device: expected %d outputs, got %d\\n\", {expected_outputs}, n_out);"
         ));
         self.line("abort();");
         self.indent -= 1;
@@ -405,13 +416,20 @@ impl HipEmitter {
         let input_types = Self::input_types(dag);
         let mut sorted_labels: Vec<&String> = input_types.keys().collect();
         sorted_labels.sort();
+        // Producer-supplied `func_name` flows into format-string context;
+        // sanitize per spec/upstream-bugs/producer-string-sanitization.md.
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         for label in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
+            // `label` is `LoadStoreName::as_str()` (validated); route
+            // through the format-string sanitizer to lock the
+            // architectural pattern.
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}: input `{label}` at slot {slot} is NULL\\n\");"
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` at slot {slot} is NULL\\n\");"
             ));
             self.line("abort();");
             self.indent -= 1;
@@ -422,7 +440,7 @@ impl HipEmitter {
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -435,7 +453,7 @@ impl HipEmitter {
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name}: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -446,23 +464,25 @@ impl HipEmitter {
 
         for binding in symbolic_bindings(dag) {
             let canonical_slot = input_slots[&binding.canonical.input_label];
+            // `binding.name` flows into format-string context; sanitize.
+            let binding_name_fmt =
+                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
                 "int {} = inputs[{canonical_slot}]->shape[{}];",
                 binding.name, binding.canonical.axis
             ));
             for occurrence in binding.others {
                 let slot = input_slots[&occurrence.input_label];
+                let occ_label_fmt =
+                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
                 self.line(&format!(
                     "if (inputs[{slot}]->shape[{}] != {}) {{",
                     occurrence.axis, binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name}: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    binding.name,
-                    occurrence.input_label,
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
                     occurrence.axis,
-                    binding.name,
                     occurrence.axis,
                     binding.name
                 ));
@@ -487,13 +507,17 @@ impl HipEmitter {
         let input_types = Self::input_types(dag);
         let mut sorted_labels: Vec<&String> = input_types.keys().collect();
         sorted_labels.sort();
+        // Format-string-context sanitization for producer-supplied
+        // strings per spec/upstream-bugs/producer-string-sanitization.md.
+        let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         for label in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
             self.line(&format!("if (inputs[{slot}] == NULL) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}_device: input `{label}` at slot {slot} is NULL\\n\");"
+                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` at slot {slot} is NULL\\n\");"
             ));
             self.line("abort();");
             self.indent -= 1;
@@ -504,7 +528,7 @@ impl HipEmitter {
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name}_device: input `{label}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -517,7 +541,7 @@ impl HipEmitter {
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name}_device: input `{label}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -528,23 +552,24 @@ impl HipEmitter {
 
         for binding in symbolic_bindings(dag) {
             let canonical_slot = input_slots[&binding.canonical.input_label];
+            let binding_name_fmt =
+                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
                 "int {} = inputs[{canonical_slot}]->shape[{}];",
                 binding.name, binding.canonical.axis
             ));
             for occurrence in binding.others {
                 let slot = input_slots[&occurrence.input_label];
+                let occ_label_fmt =
+                    chelis_ir::span_sanitize::sanitize_for_format_string(&occurrence.input_label);
                 self.line(&format!(
                     "if (inputs[{slot}]->shape[{}] != {}) {{",
                     occurrence.axis, binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name}_device: symbolic dim `{}` mismatch: {}[{}]=%d but {}=%d\\n\", inputs[{slot}]->shape[{}], {});",
-                    binding.name,
-                    occurrence.input_label,
+                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{}], {});",
                     occurrence.axis,
-                    binding.name,
                     occurrence.axis,
                     binding.name
                 ));
@@ -1514,7 +1539,16 @@ impl HipEmitter {
             &format!("d_t{a}->data"),
             &format!("d_t{a}->storage_size"),
         );
-        self.line(&format!("/* store: {name} */"));
+        // Producer-supplied Store name in a `/* ... */` block-comment
+        // context. LoadStoreName grammar already excludes `*` and `/`,
+        // so a `*/` cannot reach this format!() via the constructor;
+        // the deserialize bypass remains a hypothetical second-layer
+        // concern but is out of scope for the comment-control-byte
+        // sanitizer (which targets the line-comment context). The
+        // control-byte sanitizer below still applies as defense in
+        // depth per spec/upstream-bugs/producer-string-sanitization.md.
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
+        self.line(&format!("/* store: {safe_name} */"));
     }
 
     // ------------------------------------------------------------------

@@ -319,6 +319,7 @@ dependencies = [
  "chelis-runtime",
  "chelis-types",
  "pkg-config",
+ "serde_json",
  "tempfile",
 ]
 
@@ -329,6 +330,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "serde_json",
  "tempfile",
 ]
 
@@ -339,6 +341,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "serde_json",
  "tempfile",
 ]
 
