@@ -76,6 +76,41 @@ Synthesized markers always carry forward-node spans alongside on
 `merged_spans`. A node with `span_id = "__synthesized_grad__"` and empty
 `merged_spans` is invalid — the grad pass MUST attach the forward span.
 
+#### Host-side passes (S6)
+
+The host-side AST (`HostExpr`) carries the same `span_id: Option<String>`
++ `merged_spans: Vec<String>` schema as `DagNode`. The host-side rule
+table mirrors the DAG-side table above for the lowering and rewriting
+passes that produce `HostExpr` trees. Backend host-side emission (the
+`// span:` comment block emitted by `chelis-backend-c`'s `host_emit.rs`)
+is the read-only consumer; it follows the same shape as the DAG-side
+codegen rule.
+
+| Host-side pass | Rule | Synthesized-node rule |
+|----------------|------|------------------------|
+| Lowering (Deep→`HostExpr`) | `span_id` inherited from `meta["span"]` of the Deep `Expr` being lowered. | (a) **1→1 / 1→N:** every freshly-produced `HostExpr` inherits the enclosing Deep expr's span (region-corresponding). Implemented via `lower_host_expr`'s top-level wrapper that stamps `expr.span_id()` onto the result before returning. (b) **N→1 lowering collapse:** when a parent Deep expr lowers to a body that already corresponds to an existing `HostExpr` (e.g. `(realize {} x)`, `(handle-effect {} seed body)`, `(lit {span: a} child)` — all of which return the inner lowered child verbatim — and the top-level `(def {span: a} name body)` → `HostBinding`/`HostFunction.body` collapse), the parent's `span_id` appends to the existing node's `merged_spans` via `HostExpr::append_merged_span` (lex-sorted, deduped, None-safe, canonical-equal-no-op). Same primitive shape as the DAG-side rule (b). |
+| `Let`-binding lowering | Each binding's value is a fresh `HostExpr` carrying that binding's source span (region-corresponding). When the surrounding `(bind {span: b} name value)` carries its own span, that span appends to the value HostExpr's `merged_spans` per rule (b) (the bind wrapper collapses onto the value). The enclosing `Let` node's `span_id` is the parent `(let ...)` Deep expr's span. | n/a — no synthesis. |
+| `If` / `Match` lowering | The result `HostExprKind::If` / `MatchOption` / `MatchAdt` is a fresh node carrying the enclosing `(if ...)` / `(match ...)` Deep expr's span. Arm bodies recurse through `lower_host_expr` and so each arm's `HostExpr` carries the arm-body's own span. | n/a — no synthesis. |
+| `Cast` / `Builtin` rewriting | Rewriting `(cast {} x)` → `HostExprKind::Builtin { name: "cast", args: [x] }` and similar `(copy {} x)` rewrites: the result `Builtin` node's `span_id` is the enclosing operation's span (region-corresponding). The argument's own span lives on the argument `HostExpr`'s `span_id` and travels with it. No append to the operation's `merged_spans` — the argument is a child node, not a merged contributor. | n/a — `cast` / `copy` are real source operations. |
+| `(grad ...)` / `(vmap ...)` / `(vmap-grad ...)` host-position fallback | Produces a `HostExprKind::Builtin { name: "__unresolved_<tag>__", args: [], .. }` so `host_program_unresolved_call_sites` can surface a clean pre-codegen error. The result's `span_id` is the source `(grad ...)` Deep expr's own span (region-corresponding rule), set by `lower_host_expr`'s wrapper. The `__unresolved_<tag>__` value lives in the `Builtin.name` field — it is NOT a synthesized `span_id`. | n/a — the result has a real source span. The `Builtin.name` is a payload string, not a synthesized span marker. |
+| Tensor-helper extraction (`try_lower_tensor_helper_call` / `finish_tensor_helper_call`) | The produced `HostExprKind::TensorCall { helper, args, .. }` wraps an extracted DAG. The result's `span_id` is the originating Deep expr's source span (set by `lower_host_expr`'s wrapper when the tensor call returns from `lower_host_expr`). The helper's INTERNAL DAG nodes carry their own per-node spans via DAG-side lowering rules (S2). | n/a — TensorCall has a real source span. |
+| Top-level fn inlining (`inline_top_level_host_call` and the `lower_app_host_expr` HOF specialization path) | When a callee is inlined for HOF specialization (e.g. `grad(local_fn)(theta)`), the inlined-substituted body is re-lowered through `lower_host_expr`. Each lowered node carries its own region-corresponding span via the rule above; the call-site's outer span (the `(app ...)` expr) appends to the result's `merged_spans` per rule (b) (the call-site collapses onto the inlined body). | n/a — the inlined body is real source. |
+| Argument hoisting (`hoist_host_lane_tensor_bindings`) | Hoisted `__host_tensor_arg_<index>` bindings live inside a synthetic `HostExprKind::Let` whose `span_id` is the original `(app ...)` expr's span (region-corresponding via `lower_host_expr`'s wrapper). Each hoisted binding's value carries its own argument-expr span. | n/a — the wrapper Let inherits the originating `(app ...)` span (a real source region). |
+| Type-refinement passes (`refine_host_expr_types`, `refine_host_function_signatures`, `refine_host_globals`, `propagate_named_callback_signatures`) | Type-only updates; `span_id` and `merged_spans` are pure copies (mutation in place, never reset). | n/a — no synthesis. |
+| Host emit (S6 step 5/8 — read-only consumer) | Backend host-side emitter prepends one `// span:` line per `span_id ∪ merged_spans` immediately before the C statement(s) implementing the node. Order: canonical first, then `merged_spans` lex-sorted (deterministic, reproducible across runs). Out of scope for S6 steps 1-4; landed in S6 step 5. | n/a |
+
+**Synthesized-marker invariant (forward-looking).** Today's host-side
+passes do not mint `__synthesized_<host_pass>__` span IDs — every
+shipped rule above resolves to a real source span via the
+region-corresponding rule. The invariant is locked architecturally for
+when host-side passes (e.g. a future host-side fusion or HOF specializer
+that synthesizes wrapper nodes with no source region) DO need synthesized
+markers: any `HostExpr` with `span_id` matching `__synthesized_<host_pass>__`
+MUST have non-empty `merged_spans` carrying the originating source span,
+mirroring the same invariant the S3 grad/Tier 2 passes enforce on
+`DagNode`. Locked via a test that constructs such a HostExpr
+programmatically and asserts the invariant.
+
 ### 2.4 Backend emission (S4)
 
 Each backend (C / HIP / Metal) emits one `// span: <id>` line per

@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    HostCallback, HostCallbackKind, HostExpr, HostFunction, HostMatchArm, HostParam, HostProgram,
-    HostTensorHelper, HostType,
+    HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction, HostMatchArm, HostParam,
+    HostProgram, HostTensorHelper, HostType,
 };
 
 use crate::emit::CEmitter;
@@ -423,23 +423,23 @@ impl HostEmitter {
     }
 
     fn assign_expr(&mut self, target: &str, expr: &HostExpr, ty: &HostType) {
-        match expr {
-            HostExpr::Int(value) => self
+        match &expr.kind {
+            HostExprKind::Int(value) => self
                 .lines
                 .push(format!("{}{target} = {};", self.indent, value)),
-            HostExpr::Float(value) => self
+            HostExprKind::Float(value) => self
                 .lines
                 .push(format!("{}{target} = {};", self.indent, value)),
-            HostExpr::Bool(value) => self.lines.push(format!(
+            HostExprKind::Bool(value) => self.lines.push(format!(
                 "{}{target} = {};",
                 self.indent,
                 if *value { "true" } else { "false" }
             )),
-            HostExpr::String(value) => self.lines.push(format!(
+            HostExprKind::String(value) => self.lines.push(format!(
                 "{}{target} = chelis_string_from_cstr({:?});",
                 self.indent, value
             )),
-            HostExpr::List(items, expr_ty) => {
+            HostExprKind::List(items, expr_ty) => {
                 let effective_ty = if !matches!(ty, HostType::Unknown) {
                     ty
                 } else {
@@ -447,7 +447,7 @@ impl HostEmitter {
                 };
                 self.assign_list_literal(target, items, effective_ty);
             }
-            HostExpr::Tuple(items, expr_ty) => {
+            HostExprKind::Tuple(items, expr_ty) => {
                 let effective_ty = if !matches!(ty, HostType::Unknown) {
                     ty
                 } else {
@@ -455,7 +455,7 @@ impl HostEmitter {
                 };
                 self.assign_tuple_literal(target, items, effective_ty);
             }
-            HostExpr::Var(name, var_ty) => {
+            HostExprKind::Var(name, var_ty) => {
                 if name == "Nil" {
                     self.lines
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
@@ -473,7 +473,7 @@ impl HostEmitter {
                     ));
                 }
             }
-            HostExpr::Call {
+            HostExprKind::Call {
                 function,
                 args,
                 arg_tys,
@@ -481,7 +481,7 @@ impl HostEmitter {
             } => {
                 self.assign_call(target, function, args, arg_tys, call_ty);
             }
-            HostExpr::Builtin {
+            HostExprKind::Builtin {
                 name,
                 args,
                 ty: expr_ty,
@@ -493,7 +493,7 @@ impl HostEmitter {
                 };
                 self.assign_builtin(target, name, args, effective_ty);
             }
-            HostExpr::AdtConstruct {
+            HostExprKind::AdtConstruct {
                 ctor,
                 fields,
                 ty: expr_ty,
@@ -505,7 +505,7 @@ impl HostEmitter {
                 };
                 self.assign_adt_construct(target, ctor, fields, effective_ty);
             }
-            HostExpr::AdtFieldAccess {
+            HostExprKind::AdtFieldAccess {
                 base,
                 field_index,
                 ty: expr_ty,
@@ -517,7 +517,7 @@ impl HostEmitter {
                 };
                 self.assign_adt_field_access(target, base, *field_index, effective_ty);
             }
-            HostExpr::If {
+            HostExprKind::If {
                 cond,
                 then_expr,
                 else_expr,
@@ -543,7 +543,7 @@ impl HostEmitter {
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
-            HostExpr::MatchOption {
+            HostExprKind::MatchOption {
                 scrutinee,
                 bind_name,
                 some_expr,
@@ -598,7 +598,7 @@ impl HostEmitter {
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
-            HostExpr::MatchAdt {
+            HostExprKind::MatchAdt {
                 scrutinee,
                 arms,
                 default_expr,
@@ -617,7 +617,7 @@ impl HostEmitter {
                     effective_ty,
                 );
             }
-            HostExpr::Let {
+            HostExprKind::Let {
                 bindings,
                 body,
                 ty: expr_ty,
@@ -650,13 +650,13 @@ impl HostEmitter {
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
-            HostExpr::Map { callback, list, ty } => {
+            HostExprKind::Map { callback, list, ty } => {
                 self.assign_map(target, callback, list, ty);
             }
-            HostExpr::Filter { callback, list, ty } => {
+            HostExprKind::Filter { callback, list, ty } => {
                 self.assign_filter(target, callback, list, ty);
             }
-            HostExpr::Fold {
+            HostExprKind::Fold {
                 callback,
                 init,
                 list,
@@ -664,7 +664,7 @@ impl HostEmitter {
             } => {
                 self.assign_fold(target, callback, init, list, ty);
             }
-            HostExpr::Scan {
+            HostExprKind::Scan {
                 callback,
                 init,
                 list,
@@ -672,16 +672,16 @@ impl HostEmitter {
             } => {
                 self.assign_scan(target, callback, init, list, ty);
             }
-            HostExpr::Partition { callback, list, ty } => {
+            HostExprKind::Partition { callback, list, ty } => {
                 self.assign_partition(target, callback, list, ty);
             }
-            HostExpr::FlatMap { callback, list, ty } => {
+            HostExprKind::FlatMap { callback, list, ty } => {
                 self.assign_flat_map(target, callback, list, ty);
             }
-            HostExpr::TensorCall { helper, args, ty } => {
+            HostExprKind::TensorCall { helper, args, ty } => {
                 self.assign_tensor_call(target, *helper, args, ty);
             }
-            HostExpr::Unit => {
+            HostExprKind::Unit => {
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
         }
@@ -2386,30 +2386,30 @@ fn c_decl(ty: &HostType, name: &str) -> String {
 }
 
 fn host_type(expr: &HostExpr) -> HostType {
-    match expr {
-        HostExpr::Int(_) => HostType::Int64,
-        HostExpr::Float(_) => HostType::Float64,
-        HostExpr::Bool(_) => HostType::Bool,
-        HostExpr::String(_) => HostType::String,
-        HostExpr::List(_, ty) => ty.clone(),
-        HostExpr::Tuple(_, ty) => ty.clone(),
-        HostExpr::Var(_, ty)
-        | HostExpr::Call { ty, .. }
-        | HostExpr::Builtin { ty, .. }
-        | HostExpr::AdtConstruct { ty, .. }
-        | HostExpr::AdtFieldAccess { ty, .. }
-        | HostExpr::If { ty, .. }
-        | HostExpr::MatchOption { ty, .. }
-        | HostExpr::MatchAdt { ty, .. }
-        | HostExpr::Let { ty, .. }
-        | HostExpr::Map { ty, .. }
-        | HostExpr::Filter { ty, .. }
-        | HostExpr::Fold { ty, .. }
-        | HostExpr::Scan { ty, .. }
-        | HostExpr::Partition { ty, .. }
-        | HostExpr::FlatMap { ty, .. }
-        | HostExpr::TensorCall { ty, .. } => ty.clone(),
-        HostExpr::Unit => HostType::Unit,
+    match &expr.kind {
+        HostExprKind::Int(_) => HostType::Int64,
+        HostExprKind::Float(_) => HostType::Float64,
+        HostExprKind::Bool(_) => HostType::Bool,
+        HostExprKind::String(_) => HostType::String,
+        HostExprKind::List(_, ty) => ty.clone(),
+        HostExprKind::Tuple(_, ty) => ty.clone(),
+        HostExprKind::Var(_, ty)
+        | HostExprKind::Call { ty, .. }
+        | HostExprKind::Builtin { ty, .. }
+        | HostExprKind::AdtConstruct { ty, .. }
+        | HostExprKind::AdtFieldAccess { ty, .. }
+        | HostExprKind::If { ty, .. }
+        | HostExprKind::MatchOption { ty, .. }
+        | HostExprKind::MatchAdt { ty, .. }
+        | HostExprKind::Let { ty, .. }
+        | HostExprKind::Map { ty, .. }
+        | HostExprKind::Filter { ty, .. }
+        | HostExprKind::Fold { ty, .. }
+        | HostExprKind::Scan { ty, .. }
+        | HostExprKind::Partition { ty, .. }
+        | HostExprKind::FlatMap { ty, .. }
+        | HostExprKind::TensorCall { ty, .. } => ty.clone(),
+        HostExprKind::Unit => HostType::Unit,
     }
 }
 

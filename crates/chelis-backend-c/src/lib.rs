@@ -332,7 +332,8 @@ mod tests {
         // mark the helper function as `static` (preventing PLT export) while
         // the user-facing HostFunction entry keeps external linkage.
         use chelis_ir::host::{
-            HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
+            HostType,
         };
 
         // Build a simple 1-element scalar DAG for the helper.
@@ -355,7 +356,7 @@ mod tests {
             ret_ty: HostType::Float64,
             // Body is just a float literal — does not actually call the tensor helper,
             // but the helper must still be emitted into the file.
-            body: HostExpr::Float(0.0),
+            body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
         };
 
@@ -2448,7 +2449,8 @@ int main(void) {{
     #[test]
     fn adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void() {
         use chelis_ir::host::{
-            HostBinding, HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+            HostBinding, HostExpr, HostExprKind, HostFunction, HostParam, HostProgram,
+            HostTensorHelper, HostType,
         };
 
         let mut helper_dag = Dag::new();
@@ -2468,7 +2470,7 @@ int main(void) {{
                 ty: HostType::Float64,
             }],
             ret_ty: HostType::Float64,
-            body: HostExpr::Float(0.0),
+            body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
         };
 
@@ -2478,7 +2480,7 @@ int main(void) {{
                 name: "__g".to_string(),
                 display_name: None,
                 ty: HostType::Int64,
-                value: HostExpr::Int(1),
+                value: HostExpr::new(HostExprKind::Int(1)),
             }],
             global_tensor_helpers: vec![],
             functions: vec![func],
@@ -2513,7 +2515,8 @@ int main(void) {{
             return;
         }
         use chelis_ir::host::{
-            HostExpr, HostFunction, HostParam, HostProgram, HostTensorHelper, HostType,
+            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
+            HostType,
         };
 
         let mut helper_dag = Dag::new();
@@ -2533,7 +2536,7 @@ int main(void) {{
                 ty: HostType::Float64,
             }],
             ret_ty: HostType::Float64,
-            body: HostExpr::Float(0.0),
+            body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
         };
 
