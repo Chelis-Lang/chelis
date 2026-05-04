@@ -1,7 +1,7 @@
 [package]
 name = "pseudo-nautilus"
 version = "0.1.0"
-compiler = "=0.4.1"
+compiler = "=0.5.0"
 module_prefix = "PseudoNautilus"
 
 [dependencies]
