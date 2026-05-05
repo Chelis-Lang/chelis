@@ -428,11 +428,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path(
-                "chelis-lang",
-                "nautilus",
-                "v0.1.0",
-            )))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.1.0")))
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down")),
     ]);
 
@@ -646,11 +642,7 @@ fn phaseA_item8_429_during_autofetch_names_retry_after() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path(
-                "chelis-lang",
-                "nautilus",
-                "v0.1.0",
-            )))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.1.0")))
             .respond_with(
                 ResponseTemplate::new(429)
                     .insert_header("Retry-After", "300")
@@ -1032,7 +1024,10 @@ fn phaseA_item8_real_github_manual_gate() {
         .assert()
         .success();
     let index_path = reef_home.join("index.json");
-    assert!(index_path.exists(), "index.json must exist after auto-fetch");
+    assert!(
+        index_path.exists(),
+        "index.json must exist after auto-fetch"
+    );
     let index: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&index_path).unwrap()).unwrap();
     let entries = index["packages"]["nautilus"]
