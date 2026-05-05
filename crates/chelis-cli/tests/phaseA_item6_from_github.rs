@@ -400,6 +400,8 @@ fn phaseA_item6_from_github_oracle() {
     oracle_happy_path_via_lib_and_cli();
     oracle_byte_equality_with_from_monorepo();
     oracle_auth_missing_no_gh();
+    oracle_auth_rejected_401_distinct_from_missing();
+    oracle_auth_rejected_403_also_typed();
     oracle_404_release_asset_not_found();
     oracle_hash_mismatch_on_second_fetch();
     oracle_5xx_server_error_distinct_category();
@@ -545,6 +547,96 @@ fn oracle_auth_missing_no_gh() {
     assert!(
         msg.contains("gh auth token"),
         "auth-missing message must suggest `gh auth token`: {msg}"
+    );
+}
+
+/// Wrong token (not empty, just wrong) yields a 401 from the GitHub
+/// API. Helper must surface `GitHubFetchError::AuthRejected { status:
+/// 401, .. }` — distinct from `AuthMissing`. The Display strings for
+/// the two variants must differ so users can tell "I have no token"
+/// from "my token is invalid / lacks scope" at a glance.
+///
+/// The fixture mounts an authorization-aware mock plus an
+/// unauthenticated catch-all that returns 401. Sending a non-empty
+/// but non-matching token misses the higher-priority match and falls
+/// through to the catch-all, which is exactly what GitHub does for
+/// any non-`token unit-test-token` value.
+fn oracle_auth_rejected_401_distinct_from_missing() {
+    let (harness, _, _) = fixture_canonical_release();
+    let dir = tempdir().expect("tempdir");
+    let registry = dir.path().join("reef-home");
+
+    let err = lib_install_from_github(
+        "chelis-lang/chelis-std@v0.1.0",
+        &harness.uri(),
+        Some("not-the-right-token"),
+        &registry,
+    )
+    .expect_err("wrong token must surface 401");
+    let msg = err.to_string();
+    assert!(
+        matches!(
+            err,
+            chelis_reef::GitHubFetchError::AuthRejected { status: 401, .. }
+        ),
+        "expected AuthRejected(401), got: {err:?}"
+    );
+    assert!(
+        msg.contains("401"),
+        "AuthRejected message must name the HTTP status: {msg}"
+    );
+    // The URL must appear so users know which endpoint rejected the
+    // token (metadata vs. asset bytes — useful when debugging
+    // partial-scope tokens).
+    assert!(
+        msg.contains(&harness.uri()) || msg.contains("releases/tags"),
+        "AuthRejected message must name the URL: {msg}"
+    );
+
+    // Display-distinctness contract: AuthMissing and AuthRejected
+    // must produce different user-facing messages so the operator
+    // can tell "I never set a token" from "my token is wrong."
+    let missing_err = chelis_reef::GitHubFetchError::AuthMissing {
+        reason: "synthetic for distinctness check".to_string(),
+    };
+    assert_ne!(
+        missing_err.to_string(),
+        msg,
+        "AuthMissing and AuthRejected Display must be distinct"
+    );
+}
+
+/// 403 also maps to `AuthRejected`. Real-world GitHub uses 403 for
+/// "token is valid but lacks repo scope" and 401 for "token is
+/// missing or invalid"; both are auth-rejection from the user's
+/// perspective. Our helper collapses both into the same typed
+/// variant with the actual HTTP status preserved in the `status`
+/// field, so callers can distinguish if needed.
+fn oracle_auth_rejected_403_also_typed() {
+    let harness = WiremockHarness::new();
+    harness.mount_all(vec![
+        Mock::given(method("GET"))
+            .and(wm_path(metadata_path(
+                "chelis-lang",
+                "chelis-std",
+                "v0.1.0",
+            )))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden")),
+    ]);
+    let dir = tempdir().expect("tempdir");
+    let err = lib_install_from_github(
+        "chelis-lang/chelis-std@v0.1.0",
+        &harness.uri(),
+        Some("scope-limited-token"),
+        &dir.path().join("reef-home"),
+    )
+    .expect_err("403 must surface AuthRejected");
+    assert!(
+        matches!(
+            err,
+            chelis_reef::GitHubFetchError::AuthRejected { status: 403, .. }
+        ),
+        "expected AuthRejected(403), got: {err:?}"
     );
 }
 
