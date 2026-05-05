@@ -2162,9 +2162,15 @@ impl std::fmt::Display for LockfileInstallError {
     }
 }
 
-/// Default list of canonical shells to bootstrap when
+/// Default list of canonical **shells** to bootstrap when
 /// `chelis reef install --bootstrap` is invoked without an explicit
 /// list. Each entry is `(repo, tag)` under [`CANONICAL_REEF_ORG`].
+///
+/// **Runtime is not in this list.** `chelis-std` is the language
+/// runtime, not a shell — it ships bundled with the compiler and is
+/// not installed via `reef install`. An explicit `chelis-std` entry
+/// in the bootstrap input list is rejected with a typed runtime
+/// error (see [`install_bootstrap`]).
 ///
 /// This list is **hand-maintained** for the pre-launch dev team. Bump
 /// each entry's tag whenever a shell publishes a new release that
@@ -2178,11 +2184,10 @@ impl std::fmt::Display for LockfileInstallError {
 /// in `spec/design/reef_distribution.md`; until then this list is the
 /// hard-coded source of truth.
 pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
-    ("chelis-std", "v0.1.0"),
-    ("nautilus", "v0.4.0"),
-    ("coral", "v0.4.0"),
-    ("shoals", "v0.1.0"),
-    ("octant", "v0.1.0"),
+    ("nautilus", "v0.5.0"),
+    ("coral", "v0.5.0"),
+    ("shoals", "v0.2.0"),
+    ("octant", "v0.3.3"),
 ];
 
 /// Distinct error categories surfaced by the bootstrap install path.
@@ -2207,6 +2212,14 @@ pub enum BootstrapError {
     DuplicateVersion {
         package: String,
         versions: Vec<String>,
+    },
+    /// The input list contains the language runtime (`chelis-std`).
+    /// The runtime is bundled with the compiler and cannot be
+    /// installed via reef. The error names the requested version and
+    /// the compiler's bundled version.
+    RuntimeNotABootstrapTarget {
+        requested_version: String,
+        bundled_version: String,
     },
     /// The input list is empty AND
     /// [`DEFAULT_BOOTSTRAP_LIST`] is empty (test scaffolds inject a
@@ -2243,6 +2256,16 @@ impl std::fmt::Display for BootstrapError {
                 f,
                 "package `{package}` appears at multiple versions in the bootstrap input list: [{}] — pick one",
                 versions.join(", ")
+            ),
+            Self::RuntimeNotABootstrapTarget {
+                requested_version,
+                bundled_version,
+            } => write!(
+                f,
+                "`chelis-std` is the language runtime; it ships with the compiler and is not \
+                 installed via `reef install --bootstrap` (requested `{requested_version}`, \
+                 compiler bundles `{bundled_version}`). Drop `chelis-std` from the bootstrap \
+                 input list — programs depend on the runtime implicitly."
             ),
             Self::NothingToInstall => write!(
                 f,
@@ -2684,6 +2707,20 @@ pub fn install_bootstrap(
         return Err(BootstrapError::NothingToInstall);
     }
 
+    // Reject explicit `chelis-std` entries up front: the runtime is
+    // bundled with the compiler and is not a `reef install --bootstrap`
+    // target. Surface a typed error naming both the requested and
+    // bundled versions so the user can tell which side moved.
+    if let Some(runtime_spec) = specs
+        .iter()
+        .find(|s| s.repo == CHELIS_STD_PACKAGE_NAME)
+    {
+        return Err(BootstrapError::RuntimeNotABootstrapTarget {
+            requested_version: runtime_spec.version.clone(),
+            bundled_version: compiler_bundled_chelis_std_version().to_string(),
+        });
+    }
+
     // Phase 1: fetch each manifest, accumulate (name, version, deps).
     let mut nodes: Vec<BootstrapNode> = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -2718,6 +2755,30 @@ pub fn install_bootstrap(
             // build time. Bootstrap's job is the upstream-published
             // dep set.
             if dep_spec.path.is_some() && dep_spec.version.is_none() {
+                continue;
+            }
+            // chelis-std declared by a shell's `reef.toml` is the
+            // implicit-runtime dep, not an edge in the bootstrap graph.
+            // The runtime is compiler-bundled; we do not include it in
+            // the topo sort or the install loop. Soft-verify the
+            // declared version against the compiler's bundled version
+            // so a stale shell declaration surfaces clearly.
+            if dep_name == CHELIS_STD_PACKAGE_NAME {
+                if let Some(declared) = dep_spec.version.as_deref() {
+                    let bundled = compiler_bundled_chelis_std_version();
+                    if declared != bundled {
+                        return Err(BootstrapError::Validation {
+                            message: format!(
+                                "shell `{}/{}@{}` declares `chelis-std = {{ version = \"{}\" }}`, \
+                                 but this compiler bundles chelis-std `{}`. The runtime ships \
+                                 with the compiler and cannot be substituted; either upgrade \
+                                 the compiler or wait for a shell release that pins the matching \
+                                 runtime.",
+                                spec.org, spec.repo, spec.tag, declared, bundled
+                            ),
+                        });
+                    }
+                }
                 continue;
             }
             // Version-pinned deps need a peer in the bootstrap input
