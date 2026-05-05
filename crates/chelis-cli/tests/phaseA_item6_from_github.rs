@@ -1127,6 +1127,82 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
     }
 }
 
+/// Io error category — H3 regression. Wave 0 raised
+/// `GitHubFetchError::Io` on tempdir/file/client failures but no
+/// test asserted on it. Point `TMPDIR` at a path whose parent isn't
+/// writable so `tempfile::tempdir()` fails with an OS error; the
+/// helper must surface that as `Io`, distinct from `Network` and
+/// from `Validation`.
+///
+/// Strategy: create a regular file `unwritable-dir-stub`, then point
+/// `TMPDIR` at a child of it. `tempfile::tempdir()` calls
+/// `fs::create_dir_all($TMPDIR)` (or equivalently
+/// `fs::create_dir($TMPDIR/<random>)`), which fails with `ENOTDIR`
+/// because the parent path is a file. That's a clean OS-level
+/// failure independent of permissions, which makes the test
+/// portable across filesystems and runner identities.
+#[test]
+fn phaseA_item6_io_error_category_on_tempdir_failure() {
+    let _g = file_lock();
+    let outer = tempdir().expect("outer tempdir");
+    // `outer/not-a-dir` is a regular file. We then point TMPDIR at
+    // a path *inside* that file — there's no way to create a
+    // directory under a regular file, so tempfile::tempdir() fails.
+    let stub_file = outer.path().join("not-a-dir");
+    fs::write(&stub_file, b"placeholder").expect("seed stub file");
+    let bad_tmpdir = stub_file.join("inside");
+
+    let prior_tmp = std::env::var_os("TMPDIR");
+    let prior_token = std::env::var_os("GITHUB_TOKEN");
+    let prior_api_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE_API");
+    unsafe {
+        std::env::set_var("TMPDIR", &bad_tmpdir);
+        std::env::set_var("GITHUB_TOKEN", "unit-test-token");
+        // API base does not matter — we never get past tempdir
+        // creation. Pointing at the discard port keeps the test
+        // hermetic if the bad-TMPDIR somehow doesn't trip first.
+        std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9");
+    }
+    let registry = outer.path().join("reef-home");
+    let result = chelis_reef::install_from_github("chelis-lang/chelis-std@v0.1.0", &registry);
+    unsafe {
+        match prior_tmp {
+            Some(p) => std::env::set_var("TMPDIR", p),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        match prior_token {
+            Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+            None => std::env::remove_var("GITHUB_TOKEN"),
+        }
+        match prior_api_base {
+            Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
+            None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE_API"),
+        }
+    }
+    let err = result.expect_err("must fail with Io on bad TMPDIR");
+    assert!(
+        matches!(err, chelis_reef::GitHubFetchError::Io { .. }),
+        "expected Io error category for tempdir failure, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tempdir") || msg.contains("I/O"),
+        "Io message must name the failed step: {msg}"
+    );
+
+    // Type-distinctness: Io must not collide with Network or
+    // Validation Display strings on this case.
+    let synthetic_network = chelis_reef::GitHubFetchError::Network {
+        url: "http://example".to_string(),
+        message: "synthetic".to_string(),
+    };
+    let synthetic_validation = chelis_reef::GitHubFetchError::Validation {
+        message: "synthetic".to_string(),
+    };
+    assert_ne!(synthetic_network.to_string(), msg);
+    assert_ne!(synthetic_validation.to_string(), msg);
+}
+
 #[test]
 fn phaseA_item6_cli_rejects_both_sources_set() {
     let _g = file_lock();
