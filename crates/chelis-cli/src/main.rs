@@ -1390,8 +1390,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         requested.push((name, version));
                     }
-                    let installed =
-                        chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
+                    let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
                     for artifact in &installed {
                         println!(
                             "Installed {} {}",
@@ -1427,8 +1426,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let pkg_root = package_root.unwrap_or_else(|| PathBuf::from("."));
                     let registry_root = chelis_reef::registry_home()?;
-                    let results =
-                        chelis_reef::install_from_lockfile(&pkg_root, &registry_root)?;
+                    let results = chelis_reef::install_from_lockfile(&pkg_root, &registry_root)?;
                     let mut any_failure = false;
                     let mut any_no_origin = false;
                     for entry in &results {
@@ -1485,13 +1483,11 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 (None, None, false) => {
-                    return Err(
-                        "`chelis reef install` requires a source. \
+                    return Err("`chelis reef install` requires a source. \
                          Pass `--from-monorepo <PATH>` pointing at a chelis monorepo, \
                          `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release, \
                          or `--from-lockfile` to re-fetch from the project's reef.lock."
-                            .into(),
-                    );
+                        .into());
                 }
                 _ => {
                     // Should be unreachable due to clap's

@@ -152,10 +152,9 @@ impl std::fmt::Display for RemoteOriginParseError {
                 "remote_origin `{input}` uses unknown scheme `{scheme}` \
                  (supported: `github://`)"
             ),
-            Self::Malformed { input, reason } => write!(
-                f,
-                "remote_origin `{input}` is malformed: {reason}"
-            ),
+            Self::Malformed { input, reason } => {
+                write!(f, "remote_origin `{input}` is malformed: {reason}")
+            }
         }
     }
 }
@@ -1775,10 +1774,7 @@ pub enum LockfileInstallEntry {
     /// so we cannot fetch it. The caller is told to run `--bootstrap`
     /// (or re-run `--from-monorepo`/`--from-github`) to populate the
     /// origin in the lockfile.
-    SkippedNoOrigin {
-        name: String,
-        version: String,
-    },
+    SkippedNoOrigin { name: String, version: String },
     /// A path-dep entry. There is nothing to fetch — the dep lives in
     /// the developer's working tree and `chelis reef build` resolves
     /// it directly. The CLI surfaces this as informational, not an
@@ -1837,27 +1833,19 @@ impl std::fmt::Display for LockfileInstallError {
                 "no lockfile found at {} — run `chelis reef build` first to generate one",
                 path.display()
             ),
-            Self::Malformed { path, message } => write!(
-                f,
-                "lockfile at {} is malformed: {message}",
-                path.display()
-            ),
+            Self::Malformed { path, message } => {
+                write!(f, "lockfile at {} is malformed: {message}", path.display())
+            }
             Self::OriginParse {
                 name,
                 version,
                 inner,
-            } => write!(
-                f,
-                "lockfile entry `{name}` v{version}: {inner}"
-            ),
+            } => write!(f, "lockfile entry `{name}` v{version}: {inner}"),
             Self::Fetch {
                 name,
                 version,
                 inner,
-            } => write!(
-                f,
-                "lockfile entry `{name}` v{version}: {inner}"
-            ),
+            } => write!(f, "lockfile entry `{name}` v{version}: {inner}"),
         }
     }
 }
@@ -1916,11 +1904,10 @@ pub fn install_from_lockfile(
         path: lockfile_path.clone(),
         message: format!("failed to read: {e}"),
     })?;
-    let lock: ReefLock =
-        toml::from_str(&text).map_err(|e| LockfileInstallError::Malformed {
-            path: lockfile_path.clone(),
-            message: e.to_string(),
-        })?;
+    let lock: ReefLock = toml::from_str(&text).map_err(|e| LockfileInstallError::Malformed {
+        path: lockfile_path.clone(),
+        message: e.to_string(),
+    })?;
 
     fs::create_dir_all(registry_root).map_err(|e| LockfileInstallError::Malformed {
         path: lockfile_path.clone(),
@@ -2319,6 +2306,11 @@ fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
     })
 }
 
+// 8 arguments — the prior surface was already 7 and Item 9 adds
+// `remote_origin` plumbing. Folding into a struct would just rename
+// the same eight values; the recursion stays clearer with positional
+// parameters.
+#[allow(clippy::too_many_arguments)]
 fn resolve_package_recursive(
     package_name: &str,
     root: PathBuf,
