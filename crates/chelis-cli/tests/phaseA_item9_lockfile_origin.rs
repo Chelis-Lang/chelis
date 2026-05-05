@@ -52,6 +52,16 @@
 //! GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli \
 //!   phaseA_item9_real_github_manual_gate -- --ignored --exact
 //! ```
+//!
+//! **Phase A correction (chelis-std-runtime fix wave):** the wiremock
+//! fixtures previously served real chelis-std bytes off the monorepo
+//! dist tree. Now that chelis-std is classified as the language runtime
+//! (not a shell) and routed via `LockSource::Bundled` rather than
+//! through GitHub auto-fetch, those tests use a synthetic `nautilus`
+//! shell built in-memory at test start. Tests that exercise the
+//! lockfile schema (round-trip / back-compat) still use "chelis-std"
+//! string literals because they assert serde behavior, not resolver
+//! behavior.
 
 #![allow(non_snake_case)]
 
@@ -61,8 +71,11 @@ use chelis_reef::{
     LockfileInstallError, ReefLock, RemoteOriginParseError, parse_remote_origin,
 };
 use chelis_shell::PackageId;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use tar::Builder;
 use tempfile::tempdir;
 use wiremock::matchers::{header, method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -75,18 +88,78 @@ fn monorepo_root() -> PathBuf {
         .expect("monorepo root must exist")
 }
 
-/// Real prebuilt artifacts shipped in `packages/chelis-std/dist/`. The
-/// oracle uses these as the bytes the wiremock fixture serves.
-fn chelis_std_dist() -> (PathBuf, PathBuf) {
-    let dist = monorepo_root().join("packages/chelis-std/dist");
-    let archive = dist.join("chelis-std-0.1.0.tar.zst");
-    let shell = dist.join("chelis-std-0.1.0.chb");
-    assert!(
-        archive.exists() && shell.exists(),
-        "prebuilt chelis-std artifacts missing under {} — \
-         run `chelis reef build` in packages/chelis-std/ first",
-        dist.display()
+// ============================================================
+// Synthetic-nautilus fixture builders.
+// Same shape as item-7 / item-8, kept inline rather than factored
+// into a shared helper crate so each phaseA test file remains
+// self-contained.
+// ============================================================
+
+fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u8> {
+    let mut deps_toml = String::new();
+    for (dep_name, dep_version) in deps {
+        deps_toml.push_str(&format!(
+            "\n[dependencies.{dep_name}]\nversion = \"{dep_version}\"\n"
+        ));
+    }
+    let manifest_text = format!(
+        r#"[package]
+name = "{name}"
+version = "{version}"
+compiler = "=0.5.0"
+module_prefix = "Test"
+{deps_toml}"#
     );
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = Builder::new(&mut tar_bytes);
+        let manifest_bytes = manifest_text.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("reef.toml").expect("set path");
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append(&header, manifest_bytes)
+            .expect("append manifest");
+        let main_bytes = main_text.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("src/main.ch").expect("set path");
+        header.set_size(main_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, main_bytes).expect("append main");
+        builder.finish().expect("finish tar");
+    }
+    zstd::stream::encode_all(Cursor::new(tar_bytes), 19).expect("zstd encode")
+}
+
+fn sha256_bytes(b: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b);
+    format!("{:x}", h.finalize())
+}
+
+fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
+    let shell = chelis_shell::ShellPackage {
+        package: chelis_shell::PackageId {
+            name: name.to_string(),
+            version: version.to_string(),
+        },
+        compiler: "=0.5.0".to_string(),
+        modules: Vec::new(),
+        dependencies: Vec::new(),
+        archive_sha256: archive_sha256.to_string(),
+    };
+    chelis_shell::encode_shell(&shell).expect("encode shell")
+}
+
+/// Synthetic `nautilus` archive+shell pair. No filesystem dependency.
+fn synthetic_nautilus_artifacts() -> (Vec<u8>, Vec<u8>) {
+    let archive = build_test_archive("nautilus", "0.1.0", &[]);
+    let archive_sha = sha256_bytes(&archive);
+    let shell = build_test_shell_bytes("nautilus", "0.1.0", &archive_sha);
     (archive, shell)
 }
 
@@ -122,25 +195,23 @@ fn metadata_json(tag: &str, assets: &[(u64, &str)]) -> String {
 const ARCHIVE_ASSET_ID: u64 = 1001;
 const SHELL_ASSET_ID: u64 = 1002;
 
-/// Stand up a wiremock harness that serves the chelis-std artifacts as
-/// `chelis-lang/chelis-std@v0.1.0` release assets via the GitHub API
-/// two-step path. The metadata + byte endpoints all require an
-/// `Authorization: token unit-test-token` header. Returns harness +
-/// (archive, shell) bytes.
+/// Stand up a wiremock harness that serves the synthetic nautilus
+/// artifacts as `chelis-lang/nautilus@v0.1.0` release assets via the
+/// GitHub API two-step path. The metadata + byte endpoints all
+/// require an `Authorization: token unit-test-token` header. Returns
+/// harness + (archive, shell) bytes.
 fn fixture_canonical_release() -> (WiremockHarness, Vec<u8>, Vec<u8>) {
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).expect("read archive");
-    let shell_bytes = fs::read(&shell_p).expect("read shell");
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
 
     let harness = WiremockHarness::new();
-    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.1.0");
-    let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
-    let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
+    let meta_path = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let archive_url_path = asset_id_path("chelis-lang", "nautilus", ARCHIVE_ASSET_ID);
+    let shell_url_path = asset_id_path("chelis-lang", "nautilus", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
         "v0.1.0",
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
         ],
     );
 
@@ -284,23 +355,20 @@ path = "../neighbor"
 }
 
 /// Round-trip invariant: serialize → parse → serialize is a fixed
-/// point both with and without `remote_origin` populated. Pinned at
-/// the byte level so a serde-attribute regression that flipped
-/// `skip_serializing_if` on a TOML-serialized field would surface as
-/// a diff here.
+/// point for every `LockSource` variant. Pinned at the byte level so
+/// a serde-attribute regression that flipped `skip_serializing_if` on
+/// a TOML-serialized field would surface as a diff here.
 fn oracle_roundtrip_with_and_without_origin() {
-    fn synth_lock(remote_origin: Option<&str>) -> ReefLock {
+    fn synth_lock(source: LockSource, name: &str) -> ReefLock {
         ReefLock {
             package: PackageId {
                 name: "demo".to_string(),
                 version: "0.1.0".to_string(),
             },
             dependencies: vec![LockedDependency {
-                name: "chelis-std".to_string(),
+                name: name.to_string(),
                 version: "0.1.0".to_string(),
-                source: LockSource::LocalRegistry {
-                    remote_origin: remote_origin.map(str::to_string),
-                },
+                source,
                 compiler: "=0.5.0".to_string(),
                 archive_sha256: "ABC".to_string(),
                 shell_sha256: "DEF".to_string(),
@@ -308,8 +376,12 @@ fn oracle_roundtrip_with_and_without_origin() {
         }
     }
 
-    for origin in [None, Some("github://chelis-lang/chelis-std@v0.1.0")] {
-        let lock = synth_lock(origin);
+    // LocalRegistry with and without remote_origin.
+    for origin in [None, Some("github://chelis-lang/nautilus@v0.1.0")] {
+        let source = LockSource::LocalRegistry {
+            remote_origin: origin.map(str::to_string),
+        };
+        let lock = synth_lock(source, "nautilus");
         let serialized = toml::to_string_pretty(&lock).expect("serialize");
         let parsed: ReefLock = toml::from_str(&serialized).expect("parse round-1");
         assert_eq!(parsed, lock, "first round-trip must equal original");
@@ -318,10 +390,6 @@ fn oracle_roundtrip_with_and_without_origin() {
             serialized, reserialized,
             "byte-level fixed point: second serialize must equal first"
         );
-
-        // Surface check: when origin is None, the field must not appear
-        // in the TOML at all (skip_serializing_if invariant). When
-        // origin is Some, the field must appear with the canonical URI.
         match origin {
             None => assert!(
                 !serialized.contains("remote_origin"),
@@ -333,6 +401,28 @@ fn oracle_roundtrip_with_and_without_origin() {
             ),
         }
     }
+
+    // Bundled (the language runtime). Same fixed-point property.
+    let bundled_source = LockSource::Bundled {
+        compiler_version: "0.5.0".to_string(),
+    };
+    let lock = synth_lock(bundled_source, "chelis-std");
+    let serialized = toml::to_string_pretty(&lock).expect("serialize bundled");
+    assert!(
+        serialized.contains("kind = \"bundled\""),
+        "Bundled variant must serialize with `bundled` tag; got: {serialized}"
+    );
+    assert!(
+        serialized.contains("compiler_version = \"0.5.0\""),
+        "Bundled must record compiler_version; got: {serialized}"
+    );
+    let parsed: ReefLock = toml::from_str(&serialized).expect("parse bundled");
+    assert_eq!(parsed, lock, "Bundled round-trip must equal original");
+    let reserialized = toml::to_string_pretty(&parsed).expect("serialize bundled round-2");
+    assert_eq!(
+        serialized, reserialized,
+        "Bundled byte-level fixed point must hold"
+    );
 }
 
 /// Run a wiremock-backed `install_from_github` (lib-level, no
@@ -350,7 +440,7 @@ fn lib_install_from_github_canonical(registry_root: &Path, harness_uri: &str) {
         // Empty PATH so the gh fallback can never win.
         std::env::set_var("PATH", "");
     }
-    let result = chelis_reef::install_from_github("chelis-lang/chelis-std@v0.1.0", registry_root);
+    let result = chelis_reef::install_from_github("chelis-lang/nautilus@v0.1.0", registry_root);
     unsafe {
         match prior_api_base {
             Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
@@ -383,19 +473,19 @@ fn oracle_install_from_github_populates_field() {
 
     let index: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(registry.join("index.json")).unwrap()).unwrap();
-    let chelis_std_versions = &index["packages"]["chelis-std"];
-    let entry = &chelis_std_versions[0];
+    let nautilus_versions = &index["packages"]["nautilus"];
+    let entry = &nautilus_versions[0];
     assert_eq!(
         entry["remote_origin"],
-        serde_json::Value::String("github://chelis-lang/chelis-std@v0.1.0".to_string()),
+        serde_json::Value::String("github://chelis-lang/nautilus@v0.1.0".to_string()),
         "GitHub install must stamp remote_origin into index.json"
     );
 
     // Downstream lockfile: build a tiny package that depends on
-    // chelis-std and assert `chelis reef build` populates
+    // nautilus and assert `chelis reef build` populates
     // remote_origin in its reef.lock from the registry index.
     let pkg_root = dir.path().join("downstream-pkg");
-    seed_downstream_package(&pkg_root);
+    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.1.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_REEF_HOME", &registry)
@@ -404,7 +494,7 @@ fn oracle_install_from_github_populates_field() {
         .success();
     let lock_text = fs::read_to_string(pkg_root.join("reef.lock")).expect("read lockfile");
     assert!(
-        lock_text.contains("remote_origin = \"github://chelis-lang/chelis-std@v0.1.0\""),
+        lock_text.contains("remote_origin = \"github://chelis-lang/nautilus@v0.1.0\""),
         "lockfile must carry remote_origin from registry; got:\n{lock_text}"
     );
 }
@@ -452,9 +542,9 @@ fn oracle_dev_a_to_dev_b_byte_identical() {
     let dev_b_registry = dir.path().join("dev-b-reef-home");
     let pkg_root = dir.path().join("shared-pkg");
 
-    // Dev A: install chelis-std via GitHub, build downstream package.
+    // Dev A: install nautilus via GitHub, build downstream package.
     lib_install_from_github_canonical(&dev_a_registry, &harness.uri());
-    seed_downstream_package(&pkg_root);
+    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.1.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_REEF_HOME", &dev_a_registry)
@@ -463,10 +553,9 @@ fn oracle_dev_a_to_dev_b_byte_identical() {
         .success();
 
     // Snapshot dev A's registry state.
-    let a_archive =
-        fs::read(dev_a_registry.join("packages/chelis-std/0.1.0/chelis-std-0.1.0.tar.zst"))
-            .expect("dev A archive must exist");
-    let a_shell = fs::read(dev_a_registry.join("packages/chelis-std/0.1.0/chelis-std-0.1.0.chb"))
+    let a_archive = fs::read(dev_a_registry.join("packages/nautilus/0.1.0/nautilus-0.1.0.tar.zst"))
+        .expect("dev A archive must exist");
+    let a_shell = fs::read(dev_a_registry.join("packages/nautilus/0.1.0/nautilus-0.1.0.chb"))
         .expect("dev A shell must exist");
     let a_index = fs::read_to_string(dev_a_registry.join("index.json")).expect("dev A index");
 
@@ -489,10 +578,9 @@ fn oracle_dev_a_to_dev_b_byte_identical() {
         .assert()
         .success();
 
-    let b_archive =
-        fs::read(dev_b_registry.join("packages/chelis-std/0.1.0/chelis-std-0.1.0.tar.zst"))
-            .expect("dev B archive must exist");
-    let b_shell = fs::read(dev_b_registry.join("packages/chelis-std/0.1.0/chelis-std-0.1.0.chb"))
+    let b_archive = fs::read(dev_b_registry.join("packages/nautilus/0.1.0/nautilus-0.1.0.tar.zst"))
+        .expect("dev B archive must exist");
+    let b_shell = fs::read(dev_b_registry.join("packages/nautilus/0.1.0/nautilus-0.1.0.chb"))
         .expect("dev B shell must exist");
     let b_index = fs::read_to_string(dev_b_registry.join("index.json")).expect("dev B index");
 
@@ -520,7 +608,7 @@ fn oracle_hash_mismatch_on_refetch() {
     let pkg_root = dir.path().join("hash-mismatch-pkg");
 
     lib_install_from_github_canonical(&dev_a_registry, &harness.uri());
-    seed_downstream_package(&pkg_root);
+    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.1.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_REEF_HOME", &dev_a_registry)
@@ -540,14 +628,14 @@ fn oracle_hash_mismatch_on_refetch() {
     tampered_archive[last] ^= 0xff;
 
     let bad_harness = WiremockHarness::new();
-    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.1.0");
-    let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
-    let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
+    let meta_path = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let archive_url_path = asset_id_path("chelis-lang", "nautilus", ARCHIVE_ASSET_ID);
+    let shell_url_path = asset_id_path("chelis-lang", "nautilus", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
         "v0.1.0",
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
         ],
     );
     bad_harness.mount_all(vec![
@@ -600,9 +688,9 @@ fn oracle_hash_mismatch_on_refetch() {
 fn oracle_entry_without_origin_errors_clearly() {
     let dir = tempdir().expect("tempdir");
     let pkg_root = dir.path().join("origin-less-pkg");
-    seed_downstream_package(&pkg_root);
+    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.1.0", "Downstream");
 
-    // Hand-write a lockfile that pins chelis-std as a registry dep but
+    // Hand-write a lockfile that pins nautilus as a registry dep but
     // omits `remote_origin`. No build step required — `--from-lockfile`
     // operates on the lockfile bytes directly.
     fs::write(
@@ -613,7 +701,7 @@ name = "downstream"
 version = "0.1.0"
 
 [[dependencies]]
-name = "chelis-std"
+name = "nautilus"
 version = "0.1.0"
 compiler = "{ver}"
 archive_sha256 = "abc"
@@ -642,7 +730,7 @@ kind = "local_registry"
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("chelis-std"),
+        stderr.contains("nautilus"),
         "no-origin error must name the entry; got: {stderr}"
     );
     assert!(
@@ -662,7 +750,7 @@ fn oracle_mutex_with_other_flags() {
             "install",
             "--from-lockfile",
             "--from-github",
-            "chelis-lang/chelis-std@v0.1.0",
+            "chelis-lang/nautilus@v0.1.0",
         ])
         .assert()
         .failure();
@@ -693,6 +781,72 @@ fn oracle_mutex_with_other_flags() {
 // ============================================================
 // Negative-parity tests (separate `#[test]` functions).
 // ============================================================
+
+/// Migration parity: an old lockfile that records `chelis-std` as
+/// `LocalRegistry` (whether or not `remote_origin` is set) must be
+/// transparently treated as the bundled runtime by
+/// `install_from_lockfile`. The migration fires a one-line warning
+/// to stderr; the next `chelis reef build` rewrites the lockfile.
+#[test]
+fn phaseA_item9_old_chelis_std_lockfile_migrates_to_bundled() {
+    let _g = file_lock();
+    let dir = tempdir().expect("tempdir");
+    let pkg_root = dir.path().join("old-lockfile-pkg");
+    fs::create_dir_all(&pkg_root).unwrap();
+    fs::write(
+        pkg_root.join("reef.toml"),
+        r#"[package]
+name = "downstream"
+version = "0.1.0"
+compiler = "=0.5.0"
+module_prefix = "Downstream"
+"#,
+    )
+    .unwrap();
+    // Note: the entry has no remote_origin AND no version match against
+    // the compiler. The migration path bypasses both checks because
+    // chelis-std is now treated as bundled regardless.
+    fs::write(
+        pkg_root.join("reef.lock"),
+        r#"[package]
+name = "downstream"
+version = "0.1.0"
+
+[[dependencies]]
+name = "chelis-std"
+version = "0.1.0"
+compiler = "=0.5.0"
+archive_sha256 = "abc"
+shell_sha256 = "def"
+
+[dependencies.source]
+kind = "local_registry"
+"#,
+    )
+    .unwrap();
+
+    let registry = dir.path().join("reef-home");
+    let entries = chelis_reef::install_from_lockfile(&pkg_root, &registry)
+        .expect("install_from_lockfile must Ok with per-entry results");
+    assert_eq!(entries.len(), 1);
+    match &entries[0] {
+        LockfileInstallEntry::SkippedBundledRuntime {
+            name,
+            version,
+            compiler_version,
+        } => {
+            assert_eq!(name, "chelis-std");
+            assert_eq!(version, "0.1.0");
+            assert!(
+                !compiler_version.is_empty(),
+                "compiler_version must be recorded"
+            );
+        }
+        other => panic!(
+            "old chelis-std-as-LocalRegistry must migrate to SkippedBundledRuntime; got: {other:?}"
+        ),
+    }
+}
 
 /// `parse_remote_origin` rejects unknown-scheme strings with a typed
 /// `RemoteOriginParseError::UnknownScheme`. Pinned at the lib API
@@ -760,7 +914,7 @@ fn phaseA_item9_remote_origin_404_surfaces_release_asset_not_found() {
         Mock::given(method("GET"))
             .and(wm_path(metadata_path(
                 "chelis-lang",
-                "chelis-std",
+                "nautilus",
                 "v9.9.9",
             )))
             .respond_with(ResponseTemplate::new(404)),
@@ -776,7 +930,7 @@ name = "x"
 version = "0.1.0"
 
 [[dependencies]]
-name = "chelis-std"
+name = "nautilus"
 version = "9.9.9"
 compiler = "=0.5.0"
 archive_sha256 = "abc"
@@ -784,7 +938,7 @@ shell_sha256 = "def"
 
 [dependencies.source]
 kind = "local_registry"
-remote_origin = "github://chelis-lang/chelis-std@v9.9.9"
+remote_origin = "github://chelis-lang/nautilus@v9.9.9"
 "#,
     )
     .unwrap();
@@ -821,7 +975,7 @@ remote_origin = "github://chelis-lang/chelis-std@v9.9.9"
             version,
             error: LockfileInstallError::Fetch { inner, .. },
         } => {
-            assert_eq!(name, "chelis-std");
+            assert_eq!(name, "nautilus");
             assert_eq!(version, "9.9.9");
             assert!(
                 matches!(inner, GitHubFetchError::ReleaseAssetNotFound { .. }),
@@ -974,12 +1128,6 @@ fn phaseA_item9_real_github_manual_gate() {
 // ============================================================
 // Helpers
 // ============================================================
-
-/// Seed a downstream package that depends on chelis-std@0.1.0 so we
-/// can drive `chelis reef build` and inspect the resulting lockfile.
-fn seed_downstream_package(root: &Path) {
-    seed_downstream_package_for_dep(root, "chelis-std", "0.1.0", "Downstream");
-}
 
 /// Generic helper: seed a downstream package that depends on
 /// `(dep_name, dep_version)` and uses `module_prefix` for its module
