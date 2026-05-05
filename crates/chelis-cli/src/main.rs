@@ -283,8 +283,27 @@ enum ReefCommand {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Build package artifacts (.chb + .tar.zst)
-    Build { path: Option<PathBuf> },
+    /// Build package artifacts (.chb + .tar.zst).
+    ///
+    /// By default, missing-from-registry dependencies are
+    /// auto-fetched from the canonical hosting org's GitHub release
+    /// tags before the build resumes; pass `--no-auto-fetch` to
+    /// opt out. Phase A Item 8 introduced this default and the
+    /// opt-out flag — see `spec/design/reef_distribution.md` § Item 8.
+    Build {
+        path: Option<PathBuf>,
+        /// Disable Item 8's default-on auto-fetch of missing-from-
+        /// registry dependencies. With this flag set, a missing
+        /// dependency surfaces an error naming the URL that
+        /// would have been auto-fetched, plus the recommended
+        /// `chelis reef install --from-github <url>` recovery step.
+        ///
+        /// Use this when you want explicit control over when the
+        /// build performs network access (e.g. air-gapped CI,
+        /// reproducible-rebuild auditing).
+        #[arg(long = "no-auto-fetch")]
+        no_auto_fetch: bool,
+    },
     /// Publish a package into the local Reef registry
     Publish { path: Option<PathBuf> },
     /// Install prebuilt packages into the local Reef registry
@@ -1317,9 +1336,15 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 root.canonicalize().unwrap_or(root).display()
             );
         }
-        ReefCommand::Build { path } => {
+        ReefCommand::Build {
+            path,
+            no_auto_fetch,
+        } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
-            let artifacts = chelis_reef::build_package(&root)?;
+            let options = chelis_reef::BuildOptions {
+                auto_fetch: !no_auto_fetch,
+            };
+            let artifacts = chelis_reef::build_package_with_options(&root, &options)?;
             println!(
                 "Built {} {}",
                 artifacts.package.name, artifacts.package.version
