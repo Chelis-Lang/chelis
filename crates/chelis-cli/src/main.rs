@@ -369,12 +369,16 @@ enum ReefCommand {
         /// Pass zero or more `<org>/<repo>@<tag>` entries. With no
         /// entries, the built-in
         /// [`chelis_reef::DEFAULT_BOOTSTRAP_LIST`] is used (canonical
-        /// shells: chelis-std, nautilus, coral, shoals, octant). The
+        /// shells: nautilus, coral, shoals, octant). The
         /// installer fetches each shell's manifest, builds a
         /// dependency graph, topologically sorts, and installs each
         /// shell via the same path as `--from-github`. Cycles and
         /// references to packages outside the input set are surfaced
         /// as typed errors.
+        ///
+        /// `chelis-std` is the language runtime and ships with the
+        /// compiler — it is not a bootstrap target. Including it in
+        /// the input list is rejected with a typed runtime-error.
         #[arg(long, value_name = "ORG/REPO@TAG", num_args = 0..)]
         bootstrap: Option<Vec<String>>,
         /// `<name>` or `<name>=<version>` selectors. If omitted with
@@ -1488,6 +1492,17 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                                 println!(
                                     "Skipped path dep {name} {version} (path = {path}) — \
                                      resolved at build time, not via remote fetch"
+                                );
+                            }
+                            chelis_reef::LockfileInstallEntry::SkippedBundledRuntime {
+                                name,
+                                version,
+                                compiler_version,
+                            } => {
+                                println!(
+                                    "Skipped bundled runtime {name} {version} \
+                                     (compiler version {compiler_version}) — \
+                                     ships with the compiler, not fetched"
                                 );
                             }
                             chelis_reef::LockfileInstallEntry::SkippedNoOrigin {
