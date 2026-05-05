@@ -673,7 +673,7 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
 }
 
 /// One package successfully copied into the local registry by
-/// [`install_from_monorepo`].
+/// [`install_from_monorepo`] or [`install_from_github`].
 #[derive(Debug, Clone)]
 pub struct InstalledArtifact {
     pub package: PackageId,
@@ -681,6 +681,282 @@ pub struct InstalledArtifact {
     pub archive_path: PathBuf,
     pub shell_sha256: String,
     pub archive_sha256: String,
+}
+
+/// Canonical hosting org for chelis pre-launch shell distribution.
+///
+/// Used as the implicit publisher when a tag is referenced without an
+/// `org/repo` prefix. Locked 2026-05-05 by `phaseA_reef_distribution.md`;
+/// see `spec/design/reef_distribution.md` Item 6.
+pub const CANONICAL_REEF_ORG: &str = "chelis-lang";
+
+/// Default GitHub base URL. Tests inject a localhost wiremock URL via
+/// the `CHELIS_REEF_GITHUB_BASE` env var. Real-network code falls back
+/// to this.
+const DEFAULT_GITHUB_BASE: &str = "https://github.com";
+
+/// Distinct error categories surfaced by the GitHub fetch path. The
+/// caller — typically `chelis reef install --from-github`'s CLI handler
+/// — gets a category to discriminate on so wording can stay actionable.
+///
+/// New variants must keep the existing wording stable; tests assert
+/// against substrings of the `Display` impl.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHubFetchError {
+    /// `<org>/<repo>@<tag>` did not parse: missing slash, missing `@`,
+    /// empty component, etc.
+    Parse { input: String, reason: String },
+    /// Auth was unobtainable: `GITHUB_TOKEN` unset and `gh auth token`
+    /// shell-out also failed.
+    AuthMissing { reason: String },
+    /// HTTP 401/403 from the release-asset URL even with a token; the
+    /// token is invalid or lacks scope.
+    AuthRejected { url: String, status: u16 },
+    /// HTTP 404 — the release tag exists but the named asset is not
+    /// attached to it (or the tag itself does not exist).
+    ReleaseAssetNotFound { url: String, asset_name: String },
+    /// HTTP 429 — GitHub rate limit. Message includes the `Retry-After`
+    /// header value if present.
+    RateLimited {
+        url: String,
+        retry_after: Option<String>,
+    },
+    /// HTTP 5xx.
+    ServerError { url: String, status: u16 },
+    /// Connection error: DNS, TCP, TLS, body-read.
+    Network { url: String, message: String },
+    /// I/O error during streaming / temp-file work.
+    Io { message: String },
+    /// Validation fired downstream of fetch (see
+    /// [`install_validated_artifact_pair`]).
+    Validation { message: String },
+}
+
+impl std::fmt::Display for GitHubFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse { input, reason } => write!(
+                f,
+                "could not parse `{input}` as <org>/<repo>@<tag>: {reason}"
+            ),
+            Self::AuthMissing { reason } => write!(
+                f,
+                "GITHUB_TOKEN is not set and `gh auth token` did not yield a token ({reason}). \
+                 export GITHUB_TOKEN=$(gh auth token) and retry"
+            ),
+            Self::AuthRejected { url, status } => write!(
+                f,
+                "GitHub rejected the token (HTTP {status}) when fetching {url} — \
+                 the token may be invalid or missing repo scope"
+            ),
+            Self::ReleaseAssetNotFound { url, asset_name } => write!(
+                f,
+                "release asset `{asset_name}` not found at {url} (HTTP 404) — \
+                 verify the release tag exists and that the asset is attached to it"
+            ),
+            Self::RateLimited { url, retry_after } => match retry_after {
+                Some(r) => write!(
+                    f,
+                    "GitHub rate limit (HTTP 429) when fetching {url}; Retry-After: {r}"
+                ),
+                None => write!(
+                    f,
+                    "GitHub rate limit (HTTP 429) when fetching {url}; no Retry-After header"
+                ),
+            },
+            Self::ServerError { url, status } => {
+                write!(f, "GitHub returned HTTP {status} for {url}; not retrying")
+            }
+            Self::Network { url, message } => {
+                write!(f, "network error fetching {url}: {message}")
+            }
+            Self::Io { message } => write!(f, "I/O error during GitHub fetch: {message}"),
+            Self::Validation { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for GitHubFetchError {}
+
+impl From<GitHubFetchError> for String {
+    fn from(e: GitHubFetchError) -> Self {
+        e.to_string()
+    }
+}
+
+/// Atomically write `bytes` to `final_path` by writing to a sibling
+/// temp file in the same directory and `fs::rename`'ing into place.
+///
+/// Same-directory rename is atomic on every supported FS we run on.
+/// The temp file is named `<basename>.tmp` so concurrent installs of
+/// different files in the same directory do not collide on the temp
+/// name (each unique destination has a unique temp). Concurrent
+/// installs of the SAME file are not made safe by this alone; that is
+/// what Item 8's `flock` will add.
+fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = final_path.parent().ok_or_else(|| {
+        format!(
+            "atomic_write: {} has no parent directory",
+            final_path.display()
+        )
+    })?;
+    fs::create_dir_all(dir).map_err(|e| {
+        format!(
+            "failed to create {} for atomic_write of {}: {e}",
+            dir.display(),
+            final_path.display()
+        )
+    })?;
+    let file_name = final_path.file_name().ok_or_else(|| {
+        format!(
+            "atomic_write: {} has no file name component",
+            final_path.display()
+        )
+    })?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = dir.join(&tmp_name);
+    // Best-effort cleanup of a stale temp from a previous crashed write.
+    let _ = fs::remove_file(&tmp_path);
+    fs::write(&tmp_path, bytes).map_err(|e| {
+        format!(
+            "failed to write temp file {} for atomic_write of {}: {e}",
+            tmp_path.display(),
+            final_path.display()
+        )
+    })?;
+    fs::rename(&tmp_path, final_path).map_err(|e| {
+        // Clean up the orphaned temp on rename failure to avoid leaving
+        // half-written `.tmp` files in the registry root.
+        let _ = fs::remove_file(&tmp_path);
+        format!(
+            "failed to rename {} -> {}: {e}",
+            tmp_path.display(),
+            final_path.display()
+        )
+    })
+}
+
+/// Validate one prebuilt `(archive, shell)` pair on disk and place a
+/// copy into the local Reef registry, updating `index.json` atomically.
+///
+/// This is the validation+placement step extracted out of the original
+/// monolithic `install_from_monorepo`. Both the monorepo path and the
+/// new `--from-github` path call it. Same SHA256 verification, same
+/// archive↔shell agreement check, same name/version-agreement check,
+/// same `index.json` schema. Rust's borrow checker, not duplication,
+/// is the source-equivalence enforcer here.
+///
+/// The caller passes the bytes' source-of-truth on-disk locations
+/// (which may be a tempdir for the GitHub path) and the expected
+/// `name`/`version` strings. The helper produces:
+/// - the validated archive and shell hashes,
+/// - `<registry_root>/packages/<name>/<version>/<files>` placed via
+///   plain `fs::copy`,
+/// - `<registry_root>/index.json` updated atomically (write to
+///   `index.json.tmp`, `fs::rename` into place).
+///
+/// Errors out (and does **not** update the index) if any of:
+/// - on-disk SHA256 of `shell_path` disagrees with the shell's embedded
+///   `archive_sha256` — i.e. the pair is from different builds,
+/// - the shell's `package` does not match `(name, version)`,
+/// - the destination directory cannot be created,
+/// - either `fs::copy` fails.
+///
+/// Atomicity invariant: if the index update fails or any prior step
+/// fails, `index.json` is unchanged. Half-copied files in the package
+/// dir may exist on the failed install (the caller is responsible for
+/// cleanup if it cares about that — but the index sees nothing).
+pub fn install_validated_artifact_pair(
+    archive_path: &Path,
+    shell_path: &Path,
+    name: &str,
+    version: &str,
+    registry_root: &Path,
+) -> Result<InstalledArtifact, String> {
+    fs::create_dir_all(registry_root).map_err(|e| {
+        format!(
+            "failed to create registry root {}: {e}",
+            registry_root.display()
+        )
+    })?;
+    let index_path = registry_root.join("index.json");
+    let mut index = if index_path.exists() {
+        serde_json::from_str::<LocalRegistryIndex>(
+            &fs::read_to_string(&index_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        LocalRegistryIndex::default()
+    };
+
+    let archive_sha256 = sha256_file(archive_path)?;
+    let shell_sha256 = sha256_file(shell_path)?;
+    let shell = read_shell(shell_path).map_err(|e| e.to_string())?;
+    if shell.archive_sha256 != archive_sha256 {
+        return Err(format!(
+            "prebuilt shell {} disagrees with archive {} on archive_sha256 — \
+             the dist/ tree is stale; run `chelis reef build` in the monorepo",
+            shell_path.display(),
+            archive_path.display()
+        ));
+    }
+    if shell.package.name != name || shell.package.version != version {
+        return Err(format!(
+            "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
+            shell_path.display(),
+            shell.package.name,
+            shell.package.version
+        ));
+    }
+
+    let target_dir = registry_root.join("packages").join(name).join(version);
+    fs::create_dir_all(&target_dir).map_err(|e| {
+        format!(
+            "failed to create registry package dir {}: {e}",
+            target_dir.display()
+        )
+    })?;
+    let archive_dst = target_dir.join(format!("{name}-{version}.tar.zst"));
+    let shell_dst = target_dir.join(format!("{name}-{version}.chb"));
+    fs::copy(archive_path, &archive_dst).map_err(|e| {
+        format!(
+            "failed to copy archive {} -> {}: {e}",
+            archive_path.display(),
+            archive_dst.display()
+        )
+    })?;
+    fs::copy(shell_path, &shell_dst).map_err(|e| {
+        format!(
+            "failed to copy shell {} -> {}: {e}",
+            shell_path.display(),
+            shell_dst.display()
+        )
+    })?;
+
+    let versions = index.packages.entry(name.to_string()).or_default();
+    versions.retain(|entry| entry.version != version);
+    versions.push(RegistryVersion {
+        version: version.to_string(),
+        compiler: shell.compiler.clone(),
+        archive_sha256: archive_sha256.clone(),
+        shell_sha256: shell_sha256.clone(),
+    });
+    versions.sort_by(|a, b| a.version.cmp(&b.version));
+
+    let serialized = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
+    atomic_write(&index_path, serialized.as_bytes())?;
+
+    Ok(InstalledArtifact {
+        package: PackageId {
+            name: name.to_string(),
+            version: version.to_string(),
+        },
+        shell_path: shell_dst,
+        archive_path: archive_dst,
+        shell_sha256,
+        archive_sha256,
+    })
 }
 
 /// Install one or more prebuilt packages from a chelis monorepo's
@@ -793,15 +1069,6 @@ pub fn install_from_monorepo(
 
     let registry_root = registry_root()?;
     fs::create_dir_all(&registry_root).map_err(|e| e.to_string())?;
-    let index_path = registry_root.join("index.json");
-    let mut index = if index_path.exists() {
-        serde_json::from_str::<LocalRegistryIndex>(
-            &fs::read_to_string(&index_path).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        LocalRegistryIndex::default()
-    };
 
     let mut installed = Vec::new();
     for (name, version, pkg_root) in &resolved {
@@ -830,65 +1097,299 @@ pub fn install_from_monorepo(
             ));
         }
 
-        // Sanity-check that the prebuilt shell agrees with the prebuilt
-        // archive. This catches stale dist/ trees where one half was
-        // rebuilt and the other was not.
-        let archive_sha256 = sha256_file(&archive_src)?;
-        let shell_sha256 = sha256_file(&shell_src)?;
-        let shell = read_shell(&shell_src).map_err(|e| e.to_string())?;
-        if shell.archive_sha256 != archive_sha256 {
-            return Err(format!(
-                "prebuilt shell {} disagrees with archive {} on archive_sha256 — \
-                 the dist/ tree is stale; run `chelis reef build` in the monorepo",
-                shell_src.display(),
-                archive_src.display()
-            ));
-        }
-        if shell.package.name != *name || shell.package.version != *version {
-            return Err(format!(
-                "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
-                shell_src.display(),
-                shell.package.name,
-                shell.package.version
-            ));
-        }
-
-        let target_dir = registry_root.join("packages").join(name).join(version);
-        fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-        let archive_dst = target_dir.join(format!("{name}-{version}.tar.zst"));
-        let shell_dst = target_dir.join(format!("{name}-{version}.chb"));
-        fs::copy(&archive_src, &archive_dst).map_err(|e| e.to_string())?;
-        fs::copy(&shell_src, &shell_dst).map_err(|e| e.to_string())?;
-
-        let versions = index.packages.entry(name.clone()).or_default();
-        versions.retain(|entry| entry.version != *version);
-        versions.push(RegistryVersion {
-            version: version.clone(),
-            compiler: shell.compiler.clone(),
-            archive_sha256: archive_sha256.clone(),
-            shell_sha256: shell_sha256.clone(),
-        });
-        versions.sort_by(|a, b| a.version.cmp(&b.version));
-
-        installed.push(InstalledArtifact {
-            package: PackageId {
-                name: name.clone(),
-                version: version.clone(),
-            },
-            shell_path: shell_dst,
-            archive_path: archive_dst,
-            shell_sha256,
-            archive_sha256,
-        });
+        // Validation + placement is shared with `install_from_github`
+        // via this helper. The helper does on-disk sha256 verification,
+        // archive↔shell agreement, name/version-agreement, registry
+        // copy, and atomic index update.
+        let artifact = install_validated_artifact_pair(
+            &archive_src,
+            &shell_src,
+            name,
+            version,
+            &registry_root,
+        )?;
+        installed.push(artifact);
     }
 
-    fs::write(
-        &index_path,
-        serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-
     Ok(installed)
+}
+
+/// Parsed `<org>/<repo>@<tag>` triple. The `version` is `tag` with a
+/// leading `v` stripped if present, so `v0.4.0` and `0.4.0` both map
+/// to version string `0.4.0`. Asset URLs use the original `tag` as
+/// GitHub's release path component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubReleaseSpec {
+    pub org: String,
+    pub repo: String,
+    pub tag: String,
+    /// `tag` with one leading `v` stripped if present.
+    pub version: String,
+}
+
+impl GitHubReleaseSpec {
+    /// Parse `<org>/<repo>@<tag>`. Both `chelis-lang/nautilus@v0.4.0`
+    /// and `chelis-lang/nautilus@0.4.0` are accepted; the leading `v`
+    /// is treated as decorative and stripped to derive `version`. The
+    /// `tag` field preserves whatever the caller passed so the asset
+    /// URL still hits the right release.
+    pub fn parse(input: &str) -> Result<Self, GitHubFetchError> {
+        let (org_repo, tag) = input
+            .split_once('@')
+            .ok_or_else(|| GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "missing `@<tag>` component".to_string(),
+            })?;
+        let (org, repo) = org_repo
+            .split_once('/')
+            .ok_or_else(|| GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "missing `/` between org and repo".to_string(),
+            })?;
+        if org.is_empty() {
+            return Err(GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "empty <org> component".to_string(),
+            });
+        }
+        if repo.is_empty() {
+            return Err(GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "empty <repo> component".to_string(),
+            });
+        }
+        if tag.is_empty() {
+            return Err(GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "empty <tag> component".to_string(),
+            });
+        }
+        let version = tag.strip_prefix('v').unwrap_or(tag).to_string();
+        if version.is_empty() {
+            return Err(GitHubFetchError::Parse {
+                input: input.to_string(),
+                reason: "tag is just `v` with no version".to_string(),
+            });
+        }
+        Ok(Self {
+            org: org.to_string(),
+            repo: repo.to_string(),
+            tag: tag.to_string(),
+            version,
+        })
+    }
+
+    /// Asset URL for one named release asset, against the configured
+    /// base URL (defaults to `https://github.com`; tests inject
+    /// localhost via `CHELIS_REEF_GITHUB_BASE`).
+    fn asset_url(&self, base: &str, asset_name: &str) -> String {
+        format!(
+            "{base}/{org}/{repo}/releases/download/{tag}/{asset_name}",
+            base = base.trim_end_matches('/'),
+            org = self.org,
+            repo = self.repo,
+            tag = self.tag,
+        )
+    }
+}
+
+/// Resolve a GitHub auth token. Reads `GITHUB_TOKEN` first; falls back
+/// to `gh auth token`. Empty tokens are treated as missing. Returns
+/// [`GitHubFetchError::AuthMissing`] if neither yields one.
+fn resolve_github_token() -> Result<String, GitHubFetchError> {
+    if let Ok(t) = env::var("GITHUB_TOKEN") {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    // `gh auth token` is the documented escape hatch for devs who use
+    // the `gh` CLI but don't keep a long-lived `GITHUB_TOKEN` exported.
+    // We shell out only here, deliberately keeping this seam thin so
+    // tests can disable the fallback by un-PATH-ing `gh`.
+    let result = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output();
+    match result {
+        Ok(out) if out.status.success() => {
+            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if token.is_empty() {
+                Err(GitHubFetchError::AuthMissing {
+                    reason: "`gh auth token` returned an empty string".to_string(),
+                })
+            } else {
+                Ok(token)
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(GitHubFetchError::AuthMissing {
+                reason: format!(
+                    "`gh auth token` exited with status {}: {stderr}",
+                    out.status
+                ),
+            })
+        }
+        Err(e) => Err(GitHubFetchError::AuthMissing {
+            reason: format!("`gh auth token` could not be invoked: {e}"),
+        }),
+    }
+}
+
+/// Read `CHELIS_REEF_GITHUB_BASE` or fall back to the canonical
+/// `https://github.com`. The env var is the test-injection seam.
+fn github_base_url() -> String {
+    env::var("CHELIS_REEF_GITHUB_BASE").unwrap_or_else(|_| DEFAULT_GITHUB_BASE.to_string())
+}
+
+/// Fetch one release asset to a target file path. Streams the response
+/// to disk via the blocking `reqwest::Response::copy_to` family so
+/// large artifacts don't sit fully in memory.
+///
+/// Maps HTTP status to typed error categories. Only 200 is success;
+/// 401/403 -> `AuthRejected`, 404 -> `ReleaseAssetNotFound`,
+/// 429 -> `RateLimited`, 5xx -> `ServerError`, other 4xx -> `Network`.
+/// Connection-level errors (DNS, TLS, body read) -> `Network`.
+fn fetch_release_asset(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    asset_name: &str,
+    token: &str,
+    target: &Path,
+) -> Result<(), GitHubFetchError> {
+    // GitHub's release-asset URL pattern (`/releases/download/<tag>/<asset>`)
+    // is a 302 from the repo URL to a CDN host. `reqwest` follows
+    // redirects by default so we get the binary back here.
+    let response = client
+        .get(url)
+        // Standard GitHub auth header.
+        .header("Authorization", format!("token {token}"))
+        // GitHub asks user-agent be set; without it some endpoints 403.
+        .header("User-Agent", "chelis-reef/0.5")
+        // The download URLs serve the raw asset; explicit Accept makes
+        // the intent obvious to test fixtures and to GitHub.
+        .header("Accept", "application/octet-stream")
+        .send()
+        .map_err(|e| GitHubFetchError::Network {
+            url: url.to_string(),
+            message: e.to_string(),
+        })?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::OK {
+        let mut response = response;
+        let mut out = fs::File::create(target).map_err(|e| GitHubFetchError::Io {
+            message: format!("create {}: {e}", target.display()),
+        })?;
+        response
+            .copy_to(&mut out)
+            .map_err(|e| GitHubFetchError::Network {
+                url: url.to_string(),
+                message: format!("body read failed: {e}"),
+            })?;
+        return Ok(());
+    }
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        return Err(GitHubFetchError::AuthRejected {
+            url: url.to_string(),
+            status: code,
+        });
+    }
+    if code == 404 {
+        return Err(GitHubFetchError::ReleaseAssetNotFound {
+            url: url.to_string(),
+            asset_name: asset_name.to_string(),
+        });
+    }
+    if code == 429 {
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .or_else(|| response.headers().get("X-RateLimit-Reset"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        return Err(GitHubFetchError::RateLimited {
+            url: url.to_string(),
+            retry_after,
+        });
+    }
+    if status.is_server_error() {
+        return Err(GitHubFetchError::ServerError {
+            url: url.to_string(),
+            status: code,
+        });
+    }
+    Err(GitHubFetchError::Network {
+        url: url.to_string(),
+        message: format!("unexpected HTTP status {code}"),
+    })
+}
+
+/// Install one shell from a GitHub Release into the local Reef
+/// registry rooted at `registry_root`.
+///
+/// `org_repo_tag` is `<org>/<repo>@<tag>`. The repository name is the
+/// shell name; the tag (with optional leading `v` stripped) is the
+/// shell version. The two release assets fetched are
+/// `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` from
+/// `${CHELIS_REEF_GITHUB_BASE}/<org>/<repo>/releases/download/<tag>/<asset>`,
+/// where `CHELIS_REEF_GITHUB_BASE` defaults to `https://github.com`.
+///
+/// Authentication: `GITHUB_TOKEN` env var, or `gh auth token` shell-out.
+/// The canonical chelis-lang repos are private during the pre-launch
+/// era, so an unauthenticated fetch is hard-failed with an actionable
+/// message.
+///
+/// On error, the function returns without updating the registry index;
+/// any tempdir created for the download is removed. On success, the
+/// helper [`install_validated_artifact_pair`] is the placement and
+/// validation oracle, identical to what `--from-monorepo` invokes.
+pub fn install_from_github(
+    org_repo_tag: &str,
+    registry_root: &Path,
+) -> Result<InstalledArtifact, GitHubFetchError> {
+    let spec = GitHubReleaseSpec::parse(org_repo_tag)?;
+    let token = resolve_github_token()?;
+    let base = github_base_url();
+
+    // Tempdir lives for the duration of the fetch+install. On any
+    // return path (success or any error category) the `_tmp` guard
+    // drops and removes the directory. The tempfile-cleanup contract
+    // is locked by `tempfile_cleanup_on_success` and
+    // `tempfile_cleanup_on_failure` tests in this crate.
+    let tmp = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
+        message: format!("create tempdir: {e}"),
+    })?;
+    let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
+    let shell_name = format!("{}-{}.chb", spec.repo, spec.version);
+    let archive_path = tmp.path().join(&archive_name);
+    let shell_path = tmp.path().join(&shell_name);
+
+    // Plain blocking client; no implicit retry. Decisions in the
+    // brief: fail fast on transient errors, surface 429 with
+    // `Retry-After`. Connect timeout keeps a wedged DNS resolver
+    // from hanging the install indefinitely.
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| GitHubFetchError::Io {
+            message: format!("build http client: {e}"),
+        })?;
+
+    let archive_url = spec.asset_url(&base, &archive_name);
+    let shell_url = spec.asset_url(&base, &shell_name);
+    fetch_release_asset(&client, &archive_url, &archive_name, &token, &archive_path)?;
+    fetch_release_asset(&client, &shell_url, &shell_name, &token, &shell_path)?;
+
+    install_validated_artifact_pair(
+        &archive_path,
+        &shell_path,
+        &spec.repo,
+        &spec.version,
+        registry_root,
+    )
+    .map_err(|message| GitHubFetchError::Validation { message })
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
@@ -916,6 +1417,15 @@ fn registry_root() -> Result<PathBuf, String> {
     }
     let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
     Ok(PathBuf::from(home).join(".chelis/reef"))
+}
+
+/// Public accessor for the local Reef registry root used by external
+/// callers (the CLI's `--from-github` handler in particular). Returns
+/// `$CHELIS_REEF_HOME` if set, else `$HOME/.chelis/reef`. The directory
+/// is **not** created here; callers that intend to write should rely on
+/// the install helpers, which do `fs::create_dir_all`.
+pub fn registry_home() -> Result<PathBuf, String> {
+    registry_root()
 }
 
 fn read_manifest(path: &Path) -> Result<ReefManifest, String> {

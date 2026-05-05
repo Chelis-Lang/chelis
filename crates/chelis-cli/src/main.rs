@@ -292,20 +292,31 @@ enum ReefCommand {
     /// Populates `~/.chelis/reef/packages/<name>/<version>/` and updates
     /// `~/.chelis/reef/index.json` from a known-good source.
     ///
-    /// Currently the only supported source is `--from-monorepo`, which
-    /// copies prebuilt artifacts out of a chelis monorepo's
-    /// `packages/<name>/dist/` directory.
+    /// Two source forms are supported:
+    /// * `--from-monorepo <PATH>` — copy prebuilt artifacts out of a
+    ///   chelis monorepo's `packages/<name>/dist/` directory.
+    /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
+    ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` from
+    ///   `https://github.com/<org>/<repo>/releases/download/<tag>/...`
+    ///   and validate them through the same on-disk verification path.
+    ///   Authentication uses `GITHUB_TOKEN`, falling back to
+    ///   `gh auth token`.
     ///
     /// `chelis reef build` does NOT auto-install dependencies. This is
     /// the explicit population step.
     Install {
         /// Path to a chelis monorepo (the directory containing `packages/`).
-        ///
-        /// Required while Form B (URL/release fallback) is unimplemented.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "from_github")]
         from_monorepo: Option<PathBuf>,
+        /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
+        /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
+        /// Requires `GITHUB_TOKEN` (or a working `gh auth token`)
+        /// because the canonical-org repos are private.
+        #[arg(long, value_name = "ORG/REPO@TAG")]
+        from_github: Option<String>,
         /// `<name>` or `<name>=<version>` selectors. If omitted with
         /// `--from-monorepo`, every package in the monorepo is installed.
+        /// Ignored with `--from-github` (the spec is the selector).
         #[arg(value_name = "NAME[=VERSION]")]
         packages: Vec<String>,
     },
@@ -1326,27 +1337,42 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ReefCommand::Install {
             from_monorepo,
+            from_github,
             packages,
-        } => {
-            let Some(monorepo_root) = from_monorepo else {
-                return Err("`chelis reef install` requires a source. \
-                     Pass `--from-monorepo <PATH>` pointing at a chelis monorepo. \
-                     URL/release fallbacks are not implemented yet."
-                    .into());
-            };
-            let mut requested: Vec<(String, Option<String>)> = Vec::new();
-            for spec in packages {
-                let (name, version) = match spec.split_once('=') {
-                    Some((n, v)) => (n.to_string(), Some(v.to_string())),
-                    None => (spec.clone(), None),
-                };
-                if name.is_empty() {
-                    return Err(format!("invalid package selector `{spec}`").into());
+        } => match (from_monorepo, from_github) {
+            (Some(monorepo_root), None) => {
+                let mut requested: Vec<(String, Option<String>)> = Vec::new();
+                for spec in packages {
+                    let (name, version) = match spec.split_once('=') {
+                        Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                        None => (spec.clone(), None),
+                    };
+                    if name.is_empty() {
+                        return Err(format!("invalid package selector `{spec}`").into());
+                    }
+                    requested.push((name, version));
                 }
-                requested.push((name, version));
+                let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
+                for artifact in &installed {
+                    println!(
+                        "Installed {} {}",
+                        artifact.package.name, artifact.package.version
+                    );
+                    println!("Shell: {}", artifact.shell_path.display());
+                    println!("Archive: {}", artifact.archive_path.display());
+                }
+                if installed.is_empty() {
+                    println!("No packages installed.");
+                }
             }
-            let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
-            for artifact in &installed {
+            (None, Some(spec)) => {
+                if !packages.is_empty() {
+                    return Err("`--from-github` does not accept positional package \
+                             selectors; the <ORG>/<REPO>@<TAG> spec is the selector"
+                        .into());
+                }
+                let registry_root = chelis_reef::registry_home()?;
+                let artifact = chelis_reef::install_from_github(&spec, &registry_root)?;
                 println!(
                     "Installed {} {}",
                     artifact.package.name, artifact.package.version
@@ -1354,10 +1380,16 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 println!("Shell: {}", artifact.shell_path.display());
                 println!("Archive: {}", artifact.archive_path.display());
             }
-            if installed.is_empty() {
-                println!("No packages installed.");
+            (Some(_), Some(_)) => {
+                return Err("`--from-monorepo` and `--from-github` are mutually exclusive".into());
             }
-        }
+            (None, None) => {
+                return Err("`chelis reef install` requires a source. \
+                         Pass `--from-monorepo <PATH>` pointing at a chelis monorepo, \
+                         or `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release."
+                    .into());
+            }
+        },
     }
     Ok(())
 }
