@@ -912,11 +912,7 @@ fn phaseA_item9_remote_origin_404_surfaces_release_asset_not_found() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path(
-                "chelis-lang",
-                "nautilus",
-                "v9.9.9",
-            )))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v9.9.9")))
             .respond_with(ResponseTemplate::new(404)),
     ]);
 

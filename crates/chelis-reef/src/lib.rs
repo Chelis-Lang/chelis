@@ -2728,10 +2728,7 @@ pub fn install_bootstrap(
     // bundled with the compiler and is not a `reef install --bootstrap`
     // target. Surface a typed error naming both the requested and
     // bundled versions so the user can tell which side moved.
-    if let Some(runtime_spec) = specs
-        .iter()
-        .find(|s| s.repo == CHELIS_STD_PACKAGE_NAME)
-    {
+    if let Some(runtime_spec) = specs.iter().find(|s| s.repo == CHELIS_STD_PACKAGE_NAME) {
         return Err(BootstrapError::RuntimeNotABootstrapTarget {
             requested_version: runtime_spec.version.clone(),
             bundled_version: compiler_bundled_chelis_std_version().to_string(),
@@ -5210,13 +5207,11 @@ mod tests {
             "packages/chelis-std/reef.toml package name must be `chelis-std`"
         );
         assert_eq!(
-            manifest.package.version,
-            BUNDLED_CHELIS_STD_VERSION,
+            manifest.package.version, BUNDLED_CHELIS_STD_VERSION,
             "BUNDLED_CHELIS_STD_VERSION (`{}`) must equal \
              packages/chelis-std/reef.toml's package.version (`{}`); \
              bump both together",
-            BUNDLED_CHELIS_STD_VERSION,
-            manifest.package.version,
+            BUNDLED_CHELIS_STD_VERSION, manifest.package.version,
         );
     }
 
@@ -5284,7 +5279,9 @@ kind = "local_registry"
         assert_eq!(lock.dependencies[0].name, "chelis-std");
         assert!(matches!(
             lock.dependencies[0].source,
-            LockSource::LocalRegistry { remote_origin: None }
+            LockSource::LocalRegistry {
+                remote_origin: None
+            }
         ));
     }
 
