@@ -151,7 +151,24 @@ The domain is **chelis.ch**.
 
 ### Shell Ecosystem
 
-Packages layered on `chelis-std`. `nautilus` and `coral` are independent and can land in
+**Runtime vs shells.** `chelis-std` is the language **runtime**, not a shell.
+It version-marches with the compiler, ships bundled with the toolchain, and
+cannot be substituted independently — programs depend on it implicitly the
+same way Rust programs depend on `core`/`std`. Every other entry below is a
+**shell** in the substitutability sense: a library that someone could in
+principle write an alternative to (alternative scipy/pandas/etc.). Shells are
+fetched and installed via reef from network releases; the runtime is not.
+
+Lockfile entries for the runtime use `LockSource::Bundled
+{ compiler_version }` to make the distinction explicit and auditable. A
+declaration of `chelis-std = { version = "X" }` in a downstream `reef.toml`
+soft-verifies against the compiler's bundled runtime version: matching is
+recorded as `Bundled`, mismatching surfaces a typed error naming both
+versions. Auto-fetch from GitHub is intentionally disabled for the runtime;
+`reef install --bootstrap chelis-std` is rejected with a typed error
+explaining the runtime is compiler-bundled.
+
+Shells layered on the runtime. `nautilus` and `coral` are independent and can land in
 parallel; `shoals` depends on both. `octant` Part A (LaTeX ↔ Deep bridge, parser +
 deterministic lowering + rendering + provenance) has the same prerequisite as
 `shoals` (namely `nautilus` green) and runs **in parallel with `shoals`**; `octant`
@@ -161,22 +178,24 @@ algorithms), `hull` (executable language specification), and `beacon` (automated
 static analysis on the tensor DAG) are post-Phase-3 stubs, as is `octant-docs` (full
 LaTeX document ingestion, Octant Phase 4).
 
-| Shell | Depends On | Status | Contents |
-|---|---|---|---|
-| `chelis-std` | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests) |
-| `nautilus` | `chelis-std` | Active (`v0.1.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
-| `coral` | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
-| `shoals` | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
-| `octant` | `chelis-std` + `nautilus` required; `shoals` required only for the Part B SDE / MC / curve lowering | Phase 3n (Part A) ∥ Phase 3l, Phase 3o (Part B) after Phase 3l | LaTeX ↔ Deep bridge for quantitative finance. Parses a bounded LaTeX subset, lowers to Deep deterministically (arithmetic, derivatives, special functions, integrals, matrix ops) in Part A plus LLM-assisted lowering (SDE, Monte Carlo expectation, calibration, yield curves) in Part B, round-trips through the compiler with type overlays, and carries provenance spans on every Deep node. Ships an interactive cell-based notebook in Part B. **NOT a CAS** — notation adapter only, no symbolic integration or simplification. |
-| `school` | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
-| `darwin` | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
-| `hull` | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
-| `beacon` | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
+| Package | Kind | Depends On | Status | Contents |
+|---|---|---|---|---|
+| `chelis-std` | **Runtime** (compiler-bundled) | (core) | Active | `Std.Nn` (Linear, Embedding, LayerNorm, Generate with KV cache, GELU/SiLU/RMSNorm, Conv1d/2d, attention), `Std.Optim` (SGD, Adam, AdamW, LAMB), `Std.Loss` (including KL, BCEWithLogits, accuracy, perplexity), `Std.Init` (Kaiming, Xavier, trunc_normal), `Std.Schedule`, `Std.IO` (files, mmap, safetensors, CSV, JSON), `Std.Tokenizer`, `Std.Time`, `Std.Decimal`, `Std.Test` (assertion functions for Chelis-native tests) |
+| `nautilus` | Shell | `chelis-std` | Active (`v0.5.0` released) | Numerical methods — stats, distributions, linear algebra (nalgebra-backed with hand-written AD adjoints), convex optimization, ODE/SDE solvers, roots, integration, interpolation, special functions (`erf`, `log_gamma`, …), distances. The scipy competitor. `Nautilus.Signal` stubbed until complex numbers (Phase 5f). |
+| `coral` | Shell | `chelis-std` | Phase 3k | Typed dataframes — numeric columns are tensors (lazy, GPU-accelerable, fusible via the DAG), string columns are host-side lists (eager). AD through dataframe operations. Column selection, filtering, sort-by, group-by, joins, pivot/melt, rolling windows, NaN handling built into `Coral.Frame`, Parquet I/O via `parquet2`, DataFrame-aware CSV/JSON. The pandas competitor. No query optimizer — numeric optimization comes from the tensor compiler's fusion. |
+| `shoals` | Shell | `chelis-std` + `nautilus` + `coral` | Phase 3l | Options pricing, risk measures, yield curves, stochastic processes, order books |
+| `octant` | Shell | `chelis-std` + `nautilus` required; `shoals` required only for the Part B SDE / MC / curve lowering | Phase 3n (Part A) ∥ Phase 3l, Phase 3o (Part B) after Phase 3l | LaTeX ↔ Deep bridge for quantitative finance. Parses a bounded LaTeX subset, lowers to Deep deterministically (arithmetic, derivatives, special functions, integrals, matrix ops) in Part A plus LLM-assisted lowering (SDE, Monte Carlo expectation, calibration, yield curves) in Part B, round-trips through the compiler with type overlays, and carries provenance spans on every Deep node. Ships an interactive cell-based notebook in Part B. **NOT a CAS** — notation adapter only, no symbolic integration or simplification. |
+| `school` | Shell | `chelis-std` + `nautilus` + `coral` | **Stub** (post-3) | Classical ML (scikit-learn competitor). Regression, decision trees, SVMs, clustering, pipelines, cross-validation. |
+| `darwin` | Shell | `chelis-std` + `nautilus` required, `coral` optional | **Stub** (post-3) | Evolutionary algorithms — GA, genetic programming over the Deep AST, evolution strategies, population-based training, neural architecture search. Uniquely natural fit because Deep is homoiconic: program mutation and crossover are typed AST operations, and the compiler's 0–1 fitness scoring is literally the fitness function for evolutionary search. `coral` is optional for evolving feature-engineering pipelines over tabular data. |
+| `hull` | Shell | `chelis-std` | **Stub** (post-3) | Executable language specification. Self-hosted reference type checker and evaluator implementing the LaCaDiLE typing rules and operational semantics as Chelis functions over Deep AST ADTs. Differential testing against the real compiler. Spec-driven random well-typed program generation. The spec of Chelis, written in Chelis, checked by Chelis. |
+| `beacon` | Shell | `chelis-std` + compiler DAG IR | **Future** | Automated static analysis: value range inference, div-zero detection, overflow detection, NaN propagation, bounded output verification. Input ranges specified by user; output ranges inferred. Pre-deployment gate (minutes, not milliseconds). Inspired by Astree (Airbus A380 flight control verification). Trust stack Level 3. |
 
-Design rule: `chelis-std` covers what every Chelis program may need (tensors, neural
-primitives, time, decimal). `nautilus` owns general numerical methods. `coral` owns
-tabular data. `shoals` is finance-only. `school` is classical ML only. `darwin` is
-evolutionary search only. If it's about the language's own specification and
+Design rule: the chelis-std runtime covers what every Chelis program may need
+(tensors, neural primitives, time, decimal); the substitutability criterion
+keeps it out of the shell taxonomy — programs cannot opt out of it any more
+than a Rust program can opt out of `core`. `nautilus` owns general numerical
+methods. `coral` owns tabular data. `shoals` is finance-only. `school` is
+classical ML only. `darwin` is evolutionary search only. If it's about the language's own specification and
 conformance testing, it goes in `hull`. If it's about automated static analysis on the
 DAG (range inference, overflow detection, numerical stability), it goes in `beacon`.
 `octant` is a notation bridge layered on top of `nautilus` and (optionally) `shoals` —

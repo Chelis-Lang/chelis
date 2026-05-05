@@ -51,8 +51,8 @@ runs entirely on bytes already on disk; no code from the artifact executes.
 - Remote fetch. There is no path that downloads bytes from a URL and feeds
   them into the validation+placement step.
 - Topological dependency-ordered install. Today a user must know to install
-  chelis-std first, then nautilus, then coral (which depends on nautilus),
-  etc., manually.
+  nautilus first, then coral (which depends on nautilus), etc., manually.
+  (chelis-std is the bundled runtime and is never installed via reef.)
 - Auto-fetch during `chelis reef build`. The build errors with "missing
   from local registry index — run `chelis reef build` first to populate
   the cache" at `crates/chelis-reef/src/lib.rs:1243-1245` if a dependency
@@ -194,19 +194,40 @@ path under the hood.
   naming the cycle.
 - Install each shell in order via Item 6's `install_validated_artifact_pair`
   + lockfile update.
-- The built-in default list covers the canonical shells: `chelis-std`,
-  `nautilus`, `coral`, `shoals`, `octant`. This list is hard-coded for
-  the pre-launch dev team; multi-publisher generalization is post-launch.
+- The built-in default list covers the canonical shells: `nautilus`,
+  `coral`, `shoals`, `octant`. This list is hard-coded for the
+  pre-launch dev team; multi-publisher generalization is post-launch.
+
+**chelis-std is the language runtime, not a shell.** The runtime is
+distributed bundled with the compiler — it version-marches with the
+toolchain and cannot be substituted independently. Programs depend on
+it the same way Rust programs depend on `core`/`std`. Concretely:
+
+- `chelis-std` is **never** in the bootstrap input list. An explicit
+  `chelis-std` entry in `--bootstrap` arguments is rejected with a
+  typed `BootstrapError::RuntimeNotABootstrapTarget` error naming
+  both the requested and the bundled version.
+- A shell's `reef.toml` may declare `chelis-std = { version = "X" }`.
+  The bootstrap installer soft-verifies `X` against the compiler's
+  bundled runtime version: on match the dep is filtered from the
+  bootstrap graph (it is implicit, not an edge in the install loop);
+  on mismatch the bootstrap aborts with a typed validation error
+  naming both versions.
+- Lockfile entries for chelis-std use `LockSource::Bundled
+  { compiler_version }`, recording the version of the compiler that
+  supplied the bytes for auditability. There is no archive to fetch
+  and integrity comes from the compiler binary itself.
 
 **Acceptance oracle.**
 
 - A clean dev environment with `GITHUB_TOKEN` set runs `chelis reef
   install --bootstrap` (no arguments — uses the default list) and ends
-  with all canonical shells installed in the local registry, in the
-  correct order so each shell's dependencies were already present when
-  it was installed.
+  with all four canonical shells (`nautilus`, `coral`, `shoals`,
+  `octant`) installed in the local registry, in the correct order so
+  each shell's dependencies were already present when it was
+  installed.
 - Explicit list form `chelis reef install --bootstrap
-  <org>/nautilus@v0.4.0 <org>/coral@v0.4.0` installs only the two
+  <org>/nautilus@v0.5.0 <org>/coral@v0.5.0` installs only the two
   named shells in topological order.
 
 **Scope.** ~50 lines on top of Item 6. The graph build is small (each
