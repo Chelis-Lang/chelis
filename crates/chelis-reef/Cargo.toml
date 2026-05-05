@@ -16,6 +16,13 @@ chelis-shell.workspace = true
 serde.workspace = true
 bincode = "1"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
+# Item 8: process-level advisory lock (`flock(2)`) on
+# `$CHELIS_REEF_HOME/.reef-lock` around the auto-fetch + install + index
+# update critical section. `rustix` is already in the dep graph as a
+# transitive of several workspace deps; promoting it to a direct dep
+# adds no new external dependency. Pinned to the same major version
+# already in `Cargo.lock` to keep the resolved tree single-version.
+rustix = { version = "1.1", features = ["fs"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"

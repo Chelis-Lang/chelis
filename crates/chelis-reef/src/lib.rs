@@ -386,6 +386,33 @@ pub struct PackageBuildArtifacts {
     pub archive_sha256: String,
 }
 
+/// Options that tune the behavior of [`build_package_with_options`].
+///
+/// Phase A Item 8 surface. The default is locked at "auto-fetch on" so
+/// that a fresh `chelis reef build` against an empty registry resolves
+/// missing dependencies from the canonical hosting org without a manual
+/// `chelis reef install --from-github` round trip first. Callers that
+/// want explicit control over network access during build pass
+/// `BuildOptions { auto_fetch: false, .. }`.
+///
+/// `BuildOptions::default()` matches the pre-Item-8 behavior except for
+/// the auto-fetch flip — a subtle but locked CLI behavior change
+/// documented in the `chelis reef build --help` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildOptions {
+    /// When `true` (default), missing-from-registry dependencies trigger
+    /// an automatic fetch via [`install_from_github`] before the build
+    /// fails. When `false`, the build fails fast with the improved
+    /// error wording naming the URL that would have been tried.
+    pub auto_fetch: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self { auto_fetch: true }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LoadedPackage {
     id: PackageId,
@@ -537,7 +564,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
     let Some(root) = find_package_root_for_input(file)? else {
         return Ok(None);
     };
-    let graph = resolve_package_graph(&root)?;
+    let graph = resolve_package_graph(&root, LoadOptions::default_for_load())?;
     write_lockfile(&root.join("reef.lock"), &build_lockfile(&graph))?;
     let entry_module = module_name_for_input(&root, file, &graph.root_package)?;
     let linked = link_graph(&graph, std::slice::from_ref(&entry_module))?;
@@ -677,15 +704,22 @@ pub fn compile_with_reef_graph(
 /// otherwise run the full resolver under the standard 5-second timeout.
 ///
 /// Eval does not write the lockfile — that is the build path's responsibility.
+///
+/// Auto-fetch is on by default for eval too: `chelis check` / `chelis eval`
+/// against an empty registry should not require a manual install round-trip
+/// any more than `chelis reef build` does. The Item 8 `--no-auto-fetch`
+/// surface is exposed only on `chelis reef build` for now; eval-side
+/// callers run with [`LoadOptions::default_for_load`].
 fn load_package_graph_for_eval(root: &Path) -> Result<PackageGraph, String> {
+    let options = LoadOptions::default_for_load();
     let lock_path = root.join("reef.lock");
     if lock_path.exists() {
         let lock = read_lockfile(&lock_path)?;
-        reconstruct_graph_from_lockfile(root, &lock)
+        reconstruct_graph_from_lockfile(root, &lock, options)
     } else {
         let root_clone = root.to_path_buf();
         run_with_timeout(
-            move || resolve_package_graph(&root_clone),
+            move || resolve_package_graph(&root_clone, options),
             Duration::from_secs(5),
             TIMEOUT_MSG,
         )
@@ -708,9 +742,46 @@ pub fn prepare_program_for_eval_source(
     compile_with_reef_graph(&graph, entry_decls).map(Some)
 }
 
+/// Build a package with the default options ([`BuildOptions::default`]),
+/// which today means auto-fetch is **on**: missing-from-registry
+/// dependencies are silently fetched from the canonical hosting org
+/// before the build resumes.
+///
+/// Pre-Item-8 callers that want the legacy "fail if anything is
+/// missing" behavior should call [`build_package_with_options`] with
+/// `BuildOptions { auto_fetch: false }`. Auto-fetch's user-visible
+/// effect is surfaced via stderr ("chelis reef: auto-fetching ...")
+/// so it remains observable, per the locked Item 8 contract invariant.
 pub fn build_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
+    build_package_with_options(root, &BuildOptions::default())
+}
+
+/// Build a package with caller-supplied [`BuildOptions`]. Phase A
+/// Item 8 entry point; the CLI's `chelis reef build [--no-auto-fetch]`
+/// dispatches here.
+///
+/// ### Auto-fetch contract
+///
+/// - `auto_fetch: true` (default): each missing-from-registry
+///   dependency triggers a single attempt to
+///   [`install_from_github`] against either the lockfile's
+///   `remote_origin` (Item 9; today always `None`) or the
+///   `chelis-lang/<name>@v<version>` canonical default. The fetch
+///   runs under [`acquire_reef_home_lock`] so concurrent builds do
+///   not race on `index.json`. On fetch failure the build bails with
+///   the improved error wording (URL + auth state + typed category).
+///   The auto-fetch event is logged to stderr so it remains
+///   observable to operators.
+/// - `auto_fetch: false`: missing-from-registry surfaces the same
+///   improved-wording error immediately, naming the URL that would
+///   have been tried so the operator can run
+///   `chelis reef install --from-github <url>` manually.
+pub fn build_package_with_options(
+    root: &Path,
+    options: &BuildOptions,
+) -> Result<PackageBuildArtifacts, String> {
     let root = canonical_root(root)?;
-    let graph = resolve_package_graph(&root)?;
+    let graph = resolve_package_graph(&root, options.into())?;
     let lock = build_lockfile(&graph);
     write_lockfile(&root.join("reef.lock"), &lock)?;
 
@@ -1025,6 +1096,176 @@ fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<(), String> {
             final_path.display()
         )
     })
+}
+
+/// File name (relative to `$CHELIS_REEF_HOME`) of the Item 8 advisory
+/// lock file used to serialize concurrent registry-mutating operations
+/// (auto-fetch + install + index update).
+///
+/// Created on first acquire (and never removed — `flock(2)` is
+/// auto-released by the kernel when the holder's fd closes, so a
+/// crashed process leaves the file but not the lock). The file's
+/// inode is the lock identity; `flock` semantics are scoped to the
+/// open file description, not the path.
+const REEF_HOME_LOCK_FILE: &str = ".reef-lock";
+
+/// Default acquire-timeout for the Item 8 process-level lock. 60 seconds
+/// is comfortably longer than any single `install_from_github` round
+/// trip on a real GitHub release (the heaviest canonical asset today is
+/// `chelis-std-0.1.0.tar.zst` at well under 1 MB) and short enough to
+/// surface a deadlocked / wedged peer process within a developer's
+/// single iteration loop. Locked by `phaseA_item8_autofetch_build_oracle`.
+const REEF_HOME_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// RAII guard for the Item 8 process-level advisory lock on
+/// `$CHELIS_REEF_HOME/.reef-lock`. Drop releases the underlying
+/// `flock(2)` by closing the file descriptor — the kernel does the
+/// work, so panics, `?`-bailouts, and normal returns all release the
+/// lock cleanly without explicit unlock plumbing.
+///
+/// The guard is intentionally non-`Clone`, non-`Copy`, and stores its
+/// owned `fs::File` private. Callers must not access the file
+/// directly.
+#[must_use = "the lock is released when the guard drops; binding to `_` would release immediately"]
+pub struct ReefHomeLock {
+    /// The lock-bearing fd. Drop closes it, which releases the
+    /// `flock(2)` held against it.
+    _file: fs::File,
+    /// Path of the lock file. Stored for diagnostic messages only.
+    path: PathBuf,
+}
+
+impl ReefHomeLock {
+    /// Path of the on-disk lock file backing this guard. Exposed so
+    /// tests can assert the file exists during the lock window.
+    pub fn lock_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Errors surfaced by [`acquire_reef_home_lock`]. Each variant carries
+/// enough detail to make the failure self-explanatory in a CLI message.
+#[derive(Debug)]
+pub enum ReefHomeLockError {
+    /// Could not create or open `$CHELIS_REEF_HOME/.reef-lock` — the
+    /// registry root is missing, unwritable, or some other I/O issue.
+    Io { path: PathBuf, message: String },
+    /// `flock(LOCK_EX)` was not acquired within the configured wait
+    /// window. The lock is held by another process; surface a clear
+    /// timeout error.
+    Timeout { path: PathBuf, waited: Duration },
+}
+
+impl std::fmt::Display for ReefHomeLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, message } => {
+                write!(
+                    f,
+                    "failed to open registry lock file {}: {message}",
+                    path.display()
+                )
+            }
+            Self::Timeout { path, waited } => write!(
+                f,
+                "timed out after {waited:?} waiting for registry lock {}; \
+                 another `chelis reef build` or `chelis reef install` is likely in progress",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReefHomeLockError {}
+
+/// Acquire a process-level advisory lock on
+/// `$CHELIS_REEF_HOME/.reef-lock`. Blocks (in a poll-with-sleep loop)
+/// up to `timeout`, returning [`ReefHomeLockError::Timeout`] if the
+/// lock cannot be acquired within that window.
+///
+/// ### Lock semantics
+///
+/// The lock is `flock(2)` with `LOCK_EX | LOCK_NB`. A crashed
+/// process's lock is auto-released by the kernel when its file
+/// descriptor is closed; a stale `.reef-lock` file on disk does
+/// **not** prevent acquisition. This is the documented Unix
+/// semantic and the test
+/// `phaseA_item8_stale_lock_file_does_not_block_acquisition`
+/// pins it.
+///
+/// ### Concurrency
+///
+/// Holders are serialized strictly: only one process can hold the lock
+/// at a time. The auto-fetch path holds the lock through the entire
+/// fetch + install + index-update window (Item 6's `install_from_github`
+/// → `install_validated_artifact_pair` chain), so concurrent peers
+/// observe a serialized view of `index.json`.
+///
+/// ### What this is not
+///
+/// This is **not** a per-package lock. Two concurrent builds against
+/// distinct packages still serialize through this single registry
+/// lock. The trade-off is intentional: the registry's `index.json` is
+/// a single shared file, and per-package fan-out would require
+/// per-package lock files plus an index-write critical section
+/// anyway. Item 10's registry-server design will revisit this when
+/// concurrent throughput becomes a real driver.
+pub fn acquire_reef_home_lock(
+    registry_root: &Path,
+    timeout: Duration,
+) -> Result<ReefHomeLock, ReefHomeLockError> {
+    use rustix::fs::{FlockOperation, flock};
+    use std::os::fd::AsFd;
+
+    fs::create_dir_all(registry_root).map_err(|e| ReefHomeLockError::Io {
+        path: registry_root.to_path_buf(),
+        message: format!("create registry root: {e}"),
+    })?;
+    let lock_path = registry_root.join(REEF_HOME_LOCK_FILE);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| ReefHomeLockError::Io {
+            path: lock_path.clone(),
+            message: e.to_string(),
+        })?;
+
+    // Poll loop: try non-blocking first, sleep briefly, retry. We do
+    // not use blocking `flock` because we want the wait-with-timeout
+    // semantic and a deterministic test signal. Polling cadence:
+    // 50 ms — fine-grained enough that a successful release is picked
+    // up quickly, coarse enough that a 60 s timeout is ~1200 syscalls
+    // worst case (negligible).
+    let poll_interval = Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    loop {
+        match flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {
+                return Ok(ReefHomeLock {
+                    _file: file,
+                    path: lock_path,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= timeout {
+                    return Err(ReefHomeLockError::Timeout {
+                        path: lock_path,
+                        waited: timeout,
+                    });
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => {
+                return Err(ReefHomeLockError::Io {
+                    path: lock_path,
+                    message: format!("flock: {e}"),
+                });
+            }
+        }
+    }
 }
 
 /// Validate one prebuilt `(archive, shell)` pair on disk and place a
@@ -2576,9 +2817,16 @@ const TIMEOUT_MSG: &str = "reef dependency resolution timed out \u{2014} run `ch
 ///
 /// Path dependencies are loaded directly from the local filesystem (fast).
 /// Local-registry dependencies are loaded with a 5-second timeout; if the
-/// cache is missing or slow the caller gets an actionable error instead of
-/// a hang.
-fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<PackageGraph, String> {
+/// cache is missing or slow, Item 8's auto-fetch (when enabled) attempts
+/// to repair the registry before returning an error. Auto-fetch runs
+/// **outside** the timeout-bound thread because the network round trip
+/// can legitimately exceed 5 s — the timeout exists to bound a wedged
+/// local registry, not the auto-fetch itself.
+fn reconstruct_graph_from_lockfile(
+    root: &Path,
+    lock: &ReefLock,
+    options: LoadOptions,
+) -> Result<PackageGraph, String> {
     let mut packages: BTreeMap<String, LoadedPackage> = BTreeMap::new();
 
     // Load the root package.
@@ -2626,11 +2874,45 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
             LockSource::LocalRegistry { remote_origin } => {
                 let dep_name = dep.name.clone();
                 let dep_version = dep.version.clone();
-                let installed = run_with_timeout(
-                    move || load_registry_package(&dep_name, &dep_version),
+                // First try the timeout-bounded load (no network, just
+                // bytes-on-disk). If it succeeds the registry already
+                // had the package and we are done.
+                let dep_name_t = dep_name.clone();
+                let dep_version_t = dep_version.clone();
+                let timeout_result = run_with_timeout(
+                    move || {
+                        load_registry_package(&dep_name_t, &dep_version_t).map_err(|e| match e {
+                            LoadRegistryError::Other(s) => s,
+                            LoadRegistryError::MissingFromIndex
+                            | LoadRegistryError::MissingPackageDir => {
+                                // Sentinel that the caller (which
+                                // owns `options` and the
+                                // lockfile dep) will route into
+                                // auto-fetch. Encoded as a string
+                                // because run_with_timeout's
+                                // signature is `Result<T, String>`.
+                                String::from(MISSING_REGISTRY_SENTINEL)
+                            }
+                        })
+                    },
                     Duration::from_secs(5),
                     TIMEOUT_MSG,
-                )?;
+                );
+                let installed = match timeout_result {
+                    Ok(installed) => installed,
+                    Err(s) if s == MISSING_REGISTRY_SENTINEL => {
+                        // Auto-fetch has its own internal lock + retry
+                        // logic and can take longer than the 5-second
+                        // local-registry budget.
+                        load_registry_package_or_autofetch(
+                            &dep_name,
+                            &dep_version,
+                            options,
+                            Some(dep),
+                        )?
+                    }
+                    Err(s) => return Err(s),
+                };
                 let dep_manifest = read_manifest(&installed.root.join("reef.toml"))?;
                 let dep_modules = load_package_modules(&installed.root, &dep_manifest)?;
                 // The lockfile is the source of truth: if it pinned
@@ -2663,6 +2945,13 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
         packages,
     })
 }
+
+/// Sentinel string smuggled through `run_with_timeout`'s
+/// `Result<T, String>` signature so the lockfile-reconstruction caller
+/// can branch into auto-fetch on missing-from-registry without changing
+/// `run_with_timeout`'s public type. Internal-only; tests do not rely
+/// on the literal value.
+const MISSING_REGISTRY_SENTINEL: &str = "__chelis_missing_from_registry_sentinel__";
 
 /// Reserved top-level directory names that cannot appear in
 /// `additional_sources`. Future sibling tools that introduce their own
@@ -2741,7 +3030,7 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
+fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
     let mut packages = BTreeMap::new();
     let mut by_name = HashMap::<String, PackageId>::new();
     let mut stack = Vec::new();
@@ -2759,6 +3048,7 @@ fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
         &mut packages,
         &mut by_name,
         &mut stack,
+        options,
     )?;
     Ok(PackageGraph {
         root_package: root_id.name,
@@ -2767,9 +3057,10 @@ fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
 }
 
 // 8 arguments — the prior surface was already 7 and Item 9 adds
-// `remote_origin` plumbing. Folding into a struct would just rename
-// the same eight values; the recursion stays clearer with positional
-// parameters.
+// `remote_origin` plumbing. Folding into a struct would obscure the
+// resolver's flow and rename the same values without an abstraction
+// win — the recursion needs all of these in scope. This allow is
+// local to keep the noise contained.
 #[allow(clippy::too_many_arguments)]
 fn resolve_package_recursive(
     package_name: &str,
@@ -2780,6 +3071,7 @@ fn resolve_package_recursive(
     packages: &mut BTreeMap<String, LoadedPackage>,
     by_name: &mut HashMap<String, PackageId>,
     stack: &mut Vec<String>,
+    options: LoadOptions,
 ) -> Result<(), String> {
     if stack.iter().any(|name| name == package_name) {
         stack.push(package_name.to_string());
@@ -2839,10 +3131,19 @@ fn resolve_package_recursive(
                     packages,
                     by_name,
                     stack,
+                    options,
                 )?;
             }
             (Some(version), None) => {
-                let installed = load_registry_package(dep_name, version)?;
+                // Item 8 insertion point: missing-from-registry deps
+                // route through the auto-fetch decision before bailing.
+                // No lockfile context here (we're walking manifests);
+                // pass `None` so the source URL falls back to the
+                // canonical-org default for the named package.
+                let installed =
+                    load_registry_package_or_autofetch(dep_name, version, options, None)?;
+                // Item 9 plumbing: pull the registry-recorded
+                // `remote_origin` so `build_lockfile` can persist it.
                 let dep_origin = installed.remote_origin.clone();
                 resolve_package_recursive(
                     dep_name,
@@ -2853,6 +3154,7 @@ fn resolve_package_recursive(
                     packages,
                     by_name,
                     stack,
+                    options,
                 )?;
             }
             _ => unreachable!("validated earlier"),
@@ -2874,61 +3176,357 @@ struct InstalledPackage {
     remote_origin: Option<String>,
 }
 
-fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, String> {
-    let registry_root = registry_root()?;
-    let index = read_registry_index(&registry_root)?;
-    let expected = index
+/// Typed result for [`load_registry_package`]. Item 8 introduces this
+/// enum so the auto-fetch decision point can discriminate "the package
+/// is simply not in the registry yet" from "the package is in the
+/// registry but corrupt / mismatched / etc." Only the former is
+/// recoverable by an auto-fetch; the latter would silently overwrite
+/// damaged bytes if we treated them the same.
+///
+/// The two `Missing*` variants correspond to the two missing-from-registry
+/// branches in [`load_registry_package`] that the pre-Item-8 code
+/// surfaced as user-facing strings naming the (now-misleading) fix
+/// `run `chelis reef build` first to populate the cache`.
+#[derive(Debug, Clone)]
+enum LoadRegistryError {
+    /// The package is absent from `index.json`. This is the canonical
+    /// "fresh registry" case Item 8's auto-fetch is designed for.
+    MissingFromIndex,
+    /// `index.json` claims the package exists but `packages/<name>/<version>/`
+    /// is gone (corrupt / partially deleted registry). Auto-fetch can
+    /// repair this by re-fetching the bytes.
+    MissingPackageDir,
+    /// Any other error: checksum mismatch, malformed shell, I/O failure
+    /// reading the index, etc. Not recoverable by auto-fetch — the
+    /// registry has bytes for this `(name, version)` and they
+    /// disagree with what's pinned, which is a hash-mismatch
+    /// signal we must surface, not paper over.
+    Other(String),
+}
+
+impl LoadRegistryError {
+    /// Whether auto-fetch is allowed to attempt to repair this state
+    /// by re-fetching from the canonical hosting org.
+    fn is_recoverable_by_autofetch(&self) -> bool {
+        matches!(self, Self::MissingFromIndex | Self::MissingPackageDir)
+    }
+}
+
+fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, LoadRegistryError> {
+    let registry_root = registry_root().map_err(LoadRegistryError::Other)?;
+    let index = read_registry_index(&registry_root).map_err(LoadRegistryError::Other)?;
+    let Some(expected) = index
         .packages
         .get(name)
         .and_then(|versions| versions.iter().find(|entry| entry.version == version))
-        .ok_or_else(|| {
-            format!(
-                "package `{name}` version `{version}` missing from local registry index — \
-                 run `chelis reef build` first to populate the cache"
-            )
-        })?;
+    else {
+        return Err(LoadRegistryError::MissingFromIndex);
+    };
     let pkg_dir = registry_root.join("packages").join(name).join(version);
     if !pkg_dir.exists() {
-        return Err(format!(
-            "package `{name}` version `{version}` not found in local registry — \
-             run `chelis reef build` first to populate the cache"
-        ));
+        return Err(LoadRegistryError::MissingPackageDir);
     }
     let shell_path = pkg_dir.join(format!("{name}-{version}.chb"));
     let archive_path = pkg_dir.join(format!("{name}-{version}.tar.zst"));
-    let shell_sha256 = sha256_file(&shell_path)?;
+    let shell_sha256 = sha256_file(&shell_path).map_err(LoadRegistryError::Other)?;
     if shell_sha256 != expected.shell_sha256 {
-        return Err(format!(
+        return Err(LoadRegistryError::Other(format!(
             "shell checksum mismatch for `{name}` version `{version}`"
-        ));
+        )));
     }
-    let archive_sha256 = sha256_file(&archive_path)?;
+    let archive_sha256 = sha256_file(&archive_path).map_err(LoadRegistryError::Other)?;
     if archive_sha256 != expected.archive_sha256 {
-        return Err(format!(
+        return Err(LoadRegistryError::Other(format!(
             "archive checksum mismatch for `{name}` version `{version}`"
-        ));
+        )));
     }
-    let shell = read_shell(&shell_path).map_err(|e| e.to_string())?;
+    let shell = read_shell(&shell_path).map_err(|e| LoadRegistryError::Other(e.to_string()))?;
     if archive_sha256 != shell.archive_sha256 {
-        return Err(format!(
+        return Err(LoadRegistryError::Other(format!(
             "archive checksum mismatch for `{name}` version `{version}`"
-        ));
+        )));
     }
     if shell.package.name != name || shell.package.version != version {
-        return Err(format!(
+        return Err(LoadRegistryError::Other(format!(
             "shell package id mismatch for `{name}` version `{version}`"
-        ));
+        )));
     }
     let cache_root = registry_root.join("cache").join(&archive_sha256);
     if !cache_root.exists() {
-        fs::create_dir_all(&cache_root).map_err(|e| e.to_string())?;
-        extract_archive(&archive_path, &cache_root)?;
+        fs::create_dir_all(&cache_root).map_err(|e| LoadRegistryError::Other(e.to_string()))?;
+        extract_archive(&archive_path, &cache_root).map_err(LoadRegistryError::Other)?;
     }
     Ok(InstalledPackage {
         root: cache_root,
         shell,
         remote_origin: expected.remote_origin.clone(),
     })
+}
+
+/// Phase A Item 8: try [`load_registry_package`] and, on a recoverable
+/// "missing-from-registry" failure, attempt one auto-fetch through
+/// [`install_from_github`] before bailing.
+///
+/// ### Behavior
+///
+/// 1. Try `load_registry_package(name, version)`.
+/// 2. If it fails with [`LoadRegistryError::Other`], the registry has
+///    poisoned bytes — surface the underlying string as-is. Auto-fetch
+///    is **not** allowed to silently overwrite a hash-mismatching local
+///    install (Item 6's locked invariant).
+/// 3. If it fails with [`LoadRegistryError::MissingFromIndex`] or
+///    [`LoadRegistryError::MissingPackageDir`] **and** `auto_fetch`
+///    is `true`, hold the process-level `flock(2)` on
+///    `$CHELIS_REEF_HOME/.reef-lock` (see [`acquire_reef_home_lock`])
+///    for the entire fetch + install + index update window, run
+///    [`install_from_github`] against the resolved source URL, then
+///    retry `load_registry_package`.
+/// 4. If `auto_fetch` is `false`, or if the auto-fetch attempt itself
+///    fails, bail with the improved-wording error
+///    [`format_missing_dep_error`] which names: the URL that
+///    was/would-be tried, whether `GITHUB_TOKEN` is currently set, and
+///    (when auto-fetch ran) the typed [`GitHubFetchError`] category.
+///
+/// ### Source resolution
+///
+/// The fetch source URL is, in priority order:
+/// 1. The lockfile entry's `remote_origin` field (today: always `None`
+///    via [`lockfile_remote_origin`]; Item 9 wires this in).
+/// 2. The canonical-org default from [`canonical_origin_for`].
+///
+/// Callers without a lockfile entry pass `lockfile_dep = None`.
+fn load_registry_package_or_autofetch(
+    name: &str,
+    version: &str,
+    options: LoadOptions,
+    lockfile_dep: Option<&LockedDependency>,
+) -> Result<InstalledPackage, String> {
+    // First attempt: maybe the registry already has it.
+    let first_err = match load_registry_package(name, version) {
+        Ok(installed) => return Ok(installed),
+        Err(e) => e,
+    };
+
+    // Non-recoverable: surface the original error string.
+    if !first_err.is_recoverable_by_autofetch() {
+        return Err(match first_err {
+            LoadRegistryError::Other(s) => s,
+            // Unreachable: filtered by `is_recoverable_by_autofetch`.
+            LoadRegistryError::MissingFromIndex | LoadRegistryError::MissingPackageDir => {
+                unreachable!()
+            }
+        });
+    }
+
+    // Resolve the source URL: lockfile remote_origin (Item 9) wins, then
+    // canonical-org default. Recorded for error messages even if we
+    // skip the fetch attempt.
+    let source_origin = lockfile_dep
+        .and_then(lockfile_remote_origin)
+        .unwrap_or_else(|| canonical_origin_for(name, version));
+
+    if !options.auto_fetch {
+        // Opt-out path. Improved error wording: name the URL that
+        // would have been tried so the user can run
+        // `chelis reef install --from-github <url>` themselves.
+        return Err(format_missing_dep_error(
+            name,
+            version,
+            &source_origin,
+            None,
+            false,
+        ));
+    }
+
+    // Acquire the process-level lock for the duration of the fetch +
+    // install + index update. The same registry root is shared across
+    // every concurrent build that touches `$CHELIS_REEF_HOME`, so we
+    // serialize through a `flock(2)` on `.reef-lock` to keep
+    // `index.json` updates linearizable.
+    let registry_root_path = registry_root()?;
+    let _lock = match acquire_reef_home_lock(&registry_root_path, REEF_HOME_LOCK_TIMEOUT) {
+        Ok(g) => g,
+        Err(e) => return Err(format!("auto-fetch could not lock registry: {e}")),
+    };
+
+    // Re-check after acquiring the lock: a concurrent process may
+    // have just installed it. This is the standard double-checked-
+    // locking discipline; it also keeps the auto-fetch event
+    // observable (we do NOT count this as an auto-fetch since no
+    // network was hit).
+    if let Ok(installed) = load_registry_package(name, version) {
+        return Ok(installed);
+    }
+
+    // Run the fetch. Auto-fetch event becomes observable here via the
+    // emitted log message; tests assert against this signal.
+    eprintln!("chelis reef: auto-fetching `{name}` `{version}` from {source_origin}",);
+    let fetch_err = match install_from_github(&source_origin, &registry_root_path) {
+        Ok(_artifact) => {
+            // Retry the registry lookup. If retry still fails, the
+            // surprise is on us — surface as Other since it's a
+            // post-install corruption case.
+            return load_registry_package(name, version).map_err(|e| match e {
+                LoadRegistryError::Other(s) => s,
+                LoadRegistryError::MissingFromIndex | LoadRegistryError::MissingPackageDir => {
+                    format!(
+                        "post-fetch reload: package `{name}` `{version}` still missing after \
+                         auto-fetch from {source_origin} reported success"
+                    )
+                }
+            });
+        }
+        Err(e) => e,
+    };
+
+    Err(format_missing_dep_error(
+        name,
+        version,
+        &source_origin,
+        Some(&fetch_err),
+        true,
+    ))
+}
+
+/// Phase A Item 8 — Item 9 coordination shim.
+///
+/// Returns the lockfile entry's recorded `remote_origin` URL, if any.
+/// Today the [`LockSource`] enum has no `remote_origin` field, so this
+/// helper unconditionally returns `None`. After Item 9 lands and adds
+/// `remote_origin: Option<String>` to `LockSource::LocalRegistry`, the
+/// body of this function flips to `match &dep.source {
+/// LockSource::LocalRegistry { remote_origin } => remote_origin.clone(),
+/// _ => None }`.
+///
+/// Keeping the resolution logic behind this single shim means the Item 9
+/// merge is a one-line change to a single function — everything else in
+/// the auto-fetch path keeps working unchanged.
+fn lockfile_remote_origin(dep: &LockedDependency) -> Option<String> {
+    // Item 9 has merged: read the field on `LockSource::LocalRegistry`.
+    match &dep.source {
+        LockSource::LocalRegistry { remote_origin } => remote_origin.clone(),
+        LockSource::Path { .. } => None,
+    }
+}
+
+/// Phase A Item 8: derive the canonical-org default fetch URL for a
+/// `(name, version)` pair the lockfile does not name a `remote_origin`
+/// for. Returns a string in the form
+/// `<canonical-org>/<name>@v<version>`, accepted as-is by
+/// [`GitHubReleaseSpec::parse`] (which strips the leading `v` to
+/// derive the version field).
+///
+/// Locked by [`CANONICAL_REEF_ORG`] = `"chelis-lang"`. Multi-publisher
+/// generalization is post-launch (Item 10).
+pub fn canonical_origin_for(name: &str, version: &str) -> String {
+    format!("{CANONICAL_REEF_ORG}/{name}@v{version}")
+}
+
+/// Phase A Item 8: format the user-facing error wording for a missing
+/// dependency that auto-fetch did not (or could not) repair.
+///
+/// The wording names:
+/// - the dependency's `(name, version)`
+/// - the source URL spec that was/would-be tried
+/// - whether `GITHUB_TOKEN` is currently set in the environment
+///   (auth state)
+/// - if `fetch_err` is `Some`, the typed [`GitHubFetchError`] category
+///   (`auth-missing`, `auth-rejected`, `release-asset-not-found`,
+///   `rate-limited`, `server-error`, `network`, `io`, `validation`,
+///   `parse`)
+///
+/// The message shape is asserted against by the named acceptance oracle
+/// `phaseA_item8_autofetch_build_oracle`. Wording must remain stable
+/// (regex-stable, not just `contains()`) until Item 9 gates a change.
+fn format_missing_dep_error(
+    name: &str,
+    version: &str,
+    source_origin: &str,
+    fetch_err: Option<&GitHubFetchError>,
+    auto_fetch_was_enabled: bool,
+) -> String {
+    let token_state = if env::var_os("GITHUB_TOKEN").is_some() {
+        "GITHUB_TOKEN is set"
+    } else {
+        "GITHUB_TOKEN is not set"
+    };
+    match fetch_err {
+        Some(e) => {
+            // Auto-fetch ran and failed.
+            format!(
+                "auto-fetch failed for dependency `{name}` `{version}` from \
+                 `{source_origin}` (category: {cat}, {auth}): {msg}",
+                cat = github_fetch_error_category(e),
+                auth = token_state,
+                msg = e,
+            )
+        }
+        None if auto_fetch_was_enabled => {
+            // Defensive branch — should not be reached: if auto-fetch
+            // is on and we didn't get a fetch error, the caller must
+            // have skipped the fetch.
+            format!(
+                "missing dependency `{name}` `{version}` and auto-fetch \
+                 from `{source_origin}` did not run ({auth})",
+                auth = token_state,
+            )
+        }
+        None => {
+            // Opt-out (--no-auto-fetch) path.
+            format!(
+                "missing dependency `{name}` `{version}` (auto-fetch disabled by \
+                 `--no-auto-fetch`); would have fetched from `{source_origin}` \
+                 (category: would-attempt, {token_state}). \
+                 Either drop `--no-auto-fetch` or run \
+                 `chelis reef install --from-github {source_origin}` manually."
+            )
+        }
+    }
+}
+
+/// Map a [`GitHubFetchError`] variant onto a stable category string used
+/// in [`format_missing_dep_error`]. Stable strings — tests pin against
+/// these.
+fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
+    match e {
+        GitHubFetchError::Parse { .. } => "parse",
+        GitHubFetchError::AuthMissing { .. } => "auth-missing",
+        GitHubFetchError::AuthRejected { .. } => "auth-rejected",
+        GitHubFetchError::ReleaseAssetNotFound { .. } => "release-asset-not-found",
+        GitHubFetchError::RateLimited { .. } => "rate-limited",
+        GitHubFetchError::ServerError { .. } => "server-error",
+        GitHubFetchError::Network { .. } => "network",
+        GitHubFetchError::Io { .. } => "io",
+        GitHubFetchError::Validation { .. } => "validation",
+    }
+}
+
+/// Phase A Item 8 internal load knobs threaded through the package
+/// graph resolver. The public surface is [`BuildOptions`]; this
+/// internal `Copy` carrier exists because the resolver passes options
+/// into many recursive callsites and a leaf-only `bool` is more
+/// ergonomic than threading the public struct everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LoadOptions {
+    auto_fetch: bool,
+}
+
+impl LoadOptions {
+    /// Default for non-build callers (eval, check, prepare-for-eval,
+    /// etc.). Keeps the user-experience promise that `chelis check`
+    /// against an empty registry will auto-fetch the same way
+    /// `chelis reef build` does.
+    fn default_for_load() -> Self {
+        Self { auto_fetch: true }
+    }
+}
+
+impl From<&BuildOptions> for LoadOptions {
+    fn from(opts: &BuildOptions) -> Self {
+        Self {
+            auto_fetch: opts.auto_fetch,
+        }
+    }
 }
 
 fn read_registry_index(registry_root: &Path) -> Result<LocalRegistryIndex, String> {
@@ -3221,7 +3819,7 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
 }
 
 fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result<String, String> {
-    let root_pkg = resolve_package_graph(root)?
+    let root_pkg = resolve_package_graph(root, LoadOptions::default_for_load())?
         .packages
         .remove(package_name)
         .ok_or_else(|| "root package missing".to_string())?;
@@ -4518,14 +5116,34 @@ some-registry-lib = {{ version = "0.1.0" }}
         //
         // What we CAN assert without waiting: if CHELIS_REEF_HOME is pointed at
         // an empty directory, load_registry_package errors immediately (no hang).
+        //
+        // Item 8: auto-fetch is on by default for eval-side callers. Lock the
+        // env so auto-fetch surfaces `auth-missing` instantly instead of
+        // attempting a real network round trip:
+        // - `GITHUB_TOKEN` removed
+        // - `PATH` emptied so the `gh auth token` shell-out fails
+        // The downstream error is still `is_err()`, which is what this
+        // negative test guards against.
+        let prior_token = std::env::var_os("GITHUB_TOKEN");
+        let prior_path = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("PATH", "");
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
+            match prior_token {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match prior_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
         }
 
         // Should either succeed (if somehow resolved) or return an error — the
@@ -4631,11 +5249,21 @@ kind = "local_registry"
         }
 
         let lock = read_lockfile(&root.join("reef.lock")).expect("read lockfile");
-        // Use a short timeout to avoid waiting 5 seconds in the test.
-        // We call reconstruct_graph_from_lockfile indirectly via run_with_timeout.
+        // Item 8: opt out of auto-fetch deterministically so the test
+        // never attempts network. Auto-fetch's improved-wording error
+        // path is the actionable instruction now (it names the URL the
+        // user can install manually). Pre-Item-8 wording mentioning
+        // `chelis reef build` was misleading once auto-fetch became
+        // the default — the spec calls that out explicitly.
         let root_clone = root.clone();
         let result = run_with_timeout(
-            move || reconstruct_graph_from_lockfile(&root_clone, &lock),
+            move || {
+                reconstruct_graph_from_lockfile(
+                    &root_clone,
+                    &lock,
+                    LoadOptions { auto_fetch: false },
+                )
+            },
             Duration::from_millis(200),
             TIMEOUT_MSG,
         );
@@ -4645,10 +5273,17 @@ kind = "local_registry"
         }
 
         let err = result.expect_err("should have failed: registry dep not in cache");
-        // The error must mention "chelis reef build" — the actionable instruction.
+        // Post-Item-8 actionable wording: the error must name the URL
+        // the user can run `chelis reef install --from-github` against,
+        // and the auto-fetch state.
         assert!(
-            err.contains("chelis reef build"),
-            "error must mention `chelis reef build` for actionable recovery; got: {err}"
+            err.contains("chelis reef install --from-github")
+                || err.contains("auto-fetch disabled"),
+            "error must name `chelis reef install --from-github` for actionable recovery; got: {err}"
+        );
+        assert!(
+            err.contains("chelis-lang/some-lib@v0.1.0"),
+            "error must name the canonical-org URL that would have been tried; got: {err}"
         );
     }
 
