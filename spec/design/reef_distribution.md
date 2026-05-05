@@ -109,9 +109,23 @@ Multiple `--from-github` flags are independent installs.
   neither yields a token, suggesting `export GITHUB_TOKEN=$(gh auth token)`
   as the fix. Authentication is mandatory because the canonical repos are
   private.
-- Fetch the two release assets via authenticated HTTPS:
-  `https://github.com/<org>/<repo>/releases/download/<tag>/<name>-<ver>.tar.zst`
-  and the corresponding `.chb`. Buffer to disk in a temp directory.
+- Fetch the two release assets via the GitHub REST API in two steps:
+  1. `GET https://api.github.com/repos/<org>/<repo>/releases/tags/<tag>`
+     with `Accept: application/vnd.github+json` to look up the
+     release's asset list. Find the entries whose `name` matches
+     `<repo>-<ver>.tar.zst` and `<repo>-<ver>.chb`; capture each
+     asset's numeric `id`.
+  2. `GET https://api.github.com/repos/<org>/<repo>/releases/assets/<asset_id>`
+     with `Accept: application/octet-stream` and the auth header to
+     stream the bytes to a temp directory.
+
+  GitHub's public-facing `/releases/download/<tag>/<asset>` URL form
+  does not serve private-repo asset bytes even with a valid
+  `Authorization: token …` header — it returns 404. The canonical
+  chelis-lang shells are private during the pre-launch era; the API
+  path is required, not optional. Test fixtures inject a localhost
+  base URL via `CHELIS_REEF_GITHUB_BASE_API` (default
+  `https://api.github.com`).
 - Call the existing validation and placement logic, refactored out of
   `install_from_monorepo` into a shared
   `install_validated_artifact_pair(archive_path, shell_path, name, version,
@@ -121,9 +135,15 @@ Multiple `--from-github` flags are independent installs.
   trust-on-first-use against the bytes the canonical repo serves;
   subsequent fetches verify against the pinned hashes from the lockfile
   (same semantics as `--from-monorepo`).
-- Clear error categories: auth failure, asset 404 (suggest checking the
-  release tag exists), hash mismatch on subsequent fetch (suggest
-  investigating; do not auto-overwrite), I/O error.
+- Clear error categories: auth failure (`AuthMissing` for no token,
+  `AuthRejected` for 401/403 on either API endpoint), asset 404
+  (`ReleaseAssetNotFound` — split into "metadata 404" naming the tag
+  URL and "asset-list mismatch" naming the expected asset name plus
+  the assets actually present on the release), rate-limit
+  (`RateLimited` carrying `Retry-After`), 5xx (`ServerError`),
+  network/DNS (`Network`), hash mismatch on subsequent fetch
+  (`Validation` from the shared helper; do not auto-overwrite), I/O
+  error (`Io`).
 
 **Acceptance oracle.**
 
@@ -137,14 +157,17 @@ Multiple `--from-github` flags are independent installs.
 - The MCP and HTTP surfaces of Tide are unaffected.
 
 **Scope.** Approximately 180 lines of new code across two files:
-- `crates/chelis-reef/src/lib.rs`: extract
-  `install_validated_artifact_pair` from the existing monolithic
-  `install_from_monorepo` (around lines 691-881). ~50 lines refactor.
-- `crates/chelis-cli/src/main.rs`: new `--from-github` handler that
-  parses the repo+tag, fetches via `reqwest`, calls the new shared
-  helper. ~100 lines.
-- `Cargo.toml` adds `reqwest = { version = "0.11", features = ["blocking"] }`
-  to the `chelis-cli` crate.
+- `crates/chelis-reef/src/lib.rs`: `install_validated_artifact_pair`
+  is the shared validation+placement helper (currently around line
+  892); it is invoked by both `install_from_monorepo` (line ~1000) and
+  `install_from_github` (line ~1528). Line numbers may drift; the
+  helper's name is the stable reference.
+- `crates/chelis-cli/src/main.rs`: `--from-github` handler that parses
+  the repo+tag and calls `install_from_github`. The CLI handler stays
+  thin — the HTTP layer lives in `chelis-reef` per the locked
+  decision in `phaseA_reef_distribution.md`. ~100 lines.
+- `crates/chelis-reef/Cargo.toml` adds
+  `reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }`.
 
 ---
 
@@ -334,11 +357,14 @@ integration tests against the canonical org.
 
 ## Reused machinery
 
-- `install_from_monorepo` validation+placement code at
-  `crates/chelis-reef/src/lib.rs:691-881`. Item 6 extracts the
-  validation + placement portion (around lines 805-843) into a
-  shared `install_validated_artifact_pair` helper; both
-  `--from-monorepo` and `--from-github` call into it.
+- `install_validated_artifact_pair` is the shared validation+placement
+  helper (currently in `crates/chelis-reef/src/lib.rs` around line
+  892; line numbers drift, the function name is the stable
+  reference). Item 6 extracted it from `install_from_monorepo` so
+  both `--from-monorepo` and `--from-github` call into it. Both
+  produce byte-identical local registry state for the same
+  `(name, version)` — locked as a contract invariant by the byte-
+  equality sub-case of the named oracle.
 - SHA256 verification logic already shipped (computes
   `archive_sha256` and `shell_sha256` per
   `LockedDependency` at `lib.rs:64-71`).

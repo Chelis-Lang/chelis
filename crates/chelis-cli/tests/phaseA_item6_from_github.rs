@@ -8,9 +8,10 @@
 //!
 //! The oracle is a single comprehensive test function that exercises,
 //! against a localhost `wiremock` fixture, every spec acceptance bullet
-//! plus the locked negative-parity cases. The `CHELIS_REEF_GITHUB_BASE`
-//! env var injects the localhost URL into the fetch path; without that
-//! seam the test would have to hit real GitHub.
+//! plus the locked negative-parity cases. The
+//! `CHELIS_REEF_GITHUB_BASE_API` env var injects the localhost URL
+//! into the fetch path; without that seam the test would have to hit
+//! real GitHub.
 //!
 //! The oracle test lives next to the existing `phase3t_reef_install.rs`
 //! `--from-monorepo` regression test so the contract-invariant
@@ -92,37 +93,124 @@ fn sha256_bytes(b: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Build the asset path component used by both the wiremock matcher
-/// and the helper-under-test. The format is the locked canonical
-/// shape: `/<org>/<repo>/releases/download/<tag>/<asset>`.
-fn asset_path(org: &str, repo: &str, tag: &str, asset: &str) -> String {
-    format!("/{org}/{repo}/releases/download/{tag}/{asset}")
+/// Wiremock path for the GitHub API release-metadata endpoint.
+/// Form: `/repos/<org>/<repo>/releases/tags/<tag>`. Step 1 of the
+/// two-step API fetch.
+fn metadata_path(org: &str, repo: &str, tag: &str) -> String {
+    format!("/repos/{org}/{repo}/releases/tags/{tag}")
+}
+
+/// Wiremock path for the GitHub API asset-by-id endpoint. Form:
+/// `/repos/<org>/<repo>/releases/assets/<id>`. Step 2 of the two-step
+/// API fetch — the byte-stream endpoint.
+fn asset_id_path(org: &str, repo: &str, asset_id: u64) -> String {
+    format!("/repos/{org}/{repo}/releases/assets/{asset_id}")
+}
+
+/// Build a minimal release-metadata JSON document with the given
+/// asset list. Mirrors the shape of GitHub's real Release API
+/// response — only the fields `parse_release_metadata` reads (`assets[]`,
+/// each with `id`, `name`) need to be present, but we add a few extras
+/// (`tag_name`, `id`) so the fixture more honestly resembles the live
+/// payload.
+fn metadata_json(tag: &str, assets: &[(u64, &str)]) -> String {
+    let asset_entries: Vec<serde_json::Value> = assets
+        .iter()
+        .map(|(id, name)| {
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "size": 0,
+                "content_type": "application/octet-stream",
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "id": 1u64,
+        "tag_name": tag,
+        "assets": asset_entries,
+    })
+    .to_string()
+}
+
+/// Stable asset ids used by the canonical fixture. Real GitHub asset
+/// ids are 8+ digit numerics; using 1001/1002 makes the test's
+/// `/releases/assets/<id>` URL look plausibly real while still being
+/// trivial to reason about.
+const ARCHIVE_ASSET_ID: u64 = 1001;
+const SHELL_ASSET_ID: u64 = 1002;
+
+/// Build the four mocks needed for a chelis-lang/chelis-std@v0.1.0
+/// canonical-API install: metadata GET + archive bytes GET + shell
+/// bytes GET, all requiring an `Authorization: token unit-test-token`
+/// header. No 401 fallthrough — callers that want unauthenticated
+/// behavior should use [`fixture_canonical_release`] (which adds
+/// catch-all 401 mounts).
+fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock> {
+    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.1.0");
+    let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
+    let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
+    let metadata_body = metadata_json(
+        "v0.1.0",
+        &[
+            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+        ],
+    );
+    vec![
+        Mock::given(method("GET"))
+            .and(wm_path(meta_path))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
+        Mock::given(method("GET"))
+            .and(wm_path(archive_url_path))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
+        Mock::given(method("GET"))
+            .and(wm_path(shell_url_path))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes)),
+    ]
 }
 
 /// Stand up a [`WiremockHarness`] that serves the chelis-std artifacts
-/// as `chelis-lang/chelis-std@v0.1.0` release assets, requiring an
-/// `Authorization: token ...` header. Returns the harness (so the
-/// caller controls drop ordering) and the (archive, shell) bytes.
+/// as `chelis-lang/chelis-std@v0.1.0` release assets via the GitHub
+/// API two-step path. The metadata endpoint requires an
+/// `Authorization: token ...` header (returns 401 otherwise); the
+/// byte endpoints likewise. Returns the harness and the (archive,
+/// shell) bytes.
 fn fixture_canonical_release() -> (WiremockHarness, Vec<u8>, Vec<u8>) {
     let (archive_p, shell_p) = chelis_std_dist();
     let archive_bytes = fs::read(&archive_p).expect("read archive");
     let shell_bytes = fs::read(&shell_p).expect("read shell");
 
     let harness = WiremockHarness::new();
-    let archive_url_path = asset_path(
-        "chelis-lang",
-        "chelis-std",
+    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.1.0");
+    let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
+    let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
+    let metadata_body = metadata_json(
         "v0.1.0",
-        "chelis-std-0.1.0.tar.zst",
+        &[
+            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+        ],
     );
-    let shell_url_path = asset_path(
-        "chelis-lang",
-        "chelis-std",
-        "v0.1.0",
-        "chelis-std-0.1.0.chb",
-    );
+
     harness.mount_all(vec![
-        // Authenticated success.
+        // Step 1 — metadata, authenticated.
+        Mock::given(method("GET"))
+            .and(wm_path(meta_path.clone()))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
+        // Step 2 — bytes-by-id, authenticated.
         Mock::given(method("GET"))
             .and(wm_path(archive_url_path.clone()))
             .and(header("authorization", "token unit-test-token"))
@@ -131,9 +219,13 @@ fn fixture_canonical_release() -> (WiremockHarness, Vec<u8>, Vec<u8>) {
             .and(wm_path(shell_url_path.clone()))
             .and(header("authorization", "token unit-test-token"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes.clone())),
-        // Unauthenticated catch-all (mounted second so it has lower
-        // priority — wiremock falls through when the higher-priority
-        // header match fails, exercising the auth-rejected path).
+        // Unauthenticated catch-alls (mounted later so they have
+        // lower priority — wiremock falls through when the
+        // higher-priority header match fails, exercising the
+        // auth-rejected path on every endpoint).
+        Mock::given(method("GET"))
+            .and(wm_path(meta_path))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized")),
         Mock::given(method("GET"))
             .and(wm_path(archive_url_path))
             .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized")),
@@ -203,29 +295,29 @@ impl WiremockHarness {
 /// the lib-level path is what most sub-cases discriminate against
 /// (typed errors, byte-exact comparisons).
 ///
-/// Sets `CHELIS_REEF_GITHUB_BASE` and `GITHUB_TOKEN` for the duration
-/// of the call. The env mutations rely on the test having acquired
-/// the file-wide [`file_lock`] (every `#[test]` in this file does so
-/// at entry). To kill the `gh auth token` fallback path
-/// deterministically, when `token` is `None` we also empty `PATH` for
-/// the call.
+/// Sets `CHELIS_REEF_GITHUB_BASE_API` and `GITHUB_TOKEN` for the
+/// duration of the call. The env mutations rely on the test having
+/// acquired the file-wide [`file_lock`] (every `#[test]` in this
+/// file does so at entry). To kill the `gh auth token` fallback path
+/// deterministically, when `token` is `None` we also empty `PATH`
+/// for the call.
 ///
 /// **Pre-condition:** the caller must already hold [`file_lock`].
 /// This helper does not acquire it.
 fn lib_install_from_github(
     spec: &str,
-    base_url: &str,
+    api_base_url: &str,
     token: Option<&str>,
     registry_root: &Path,
 ) -> Result<chelis_reef::InstalledArtifact, chelis_reef::GitHubFetchError> {
     // SAFETY: tests serialize through `file_lock`; no other thread
     // mutates these env vars while the test's guard is held. The
     // helper restores prior values before returning.
-    let prior_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE");
+    let prior_api_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE_API");
     let prior_token = std::env::var_os("GITHUB_TOKEN");
     let prior_path = std::env::var_os("PATH");
     unsafe {
-        std::env::set_var("CHELIS_REEF_GITHUB_BASE", base_url);
+        std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", api_base_url);
         match token {
             Some(t) => std::env::set_var("GITHUB_TOKEN", t),
             None => {
@@ -237,9 +329,9 @@ fn lib_install_from_github(
     }
     let result = chelis_reef::install_from_github(spec, registry_root);
     unsafe {
-        match prior_base {
-            Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE", v),
-            None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE"),
+        match prior_api_base {
+            Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
+            None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE_API"),
         }
         match prior_token {
             Some(v) => std::env::set_var("GITHUB_TOKEN", v),
@@ -346,7 +438,7 @@ fn oracle_happy_path_via_lib_and_cli() {
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_REEF_HOME", &cli_registry)
-        .env("CHELIS_REEF_GITHUB_BASE", harness.uri())
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
         // Drop PATH so the binary cannot fall back to `gh auth token`.
         .env("PATH", "")
@@ -456,16 +548,20 @@ fn oracle_auth_missing_no_gh() {
 }
 
 fn oracle_404_release_asset_not_found() {
-    // Fixture serves /chelis-lang/missing-shell/releases/... 404 on
-    // the archive URL. Helper must surface ReleaseAssetNotFound.
+    // Tag has no release at all: the metadata endpoint 404s and the
+    // helper must surface ReleaseAssetNotFound naming the metadata
+    // URL we tried — that is the actionable signal for "wrong tag /
+    // release missing." Asset-list-mismatch (release exists but the
+    // named asset is absent) is exercised separately by
+    // `phaseA_item6_wrong_asset_name_in_release_is_typed_404`, which
+    // covers the post-metadata branch of `find_asset_id`.
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(metadata_path(
                 "chelis-lang",
                 "missing-shell",
                 "v0.1.0",
-                "missing-shell-0.1.0.tar.zst",
             )))
             .respond_with(ResponseTemplate::new(404)),
     ]);
@@ -487,8 +583,8 @@ fn oracle_404_release_asset_not_found() {
     );
     let msg = err.to_string();
     assert!(
-        msg.contains("missing-shell-0.1.0.tar.zst"),
-        "404 message must name the asset: {msg}"
+        msg.contains("releases/tags/v0.1.0"),
+        "metadata-404 message must name the metadata URL: {msg}"
     );
     assert!(
         msg.contains("HTTP 404"),
@@ -513,24 +609,10 @@ fn oracle_hash_mismatch_on_second_fetch() {
     // Install round one: serve the genuine archive.
     {
         let harness = WiremockHarness::new();
-        harness.mount_all(vec![
-            Mock::given(method("GET"))
-                .and(wm_path(asset_path(
-                    "chelis-lang",
-                    "chelis-std",
-                    "v0.1.0",
-                    "chelis-std-0.1.0.tar.zst",
-                )))
-                .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes.clone())),
-            Mock::given(method("GET"))
-                .and(wm_path(asset_path(
-                    "chelis-lang",
-                    "chelis-std",
-                    "v0.1.0",
-                    "chelis-std-0.1.0.chb",
-                )))
-                .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes.clone())),
-        ]);
+        harness.mount_all(canonical_api_mocks(
+            archive_bytes.clone(),
+            shell_bytes.clone(),
+        ));
         lib_install_from_github(
             "chelis-lang/chelis-std@v0.1.0",
             &harness.uri(),
@@ -550,24 +632,7 @@ fn oracle_hash_mismatch_on_second_fetch() {
     assert_ne!(sha256_bytes(&archive_bytes), sha256_bytes(&tampered));
 
     let harness = WiremockHarness::new();
-    harness.mount_all(vec![
-        Mock::given(method("GET"))
-            .and(wm_path(asset_path(
-                "chelis-lang",
-                "chelis-std",
-                "v0.1.0",
-                "chelis-std-0.1.0.tar.zst",
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(tampered)),
-        Mock::given(method("GET"))
-            .and(wm_path(asset_path(
-                "chelis-lang",
-                "chelis-std",
-                "v0.1.0",
-                "chelis-std-0.1.0.chb",
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes)),
-    ]);
+    harness.mount_all(canonical_api_mocks(tampered, shell_bytes));
 
     let err = lib_install_from_github(
         "chelis-lang/chelis-std@v0.1.0",
@@ -588,14 +653,16 @@ fn oracle_hash_mismatch_on_second_fetch() {
 }
 
 fn oracle_5xx_server_error_distinct_category() {
+    // 5xx is mounted on the metadata endpoint — that's the first
+    // call the helper makes; the byte-download endpoints are never
+    // reached.
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
                 "v0.1.0",
-                "chelis-std-0.1.0.tar.zst",
             )))
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down")),
     ]);
@@ -620,11 +687,10 @@ fn oracle_429_rate_limited_includes_retry_after() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
                 "v0.1.0",
-                "chelis-std-0.1.0.tar.zst",
             )))
             .respond_with(
                 ResponseTemplate::new(429)
@@ -685,25 +751,13 @@ fn phaseA_item6_partial_install_does_not_corrupt_index() {
     let (archive_p, _) = chelis_std_dist();
     let archive_bytes = fs::read(&archive_p).unwrap();
 
+    // Reuse the canonical-API mock shape but substitute invalid bytes
+    // for the shell payload.
     let harness = WiremockHarness::new();
-    harness.mount_all(vec![
-        Mock::given(method("GET"))
-            .and(wm_path(asset_path(
-                "chelis-lang",
-                "chelis-std",
-                "v0.1.0",
-                "chelis-std-0.1.0.tar.zst",
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
-        Mock::given(method("GET"))
-            .and(wm_path(asset_path(
-                "chelis-lang",
-                "chelis-std",
-                "v0.1.0",
-                "chelis-std-0.1.0.chb",
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not-a-valid-shell".to_vec())),
-    ]);
+    harness.mount_all(canonical_api_mocks(
+        archive_bytes,
+        b"not-a-valid-shell".to_vec(),
+    ));
 
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
@@ -735,21 +789,34 @@ fn phaseA_item6_partial_install_does_not_corrupt_index() {
 fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
     let _g = file_lock();
     // Lock the asset-naming convention via negative test: a release
-    // that carries the non-canonical name `.tgz` instead of the
-    // locked `.tar.zst` surfaces the typed 404 against the canonical
-    // request URL.
+    // exists but carries the non-canonical name `.tgz` instead of the
+    // locked `.tar.zst`. The metadata lookup succeeds (release is
+    // present), then `find_asset_id` fails to match the expected
+    // `.tar.zst` name in the assets list and surfaces a typed
+    // ReleaseAssetNotFound — no silent fallback to the wrong name.
+    // The error message must list the assets actually present so a
+    // publisher can spot the misnaming without a second `gh release
+    // view` round-trip.
     let harness = WiremockHarness::new();
-    // The release "carries" only chelis-std-0.1.0.tgz; the canonical
-    // URL hits 404.
+    let metadata_body = metadata_json(
+        "v0.1.0",
+        // Note: only the `.tgz` form is attached — the canonical
+        // `.tar.zst` is missing. Asset id 9999 is arbitrary; the
+        // helper never reaches the byte-fetch step.
+        &[(9999, "chelis-std-0.1.0.tgz")],
+    );
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(metadata_path(
                 "chelis-lang",
                 "chelis-std",
                 "v0.1.0",
-                "chelis-std-0.1.0.tar.zst",
             )))
-            .respond_with(ResponseTemplate::new(404)),
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
     ]);
     let dir = tempdir().expect("tempdir");
     let err = lib_install_from_github(
@@ -758,7 +825,7 @@ fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
         Some("unit-test-token"),
         &dir.path().join("reef-home"),
     )
-    .expect_err("wrong asset name must 404");
+    .expect_err("wrong asset name must surface ReleaseAssetNotFound");
     assert!(matches!(
         err,
         chelis_reef::GitHubFetchError::ReleaseAssetNotFound { .. }
@@ -768,6 +835,10 @@ fn phaseA_item6_wrong_asset_name_in_release_is_typed_404() {
         msg.contains(".tar.zst"),
         "404 must name canonical asset: {msg}"
     );
+    assert!(
+        msg.contains("chelis-std-0.1.0.tgz"),
+        "404 must list assets actually present: {msg}"
+    );
 }
 
 #[test]
@@ -775,32 +846,45 @@ fn phaseA_item6_tag_without_leading_v_is_accepted_and_normalized() {
     let _g = file_lock();
     // Spec lock (per brief): both `chelis-lang/<r>@v0.1.0` and
     // `chelis-lang/<r>@0.1.0` install to packages/<r>/0.1.0/. The
-    // `v` is decorative: when present, it appears in the asset URL
-    // (so we serve the asset under `/<tag>/<asset>` matching what
-    // the caller passed); the version is the tag with one `v`
-    // stripped.
+    // `v` is decorative: when present, it appears in the metadata
+    // URL (`/releases/tags/v0.1.0` vs `/releases/tags/0.1.0`) so we
+    // serve metadata under whichever form the caller passed; the
+    // version is the tag with one `v` stripped, so the on-disk
+    // package directory and the asset names use `0.1.0` either way.
     let (archive_p, shell_p) = chelis_std_dist();
     let archive_bytes = fs::read(&archive_p).unwrap();
     let shell_bytes = fs::read(&shell_p).unwrap();
 
-    // Form: tag = "0.1.0" (no leading v). The URL path is
-    // /releases/download/0.1.0/<asset>.
+    // Form: tag = "0.1.0" (no leading v). Metadata path:
+    // /repos/.../releases/tags/0.1.0
     let harness = WiremockHarness::new();
+    let metadata_body = metadata_json(
+        "0.1.0",
+        &[
+            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+        ],
+    );
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(metadata_path("chelis-lang", "chelis-std", "0.1.0")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
+        Mock::given(method("GET"))
+            .and(wm_path(asset_id_path(
                 "chelis-lang",
                 "chelis-std",
-                "0.1.0",
-                "chelis-std-0.1.0.tar.zst",
+                ARCHIVE_ASSET_ID,
             )))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes)),
         Mock::given(method("GET"))
-            .and(wm_path(asset_path(
+            .and(wm_path(asset_id_path(
                 "chelis-lang",
                 "chelis-std",
-                "0.1.0",
-                "chelis-std-0.1.0.chb",
+                SHELL_ASSET_ID,
             )))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes)),
     ]);
@@ -885,11 +969,11 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
     {
         let (harness, _, _) = fixture_canonical_release();
         let prior_tmp = std::env::var_os("TMPDIR");
-        let prior_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE");
+        let prior_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE_API");
         let prior_token = std::env::var_os("GITHUB_TOKEN");
         unsafe {
             std::env::set_var("TMPDIR", &private_tmp);
-            std::env::set_var("CHELIS_REEF_GITHUB_BASE", harness.uri());
+            std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", harness.uri());
             std::env::set_var("GITHUB_TOKEN", "unit-test-token");
         }
         let before = count_tempfile_entries(&private_tmp);
@@ -902,8 +986,8 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
                 None => std::env::remove_var("TMPDIR"),
             }
             match prior_base {
-                Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE", v),
-                None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE"),
+                Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
+                None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE_API"),
             }
             match prior_token {
                 Some(v) => std::env::set_var("GITHUB_TOKEN", v),
@@ -919,11 +1003,11 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
     // Failure path: connection refused at discard port (RFC 863).
     {
         let prior_tmp = std::env::var_os("TMPDIR");
-        let prior_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE");
+        let prior_base = std::env::var_os("CHELIS_REEF_GITHUB_BASE_API");
         let prior_token = std::env::var_os("GITHUB_TOKEN");
         unsafe {
             std::env::set_var("TMPDIR", &private_tmp);
-            std::env::set_var("CHELIS_REEF_GITHUB_BASE", "http://localhost:9");
+            std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9");
             std::env::set_var("GITHUB_TOKEN", "unit-test-token");
         }
         let before = count_tempfile_entries(&private_tmp);
@@ -935,8 +1019,8 @@ fn phaseA_item6_tempdir_is_removed_on_success_and_failure() {
                 None => std::env::remove_var("TMPDIR"),
             }
             match prior_base {
-                Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE", v),
-                None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE"),
+                Some(v) => std::env::set_var("CHELIS_REEF_GITHUB_BASE_API", v),
+                None => std::env::remove_var("CHELIS_REEF_GITHUB_BASE_API"),
             }
             match prior_token {
                 Some(v) => std::env::set_var("GITHUB_TOKEN", v),
@@ -980,7 +1064,7 @@ fn phaseA_item6_cli_rejects_positional_packages_with_from_github() {
         .expect("chelis binary")
         .env("GITHUB_TOKEN", "x")
         .env("PATH", "")
-        .env("CHELIS_REEF_GITHUB_BASE", "http://localhost:9")
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9")
         .args([
             "reef",
             "install",

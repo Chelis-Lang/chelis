@@ -690,10 +690,32 @@ pub struct InstalledArtifact {
 /// see `spec/design/reef_distribution.md` Item 6.
 pub const CANONICAL_REEF_ORG: &str = "chelis-lang";
 
-/// Default GitHub base URL. Tests inject a localhost wiremock URL via
-/// the `CHELIS_REEF_GITHUB_BASE` env var. Real-network code falls back
-/// to this.
+/// Default GitHub web-host base URL. Currently unused on the fetch
+/// path (the `/releases/download/...` form does not serve private-repo
+/// asset bytes — see `CHELIS_REEF_GITHUB_BASE_API` below) but kept so
+/// future Item 8/9 surfaces can use it for things that legitimately
+/// live on the web host (release-page links in error messages, etc).
+/// Tests inject a localhost wiremock URL via `CHELIS_REEF_GITHUB_BASE`.
+#[allow(dead_code)]
 const DEFAULT_GITHUB_BASE: &str = "https://github.com";
+
+/// Default GitHub API host. The `--from-github` fetch path uses two
+/// API endpoints:
+///
+/// 1. `GET <api>/repos/<org>/<repo>/releases/tags/<tag>` to look up
+///    asset metadata (id, name, size).
+/// 2. `GET <api>/repos/<org>/<repo>/releases/assets/<asset_id>` with
+///    `Accept: application/octet-stream` to stream the asset bytes.
+///
+/// **Why the API path, not `/releases/download/<tag>/<asset>`:**
+/// GitHub's public-facing `/releases/download/...` URL form does not
+/// serve private-repo asset bytes even with a valid `Authorization:
+/// token …` header — it returns 404. The canonical chelis-lang shells
+/// are private during the pre-launch era, so the API path is required,
+/// not optional. See `spec/design/reef_distribution.md` § Item 6.
+///
+/// Tests inject a localhost wiremock URL via `CHELIS_REEF_GITHUB_BASE_API`.
+const DEFAULT_GITHUB_BASE_API: &str = "https://api.github.com";
 
 /// Distinct error categories surfaced by the GitHub fetch path. The
 /// caller — typically `chelis reef install --from-github`'s CLI handler
@@ -1179,18 +1201,38 @@ impl GitHubReleaseSpec {
         })
     }
 
-    /// Asset URL for one named release asset, against the configured
-    /// base URL (defaults to `https://github.com`; tests inject
-    /// localhost via `CHELIS_REEF_GITHUB_BASE`).
-    fn asset_url(&self, base: &str, asset_name: &str) -> String {
+    /// API URL for the release that owns `<tag>`. Returns the JSON
+    /// metadata document including the asset list. Step 1 of the
+    /// two-step API fetch.
+    fn release_metadata_url(&self, api_base: &str) -> String {
         format!(
-            "{base}/{org}/{repo}/releases/download/{tag}/{asset_name}",
-            base = base.trim_end_matches('/'),
+            "{base}/repos/{org}/{repo}/releases/tags/{tag}",
+            base = api_base.trim_end_matches('/'),
             org = self.org,
             repo = self.repo,
             tag = self.tag,
         )
     }
+
+    /// API URL for one release asset, addressed by numeric id from
+    /// the metadata response. Step 2 of the two-step API fetch. With
+    /// `Accept: application/octet-stream` the response body is the
+    /// raw asset bytes, including for private repos.
+    fn release_asset_url(&self, api_base: &str, asset_id: u64) -> String {
+        format!(
+            "{base}/repos/{org}/{repo}/releases/assets/{asset_id}",
+            base = api_base.trim_end_matches('/'),
+            org = self.org,
+            repo = self.repo,
+        )
+    }
+}
+
+/// One asset entry parsed out of the release-metadata JSON response.
+#[derive(Debug, Clone)]
+struct ReleaseAsset {
+    id: u64,
+    name: String,
 }
 
 /// Resolve a GitHub auth token. Reads `GITHUB_TOKEN` first; falls back
@@ -1236,71 +1278,36 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
     }
 }
 
-/// Read `CHELIS_REEF_GITHUB_BASE` or fall back to the canonical
-/// `https://github.com`. The env var is the test-injection seam.
-fn github_base_url() -> String {
-    env::var("CHELIS_REEF_GITHUB_BASE").unwrap_or_else(|_| DEFAULT_GITHUB_BASE.to_string())
+/// Read `CHELIS_REEF_GITHUB_BASE_API` or fall back to the canonical
+/// `https://api.github.com`. This is the test-injection seam for the
+/// GitHub API endpoints (release metadata + asset bytes). Tests can
+/// point this at a wiremock host.
+fn github_api_base_url() -> String {
+    env::var("CHELIS_REEF_GITHUB_BASE_API").unwrap_or_else(|_| DEFAULT_GITHUB_BASE_API.to_string())
 }
 
-/// Fetch one release asset to a target file path. Streams the response
-/// to disk via the blocking `reqwest::Response::copy_to` family so
-/// large artifacts don't sit fully in memory.
-///
-/// Maps HTTP status to typed error categories. Only 200 is success;
-/// 401/403 -> `AuthRejected`, 404 -> `ReleaseAssetNotFound`,
-/// 429 -> `RateLimited`, 5xx -> `ServerError`, other 4xx -> `Network`.
-/// Connection-level errors (DNS, TLS, body read) -> `Network`.
-fn fetch_release_asset(
-    client: &reqwest::blocking::Client,
+/// Map a non-200 HTTP status to the appropriate
+/// [`GitHubFetchError`] variant for the given URL. Used by both the
+/// metadata-fetch step and the byte-download step. The 404 mapping
+/// uses the **caller-provided** `not_found` builder so the metadata
+/// step can name the tag URL while the byte-download step can name
+/// the asset name; both surface as `ReleaseAssetNotFound` at the
+/// outer API boundary.
+fn map_http_error_status(
     url: &str,
-    asset_name: &str,
-    token: &str,
-    target: &Path,
-) -> Result<(), GitHubFetchError> {
-    // GitHub's release-asset URL pattern (`/releases/download/<tag>/<asset>`)
-    // is a 302 from the repo URL to a CDN host. `reqwest` follows
-    // redirects by default so we get the binary back here.
-    let response = client
-        .get(url)
-        // Standard GitHub auth header.
-        .header("Authorization", format!("token {token}"))
-        // GitHub asks user-agent be set; without it some endpoints 403.
-        .header("User-Agent", "chelis-reef/0.5")
-        // The download URLs serve the raw asset; explicit Accept makes
-        // the intent obvious to test fixtures and to GitHub.
-        .header("Accept", "application/octet-stream")
-        .send()
-        .map_err(|e| GitHubFetchError::Network {
-            url: url.to_string(),
-            message: e.to_string(),
-        })?;
-
+    response: &reqwest::blocking::Response,
+    not_found: impl FnOnce() -> GitHubFetchError,
+) -> GitHubFetchError {
     let status = response.status();
-    if status == reqwest::StatusCode::OK {
-        let mut response = response;
-        let mut out = fs::File::create(target).map_err(|e| GitHubFetchError::Io {
-            message: format!("create {}: {e}", target.display()),
-        })?;
-        response
-            .copy_to(&mut out)
-            .map_err(|e| GitHubFetchError::Network {
-                url: url.to_string(),
-                message: format!("body read failed: {e}"),
-            })?;
-        return Ok(());
-    }
     let code = status.as_u16();
     if code == 401 || code == 403 {
-        return Err(GitHubFetchError::AuthRejected {
+        return GitHubFetchError::AuthRejected {
             url: url.to_string(),
             status: code,
-        });
+        };
     }
     if code == 404 {
-        return Err(GitHubFetchError::ReleaseAssetNotFound {
-            url: url.to_string(),
-            asset_name: asset_name.to_string(),
-        });
+        return not_found();
     }
     if code == 429 {
         let retry_after = response
@@ -1309,20 +1316,176 @@ fn fetch_release_asset(
             .or_else(|| response.headers().get("X-RateLimit-Reset"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        return Err(GitHubFetchError::RateLimited {
+        return GitHubFetchError::RateLimited {
             url: url.to_string(),
             retry_after,
-        });
+        };
     }
     if status.is_server_error() {
-        return Err(GitHubFetchError::ServerError {
+        return GitHubFetchError::ServerError {
             url: url.to_string(),
             status: code,
-        });
+        };
     }
-    Err(GitHubFetchError::Network {
+    GitHubFetchError::Network {
         url: url.to_string(),
         message: format!("unexpected HTTP status {code}"),
+    }
+}
+
+/// Step 1 of the two-step API fetch: pull release metadata for the
+/// given tag and parse the asset list. The response shape is GitHub's
+/// "Release" object; we only read `assets[].id` and `assets[].name`.
+///
+/// On 404 returns [`GitHubFetchError::ReleaseAssetNotFound`] with the
+/// tag URL — this is the "tag does not exist or release missing"
+/// case. The error names the URL we tried, which lets the user
+/// disambiguate "wrong tag" from "wrong asset name."
+fn fetch_release_metadata(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<ReleaseAsset>, GitHubFetchError> {
+    let response = client
+        .get(url)
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "chelis-reef/0.5")
+        // GitHub's recommended Accept for the v3 REST API. Without
+        // this some endpoints return v3-deprecated responses.
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .map_err(|e| GitHubFetchError::Network {
+            url: url.to_string(),
+            message: e.to_string(),
+        })?;
+    if !response.status().is_success() {
+        return Err(map_http_error_status(url, &response, || {
+            GitHubFetchError::ReleaseAssetNotFound {
+                url: url.to_string(),
+                // For the metadata step, the "asset name" the user
+                // tried to find lives one level up: it's the tag.
+                // Surface the tag URL itself so the user knows the
+                // 404 is about the release, not the individual asset.
+                asset_name: "<release-metadata>".to_string(),
+            }
+        }));
+    }
+    let body = response.text().map_err(|e| GitHubFetchError::Network {
+        url: url.to_string(),
+        message: format!("metadata body read failed: {e}"),
+    })?;
+    parse_release_metadata(&body, url)
+}
+
+/// Parse the GitHub Release JSON document and pull out the
+/// `assets[]` list. Validates that each entry has a numeric `id` and
+/// a string `name`; missing/malformed entries surface as a typed
+/// `Validation` error so the caller does not silently drop them.
+fn parse_release_metadata(body: &str, url: &str) -> Result<Vec<ReleaseAsset>, GitHubFetchError> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| GitHubFetchError::Validation {
+            message: format!("release metadata at {url} is not valid JSON: {e}"),
+        })?;
+    let assets = value
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| GitHubFetchError::Validation {
+            message: format!("release metadata at {url} has no `assets` array"),
+        })?;
+    let mut out = Vec::with_capacity(assets.len());
+    for (i, entry) in assets.iter().enumerate() {
+        let id = entry.get("id").and_then(|v| v.as_u64()).ok_or_else(|| {
+            GitHubFetchError::Validation {
+                message: format!("release metadata at {url}: assets[{i}] is missing numeric `id`"),
+            }
+        })?;
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GitHubFetchError::Validation {
+                message: format!("release metadata at {url}: assets[{i}] is missing string `name`"),
+            })?
+            .to_string();
+        out.push(ReleaseAsset { id, name });
+    }
+    Ok(out)
+}
+
+/// Step 2 of the two-step API fetch: stream the asset bytes by id to
+/// `target` on disk. `Accept: application/octet-stream` is what makes
+/// the API endpoint return the raw bytes (vs. a JSON descriptor with
+/// a redirect URL).
+///
+/// Maps HTTP status to typed error categories the same way as the
+/// metadata step. A 404 on the asset id (rare — would indicate
+/// metadata staleness) surfaces as `ReleaseAssetNotFound` naming the
+/// asset name we expected.
+fn download_asset_by_id(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    asset_name: &str,
+    token: &str,
+    target: &Path,
+) -> Result<(), GitHubFetchError> {
+    let response = client
+        .get(url)
+        .header("Authorization", format!("token {token}"))
+        .header("User-Agent", "chelis-reef/0.5")
+        // CRITICAL: octet-stream tells the API to send the raw bytes.
+        // Without this header the same URL returns the asset's JSON
+        // descriptor instead of the binary payload.
+        .header("Accept", "application/octet-stream")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .map_err(|e| GitHubFetchError::Network {
+            url: url.to_string(),
+            message: e.to_string(),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(map_http_error_status(url, &response, || {
+            GitHubFetchError::ReleaseAssetNotFound {
+                url: url.to_string(),
+                asset_name: asset_name.to_string(),
+            }
+        }));
+    }
+    let mut response = response;
+    let mut out = fs::File::create(target).map_err(|e| GitHubFetchError::Io {
+        message: format!("create {}: {e}", target.display()),
+    })?;
+    response
+        .copy_to(&mut out)
+        .map_err(|e| GitHubFetchError::Network {
+            url: url.to_string(),
+            message: format!("body read failed: {e}"),
+        })?;
+    Ok(())
+}
+
+/// Look up one expected asset by name in the metadata response and
+/// return its id. If absent, surfaces a `ReleaseAssetNotFound` whose
+/// message lists every asset name actually present on the release —
+/// helps publishers debug "did I attach the file under the right
+/// name?" mistakes without needing a separate `gh release view` step.
+fn find_asset_id(
+    assets: &[ReleaseAsset],
+    expected_name: &str,
+    metadata_url: &str,
+) -> Result<u64, GitHubFetchError> {
+    if let Some(a) = assets.iter().find(|a| a.name == expected_name) {
+        return Ok(a.id);
+    }
+    let present_names: Vec<&str> = assets.iter().map(|a| a.name.as_str()).collect();
+    let present_listing = if present_names.is_empty() {
+        "(release has no attached assets)".to_string()
+    } else {
+        format!("present assets: [{}]", present_names.join(", "))
+    };
+    Err(GitHubFetchError::ReleaseAssetNotFound {
+        url: metadata_url.to_string(),
+        asset_name: format!("{expected_name} ({present_listing})"),
     })
 }
 
@@ -1332,18 +1495,30 @@ fn fetch_release_asset(
 /// `org_repo_tag` is `<org>/<repo>@<tag>`. The repository name is the
 /// shell name; the tag (with optional leading `v` stripped) is the
 /// shell version. The two release assets fetched are
-/// `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` from
-/// `${CHELIS_REEF_GITHUB_BASE}/<org>/<repo>/releases/download/<tag>/<asset>`,
-/// where `CHELIS_REEF_GITHUB_BASE` defaults to `https://github.com`.
+/// `<repo>-<version>.tar.zst` and `<repo>-<version>.chb`.
 ///
-/// Authentication: `GITHUB_TOKEN` env var, or `gh auth token` shell-out.
-/// The canonical chelis-lang repos are private during the pre-launch
-/// era, so an unauthenticated fetch is hard-failed with an actionable
-/// message.
+/// **Fetch shape** (locked by spec § Item 6): two GitHub API calls.
+/// 1. `GET ${CHELIS_REEF_GITHUB_BASE_API}/repos/<org>/<repo>/releases/tags/<tag>`
+///    with `Accept: application/vnd.github+json` to fetch the release
+///    metadata JSON; parse the `assets[]` array for the two expected
+///    asset names; capture each asset's `id`.
+/// 2. `GET ${CHELIS_REEF_GITHUB_BASE_API}/repos/<org>/<repo>/releases/assets/<asset_id>`
+///    with `Accept: application/octet-stream` to stream the bytes to
+///    a tempdir.
 ///
-/// On error, the function returns without updating the registry index;
-/// any tempdir created for the download is removed. On success, the
-/// helper [`install_validated_artifact_pair`] is the placement and
+/// `CHELIS_REEF_GITHUB_BASE_API` defaults to `https://api.github.com`.
+/// The web-host URL form `/<org>/<repo>/releases/download/<tag>/<asset>`
+/// is **not used**; that form 404s on private repos. The canonical
+/// chelis-lang shells are private during the pre-launch era, so the
+/// API path is required.
+///
+/// Authentication: `GITHUB_TOKEN` env var, or `gh auth token`
+/// shell-out fallback. Auth is mandatory; an unauthenticated fetch
+/// hard-fails with an actionable message.
+///
+/// On error, the function returns without updating the registry
+/// index; any tempdir created for the download is removed. On
+/// success, [`install_validated_artifact_pair`] is the placement and
 /// validation oracle, identical to what `--from-monorepo` invokes.
 pub fn install_from_github(
     org_repo_tag: &str,
@@ -1351,13 +1526,12 @@ pub fn install_from_github(
 ) -> Result<InstalledArtifact, GitHubFetchError> {
     let spec = GitHubReleaseSpec::parse(org_repo_tag)?;
     let token = resolve_github_token()?;
-    let base = github_base_url();
+    let api_base = github_api_base_url();
 
     // Tempdir lives for the duration of the fetch+install. On any
     // return path (success or any error category) the `_tmp` guard
     // drops and removes the directory. The tempfile-cleanup contract
-    // is locked by `tempfile_cleanup_on_success` and
-    // `tempfile_cleanup_on_failure` tests in this crate.
+    // is locked by tests in `crates/chelis-cli/tests/phaseA_item6_from_github.rs`.
     let tmp = tempfile::tempdir().map_err(|e| GitHubFetchError::Io {
         message: format!("create tempdir: {e}"),
     })?;
@@ -1377,10 +1551,17 @@ pub fn install_from_github(
             message: format!("build http client: {e}"),
         })?;
 
-    let archive_url = spec.asset_url(&base, &archive_name);
-    let shell_url = spec.asset_url(&base, &shell_name);
-    fetch_release_asset(&client, &archive_url, &archive_name, &token, &archive_path)?;
-    fetch_release_asset(&client, &shell_url, &shell_name, &token, &shell_path)?;
+    // Step 1: fetch release metadata, extract asset ids.
+    let metadata_url = spec.release_metadata_url(&api_base);
+    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
+    let shell_id = find_asset_id(&assets, &shell_name, &metadata_url)?;
+
+    // Step 2: stream asset bytes by id.
+    let archive_url = spec.release_asset_url(&api_base, archive_id);
+    let shell_url = spec.release_asset_url(&api_base, shell_id);
+    download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
+    download_asset_by_id(&client, &shell_url, &shell_name, &token, &shell_path)?;
 
     install_validated_artifact_pair(
         &archive_path,

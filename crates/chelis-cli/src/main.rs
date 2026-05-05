@@ -296,11 +296,13 @@ enum ReefCommand {
     /// * `--from-monorepo <PATH>` — copy prebuilt artifacts out of a
     ///   chelis monorepo's `packages/<name>/dist/` directory.
     /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
-    ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` from
-    ///   `https://github.com/<org>/<repo>/releases/download/<tag>/...`
-    ///   and validate them through the same on-disk verification path.
-    ///   Authentication uses `GITHUB_TOKEN`, falling back to
-    ///   `gh auth token`.
+    ///   `<repo>-<version>.tar.zst` and `<repo>-<version>.chb` via
+    ///   the GitHub REST API (the public `/releases/download/...` URL
+    ///   form does not serve private-repo bytes; the canonical
+    ///   chelis-lang shells are private during the pre-launch era).
+    ///   Both assets are validated through the same on-disk
+    ///   verification path as `--from-monorepo`. Authentication uses
+    ///   `GITHUB_TOKEN`, falling back to `gh auth token`.
     ///
     /// `chelis reef build` does NOT auto-install dependencies. This is
     /// the explicit population step.
