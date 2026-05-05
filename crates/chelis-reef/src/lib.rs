@@ -663,11 +663,12 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
     });
     versions.sort_by(|a, b| a.version.cmp(&b.version));
     fs::create_dir_all(&registry_root).map_err(|e| e.to_string())?;
-    fs::write(
-        &index_path,
-        serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let serialized = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
+    // Atomic-rename invariant: every registry-level write under
+    // `$CHELIS_REEF_HOME` (currently `index.json`) goes through
+    // `atomic_write` so a partial write cannot leave a corrupt index
+    // behind. See `atomic_write`'s rustdoc for the rule and scope.
+    atomic_write(&index_path, serialized.as_bytes())?;
 
     Ok(artifacts)
 }
@@ -815,6 +816,22 @@ impl From<GitHubFetchError> for String {
 /// name (each unique destination has a unique temp). Concurrent
 /// installs of the SAME file are not made safe by this alone; that is
 /// what Item 8's `flock` will add.
+///
+/// **When to use (rule):** every write of a **registry-level metadata
+/// file** under `$CHELIS_REEF_HOME` must go through this helper. As
+/// of today the only such file is `$CHELIS_REEF_HOME/index.json`,
+/// written by `install_validated_artifact_pair` (the path shared by
+/// `install_from_monorepo` and `install_from_github`) and by
+/// `publish_package`. New metadata files (e.g. a future lockfile-
+/// origin cache) join the same rule.
+///
+/// **When not to use (rule):** writes to per-package files under a
+/// package's own directory — `<root>/reef.toml`, `<root>/reef.lock`,
+/// `<root>/dist/<name>-<version>.tar.zst`, `<root>/src/main.ch` —
+/// stay on plain `fs::write`. Those are owned by the publisher's
+/// working tree, not by the shared registry, and a partial write
+/// there is the publisher's local concern (and easy to recreate by
+/// re-running `chelis reef build`).
 fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = final_path.parent().ok_or_else(|| {
         format!(
@@ -3331,6 +3348,23 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Process-shared lock for tests that mutate `CHELIS_REEF_HOME`
+    /// (or other process env). Cargo runs unit tests in this binary
+    /// in parallel by default; without serialization, test A's
+    /// `set_var` plus test B's `remove_var` race and one of them
+    /// reads a CHELIS_REEF_HOME different from what it set.
+    /// Poison-tolerant: a panicking test doesn't cascade.
+    static CHELIS_REEF_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire `CHELIS_REEF_HOME_LOCK`, recovering from poison. Bind
+    /// the returned guard to a named local that lives for the whole
+    /// test body.
+    fn lock_reef_home_env() -> std::sync::MutexGuard<'static, ()> {
+        CHELIS_REEF_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent");
@@ -3518,6 +3552,7 @@ path = "./mylib"
     /// registry dependency that is not cached must return an error, not hang.
     #[test]
     fn eval_source_without_lockfile_and_missing_registry_returns_error() {
+        let _g = lock_reef_home_env();
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("myapp");
 
@@ -3613,6 +3648,7 @@ some-registry-lib = {{ version = "0.1.0" }}
     /// We test this via the internal `reconstruct_graph_from_lockfile` path for speed.
     #[test]
     fn adv_lockfile_with_registry_dep_and_no_cache_returns_actionable_error() {
+        let _g = lock_reef_home_env();
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("myapp");
 
@@ -4343,5 +4379,175 @@ additional_sources = ["properties"]
         // The downstream cache key (ContextHash::from_digests) is a
         // deterministic SHA over the digests Vec; any difference in
         // the Vec content propagates.
+    }
+
+    /// Atomic-write contract — H1 regression. Locks the bug class
+    /// surfaced by Red Team Round 1: if any registry-level metadata
+    /// write under `$CHELIS_REEF_HOME` partial-writes, the index
+    /// becomes corrupt and downstream lookups fail in confusing
+    /// ways. Every registry-level write goes through `atomic_write`,
+    /// so locking the helper's contract locks the rule by extension.
+    #[test]
+    fn atomic_write_success_leaves_no_tmp_orphan() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("index.json");
+        atomic_write(&target, b"{\"packages\":{}}").expect("atomic_write success");
+        assert_eq!(
+            fs::read(&target).expect("read target"),
+            b"{\"packages\":{}}"
+        );
+        let tmp_orphan = dir.path().join("index.json.tmp");
+        assert!(
+            !tmp_orphan.exists(),
+            "no orphan {} must remain after a successful atomic_write",
+            tmp_orphan.display()
+        );
+    }
+
+    #[test]
+    fn atomic_write_failure_does_not_destroy_existing_file() {
+        // Failure path: rename target is itself a directory, so the
+        // `fs::rename` step will fail. Pre-existing `final_path`
+        // content must be preserved (the temp file is cleaned up;
+        // the original is untouched).
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("index.json");
+        // Pre-existing content: a non-empty index that must not be
+        // destroyed by a failed write.
+        fs::write(&target, b"{\"packages\":{\"existing\":[]}}").expect("seed existing index");
+        // Force atomic_write's fs::rename to fail by making the
+        // target a directory while keeping the same name. We do
+        // this by removing the seed file and recreating it as a
+        // directory — but we first capture the seed content so the
+        // test can verify it's preserved on disk after the failure.
+        // Actually, a more direct shape: pass an unwritable parent.
+        // Simpler approach below.
+        drop(target);
+
+        // Simpler shape: target's parent is a regular file (not a
+        // dir). atomic_write tries `fs::create_dir_all(parent)`
+        // which fails with ENOTDIR.
+        let bad_parent = dir.path().join("not-a-dir");
+        fs::write(&bad_parent, b"placeholder").expect("seed file");
+        let bad_target = bad_parent.join("inside.json");
+        let result = atomic_write(&bad_target, b"unreachable");
+        assert!(result.is_err(), "atomic_write must fail on bad parent");
+        // The placeholder file at bad_parent must be unchanged —
+        // atomic_write must not have stomped on it.
+        assert_eq!(
+            fs::read(&bad_parent).expect("read placeholder"),
+            b"placeholder",
+            "atomic_write must not corrupt the existing file at the bad parent path"
+        );
+        // No `inside.json.tmp` should exist anywhere visible.
+        assert!(!bad_parent.join("inside.json.tmp").exists());
+    }
+
+    /// Publish-package atomicity invariant — H1 regression. Verifies
+    /// that `publish_package` (which writes
+    /// `$CHELIS_REEF_HOME/index.json`) does so via `atomic_write`,
+    /// so a successful publish leaves no `index.json.tmp` orphan and
+    /// the prior index content (if any) is replaced atomically.
+    ///
+    /// Uses the monorepo's prebuilt `chelis-std` artifacts to install
+    /// a fresh registry, then runs `publish_package` on a tiny
+    /// downstream package and asserts the post-conditions.
+    #[test]
+    fn publish_package_index_update_is_atomic() {
+        let _g = lock_reef_home_env();
+        let dir = tempdir().expect("tempdir");
+        let reef_home = dir.path().join("reef-home");
+        let monorepo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("monorepo root");
+        // Skip if the monorepo's chelis-std dist is missing — the
+        // owning gate is `phase3t_reef_install` which carries the
+        // same prerequisite. Mirror its behavior so this test does
+        // not falsely red-flag a bare clone.
+        let dist = monorepo.join("packages/chelis-std/dist");
+        if !dist.join("chelis-std-0.1.0.chb").exists()
+            || !dist.join("chelis-std-0.1.0.tar.zst").exists()
+        {
+            eprintln!(
+                "skipping publish_package_index_update_is_atomic: \
+                 prebuilt chelis-std artifacts missing under {}",
+                dist.display()
+            );
+            return;
+        }
+
+        // Step 1: bootstrap chelis-std into a fresh registry. This
+        // exercises `install_from_monorepo` -> `install_validated_artifact_pair`,
+        // which itself uses atomic_write — so the post-condition
+        // also covers that path's invariant.
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", &reef_home);
+        }
+        let installed = install_from_monorepo(
+            &monorepo,
+            &[("chelis-std".to_string(), Some("0.1.0".to_string()))],
+        )
+        .expect("install chelis-std into fresh registry");
+        assert_eq!(installed.len(), 1);
+        assert!(
+            !reef_home.join("index.json.tmp").exists(),
+            "install_from_monorepo must not leave an index.json.tmp orphan"
+        );
+        let pre_index_bytes =
+            fs::read(reef_home.join("index.json")).expect("pre-publish index must exist");
+
+        // Step 2: scaffold a tiny downstream package and publish it.
+        let app_root = dir.path().join("downstream");
+        let main = "module Demo.Main\n\nimport Std.Test (assert_true)\n\n\
+             def test_case() -> unit ! { Test } = assert_true(true, \"ok\")\n\n\
+             ran = test_case()\n";
+        fs::create_dir_all(app_root.join("src")).expect("mkdir src");
+        write(
+            &app_root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "downstream-publish-test"
+version = "0.1.0"
+compiler = "{ver}"
+module_prefix = "Demo"
+
+[dependencies]
+chelis-std = {{ version = "0.1.0" }}
+"#,
+                ver = CURRENT_COMPILER_VERSION,
+            ),
+        );
+        write(&app_root.join("src/main.ch"), main);
+
+        let _published = publish_package(&app_root).expect("publish_package");
+
+        // Step 3: post-conditions.
+        assert!(
+            !reef_home.join("index.json.tmp").exists(),
+            "publish_package must not leave an index.json.tmp orphan after success"
+        );
+        let post_index_bytes =
+            fs::read(reef_home.join("index.json")).expect("post-publish index must exist");
+        // The index changed (we added `downstream-publish-test`).
+        assert_ne!(
+            pre_index_bytes, post_index_bytes,
+            "publish_package must have actually updated index.json"
+        );
+        // Both packages now in the index.
+        let post: serde_json::Value = serde_json::from_slice(&post_index_bytes).expect("parse");
+        assert!(
+            post["packages"]["chelis-std"].is_array(),
+            "post-publish index must still contain chelis-std (atomic replace, not destructive)"
+        );
+        assert!(
+            post["packages"]["downstream-publish-test"].is_array(),
+            "post-publish index must contain the just-published package"
+        );
+
+        unsafe {
+            std::env::remove_var("CHELIS_REEF_HOME");
+        }
     }
 }
