@@ -23,8 +23,9 @@
 //! `phaseA_real_github_manual_gate`, which is `#[ignore]`d and only
 //! runnable with `--ignored --exact` plus a real `GITHUB_TOKEN`. The
 //! manual-gate test is what the orchestrator runs separately to
-//! validate against the canonical `chelis-lang/nautilus@v0.4.0`
-//! release.
+//! validate against the canonical `chelis-lang/nautilus` release
+//! pinned by `MANUAL_GATE_NAUTILUS_TAG`. The pin must be bumped on
+//! each new Nautilus release; see the constant's rustdoc.
 //!
 //! Negative parity (separate `#[test]` functions, run as part of the
 //! default `cargo test --workspace` loop):
@@ -1093,9 +1094,26 @@ fn phaseA_item6_help_lists_from_github_flag() {
 // invocation: `cargo test -p chelis-cli phaseA_real_github_manual_gate
 // -- --ignored --exact`. The runner must have a working
 // `GITHUB_TOKEN` with read access to the canonical org and the
-// `chelis-lang/nautilus@v0.4.0` release must still exist with both
-// canonical assets attached.
+// `chelis-lang/nautilus@<PINNED_TAG>` release must still exist with
+// both canonical assets attached.
+//
+// **Maintenance rule:** the pinned tag is intentionally not
+// discovered at runtime — pinning is what lets this gate catch
+// publication regressions (release deleted, asset deleted, asset
+// renamed). When the canonical org publishes a new Nautilus release,
+// bump `MANUAL_GATE_NAUTILUS_TAG` below to the new tag and update the
+// derived assertions to match the new version string. Verify the
+// release exists with both canonical assets attached before
+// committing the bump (`gh release view <tag> -R chelis-lang/nautilus
+// --json assets --jq '.assets[].name'`).
 // ============================================================
+
+/// Tag pinned to the canonical `chelis-lang/nautilus` release this
+/// manual gate validates against. Bump on each new Nautilus release.
+const MANUAL_GATE_NAUTILUS_TAG: &str = "v0.5.0";
+/// Version string derived from the tag (leading `v` stripped). Used
+/// for the asset filenames and the on-disk package directory.
+const MANUAL_GATE_NAUTILUS_VERSION: &str = "0.5.0";
 
 #[test]
 #[ignore = "real-network manual gate; run with `--ignored --exact`"]
@@ -1109,27 +1127,27 @@ fn phaseA_real_github_manual_gate() {
     );
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
+    let spec = format!("chelis-lang/nautilus@{MANUAL_GATE_NAUTILUS_TAG}");
+    let expected_stdout = format!("Installed nautilus {MANUAL_GATE_NAUTILUS_VERSION}");
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_REEF_HOME", &registry)
         .env("GITHUB_TOKEN", token)
-        .args([
-            "reef",
-            "install",
-            "--from-github",
-            "chelis-lang/nautilus@v0.4.0",
-        ])
+        .args(["reef", "install", "--from-github", spec.as_str()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed nautilus 0.4.0"));
+        .stdout(predicate::str::contains(expected_stdout));
+    let pkg_dir = registry
+        .join("packages/nautilus")
+        .join(MANUAL_GATE_NAUTILUS_VERSION);
     assert!(
-        registry
-            .join("packages/nautilus/0.4.0/nautilus-0.4.0.chb")
+        pkg_dir
+            .join(format!("nautilus-{MANUAL_GATE_NAUTILUS_VERSION}.chb"))
             .exists()
     );
     assert!(
-        registry
-            .join("packages/nautilus/0.4.0/nautilus-0.4.0.tar.zst")
+        pkg_dir
+            .join(format!("nautilus-{MANUAL_GATE_NAUTILUS_VERSION}.tar.zst"))
             .exists()
     );
 }
