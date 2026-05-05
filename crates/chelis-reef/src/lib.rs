@@ -19,6 +19,34 @@ use walkdir::WalkDir;
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
+/// Version of `chelis-std` that ships bundled with this compiler. The
+/// canonical home of this version string is
+/// `packages/chelis-std/reef.toml`'s `[package].version` field; the
+/// constant here is hand-maintained in lockstep with that file. The
+/// `bundled_chelis_std_version_matches_packages_manifest` unit test
+/// asserts the two stay in sync.
+///
+/// chelis-std is the language runtime, not a shell — it version-marches
+/// with the compiler and cannot be substituted. Programs implicitly
+/// depend on it the same way Rust programs depend on `core`/`std`.
+/// Lockfile entries for chelis-std use [`LockSource::Bundled`] (not
+/// [`LockSource::LocalRegistry`]) to make this distinction explicit and
+/// auditable.
+const BUNDLED_CHELIS_STD_VERSION: &str = "0.1.0";
+
+/// Public accessor for the version of chelis-std bundled with this
+/// compiler. Use this when you need to emit a `LockSource::Bundled`
+/// entry, surface a soft-verify mismatch error, or otherwise reason
+/// about the runtime version.
+pub fn compiler_bundled_chelis_std_version() -> &'static str {
+    BUNDLED_CHELIS_STD_VERSION
+}
+
+/// The package name of the language runtime. Centralized so the soft-
+/// verify path, the bootstrap rejection path, and the lockfile-migration
+/// path all agree on the spelling.
+pub const CHELIS_STD_PACKAGE_NAME: &str = "chelis-std";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReefManifest {
     pub package: ManifestPackage,
@@ -88,6 +116,26 @@ pub enum LockSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote_origin: Option<String>,
     },
+    /// Compiler-bundled package source, currently used only for the
+    /// language runtime (`chelis-std`). Records the version of the
+    /// compiler that provided the bundled bytes so a lockfile reader
+    /// can audit whether a different compiler would supply the same
+    /// runtime version. There is no archive to fetch — integrity comes
+    /// from the compiler binary's own integrity, which is out of scope
+    /// for reef.
+    ///
+    /// **Schema bump.** Old reef binaries that do not yet know about
+    /// this variant will fail to deserialize lockfiles that contain it
+    /// (serde's tagged-enum default is unknown-variant rejection). This
+    /// is acceptable because chelis and reef are released together: a
+    /// lockfile written by a newer compiler is expected to require a
+    /// newer reef. See [`LockedDependency`]'s migration path for
+    /// reading old lockfiles that recorded `chelis-std` as
+    /// `LocalRegistry` — those are read transparently and rewritten as
+    /// `Bundled` on the next `chelis reef build`.
+    Bundled {
+        compiler_version: String,
+    },
 }
 
 impl LockSource {
@@ -112,13 +160,28 @@ impl LockSource {
         }
     }
 
+    /// Construct a `Bundled` source stamped with the version of the
+    /// compiler that supplied the runtime. Used for the soft-verify
+    /// path on explicit `chelis-std` declarations and for the
+    /// implicit-runtime synthesis path.
+    pub fn bundled_for_current_compiler() -> Self {
+        // CARGO_PKG_VERSION is the compiler crate (chelis-reef) version,
+        // which version-marches with the toolchain.
+        Self::Bundled {
+            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
     /// Read-only accessor for the `remote_origin` field of a
-    /// `LocalRegistry` source. Returns `None` for `Path` sources and
-    /// for `LocalRegistry` sources whose origin is unrecorded.
+    /// `LocalRegistry` source. Returns `None` for `Path` and `Bundled`
+    /// sources, and for `LocalRegistry` sources whose origin is
+    /// unrecorded. The `Bundled` variant intentionally has no remote
+    /// origin: there is no archive on the network — integrity comes
+    /// from the compiler binary itself.
     pub fn remote_origin(&self) -> Option<&str> {
         match self {
             Self::LocalRegistry { remote_origin } => remote_origin.as_deref(),
-            Self::Path { .. } => None,
+            Self::Path { .. } | Self::Bundled { .. } => None,
         }
     }
 }
@@ -2025,6 +2088,14 @@ pub enum LockfileInstallEntry {
         version: String,
         path: String,
     },
+    /// A `Bundled` entry — the language runtime (`chelis-std`). There
+    /// is nothing to fetch: the bytes ship inside the compiler binary.
+    /// Surfaced as informational, not an error.
+    SkippedBundledRuntime {
+        name: String,
+        version: String,
+        compiler_version: String,
+    },
     /// Fetch+install attempt failed. The error preserves whatever the
     /// underlying [`GitHubFetchError`] said; the caller is responsible
     /// for naming the entry.
@@ -2262,6 +2333,16 @@ pub fn install_from_lockfile(
                     name: dep.name.clone(),
                     version: dep.version.clone(),
                     path: path.clone(),
+                });
+            }
+            LockSource::Bundled { compiler_version } => {
+                // Compiler-bundled runtime. Nothing to fetch — the bytes
+                // ship inside the compiler binary and reef's job here
+                // is just to record the entry as accounted-for.
+                results.push(LockfileInstallEntry::SkippedBundledRuntime {
+                    name: dep.name.clone(),
+                    version: dep.version.clone(),
+                    compiler_version: compiler_version.clone(),
                 });
             }
             LockSource::LocalRegistry {
@@ -2847,7 +2928,72 @@ fn reconstruct_graph_from_lockfile(
 
     // Load each dependency.
     for dep in &lock.dependencies {
+        // Migration: an old lockfile may record `chelis-std` as
+        // `LocalRegistry`. Per Phase A § Architectural Decision 8,
+        // log a one-line warning; the next call to `build_lockfile`
+        // rewrites the entry to the `Bundled` form. The module-loading
+        // path itself still flows through the local registry (the
+        // bytes are already there) — `Bundled` is, in this wave, an
+        // auditability annotation on the lockfile, not a separate
+        // loader path.
+        if matches!(&dep.source, LockSource::LocalRegistry { .. })
+            && dep.name == CHELIS_STD_PACKAGE_NAME
+        {
+            eprintln!(
+                "chelis reef: `chelis-std` is now toolchain-bundled; \
+                 lockfile entry will be rewritten on next build"
+            );
+        }
         match &dep.source {
+            LockSource::Bundled { .. } => {
+                // chelis-std is the language runtime. In this wave its
+                // module-loading still goes through the local registry
+                // (callers install via the monorepo source); the
+                // `Bundled` variant is recorded for audit but the
+                // resolver loads modules the same way `LocalRegistry`
+                // does. Future work: a true bundled-loader path that
+                // supplants the registry for the runtime.
+                let dep_name = dep.name.clone();
+                let dep_version = dep.version.clone();
+                let dep_name_t = dep_name.clone();
+                let dep_version_t = dep_version.clone();
+                let timeout_result = run_with_timeout(
+                    move || {
+                        load_registry_package(&dep_name_t, &dep_version_t).map_err(|e| match e {
+                            LoadRegistryError::Other(s) => s,
+                            LoadRegistryError::MissingFromIndex
+                            | LoadRegistryError::MissingPackageDir => {
+                                format!(
+                                    "missing dependency `{dep_name_t}` `{dep_version_t}`: \
+                                     this is the language runtime (`chelis-std`), which ships \
+                                     with the compiler. Install it from the monorepo source \
+                                     via `chelis reef install --from-monorepo` — auto-fetch \
+                                     from GitHub is intentionally disabled for the runtime."
+                                )
+                            }
+                        })
+                    },
+                    Duration::from_secs(5),
+                    TIMEOUT_MSG,
+                );
+                let installed = timeout_result?;
+                let dep_manifest = read_manifest(&installed.root.join("reef.toml"))?;
+                let dep_modules = load_package_modules(&installed.root, &dep_manifest)?;
+                packages.insert(
+                    dep.name.clone(),
+                    LoadedPackage {
+                        id: PackageId {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                        },
+                        manifest: dep_manifest,
+                        modules: dep_modules,
+                        source: LoadedSourceKind::LocalRegistry,
+                        shell: Some(installed.shell),
+                        remote_origin: None,
+                    },
+                );
+            }
             LockSource::Path { path } => {
                 let dep_root = root.join(path).canonicalize().map_err(|e| {
                     format!("failed to resolve path dependency `{}`: {e}", dep.name)
@@ -3135,6 +3281,28 @@ fn resolve_package_recursive(
                 )?;
             }
             (Some(version), None) => {
+                // chelis-std is the language runtime, not a shell.
+                // Soft-verify the declared version against the
+                // compiler's bundled runtime. On mismatch, refuse
+                // before we even try to load — the user has either an
+                // out-of-date `reef.toml` declaration or an
+                // out-of-date compiler. Auto-fetch from GitHub is
+                // explicitly NOT attempted: chelis-std is not
+                // distributed via GitHub releases.
+                if dep_name == CHELIS_STD_PACKAGE_NAME {
+                    let bundled = compiler_bundled_chelis_std_version();
+                    if version != bundled {
+                        return Err(format!(
+                            "package depends on `chelis-std` `{version}`, but this compiler \
+                             bundles chelis-std `{bundled}`. \
+                             chelis-std is the language runtime, not a shell, so it cannot \
+                             be substituted independently. Either update the `chelis-std` \
+                             entry in `reef.toml` to match the compiler's bundled version \
+                             (`chelis-std = {{ version = \"{bundled}\" }}`), or use a \
+                             compiler whose bundled runtime matches your declaration."
+                        ));
+                    }
+                }
                 // Item 8 insertion point: missing-from-registry deps
                 // route through the auto-fetch decision before bailing.
                 // No lockfile context here (we're walking manifests);
@@ -3318,6 +3486,24 @@ fn load_registry_package_or_autofetch(
         });
     }
 
+    // chelis-std is the language runtime — auto-fetch from GitHub is
+    // intentionally disabled. The bytes ship with the compiler. If the
+    // user's local registry doesn't have the runtime, that's a setup
+    // issue (typically: `chelis reef install --from-monorepo` was
+    // never run on this machine), not a transient network condition
+    // an auto-fetch could repair.
+    if name == CHELIS_STD_PACKAGE_NAME {
+        let bundled = compiler_bundled_chelis_std_version();
+        return Err(format!(
+            "missing dependency `{name}` `{version}`: this is the language runtime, \
+             which ships bundled with the compiler (this compiler bundles \
+             chelis-std `{bundled}`). Auto-fetch from GitHub is intentionally \
+             disabled for the runtime. Install it from the monorepo source \
+             (`chelis reef install --from-monorepo`) or use a compiler whose \
+             bundled runtime matches the declared version."
+        ));
+    }
+
     // Resolve the source URL: lockfile remote_origin (Item 9) wins, then
     // canonical-org default. Recorded for error messages even if we
     // skip the fetch attempt.
@@ -3403,9 +3589,11 @@ fn load_registry_package_or_autofetch(
 /// the auto-fetch path keeps working unchanged.
 fn lockfile_remote_origin(dep: &LockedDependency) -> Option<String> {
     // Item 9 has merged: read the field on `LockSource::LocalRegistry`.
+    // `Bundled` entries (the language runtime) intentionally have no
+    // remote origin — there is nothing to fetch.
     match &dep.source {
         LockSource::LocalRegistry { remote_origin } => remote_origin.clone(),
-        LockSource::Path { .. } => None,
+        LockSource::Path { .. } | LockSource::Bundled { .. } => None,
     }
 }
 
@@ -3550,21 +3738,33 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
         .iter()
         .filter(|(name, _)| *name != &graph.root_package)
         .map(|(name, package)| {
-            let source = match &package.source {
-                LoadedSourceKind::Path { relative } => LockSource::Path {
-                    path: relative.clone(),
-                },
-                LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
-                    remote_origin: package.remote_origin.clone(),
-                },
-                // `Root` is a defensive fallback for the build-lockfile
-                // path: the root package is not normally a dependency.
-                // If it ever shows up here, treat it as an unrecorded
-                // local-registry source so the lockfile stays well-
-                // formed.
-                LoadedSourceKind::Root => LockSource::LocalRegistry {
-                    remote_origin: None,
-                },
+            // chelis-std is the language runtime, not a shell. Regardless
+            // of how it was loaded into the graph (from the local
+            // registry, from a path dep, etc.), we record it in the
+            // lockfile as `Bundled` so a reader can see at a glance
+            // that the bytes ship with the compiler. See
+            // `compiler_bundled_chelis_std_version` and
+            // `crates/chelis-reef/src/lib.rs` § "BUNDLED_CHELIS_STD_VERSION"
+            // for the runtime-vs-shell criterion.
+            let source = if name.as_str() == CHELIS_STD_PACKAGE_NAME {
+                LockSource::bundled_for_current_compiler()
+            } else {
+                match &package.source {
+                    LoadedSourceKind::Path { relative } => LockSource::Path {
+                        path: relative.clone(),
+                    },
+                    LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
+                        remote_origin: package.remote_origin.clone(),
+                    },
+                    // `Root` is a defensive fallback for the build-lockfile
+                    // path: the root package is not normally a dependency.
+                    // If it ever shows up here, treat it as an unrecorded
+                    // local-registry source so the lockfile stays well-
+                    // formed.
+                    LoadedSourceKind::Root => LockSource::LocalRegistry {
+                        remote_origin: None,
+                    },
+                }
             };
             let archive_sha256 = package
                 .shell
@@ -4902,6 +5102,112 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    /// Lock the runtime version invariant: the `BUNDLED_CHELIS_STD_VERSION`
+    /// constant in this crate must equal the `[package].version` field of
+    /// `packages/chelis-std/reef.toml`. The constant is hand-maintained
+    /// (no `include_str!` because the relative path between the chelis-reef
+    /// crate and the chelis-std reef package is fragile across worktrees);
+    /// this test catches any drift before it ships.
+    #[test]
+    fn bundled_chelis_std_version_matches_packages_manifest() {
+        // Resolve the workspace root from CARGO_MANIFEST_DIR (chelis-reef)
+        // and read the chelis-std reef.toml.
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest_path = here.join("../../packages/chelis-std/reef.toml");
+        let text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+            panic!(
+                "could not read {}: {e} — \
+                 BUNDLED_CHELIS_STD_VERSION sync test cannot run without \
+                 the chelis-std reef.toml; if the file moved, update the \
+                 path in this test",
+                manifest_path.display()
+            )
+        });
+        let manifest: ReefManifest =
+            toml::from_str(&text).expect("packages/chelis-std/reef.toml must parse");
+        assert_eq!(
+            manifest.package.name, CHELIS_STD_PACKAGE_NAME,
+            "packages/chelis-std/reef.toml package name must be `chelis-std`"
+        );
+        assert_eq!(
+            manifest.package.version,
+            BUNDLED_CHELIS_STD_VERSION,
+            "BUNDLED_CHELIS_STD_VERSION (`{}`) must equal \
+             packages/chelis-std/reef.toml's package.version (`{}`); \
+             bump both together",
+            BUNDLED_CHELIS_STD_VERSION,
+            manifest.package.version,
+        );
+    }
+
+    /// Negative parity for the version sync: a soft-verify mismatch must
+    /// be rejected with a typed error that names both versions, not a
+    /// generic "missing dep" or 404.
+    #[test]
+    fn lock_source_bundled_round_trip_is_fixed_point() {
+        let lock = ReefLock {
+            package: PackageId {
+                name: "downstream".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            dependencies: vec![LockedDependency {
+                name: "chelis-std".to_string(),
+                version: "0.1.0".to_string(),
+                source: LockSource::Bundled {
+                    compiler_version: "0.5.0".to_string(),
+                },
+                compiler: "=0.5.0".to_string(),
+                archive_sha256: String::new(),
+                shell_sha256: String::new(),
+            }],
+        };
+        // Serialize → deserialize → serialize must be byte-identical
+        // and round-trip the `Bundled` variant unchanged.
+        let s1 = toml::to_string_pretty(&lock).expect("serialize 1");
+        assert!(
+            s1.contains("kind = \"bundled\""),
+            "serialized lockfile must use the `bundled` kind tag; got:\n{s1}"
+        );
+        assert!(
+            s1.contains("compiler_version = \"0.5.0\""),
+            "serialized lockfile must record the compiler_version; got:\n{s1}"
+        );
+        let parsed: ReefLock = toml::from_str(&s1).expect("deserialize");
+        assert_eq!(parsed, lock, "Bundled round-trip must preserve all fields");
+        let s2 = toml::to_string_pretty(&parsed).expect("serialize 2");
+        assert_eq!(s1, s2, "second serialize must be a fixed point");
+    }
+
+    /// An old lockfile with `kind = "local_registry"` for chelis-std must
+    /// still deserialize successfully; the migration path then routes it
+    /// as bundled at resolve time. This test pins the deserialization
+    /// half of Decision 8.
+    #[test]
+    fn old_chelis_std_local_registry_lockfile_still_deserializes() {
+        let old_text = r#"[package]
+name = "downstream"
+version = "0.1.0"
+
+[[dependencies]]
+name = "chelis-std"
+version = "0.1.0"
+compiler = "=0.5.0"
+archive_sha256 = ""
+shell_sha256 = ""
+
+[dependencies.source]
+kind = "local_registry"
+"#;
+        let lock: ReefLock =
+            toml::from_str(old_text).expect("old chelis-std-as-local_registry must deserialize");
+        assert_eq!(lock.dependencies.len(), 1);
+        assert_eq!(lock.dependencies[0].name, "chelis-std");
+        assert!(matches!(
+            lock.dependencies[0].source,
+            LockSource::LocalRegistry { remote_origin: None }
+        ));
     }
 
     #[test]
