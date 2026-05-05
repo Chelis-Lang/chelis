@@ -400,10 +400,12 @@ dependencies = [
  "predicates",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "tokio",
  "walkdir",
  "wiremock",
+ "zstd",
 ]
 
 [[package]]

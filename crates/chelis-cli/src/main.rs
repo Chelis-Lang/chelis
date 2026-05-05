@@ -308,17 +308,42 @@ enum ReefCommand {
     /// the explicit population step.
     Install {
         /// Path to a chelis monorepo (the directory containing `packages/`).
-        #[arg(long, value_name = "PATH", conflicts_with = "from_github")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["from_github", "bootstrap"]
+        )]
         from_monorepo: Option<PathBuf>,
         /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
         /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
         /// Requires `GITHUB_TOKEN` (or a working `gh auth token`)
         /// because the canonical-org repos are private.
-        #[arg(long, value_name = "ORG/REPO@TAG")]
+        #[arg(long, value_name = "ORG/REPO@TAG", conflicts_with = "bootstrap")]
         from_github: Option<String>,
+        /// Topologically-ordered install of multiple shells from
+        /// canonical-org GitHub Releases.
+        ///
+        /// Pass zero or more `<org>/<repo>@<tag>` entries. With no
+        /// entries, the built-in
+        /// [`chelis_reef::DEFAULT_BOOTSTRAP_LIST`] is used (canonical
+        /// shells: chelis-std, nautilus, coral, shoals, octant). The
+        /// installer fetches each shell's manifest, builds a
+        /// dependency graph, topologically sorts, and installs each
+        /// shell via the same path as `--from-github`. Cycles and
+        /// references to packages outside the input set are surfaced
+        /// as typed errors.
+        #[arg(
+            long,
+            value_name = "ORG/REPO@TAG",
+            num_args = 0..,
+            conflicts_with_all = ["from_monorepo", "from_github"]
+        )]
+        bootstrap: Option<Vec<String>>,
         /// `<name>` or `<name>=<version>` selectors. If omitted with
         /// `--from-monorepo`, every package in the monorepo is installed.
         /// Ignored with `--from-github` (the spec is the selector).
+        /// Rejected with `--bootstrap` (entries are passed to
+        /// `--bootstrap` directly).
         #[arg(value_name = "NAME[=VERSION]")]
         packages: Vec<String>,
     },
@@ -1340,9 +1365,10 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         ReefCommand::Install {
             from_monorepo,
             from_github,
+            bootstrap,
             packages,
-        } => match (from_monorepo, from_github) {
-            (Some(monorepo_root), None) => {
+        } => match (from_monorepo, from_github, bootstrap) {
+            (Some(monorepo_root), None, None) => {
                 let mut requested: Vec<(String, Option<String>)> = Vec::new();
                 for spec in packages {
                     let (name, version) = match spec.split_once('=') {
@@ -1367,7 +1393,7 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                     println!("No packages installed.");
                 }
             }
-            (None, Some(spec)) => {
+            (None, Some(spec), None) => {
                 if !packages.is_empty() {
                     return Err("`--from-github` does not accept positional package \
                              selectors; the <ORG>/<REPO>@<TAG> spec is the selector"
@@ -1382,13 +1408,60 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                 println!("Shell: {}", artifact.shell_path.display());
                 println!("Archive: {}", artifact.archive_path.display());
             }
-            (Some(_), Some(_)) => {
-                return Err("`--from-monorepo` and `--from-github` are mutually exclusive".into());
+            (None, None, Some(bootstrap_args)) => {
+                if !packages.is_empty() {
+                    return Err("`--bootstrap` does not accept positional package \
+                             selectors; pass each `<ORG>/<REPO>@<TAG>` after `--bootstrap`"
+                        .into());
+                }
+                // Empty list = use the built-in default. The list is
+                // hand-maintained for the pre-launch dev team; see
+                // `chelis_reef::DEFAULT_BOOTSTRAP_LIST` rustdoc.
+                let raw_specs: Vec<String> = if bootstrap_args.is_empty() {
+                    chelis_reef::DEFAULT_BOOTSTRAP_LIST
+                        .iter()
+                        .map(|(repo, tag)| {
+                            format!("{}/{}@{}", chelis_reef::CANONICAL_REEF_ORG, repo, tag)
+                        })
+                        .collect()
+                } else {
+                    bootstrap_args
+                };
+                let mut parsed: Vec<chelis_reef::GitHubReleaseSpec> =
+                    Vec::with_capacity(raw_specs.len());
+                for s in &raw_specs {
+                    parsed.push(chelis_reef::GitHubReleaseSpec::parse(s)?);
+                }
+                let registry_root = chelis_reef::registry_home()?;
+                let installed = chelis_reef::install_bootstrap(&parsed, &registry_root)?;
+                for artifact in &installed {
+                    println!(
+                        "Installed {} {}",
+                        artifact.package.name, artifact.package.version
+                    );
+                    println!("Shell: {}", artifact.shell_path.display());
+                    println!("Archive: {}", artifact.archive_path.display());
+                }
+                if installed.is_empty() {
+                    println!("No packages installed.");
+                }
             }
-            (None, None) => {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                // clap's `conflicts_with_all` should already reject
+                // these combinations at parse time; this match arm is
+                // a defensive backstop in case the derive lattice ever
+                // drifts out of sync with the runtime check.
+                return Err(
+                    "`--from-monorepo`, `--from-github`, and `--bootstrap` are mutually exclusive"
+                        .into(),
+                );
+            }
+            (None, None, None) => {
                 return Err("`chelis reef install` requires a source. \
                          Pass `--from-monorepo <PATH>` pointing at a chelis monorepo, \
-                         or `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release."
+                         `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release, \
+                         or `--bootstrap [<ORG>/<REPO>@<TAG>...]` to install a topo-ordered \
+                         set of shells (no args = use the default canonical list)."
                     .into());
             }
         },
