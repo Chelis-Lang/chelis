@@ -1981,20 +1981,19 @@ fn reconstruct_graph_from_lockfile(
                 let dep_version_t = dep_version.clone();
                 let timeout_result = run_with_timeout(
                     move || {
-                        load_registry_package(&dep_name_t, &dep_version_t)
-                            .map_err(|e| match e {
-                                LoadRegistryError::Other(s) => s,
-                                LoadRegistryError::MissingFromIndex
-                                | LoadRegistryError::MissingPackageDir => {
-                                    // Sentinel that the caller (which
-                                    // owns `options` and the
-                                    // lockfile dep) will route into
-                                    // auto-fetch. Encoded as a string
-                                    // because run_with_timeout's
-                                    // signature is `Result<T, String>`.
-                                    String::from(MISSING_REGISTRY_SENTINEL)
-                                }
-                            })
+                        load_registry_package(&dep_name_t, &dep_version_t).map_err(|e| match e {
+                            LoadRegistryError::Other(s) => s,
+                            LoadRegistryError::MissingFromIndex
+                            | LoadRegistryError::MissingPackageDir => {
+                                // Sentinel that the caller (which
+                                // owns `options` and the
+                                // lockfile dep) will route into
+                                // auto-fetch. Encoded as a string
+                                // because run_with_timeout's
+                                // signature is `Result<T, String>`.
+                                String::from(MISSING_REGISTRY_SENTINEL)
+                            }
+                        })
                     },
                     Duration::from_secs(5),
                     TIMEOUT_MSG,
@@ -2006,7 +2005,10 @@ fn reconstruct_graph_from_lockfile(
                         // logic and can take longer than the 5-second
                         // local-registry budget.
                         load_registry_package_or_autofetch(
-                            &dep_name, &dep_version, options, Some(dep),
+                            &dep_name,
+                            &dep_version,
+                            options,
+                            Some(dep),
                         )?
                     }
                     Err(s) => return Err(s),
@@ -2120,10 +2122,7 @@ fn validate_manifest(manifest: &ReefManifest) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_package_graph(
-    root: &Path,
-    options: LoadOptions,
-) -> Result<PackageGraph, String> {
+fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
     let mut packages = BTreeMap::new();
     let mut by_name = HashMap::<String, PackageId>::new();
     let mut stack = Vec::new();
@@ -2148,6 +2147,11 @@ fn resolve_package_graph(
     })
 }
 
+// 8 params is at the clippy default threshold (7) plus one. A context
+// struct here would obscure the resolver's flow and add no real
+// abstraction win — the recursion needs all of these in scope. This
+// allow is local to keep the noise contained.
+#[allow(clippy::too_many_arguments)]
 fn resolve_package_recursive(
     package_name: &str,
     root: PathBuf,
@@ -2223,9 +2227,8 @@ fn resolve_package_recursive(
                 // No lockfile context here (we're walking manifests);
                 // pass `None` so the source URL falls back to the
                 // canonical-org default for the named package.
-                let installed = load_registry_package_or_autofetch(
-                    dep_name, version, options, None,
-                )?;
+                let installed =
+                    load_registry_package_or_autofetch(dep_name, version, options, None)?;
                 resolve_package_recursive(
                     dep_name,
                     installed.root,
@@ -2315,8 +2318,7 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
             "archive checksum mismatch for `{name}` version `{version}`"
         )));
     }
-    let shell = read_shell(&shell_path)
-        .map_err(|e| LoadRegistryError::Other(e.to_string()))?;
+    let shell = read_shell(&shell_path).map_err(|e| LoadRegistryError::Other(e.to_string()))?;
     if archive_sha256 != shell.archive_sha256 {
         return Err(LoadRegistryError::Other(format!(
             "archive checksum mismatch for `{name}` version `{version}`"
@@ -2405,7 +2407,11 @@ fn load_registry_package_or_autofetch(
         // would have been tried so the user can run
         // `chelis reef install --from-github <url>` themselves.
         return Err(format_missing_dep_error(
-            name, version, &source_origin, None, false,
+            name,
+            version,
+            &source_origin,
+            None,
+            false,
         ));
     }
 
@@ -2414,10 +2420,7 @@ fn load_registry_package_or_autofetch(
     // every concurrent build that touches `$CHELIS_REEF_HOME`, so we
     // serialize through a `flock(2)` on `.reef-lock` to keep
     // `index.json` updates linearizable.
-    let registry_root_path = match registry_root() {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
+    let registry_root_path = registry_root()?;
     let _lock = match acquire_reef_home_lock(&registry_root_path, REEF_HOME_LOCK_TIMEOUT) {
         Ok(g) => g,
         Err(e) => return Err(format!("auto-fetch could not lock registry: {e}")),
@@ -2434,9 +2437,7 @@ fn load_registry_package_or_autofetch(
 
     // Run the fetch. Auto-fetch event becomes observable here via the
     // emitted log message; tests assert against this signal.
-    eprintln!(
-        "chelis reef: auto-fetching `{name}` `{version}` from {source_origin}",
-    );
+    eprintln!("chelis reef: auto-fetching `{name}` `{version}` from {source_origin}",);
     let fetch_err = match install_from_github(&source_origin, &registry_root_path) {
         Ok(_artifact) => {
             // Retry the registry lookup. If retry still fails, the
@@ -4181,14 +4182,34 @@ some-registry-lib = {{ version = "0.1.0" }}
         //
         // What we CAN assert without waiting: if CHELIS_REEF_HOME is pointed at
         // an empty directory, load_registry_package errors immediately (no hang).
+        //
+        // Item 8: auto-fetch is on by default for eval-side callers. Lock the
+        // env so auto-fetch surfaces `auth-missing` instantly instead of
+        // attempting a real network round trip:
+        // - `GITHUB_TOKEN` removed
+        // - `PATH` emptied so the `gh auth token` shell-out fails
+        // The downstream error is still `is_err()`, which is what this
+        // negative test guards against.
+        let prior_token = std::env::var_os("GITHUB_TOKEN");
+        let prior_path = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::set_var("PATH", "");
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
+            match prior_token {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match prior_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
         }
 
         // Should either succeed (if somehow resolved) or return an error — the
