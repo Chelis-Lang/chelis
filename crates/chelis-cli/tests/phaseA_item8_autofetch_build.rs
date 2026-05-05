@@ -1015,6 +1015,28 @@ fn phaseA_item8_real_github_manual_gate() {
     let reef_home = outer.path().join("reef-home");
     let app = stage_real_nautilus_downstream(outer.path());
 
+    // Pre-install the runtime from the monorepo source — auto-fetch
+    // is intentionally disabled for chelis-std (it ships with the
+    // compiler), so the manual gate must seed it explicitly. This
+    // mirrors the production user flow where the compiler binary's
+    // installer drops chelis-std into the local registry.
+    let monorepo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("monorepo root");
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args([
+            "reef",
+            "install",
+            "--from-monorepo",
+            monorepo.to_str().unwrap(),
+            "chelis-std=0.1.0",
+        ])
+        .assert()
+        .success();
+
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_REEF_HOME", &reef_home)
