@@ -511,13 +511,52 @@ fn oracle_byte_equality_with_from_monorepo() {
 
     // Index entries: archive_sha256, shell_sha256, version, compiler must
     // all agree. The package list includes only chelis-std on both sides.
+    //
+    // Item 9 adds a `remote_origin` field that is populated by
+    // `--from-github` (with `github://<org>/<repo>@<tag>`) and left
+    // `None` (omitted from JSON) by `--from-monorepo`. That field is
+    // intentionally divergent — it records source provenance, which is
+    // exactly the user-facing difference between the two install
+    // sources. Strip it before comparing so the spec-locked
+    // source-equivalence invariant (archive_sha256, shell_sha256,
+    // version, compiler) stays asserted.
     let g_idx: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(github_reg.join("index.json")).unwrap()).unwrap();
     let m_idx: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(mono_reg.join("index.json")).unwrap()).unwrap();
+    let strip_origin = |v: &serde_json::Value| -> serde_json::Value {
+        let arr = v.as_array().expect("packages must be array");
+        arr.iter()
+            .map(|entry| {
+                let mut obj = entry.as_object().expect("entry must be object").clone();
+                obj.remove("remote_origin");
+                serde_json::Value::Object(obj)
+            })
+            .collect::<Vec<_>>()
+            .into()
+    };
     assert_eq!(
-        g_idx["packages"]["chelis-std"], m_idx["packages"]["chelis-std"],
-        "index.json package entries diverge between sources"
+        strip_origin(&g_idx["packages"]["chelis-std"]),
+        strip_origin(&m_idx["packages"]["chelis-std"]),
+        "index.json package entries (modulo remote_origin) diverge between sources"
+    );
+
+    // Item 9 forward-lock: `remote_origin` is asymmetric on purpose.
+    // GitHub install records the canonical `github://...` URI; monorepo
+    // install does not (no remote source exists). The next assertions
+    // pin both sides so a regression that drops the GitHub origin or
+    // accidentally populates the monorepo origin would surface here.
+    let g_first = &g_idx["packages"]["chelis-std"][0];
+    let m_first = &m_idx["packages"]["chelis-std"][0];
+    assert_eq!(
+        g_first["remote_origin"],
+        serde_json::Value::String("github://chelis-lang/chelis-std@v0.1.0".to_string()),
+        "GitHub install must stamp remote_origin in registry index entry"
+    );
+    assert!(
+        m_first.get("remote_origin").is_none()
+            || m_first["remote_origin"] == serde_json::Value::Null,
+        "monorepo install must NOT stamp remote_origin"
     );
 }
 

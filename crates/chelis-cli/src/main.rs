@@ -292,7 +292,7 @@ enum ReefCommand {
     /// Populates `~/.chelis/reef/packages/<name>/<version>/` and updates
     /// `~/.chelis/reef/index.json` from a known-good source.
     ///
-    /// Two source forms are supported:
+    /// Three source forms are supported:
     /// * `--from-monorepo <PATH>` — copy prebuilt artifacts out of a
     ///   chelis monorepo's `packages/<name>/dist/` directory.
     /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
@@ -303,19 +303,48 @@ enum ReefCommand {
     ///   Both assets are validated through the same on-disk
     ///   verification path as `--from-monorepo`. Authentication uses
     ///   `GITHUB_TOKEN`, falling back to `gh auth token`.
+    /// * `--from-lockfile` — read the project's `reef.lock`, walk every
+    ///   dependency, and re-fetch each one from the `remote_origin` it
+    ///   recorded. Hashes are verified against the lockfile pins; any
+    ///   mismatch is surfaced as a typed validation error. Entries
+    ///   without a recorded `remote_origin` (older monorepo-only
+    ///   installs) error with a suggestion to re-run `--bootstrap` to
+    ///   populate origins.
+    ///
+    /// The three sources are mutually exclusive — exactly one of them
+    /// must be supplied per invocation.
     ///
     /// `chelis reef build` does NOT auto-install dependencies. This is
     /// the explicit population step.
     Install {
         /// Path to a chelis monorepo (the directory containing `packages/`).
-        #[arg(long, value_name = "PATH", conflicts_with = "from_github")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["from_github", "from_lockfile"]
+        )]
         from_monorepo: Option<PathBuf>,
         /// GitHub release reference: `<org>/<repo>@<tag>`. The tag may
         /// have an optional leading `v` (e.g. `v0.4.0` or `0.4.0`).
         /// Requires `GITHUB_TOKEN` (or a working `gh auth token`)
         /// because the canonical-org repos are private.
-        #[arg(long, value_name = "ORG/REPO@TAG")]
+        #[arg(long, value_name = "ORG/REPO@TAG", conflicts_with = "from_lockfile")]
         from_github: Option<String>,
+        /// Re-install every dependency named by the project's
+        /// `reef.lock`, fetching each from its recorded
+        /// `remote_origin`. Hashes are verified against the lockfile
+        /// pins. Useful for fresh checkouts to reproduce another
+        /// developer's local registry state without out-of-band
+        /// knowledge of which `--from-github` invocations populated
+        /// it. Optional path to the package root; defaults to the
+        /// current directory.
+        #[arg(long)]
+        from_lockfile: bool,
+        /// Optional path to the package root for `--from-lockfile`.
+        /// Defaults to the current directory. Has no effect with
+        /// `--from-monorepo` or `--from-github`.
+        #[arg(long, value_name = "PATH", requires = "from_lockfile")]
+        package_root: Option<PathBuf>,
         /// `<name>` or `<name>=<version>` selectors. If omitted with
         /// `--from-monorepo`, every package in the monorepo is installed.
         /// Ignored with `--from-github` (the spec is the selector).
@@ -1340,22 +1369,48 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
         ReefCommand::Install {
             from_monorepo,
             from_github,
+            from_lockfile,
+            package_root,
             packages,
-        } => match (from_monorepo, from_github) {
-            (Some(monorepo_root), None) => {
-                let mut requested: Vec<(String, Option<String>)> = Vec::new();
-                for spec in packages {
-                    let (name, version) = match spec.split_once('=') {
-                        Some((n, v)) => (n.to_string(), Some(v.to_string())),
-                        None => (spec.clone(), None),
-                    };
-                    if name.is_empty() {
-                        return Err(format!("invalid package selector `{spec}`").into());
+        } => {
+            // clap's `conflicts_with_all` already enforces mutual
+            // exclusivity at parse time; the runtime checks below are
+            // belt-and-suspenders for any future code path that
+            // bypasses clap.
+            match (from_monorepo, from_github, from_lockfile) {
+                (Some(monorepo_root), None, false) => {
+                    let mut requested: Vec<(String, Option<String>)> = Vec::new();
+                    for spec in packages {
+                        let (name, version) = match spec.split_once('=') {
+                            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                            None => (spec.clone(), None),
+                        };
+                        if name.is_empty() {
+                            return Err(format!("invalid package selector `{spec}`").into());
+                        }
+                        requested.push((name, version));
                     }
-                    requested.push((name, version));
+                    let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
+                    for artifact in &installed {
+                        println!(
+                            "Installed {} {}",
+                            artifact.package.name, artifact.package.version
+                        );
+                        println!("Shell: {}", artifact.shell_path.display());
+                        println!("Archive: {}", artifact.archive_path.display());
+                    }
+                    if installed.is_empty() {
+                        println!("No packages installed.");
+                    }
                 }
-                let installed = chelis_reef::install_from_monorepo(&monorepo_root, &requested)?;
-                for artifact in &installed {
+                (None, Some(spec), false) => {
+                    if !packages.is_empty() {
+                        return Err("`--from-github` does not accept positional package \
+                                 selectors; the <ORG>/<REPO>@<TAG> spec is the selector"
+                            .into());
+                    }
+                    let registry_root = chelis_reef::registry_home()?;
+                    let artifact = chelis_reef::install_from_github(&spec, &registry_root)?;
                     println!(
                         "Installed {} {}",
                         artifact.package.name, artifact.package.version
@@ -1363,35 +1418,90 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
                     println!("Shell: {}", artifact.shell_path.display());
                     println!("Archive: {}", artifact.archive_path.display());
                 }
-                if installed.is_empty() {
-                    println!("No packages installed.");
+                (None, None, true) => {
+                    if !packages.is_empty() {
+                        return Err("`--from-lockfile` does not accept positional package \
+                                 selectors; the lockfile is the selector"
+                            .into());
+                    }
+                    let pkg_root = package_root.unwrap_or_else(|| PathBuf::from("."));
+                    let registry_root = chelis_reef::registry_home()?;
+                    let results = chelis_reef::install_from_lockfile(&pkg_root, &registry_root)?;
+                    let mut any_failure = false;
+                    let mut any_no_origin = false;
+                    for entry in &results {
+                        match entry {
+                            chelis_reef::LockfileInstallEntry::Installed(artifact) => {
+                                println!(
+                                    "Installed {} {}",
+                                    artifact.package.name, artifact.package.version
+                                );
+                                println!("Shell: {}", artifact.shell_path.display());
+                                println!("Archive: {}", artifact.archive_path.display());
+                            }
+                            chelis_reef::LockfileInstallEntry::SkippedPathDep {
+                                name,
+                                version,
+                                path,
+                            } => {
+                                println!(
+                                    "Skipped path dep {name} {version} (path = {path}) — \
+                                     resolved at build time, not via remote fetch"
+                                );
+                            }
+                            chelis_reef::LockfileInstallEntry::SkippedNoOrigin {
+                                name,
+                                version,
+                            } => {
+                                eprintln!(
+                                    "error: lockfile entry `{name}` v{version} has no \
+                                     `remote_origin` recorded; cannot fetch. \
+                                     Run `chelis reef install --bootstrap` (or re-run \
+                                     `--from-github`) to populate the origin."
+                                );
+                                any_no_origin = true;
+                            }
+                            chelis_reef::LockfileInstallEntry::Failed { error, .. } => {
+                                eprintln!("error: {error}");
+                                any_failure = true;
+                            }
+                        }
+                    }
+                    if any_failure || any_no_origin {
+                        let detail = if any_no_origin && any_failure {
+                            "one or more lockfile entries failed to install and one or more \
+                             have no remote_origin"
+                        } else if any_no_origin {
+                            "one or more lockfile entries have no remote_origin"
+                        } else {
+                            "one or more lockfile entries failed to install"
+                        };
+                        return Err(detail.into());
+                    }
+                    if results.is_empty() {
+                        println!("No dependencies in lockfile.");
+                    }
                 }
-            }
-            (None, Some(spec)) => {
-                if !packages.is_empty() {
-                    return Err("`--from-github` does not accept positional package \
-                             selectors; the <ORG>/<REPO>@<TAG> spec is the selector"
+                (None, None, false) => {
+                    return Err("`chelis reef install` requires a source. \
+                         Pass `--from-monorepo <PATH>` pointing at a chelis monorepo, \
+                         `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release, \
+                         or `--from-lockfile` to re-fetch from the project's reef.lock."
                         .into());
                 }
-                let registry_root = chelis_reef::registry_home()?;
-                let artifact = chelis_reef::install_from_github(&spec, &registry_root)?;
-                println!(
-                    "Installed {} {}",
-                    artifact.package.name, artifact.package.version
-                );
-                println!("Shell: {}", artifact.shell_path.display());
-                println!("Archive: {}", artifact.archive_path.display());
+                _ => {
+                    // Should be unreachable due to clap's
+                    // `conflicts_with_all`, but keep the message clear
+                    // so a regression in clap config still surfaces
+                    // an actionable error.
+                    return Err(
+                        "`--from-monorepo`, `--from-github`, and `--from-lockfile` are \
+                         mutually exclusive"
+                            .into(),
+                    );
+                }
             }
-            (Some(_), Some(_)) => {
-                return Err("`--from-monorepo` and `--from-github` are mutually exclusive".into());
-            }
-            (None, None) => {
-                return Err("`chelis reef install` requires a source. \
-                         Pass `--from-monorepo <PATH>` pointing at a chelis monorepo, \
-                         or `--from-github <ORG>/<REPO>@<TAG>` to fetch from a GitHub release."
-                    .into());
-            }
-        },
+        }
     }
     Ok(())
 }

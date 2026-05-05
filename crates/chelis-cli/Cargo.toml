@@ -40,5 +40,10 @@ predicates = "3"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `toml` is needed by `crates/chelis-cli/tests/phaseA_item9_lockfile_origin.rs`
+# (Item 9 lockfile-origin oracle) for byte-level round-trip assertions
+# against `ReefLock`. Pinned to the same version chelis-reef itself
+# uses (workspace-resolved 0.8) so the round-trip is bit-stable.
+toml = "0.8"
 walkdir = "2"
 wiremock = "0.6"

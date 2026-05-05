@@ -73,8 +73,127 @@ pub struct LockedDependency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LockSource {
-    Path { path: String },
-    LocalRegistry,
+    Path {
+        path: String,
+    },
+    /// Locally-installed registry package. The optional `remote_origin`
+    /// records where the bytes were originally fetched from, in a
+    /// scheme-tagged URI form (currently `github://<org>/<repo>@<tag>`;
+    /// future schemes such as `registry://...` are planned post-launch).
+    /// Pre-Item-9 lockfiles omit the field; they deserialize cleanly via
+    /// `#[serde(default)]` and round-trip with `remote_origin: None`.
+    /// Serialization omits the field when `None` so old lockfiles stay
+    /// byte-identical after re-serialization.
+    LocalRegistry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_origin: Option<String>,
+    },
+}
+
+impl LockSource {
+    /// Construct a `LocalRegistry` source whose `remote_origin` is the
+    /// `github://<org>/<repo>@<tag>` form derived from the given spec.
+    /// This is the canonical writer for lockfile entries that came from
+    /// `install_from_github`. Use [`Self::local_registry_no_origin`] for
+    /// monorepo-installed entries.
+    pub fn local_registry_from_github(spec: &GitHubReleaseSpec) -> Self {
+        Self::LocalRegistry {
+            remote_origin: Some(format_github_origin(&spec.org, &spec.repo, &spec.tag)),
+        }
+    }
+
+    /// Construct a `LocalRegistry` source with no recorded origin. Used
+    /// by `install_from_monorepo` (which has no remote source) and for
+    /// backward-compat when reading old lockfiles that did not carry
+    /// the field.
+    pub fn local_registry_no_origin() -> Self {
+        Self::LocalRegistry {
+            remote_origin: None,
+        }
+    }
+
+    /// Read-only accessor for the `remote_origin` field of a
+    /// `LocalRegistry` source. Returns `None` for `Path` sources and
+    /// for `LocalRegistry` sources whose origin is unrecorded.
+    pub fn remote_origin(&self) -> Option<&str> {
+        match self {
+            Self::LocalRegistry { remote_origin } => remote_origin.as_deref(),
+            Self::Path { .. } => None,
+        }
+    }
+}
+
+/// Build the canonical `github://<org>/<repo>@<tag>` origin URI string.
+/// Single source of truth for the format so the writer in
+/// `install_from_github` and the parser in [`parse_remote_origin`]
+/// cannot drift.
+fn format_github_origin(org: &str, repo: &str, tag: &str) -> String {
+    format!("github://{org}/{repo}@{tag}")
+}
+
+/// Typed parse error for a `remote_origin` string. Each variant carries
+/// the original input so user-facing error messages can name what went
+/// wrong without losing context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteOriginParseError {
+    /// Scheme prefix did not match any supported scheme (currently only
+    /// `github://`). Future schemes (`registry://...`) plug in here.
+    UnknownScheme { input: String, scheme: String },
+    /// Scheme matched but the body did not parse as `<org>/<repo>@<tag>`.
+    /// `inner` carries the underlying [`GitHubFetchError::Parse`] reason.
+    Malformed { input: String, reason: String },
+}
+
+impl std::fmt::Display for RemoteOriginParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownScheme { input, scheme } => write!(
+                f,
+                "remote_origin `{input}` uses unknown scheme `{scheme}` \
+                 (supported: `github://`)"
+            ),
+            Self::Malformed { input, reason } => {
+                write!(f, "remote_origin `{input}` is malformed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemoteOriginParseError {}
+
+/// Parse a `remote_origin` URI back into a [`GitHubReleaseSpec`]. The
+/// only currently-supported scheme is `github://`; unknown-scheme
+/// strings (e.g. `http://`, `registry://`) fail with
+/// [`RemoteOriginParseError::UnknownScheme`] rather than being silently
+/// treated as a degenerate GitHub URL. This is the spec-locked
+/// "fail-fast on unknown scheme" rule (Item 9 § Locked decisions).
+pub fn parse_remote_origin(input: &str) -> Result<GitHubReleaseSpec, RemoteOriginParseError> {
+    const GITHUB_SCHEME: &str = "github://";
+    if let Some(rest) = input.strip_prefix(GITHUB_SCHEME) {
+        return GitHubReleaseSpec::parse(rest).map_err(|e| match e {
+            GitHubFetchError::Parse { reason, .. } => RemoteOriginParseError::Malformed {
+                input: input.to_string(),
+                reason,
+            },
+            other => RemoteOriginParseError::Malformed {
+                input: input.to_string(),
+                reason: format!("{other}"),
+            },
+        });
+    }
+    let scheme = input
+        .split_once("://")
+        .map(|(s, _)| format!("{s}://"))
+        .unwrap_or_else(|| {
+            // No `://` at all — treat the whole input as the "scheme"
+            // for diagnostic purposes so the error names exactly what
+            // the user wrote.
+            input.to_string()
+        });
+    Err(RemoteOriginParseError::UnknownScheme {
+        input: input.to_string(),
+        scheme,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,6 +207,16 @@ pub struct RegistryVersion {
     pub compiler: String,
     pub archive_sha256: String,
     pub shell_sha256: String,
+    /// Where the bytes were originally fetched from, in
+    /// scheme-tagged URI form (currently only `github://<org>/<repo>@<tag>`).
+    /// `install_from_github` populates this; `install_from_monorepo`
+    /// leaves it `None`. The downstream `build_lockfile` reads it to
+    /// fill `LockSource::LocalRegistry::remote_origin`. Serde
+    /// `default + skip_serializing_if = is_none` keeps old `index.json`
+    /// readable on the new code (forward-compat) and keeps old entries
+    /// byte-identical after a re-serialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_origin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +393,23 @@ struct LoadedPackage {
     modules: BTreeMap<String, ModuleSource>,
     source: LoadedSourceKind,
     shell: Option<ShellPackage>,
+    /// Remote-origin URI for `LocalRegistry`-sourced packages. Always
+    /// `None` for `Path` and `Root` packages. Populated from the
+    /// registry index by `load_registry_package`, or directly from the
+    /// lockfile by `reconstruct_graph_from_lockfile`. Read by
+    /// `build_lockfile` to fill `LockSource::LocalRegistry::remote_origin`.
+    ///
+    /// **Serde-attribute discipline.** This struct is part of
+    /// `PreparedReefGraph`, which round-trips through **bincode** (a
+    /// positional binary format). bincode does not honor
+    /// `#[serde(skip_serializing_if = ...)]` — using it here would
+    /// cause the byte stream's offsets to drift between encode and
+    /// decode, producing the "tag for enum is not valid" panic
+    /// pinned by the `prepared_reef_graph_round_trips_through_bincode`
+    /// test. The field is therefore unconditional in the
+    /// bincode stream; `Option::None` serializes as a single tag byte
+    /// (0), which is the correct default behavior.
+    remote_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -660,6 +806,11 @@ pub fn publish_package(root: &Path) -> Result<PackageBuildArtifacts, String> {
         compiler: CURRENT_COMPILER_VERSION.to_string(),
         archive_sha256: artifacts.archive_sha256.clone(),
         shell_sha256: artifacts.shell_sha256.clone(),
+        // `chelis reef publish` populates the local registry from a
+        // local working tree; there is no remote origin to record. The
+        // field stays `None` so the entry round-trips through serde
+        // identical to a pre-Item-9 publish.
+        remote_origin: None,
     });
     versions.sort_by(|a, b| a.version.cmp(&b.version));
     fs::create_dir_all(&registry_root).map_err(|e| e.to_string())?;
@@ -912,6 +1063,7 @@ pub fn install_validated_artifact_pair(
     name: &str,
     version: &str,
     registry_root: &Path,
+    remote_origin: Option<&str>,
 ) -> Result<InstalledArtifact, String> {
     fs::create_dir_all(registry_root).map_err(|e| {
         format!(
@@ -980,6 +1132,7 @@ pub fn install_validated_artifact_pair(
         compiler: shell.compiler.clone(),
         archive_sha256: archive_sha256.clone(),
         shell_sha256: shell_sha256.clone(),
+        remote_origin: remote_origin.map(str::to_string),
     });
     versions.sort_by(|a, b| a.version.cmp(&b.version));
 
@@ -1140,12 +1293,21 @@ pub fn install_from_monorepo(
         // via this helper. The helper does on-disk sha256 verification,
         // archive↔shell agreement, name/version-agreement, registry
         // copy, and atomic index update.
+        //
+        // `--from-monorepo` has no remote origin: it copies bytes that
+        // already live on the developer's local filesystem. Item 9's
+        // `remote_origin` field stays `None` for these entries, which
+        // is why `chelis reef install --from-lockfile` errors clearly
+        // on lockfiles whose entries came exclusively from
+        // `--from-monorepo` and suggests `--bootstrap` to populate
+        // origins.
         let artifact = install_validated_artifact_pair(
             &archive_src,
             &shell_src,
             name,
             version,
             &registry_root,
+            None,
         )?;
         installed.push(artifact);
     }
@@ -1580,14 +1742,290 @@ pub fn install_from_github(
     download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
     download_asset_by_id(&client, &shell_url, &shell_name, &token, &shell_path)?;
 
+    // Item 9 retrofit: stamp the registry entry with the
+    // `github://<org>/<repo>@<tag>` origin so that downstream
+    // `chelis reef build` can surface it in `reef.lock` and
+    // `chelis reef install --from-lockfile` can re-fetch from it
+    // without out-of-band knowledge.
+    let origin = format_github_origin(&spec.org, &spec.repo, &spec.tag);
     install_validated_artifact_pair(
         &archive_path,
         &shell_path,
         &spec.repo,
         &spec.version,
         registry_root,
+        Some(&origin),
     )
     .map_err(|message| GitHubFetchError::Validation { message })
+}
+
+/// Per-entry result of [`install_from_lockfile`]. One of these is
+/// produced for every `[[dependencies]]` row in the input lockfile.
+/// The loop continues past any failure so a partial outcome is
+/// observable to the caller (the CLI prints each result and exits
+/// non-zero if any are errors).
+#[derive(Debug)]
+pub enum LockfileInstallEntry {
+    /// The entry's bytes are now in the registry. Either we re-fetched
+    /// from `remote_origin` and validated against the lockfile pin, or
+    /// the bytes were already present at the right hashes.
+    Installed(InstalledArtifact),
+    /// The entry has `kind = local_registry` but no `remote_origin`,
+    /// so we cannot fetch it. The caller is told to run `--bootstrap`
+    /// (or re-run `--from-monorepo`/`--from-github`) to populate the
+    /// origin in the lockfile.
+    SkippedNoOrigin { name: String, version: String },
+    /// A path-dep entry. There is nothing to fetch — the dep lives in
+    /// the developer's working tree and `chelis reef build` resolves
+    /// it directly. The CLI surfaces this as informational, not an
+    /// error.
+    SkippedPathDep {
+        name: String,
+        version: String,
+        path: String,
+    },
+    /// Fetch+install attempt failed. The error preserves whatever the
+    /// underlying [`GitHubFetchError`] said; the caller is responsible
+    /// for naming the entry.
+    Failed {
+        name: String,
+        version: String,
+        error: LockfileInstallError,
+    },
+}
+
+/// Top-level error category for `chelis reef install --from-lockfile`.
+/// Most variants carry a typed inner error so callers can match on
+/// category. The `EntryFailures` variant aggregates per-row errors so
+/// the CLI can print all of them in a single pass.
+#[derive(Debug)]
+pub enum LockfileInstallError {
+    /// `reef.lock` does not exist. The path tested is included so
+    /// the message can be actionable (`chelis reef build` or move
+    /// to the right directory).
+    NotFound { path: PathBuf },
+    /// `reef.lock` exists but is not valid TOML or does not match the
+    /// `ReefLock` schema. The wrapped message contains the parser
+    /// diagnostic (line/column where available).
+    Malformed { path: PathBuf, message: String },
+    /// One entry's `remote_origin` did not parse as a known scheme.
+    /// Typed and per-entry so the test suite can pin the exact error
+    /// shape.
+    OriginParse {
+        name: String,
+        version: String,
+        inner: RemoteOriginParseError,
+    },
+    /// The fetch+validate pipeline failed for one entry. Wraps the
+    /// underlying [`GitHubFetchError`] verbatim.
+    Fetch {
+        name: String,
+        version: String,
+        inner: GitHubFetchError,
+    },
+}
+
+impl std::fmt::Display for LockfileInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { path } => write!(
+                f,
+                "no lockfile found at {} — run `chelis reef build` first to generate one",
+                path.display()
+            ),
+            Self::Malformed { path, message } => {
+                write!(f, "lockfile at {} is malformed: {message}", path.display())
+            }
+            Self::OriginParse {
+                name,
+                version,
+                inner,
+            } => write!(f, "lockfile entry `{name}` v{version}: {inner}"),
+            Self::Fetch {
+                name,
+                version,
+                inner,
+            } => write!(f, "lockfile entry `{name}` v{version}: {inner}"),
+        }
+    }
+}
+
+impl std::error::Error for LockfileInstallError {}
+
+/// Re-install every dependency named by `<package_root>/reef.lock` from
+/// its recorded `remote_origin`, validating bytes against the
+/// lockfile's pinned hashes via `install_validated_artifact_pair`.
+///
+/// **Per-entry behavior.**
+///
+/// - `kind = local_registry` with `remote_origin = Some(github://...)`:
+///   fetch the bytes, validate, place into `registry_root`. The pinned
+///   `archive_sha256` and `shell_sha256` from the lockfile are not
+///   re-checked separately here — they are checked by
+///   `install_validated_artifact_pair` (which computes hashes on the
+///   bytes the URL serves and asserts archive↔shell agreement) and
+///   are also pinned in the registry's `index.json` after the install,
+///   so a subsequent `chelis reef build` will surface a hash-mismatch
+///   if the URL ever serves different bytes.
+/// - `kind = local_registry` with `remote_origin = None`: the lockfile
+///   entry has no recorded origin (it was installed via `--from-monorepo`
+///   pre-Item-9 or installed via `--bootstrap` without a manifest URL).
+///   Surface a typed error suggesting `--bootstrap` to populate the
+///   origin. The caller cannot magic up a URL.
+/// - `kind = path { path = "..." }`: nothing to fetch, the dep lives
+///   on the dev's filesystem. Skipped silently (recorded as
+///   `SkippedPathDep` for completeness).
+///
+/// **Top-level error handling.** The function reads the lockfile up
+/// front. Failures at that step (`NotFound`, `Malformed`) bail
+/// immediately because there are no entries to walk. Per-entry
+/// failures collect into `Vec<LockfileInstallEntry>` and the function
+/// returns `Ok` so the caller can decide whether to consider any
+/// failure fatal (the CLI does — it exits non-zero if any entry
+/// failed).
+///
+/// **Hash-pin invariant.** After this function completes successfully,
+/// the local registry state is byte-equivalent to what
+/// `install_from_github` produced when the lockfile was first written:
+/// same `<registry_root>/packages/<name>/<version>/{archive,shell}`
+/// bytes, same `index.json` entry. This is the spec-locked
+/// "developer A → developer B" reproducibility contract.
+pub fn install_from_lockfile(
+    package_root: &Path,
+    registry_root: &Path,
+) -> Result<Vec<LockfileInstallEntry>, LockfileInstallError> {
+    let lockfile_path = package_root.join("reef.lock");
+    if !lockfile_path.exists() {
+        return Err(LockfileInstallError::NotFound {
+            path: lockfile_path,
+        });
+    }
+    let text = fs::read_to_string(&lockfile_path).map_err(|e| LockfileInstallError::Malformed {
+        path: lockfile_path.clone(),
+        message: format!("failed to read: {e}"),
+    })?;
+    let lock: ReefLock = toml::from_str(&text).map_err(|e| LockfileInstallError::Malformed {
+        path: lockfile_path.clone(),
+        message: e.to_string(),
+    })?;
+
+    fs::create_dir_all(registry_root).map_err(|e| LockfileInstallError::Malformed {
+        path: lockfile_path.clone(),
+        message: format!(
+            "failed to create registry root {}: {e}",
+            registry_root.display()
+        ),
+    })?;
+
+    let mut results = Vec::with_capacity(lock.dependencies.len());
+    for dep in &lock.dependencies {
+        match &dep.source {
+            LockSource::Path { path } => {
+                results.push(LockfileInstallEntry::SkippedPathDep {
+                    name: dep.name.clone(),
+                    version: dep.version.clone(),
+                    path: path.clone(),
+                });
+            }
+            LockSource::LocalRegistry {
+                remote_origin: None,
+            } => {
+                results.push(LockfileInstallEntry::SkippedNoOrigin {
+                    name: dep.name.clone(),
+                    version: dep.version.clone(),
+                });
+            }
+            LockSource::LocalRegistry {
+                remote_origin: Some(origin),
+            } => {
+                let spec = match parse_remote_origin(origin) {
+                    Ok(s) => s,
+                    Err(inner) => {
+                        results.push(LockfileInstallEntry::Failed {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            error: LockfileInstallError::OriginParse {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner,
+                            },
+                        });
+                        continue;
+                    }
+                };
+                // Spec-name-vs-lockfile-name agreement: we trust the
+                // lockfile name as the package identity. The fetch
+                // pipeline derives the on-disk name from the spec
+                // (`spec.repo`), which must match the lockfile entry's
+                // `name`/`version` pair — otherwise the fetched
+                // archive would land at a wrong path and validation
+                // would surface the mismatch via the embedded shell
+                // package id check.
+                //
+                // Reconstruct the canonical `<org>/<repo>@<tag>` form
+                // and call into the established `install_from_github`
+                // pipeline. That pipeline already does
+                // `install_validated_artifact_pair` with the origin
+                // stamped, so the registry is left in a byte-identical
+                // state to the original install.
+                let org_repo_tag = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
+                match install_from_github(&org_repo_tag, registry_root) {
+                    Ok(artifact) => {
+                        // Hash-pin verification: the lockfile records
+                        // the expected hashes and the fresh fetch
+                        // recomputed them. If they disagree, the bytes
+                        // GitHub served diverged from what the
+                        // lockfile pinned; surface that as a
+                        // `Validation` error so the operator can act
+                        // on it (typically: someone re-tagged the
+                        // release without bumping the version).
+                        if artifact.archive_sha256 != dep.archive_sha256
+                            || artifact.shell_sha256 != dep.shell_sha256
+                        {
+                            results.push(LockfileInstallEntry::Failed {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                error: LockfileInstallError::Fetch {
+                                    name: dep.name.clone(),
+                                    version: dep.version.clone(),
+                                    inner: GitHubFetchError::Validation {
+                                        message: format!(
+                                            "hash mismatch for `{name}` v{version}: \
+                                             lockfile pinned archive_sha256={lock_a} \
+                                             shell_sha256={lock_s}, but the bytes served by \
+                                             {origin} hash to archive_sha256={got_a} \
+                                             shell_sha256={got_s}",
+                                            name = dep.name,
+                                            version = dep.version,
+                                            lock_a = dep.archive_sha256,
+                                            lock_s = dep.shell_sha256,
+                                            got_a = artifact.archive_sha256,
+                                            got_s = artifact.shell_sha256,
+                                        ),
+                                    },
+                                },
+                            });
+                        } else {
+                            results.push(LockfileInstallEntry::Installed(artifact));
+                        }
+                    }
+                    Err(e) => {
+                        results.push(LockfileInstallEntry::Failed {
+                            name: dep.name.clone(),
+                            version: dep.version.clone(),
+                            error: LockfileInstallError::Fetch {
+                                name: dep.name.clone(),
+                                version: dep.version.clone(),
+                                inner: e,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
@@ -1695,6 +2133,7 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
             modules: root_modules,
             source: LoadedSourceKind::Root,
             shell: None,
+            remote_origin: None,
         },
     );
 
@@ -1720,10 +2159,11 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
                             relative: path.clone(),
                         },
                         shell: None,
+                        remote_origin: None,
                     },
                 );
             }
-            LockSource::LocalRegistry => {
+            LockSource::LocalRegistry { remote_origin } => {
                 let dep_name = dep.name.clone();
                 let dep_version = dep.version.clone();
                 let installed = run_with_timeout(
@@ -1733,6 +2173,13 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
                 )?;
                 let dep_manifest = read_manifest(&installed.root.join("reef.toml"))?;
                 let dep_modules = load_package_modules(&installed.root, &dep_manifest)?;
+                // The lockfile is the source of truth: if it pinned
+                // an origin, carry it forward. Otherwise fall back to
+                // whatever the registry recorded (may also be `None`
+                // when the registry was populated by --from-monorepo).
+                let resolved_origin = remote_origin
+                    .clone()
+                    .or_else(|| installed.remote_origin.clone());
                 packages.insert(
                     dep.name.clone(),
                     LoadedPackage {
@@ -1744,6 +2191,7 @@ fn reconstruct_graph_from_lockfile(root: &Path, lock: &ReefLock) -> Result<Packa
                         modules: dep_modules,
                         source: LoadedSourceKind::LocalRegistry,
                         shell: Some(installed.shell),
+                        remote_origin: resolved_origin,
                     },
                 );
             }
@@ -1847,6 +2295,7 @@ fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
         root.to_path_buf(),
         LoadedSourceKind::Root,
         None,
+        None,
         &mut packages,
         &mut by_name,
         &mut stack,
@@ -1857,11 +2306,17 @@ fn resolve_package_graph(root: &Path) -> Result<PackageGraph, String> {
     })
 }
 
+// 8 arguments — the prior surface was already 7 and Item 9 adds
+// `remote_origin` plumbing. Folding into a struct would just rename
+// the same eight values; the recursion stays clearer with positional
+// parameters.
+#[allow(clippy::too_many_arguments)]
 fn resolve_package_recursive(
     package_name: &str,
     root: PathBuf,
     source: LoadedSourceKind,
     maybe_shell: Option<ShellPackage>,
+    remote_origin: Option<String>,
     packages: &mut BTreeMap<String, LoadedPackage>,
     by_name: &mut HashMap<String, PackageId>,
     stack: &mut Vec<String>,
@@ -1904,6 +2359,7 @@ fn resolve_package_recursive(
         modules,
         source: source.clone(),
         shell: maybe_shell.clone(),
+        remote_origin: remote_origin.clone(),
     };
 
     for (dep_name, dep) in &manifest.dependencies {
@@ -1919,6 +2375,7 @@ fn resolve_package_recursive(
                     dep_root,
                     LoadedSourceKind::Path { relative },
                     None,
+                    None,
                     packages,
                     by_name,
                     stack,
@@ -1926,11 +2383,13 @@ fn resolve_package_recursive(
             }
             (Some(version), None) => {
                 let installed = load_registry_package(dep_name, version)?;
+                let dep_origin = installed.remote_origin.clone();
                 resolve_package_recursive(
                     dep_name,
                     installed.root,
                     LoadedSourceKind::LocalRegistry,
                     Some(installed.shell),
+                    dep_origin,
                     packages,
                     by_name,
                     stack,
@@ -1948,6 +2407,11 @@ fn resolve_package_recursive(
 struct InstalledPackage {
     root: PathBuf,
     shell: ShellPackage,
+    /// `index.json`'s `remote_origin` for this `(name, version)`. The
+    /// caller (`resolve_package_recursive`) plumbs this onto the
+    /// `LoadedPackage` so `build_lockfile` can later persist it to
+    /// `LockSource::LocalRegistry::remote_origin`.
+    remote_origin: Option<String>,
 }
 
 fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, String> {
@@ -2003,6 +2467,7 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
     Ok(InstalledPackage {
         root: cache_root,
         shell,
+        remote_origin: expected.remote_origin.clone(),
     })
 }
 
@@ -2031,8 +2496,17 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
                 LoadedSourceKind::Path { relative } => LockSource::Path {
                     path: relative.clone(),
                 },
-                LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry,
-                LoadedSourceKind::Root => LockSource::LocalRegistry,
+                LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
+                    remote_origin: package.remote_origin.clone(),
+                },
+                // `Root` is a defensive fallback for the build-lockfile
+                // path: the root package is not normally a dependency.
+                // If it ever shows up here, treat it as an unrecorded
+                // local-registry source so the lockfile stays well-
+                // formed.
+                LoadedSourceKind::Root => LockSource::LocalRegistry {
+                    remote_origin: None,
+                },
             };
             let archive_sha256 = package
                 .shell
