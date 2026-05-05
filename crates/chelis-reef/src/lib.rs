@@ -2350,6 +2350,23 @@ pub fn install_from_lockfile(
 
     let mut results = Vec::with_capacity(lock.dependencies.len());
     for dep in &lock.dependencies {
+        // Migration: an old lockfile may record `chelis-std` as
+        // `LocalRegistry`. The runtime is now bundled — surface a
+        // one-line warning and treat it as `SkippedBundledRuntime`.
+        if matches!(&dep.source, LockSource::LocalRegistry { .. })
+            && dep.name == CHELIS_STD_PACKAGE_NAME
+        {
+            eprintln!(
+                "chelis reef: `chelis-std` is now toolchain-bundled; \
+                 lockfile entry will be rewritten on next build"
+            );
+            results.push(LockfileInstallEntry::SkippedBundledRuntime {
+                name: dep.name.clone(),
+                version: dep.version.clone(),
+                compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            });
+            continue;
+        }
         match &dep.source {
             LockSource::Path { path } => {
                 results.push(LockfileInstallEntry::SkippedPathDep {
