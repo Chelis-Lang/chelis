@@ -1850,6 +1850,102 @@ impl std::fmt::Display for LockfileInstallError {
     }
 }
 
+/// Default list of canonical shells to bootstrap when
+/// `chelis reef install --bootstrap` is invoked without an explicit
+/// list. Each entry is `(repo, tag)` under [`CANONICAL_REEF_ORG`].
+///
+/// This list is **hand-maintained** for the pre-launch dev team. Bump
+/// each entry's tag whenever a shell publishes a new release that
+/// should be the default-fetched version. The bootstrap installer reads
+/// each archive's `reef.toml` to discover dependencies; entries not
+/// present in this list whose `reef.toml` references them surface a
+/// [`BootstrapError::MissingDependency`] error rather than silently
+/// installing more than the operator asked for.
+///
+/// Multi-publisher generalization (the post-launch endgame) is Item 10
+/// in `spec/design/reef_distribution.md`; until then this list is the
+/// hard-coded source of truth.
+pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
+    ("chelis-std", "v0.1.0"),
+    ("nautilus", "v0.4.0"),
+    ("coral", "v0.4.0"),
+    ("shoals", "v0.1.0"),
+    ("octant", "v0.1.0"),
+];
+
+/// Distinct error categories surfaced by the bootstrap install path.
+///
+/// Keep `Display` strings stable; tests assert against substrings of
+/// the formatted message. New variants are additive.
+#[derive(Debug)]
+pub enum BootstrapError {
+    /// A cycle was detected in the dependency graph among the
+    /// requested shells. `cycle` lists the cycle members in the order
+    /// the cycle was traversed (first entry repeats at the end so the
+    /// loop is unambiguous in the formatted message).
+    Cycle { cycle: Vec<String> },
+    /// One of the requested shells declares a dependency on a package
+    /// that is not in the explicit input set. The bootstrap is not
+    /// allowed to silently expand the install set — the operator must
+    /// add the missing shell to the input list explicitly.
+    MissingDependency { dependent: String, missing: String },
+    /// One of the requested shells appears at two different versions
+    /// in the input list. The bootstrap refuses ambiguous input;
+    /// callers must pick a single version per package.
+    DuplicateVersion {
+        package: String,
+        versions: Vec<String>,
+    },
+    /// The input list is empty AND
+    /// [`DEFAULT_BOOTSTRAP_LIST`] is empty (test scaffolds inject a
+    /// list; production never trips this).
+    NothingToInstall,
+    /// A network or HTTP-layer failure during fetch. Wraps the
+    /// underlying [`GitHubFetchError`] verbatim.
+    Fetch(GitHubFetchError),
+    /// The fetched archive contained no readable `reef.toml`, or its
+    /// contents did not parse as a manifest.
+    ManifestRead { spec: String, message: String },
+    /// Validation fired downstream of fetch (sha mismatch,
+    /// name/version disagreement, malformed shell). The message text
+    /// is the underlying error.
+    Validation { message: String },
+}
+
+impl std::fmt::Display for BootstrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cycle { cycle } => {
+                let listing = cycle.join(" -> ");
+                write!(
+                    f,
+                    "dependency cycle detected among bootstrap shells: {listing}"
+                )
+            }
+            Self::MissingDependency { dependent, missing } => write!(
+                f,
+                "shell `{dependent}` depends on `{missing}` but `{missing}` is not in the bootstrap input list — \
+                 add an explicit `<org>/{missing}@<tag>` entry to the bootstrap arguments"
+            ),
+            Self::DuplicateVersion { package, versions } => write!(
+                f,
+                "package `{package}` appears at multiple versions in the bootstrap input list: [{}] — pick one",
+                versions.join(", ")
+            ),
+            Self::NothingToInstall => write!(
+                f,
+                "bootstrap input list is empty and the built-in default list is empty too — nothing to install"
+            ),
+            Self::Fetch(e) => write!(f, "fetch failed during bootstrap: {e}"),
+            Self::ManifestRead { spec, message } => write!(
+                f,
+                "could not read `reef.toml` from `{spec}` archive: {message}"
+            ),
+            Self::Validation { message } => write!(f, "{message}"),
+        }
+    }
+}
+
 impl std::error::Error for LockfileInstallError {}
 
 /// Re-install every dependency named by `<package_root>/reef.lock` from
@@ -2026,6 +2122,370 @@ pub fn install_from_lockfile(
     }
 
     Ok(results)
+}
+
+impl std::error::Error for BootstrapError {}
+
+impl From<GitHubFetchError> for BootstrapError {
+    fn from(e: GitHubFetchError) -> Self {
+        BootstrapError::Fetch(e)
+    }
+}
+
+impl From<BootstrapError> for String {
+    fn from(e: BootstrapError) -> Self {
+        e.to_string()
+    }
+}
+
+/// Fetch the `<repo>-<version>.tar.zst` archive for a single
+/// [`GitHubReleaseSpec`] and read the embedded `reef.toml` manifest
+/// from inside it. Used by [`install_bootstrap`] to discover each
+/// shell's `[dependencies]` block before topologically ordering the
+/// installs.
+///
+/// This is intentionally separate from [`install_from_github`]: it
+/// fetches only the archive (not the shell), extracts to a tempdir,
+/// reads `reef.toml`, and drops the tempdir. The full install is
+/// re-run via [`install_from_github`] later in the bootstrap loop —
+/// network fetch is repeated for the archive byte stream, but the
+/// validated install path stays the same as the single-shell case.
+fn fetch_manifest_only(spec: &GitHubReleaseSpec) -> Result<ReefManifest, BootstrapError> {
+    let token = resolve_github_token()?;
+    let api_base = github_api_base_url();
+    let archive_name = format!("{}-{}.tar.zst", spec.repo, spec.version);
+
+    let tmp = tempfile::tempdir().map_err(|e| {
+        BootstrapError::Fetch(GitHubFetchError::Io {
+            message: format!("create tempdir: {e}"),
+        })
+    })?;
+    let archive_path = tmp.path().join(&archive_name);
+
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            BootstrapError::Fetch(GitHubFetchError::Io {
+                message: format!("build http client: {e}"),
+            })
+        })?;
+
+    let metadata_url = spec.release_metadata_url(&api_base);
+    let assets = fetch_release_metadata(&client, &metadata_url, &token)?;
+    let archive_id = find_asset_id(&assets, &archive_name, &metadata_url)?;
+    let archive_url = spec.release_asset_url(&api_base, archive_id);
+    download_asset_by_id(&client, &archive_url, &archive_name, &token, &archive_path)?;
+
+    let extract_dir = tmp.path().join("extract");
+    fs::create_dir_all(&extract_dir).map_err(|e| {
+        BootstrapError::Fetch(GitHubFetchError::Io {
+            message: format!("create extract dir: {e}"),
+        })
+    })?;
+    extract_archive(&archive_path, &extract_dir).map_err(|message| {
+        BootstrapError::ManifestRead {
+            spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+            message,
+        }
+    })?;
+    let manifest_path = extract_dir.join("reef.toml");
+    if !manifest_path.exists() {
+        return Err(BootstrapError::ManifestRead {
+            spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+            message: "archive does not contain `reef.toml` at the root".to_string(),
+        });
+    }
+    read_manifest(&manifest_path).map_err(|message| BootstrapError::ManifestRead {
+        spec: format!("{}/{}@{}", spec.org, spec.repo, spec.tag),
+        message,
+    })
+}
+
+/// One node in the bootstrap dependency graph: `(name, version,
+/// deps)` where `deps` is the list of `(dep_name, dep_version)` edges
+/// the node's manifest declared. A `Vec<BootstrapNode>` is the input
+/// to [`topo_sort_bootstrap`].
+type BootstrapNode = (String, String, Vec<(String, String)>);
+
+/// Topologically sort `nodes` by their dependency edges so each entry
+/// is preceded by everything it depends on. Returns the sorted list
+/// of node indices into `nodes`.
+///
+/// The graph is keyed by `(name, version)`. Edges come from each
+/// node's manifest `[dependencies]` block: an edge from N to M means
+/// "N depends on M, install M before N." The DFS uses a recursion-
+/// stack set to detect cycles; on cycle detection the slice of the
+/// stack starting at the repeat node (with the repeat node appended
+/// at the end) is returned via [`BootstrapError::Cycle`] so the
+/// formatted message names every member of the loop.
+///
+/// Self-loops (a package depending on itself) surface as a 1-element
+/// cycle (the package's own `(name, version)` formatted twice with
+/// `->`).
+fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapError> {
+    // Map (name, version) -> index for edge resolution. Built up
+    // front so cycle detection can map back to (name, version) pairs
+    // inside the DFS.
+    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for (i, (name, version, _)) in nodes.iter().enumerate() {
+        if let Some(prior) = index_by_key.insert((name.clone(), version.clone()), i) {
+            // Defensive: bootstrap-input dedup happens before topo
+            // sort, so this branch should be unreachable for
+            // legitimate callers. We preserve the prior index either
+            // way — duplicate-version detection is the caller's job.
+            let _ = prior;
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut colors: Vec<Color> = vec![Color::White; nodes.len()];
+    let mut order: Vec<usize> = Vec::with_capacity(nodes.len());
+    // Iterative DFS using an explicit stack so we don't blow the
+    // call stack for pathological input. Each stack frame is
+    // `(node_index, edge_cursor)` — the cursor is how many of
+    // `nodes[i].2` we've already enqueued. When the cursor reaches
+    // the dep count, we pop the frame, paint the node black, and
+    // append it to `order`.
+    let mut path: Vec<(usize, usize)> = Vec::new();
+    // Track the depth-ordered list of (name, version) on the
+    // recursion stack so cycle reporting can name the loop without
+    // re-walking `path`.
+    let mut path_keys: Vec<(String, String)> = Vec::new();
+
+    for start in 0..nodes.len() {
+        if colors[start] != Color::White {
+            continue;
+        }
+        path.push((start, 0));
+        path_keys.push((nodes[start].0.clone(), nodes[start].1.clone()));
+        colors[start] = Color::Gray;
+        while let Some(&(node_idx, cursor)) = path.last() {
+            let deps = &nodes[node_idx].2;
+            if cursor >= deps.len() {
+                colors[node_idx] = Color::Black;
+                order.push(node_idx);
+                path.pop();
+                path_keys.pop();
+                continue;
+            }
+            // Advance cursor before recursing so we don't revisit on
+            // the next loop iteration after pop.
+            let last = path.last_mut().expect("path nonempty");
+            last.1 = cursor + 1;
+            let dep_key = (deps[cursor].0.clone(), deps[cursor].1.clone());
+            // Edges to nodes outside the bootstrap set are caught
+            // upstream as `MissingDependency`; here we assume every
+            // dep resolves into the input set.
+            let dep_idx = match index_by_key.get(&dep_key).copied() {
+                Some(i) => i,
+                None => continue, // unreachable in well-formed input; defensive
+            };
+            match colors[dep_idx] {
+                Color::Black => continue,
+                Color::Gray => {
+                    // Cycle — locate the repeat node in `path_keys`
+                    // and emit the slice from there to the end,
+                    // appending the repeat node again so the loop is
+                    // closed in the formatted message.
+                    let mut cycle_nodes: Vec<String> = Vec::new();
+                    let mut started = false;
+                    for key in &path_keys {
+                        if !started && *key == dep_key {
+                            started = true;
+                        }
+                        if started {
+                            cycle_nodes.push(format!("{}@{}", key.0, key.1));
+                        }
+                    }
+                    cycle_nodes.push(format!("{}@{}", dep_key.0, dep_key.1));
+                    return Err(BootstrapError::Cycle { cycle: cycle_nodes });
+                }
+                Color::White => {
+                    colors[dep_idx] = Color::Gray;
+                    path.push((dep_idx, 0));
+                    path_keys.push(dep_key);
+                }
+            }
+        }
+    }
+    Ok(order)
+}
+
+/// Topologically install a set of shells from canonical-org GitHub
+/// Releases.
+///
+/// **Algorithm.**
+/// 1. For each `spec`, fetch only the archive and read its embedded
+///    `reef.toml`. The shell payload is not fetched in this pass — only
+///    the manifest is needed to discover `[dependencies]` edges.
+/// 2. Build a directed graph keyed by `(name, version)`. Edges are
+///    drawn from each entry's manifest dependencies, matching by
+///    name+version against the other entries in `specs`.
+/// 3. Topologically sort via DFS with a recursion-stack cycle check.
+///    On cycle, return [`BootstrapError::Cycle`] naming the cycle
+///    members. On a dependency that names a package not in the input
+///    set, return [`BootstrapError::MissingDependency`].
+/// 4. For each entry in topo order, run [`install_from_github`] (full
+///    archive + shell fetch + validate + place).
+///
+/// **Atomicity.** Each individual shell install uses
+/// [`install_validated_artifact_pair`]'s atomicity (the registry
+/// `index.json` is updated atomically per shell). The bootstrap as a
+/// whole is **not** transactional across shells: if shell N fails,
+/// shells 1..N-1 stay installed. The brief calls this out as a locked
+/// design choice — the retry path is "re-run with the same input
+/// list," which is a no-op for the already-installed shells (idempotent
+/// per Item 6) and finishes the remainder.
+///
+/// **Idempotence.** Re-running with the same input list re-fetches
+/// archives but produces a byte-identical local registry state because
+/// the placement step copies the same bytes into the same destinations
+/// and atomically updates `index.json` to the same final entries.
+///
+/// **Order independence.** The topological sort depends only on the
+/// dependency graph, not on input order. Submitting the same set in
+/// different orders produces the same install sequence (modulo ties,
+/// which are resolved by input position to keep the result
+/// deterministic).
+pub fn install_bootstrap(
+    specs: &[GitHubReleaseSpec],
+    registry_root: &Path,
+) -> Result<Vec<InstalledArtifact>, BootstrapError> {
+    if specs.is_empty() {
+        return Err(BootstrapError::NothingToInstall);
+    }
+
+    // Phase 1: fetch each manifest, accumulate (name, version, deps).
+    let mut nodes: Vec<BootstrapNode> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let manifest = fetch_manifest_only(spec)?;
+        // Lock manifest <-> spec agreement: the archive's
+        // `package.name` and `package.version` must match what the
+        // spec asked for. This is the same check
+        // `install_validated_artifact_pair` runs later, but firing it
+        // here too gives a clearer error before topo sort.
+        if manifest.package.name != spec.repo {
+            return Err(BootstrapError::Validation {
+                message: format!(
+                    "shell `{}/{}@{}` archive declares package name `{}` (expected `{}`)",
+                    spec.org, spec.repo, spec.tag, manifest.package.name, spec.repo
+                ),
+            });
+        }
+        if manifest.package.version != spec.version {
+            return Err(BootstrapError::Validation {
+                message: format!(
+                    "shell `{}/{}@{}` archive declares package version `{}` (expected `{}`)",
+                    spec.org, spec.repo, spec.tag, manifest.package.version, spec.version
+                ),
+            });
+        }
+        let mut deps: Vec<(String, String)> = Vec::new();
+        for (dep_name, dep_spec) in &manifest.dependencies {
+            // Path-only deps are local development edges that the
+            // bootstrap install path cannot satisfy from a release;
+            // skip them — `install_from_github` plus the lockfile
+            // resolution path handles missing-from-registry errors at
+            // build time. Bootstrap's job is the upstream-published
+            // dep set.
+            if dep_spec.path.is_some() && dep_spec.version.is_none() {
+                continue;
+            }
+            // Version-pinned deps need a peer in the bootstrap input
+            // set. Versionless deps (no `version =` and no `path =`)
+            // are ill-formed manifests; surface that early.
+            let dep_version = match dep_spec.version.as_ref() {
+                Some(v) => v.clone(),
+                None => {
+                    return Err(BootstrapError::Validation {
+                        message: format!(
+                            "shell `{}/{}@{}` declares dependency `{}` without a version pin — \
+                             reef bootstrap requires exact version pins on every dependency",
+                            spec.org, spec.repo, spec.tag, dep_name
+                        ),
+                    });
+                }
+            };
+            deps.push((dep_name.clone(), dep_version));
+        }
+        nodes.push((
+            manifest.package.name.clone(),
+            manifest.package.version.clone(),
+            deps,
+        ));
+    }
+
+    // Duplicate-version detection: the same package name appearing at
+    // two versions in the input list is ambiguous; refuse rather than
+    // silently picking one.
+    {
+        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (name, version, _) in &nodes {
+            by_name
+                .entry(name.as_str())
+                .or_default()
+                .push(version.as_str());
+        }
+        for (name, versions) in &by_name {
+            if versions.len() > 1 {
+                let mut sorted: Vec<String> = versions.iter().map(|s| s.to_string()).collect();
+                sorted.sort();
+                sorted.dedup();
+                if sorted.len() > 1 {
+                    return Err(BootstrapError::DuplicateVersion {
+                        package: (*name).to_string(),
+                        versions: sorted,
+                    });
+                }
+            }
+        }
+    }
+
+    // Build (name, version) -> index for edge validation.
+    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::with_capacity(nodes.len());
+    for (i, (name, version, _)) in nodes.iter().enumerate() {
+        index_by_key.insert((name.clone(), version.clone()), i);
+    }
+
+    // Validate every dep edge resolves to a node in the input set.
+    for (name, _version, deps) in &nodes {
+        for (dep_name, dep_version) in deps {
+            if !index_by_key.contains_key(&(dep_name.clone(), dep_version.clone())) {
+                return Err(BootstrapError::MissingDependency {
+                    dependent: name.clone(),
+                    missing: dep_name.clone(),
+                });
+            }
+        }
+    }
+
+    let order = topo_sort_bootstrap(&nodes)?;
+
+    // Phase 3: install in topological order via Item 6's full path.
+    let mut installed: Vec<InstalledArtifact> = Vec::with_capacity(order.len());
+    for idx in order {
+        let (name, version, _deps) = &nodes[idx];
+        // Match the (name, version) back to the original spec to get
+        // the canonical `<org>/<repo>@<tag>` to call
+        // `install_from_github` with.
+        let spec = specs
+            .iter()
+            .find(|s| s.repo == *name && s.version == *version)
+            .expect("topo order references a node not in the input specs");
+        let spec_str = format!("{}/{}@{}", spec.org, spec.repo, spec.tag);
+        let artifact = install_from_github(&spec_str, registry_root)?;
+        installed.push(artifact);
+    }
+    Ok(installed)
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {

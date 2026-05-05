@@ -38,6 +38,7 @@ cargo-husky = { version = "1", default-features = false, features = ["user-hooks
 chelis-shell.workspace = true
 predicates = "3"
 sha2 = "0.10"
+tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # `toml` is needed by `crates/chelis-cli/tests/phaseA_item9_lockfile_origin.rs`
@@ -47,3 +48,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
 walkdir = "2"
 wiremock = "0.6"
+zstd = "0.13"
