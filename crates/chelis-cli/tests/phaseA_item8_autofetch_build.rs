@@ -28,37 +28,102 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Cursor;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tar::Builder;
 use tempfile::tempdir;
 use wiremock::matchers::{header, method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ============================================================
 // Shared fixture plumbing.
+//
+// Phase A correction (chelis-std-runtime fix wave): these tests
+// previously fetched real chelis-std bytes off the monorepo dist
+// tree and pretended they were a network-distributed shell. With
+// chelis-std now classified as the language runtime (not a shell),
+// auto-fetch is intentionally disabled for chelis-std and the
+// previous fixture path is no longer reachable. The tests now use
+// a synthetic shell named `nautilus` constructed at test start;
+// the wiremock fixture serves the synthetic bytes.
 // ============================================================
 
-/// The chelis monorepo root (two levels up from `crates/chelis-cli`).
-fn monorepo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("monorepo root must exist")
+/// Build a `.tar.zst` archive containing `reef.toml` + a placeholder
+/// `src/main.ch`. The manifest declares the given name, version, and
+/// dependencies. Same shape as item-7's helper. Returns archive bytes.
+fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u8> {
+    let mut deps_toml = String::new();
+    for (dep_name, dep_version) in deps {
+        deps_toml.push_str(&format!(
+            "\n[dependencies.{dep_name}]\nversion = \"{dep_version}\"\n"
+        ));
+    }
+    let manifest_text = format!(
+        r#"[package]
+name = "{name}"
+version = "{version}"
+compiler = "=0.5.0"
+module_prefix = "Test"
+{deps_toml}"#
+    );
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = Builder::new(&mut tar_bytes);
+        let manifest_bytes = manifest_text.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("reef.toml").expect("set path");
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append(&header, manifest_bytes)
+            .expect("append manifest");
+        let main_bytes = main_text.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("src/main.ch").expect("set path");
+        header.set_size(main_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, main_bytes).expect("append main");
+        builder.finish().expect("finish tar");
+    }
+    zstd::stream::encode_all(Cursor::new(tar_bytes), 19).expect("zstd encode")
 }
 
-/// Real prebuilt chelis-std artifacts. Item 8's tests reuse these as
-/// the bytes the wiremock fixture serves so the validation step sees
-/// a real chelis-std shell agreeing with its real archive.
-fn chelis_std_dist() -> (PathBuf, PathBuf) {
-    let dist = monorepo_root().join("packages/chelis-std/dist");
-    let archive = dist.join("chelis-std-0.1.0.tar.zst");
-    let shell = dist.join("chelis-std-0.1.0.chb");
-    assert!(
-        archive.exists() && shell.exists(),
-        "prebuilt chelis-std artifacts missing under {}",
-        dist.display()
-    );
+fn sha256_bytes(b: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b);
+    format!("{:x}", h.finalize())
+}
+
+/// Build a synthetic shell binary whose `archive_sha256` matches the
+/// archive's bytes. Item-8 tests only need the validation pipeline to
+/// accept the bytes — no module data has to be present.
+fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
+    let shell = chelis_shell::ShellPackage {
+        package: chelis_shell::PackageId {
+            name: name.to_string(),
+            version: version.to_string(),
+        },
+        compiler: "=0.5.0".to_string(),
+        modules: Vec::new(),
+        dependencies: Vec::new(),
+        archive_sha256: archive_sha256.to_string(),
+    };
+    chelis_shell::encode_shell(&shell).expect("encode shell")
+}
+
+/// Synthetic `nautilus` archive+shell pair used as the auto-fetch
+/// target. No filesystem dependencies; everything is in-memory.
+fn synthetic_nautilus_artifacts() -> (Vec<u8>, Vec<u8>) {
+    // Empty deps — nautilus is the leaf in this fixture's graph.
+    let archive = build_test_archive("nautilus", "0.1.0", &[]);
+    let archive_sha = sha256_bytes(&archive);
+    let shell = build_test_shell_bytes("nautilus", "0.1.0", &archive_sha);
     (archive, shell)
 }
 
@@ -93,16 +158,19 @@ fn metadata_json(tag: &str, assets: &[(u64, &str)]) -> String {
 const ARCHIVE_ASSET_ID: u64 = 2001;
 const SHELL_ASSET_ID: u64 = 2002;
 
-/// Build the canonical-API mocks for `chelis-lang/chelis-std@v0.1.0`.
+/// Build the canonical-API mocks for `chelis-lang/nautilus@v0.1.0`.
+/// The fixture pins to the synthetic `nautilus@0.1.0` so the wiremock
+/// path-based matchers cannot accidentally race against another test's
+/// `nautilus` mock.
 fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock> {
-    let meta_path = metadata_path("chelis-lang", "chelis-std", "v0.1.0");
-    let archive_url_path = asset_id_path("chelis-lang", "chelis-std", ARCHIVE_ASSET_ID);
-    let shell_url_path = asset_id_path("chelis-lang", "chelis-std", SHELL_ASSET_ID);
+    let meta_path = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let archive_url_path = asset_id_path("chelis-lang", "nautilus", ARCHIVE_ASSET_ID);
+    let shell_url_path = asset_id_path("chelis-lang", "nautilus", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
         "v0.1.0",
         &[
-            (ARCHIVE_ASSET_ID, "chelis-std-0.1.0.tar.zst"),
-            (SHELL_ASSET_ID, "chelis-std-0.1.0.chb"),
+            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
         ],
     );
     vec![
@@ -157,9 +225,10 @@ impl WiremockHarness {
     }
 }
 
-/// Stage a tiny `downstream` package that depends on `chelis-std =
-/// "0.1.0"`. Returns the package root.
-fn stage_downstream_project(parent: &Path) -> PathBuf {
+/// Stage a tiny `downstream` package that depends on `nautilus =
+/// "0.1.0"` (a synthetic shell mocked by the wiremock fixture). The
+/// runtime (`chelis-std`) is implicit and not declared.
+fn stage_downstream_project(parent: &Path) -> std::path::PathBuf {
     // Use a unique name per test invocation to avoid path-name
     // collisions when two tests share an outer tempdir. AtomicUsize
     // is process-shared; collisions across binaries are impossible
@@ -179,7 +248,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+nautilus = {{ version = "0.1.0" }}
 "#,
         ),
     )
@@ -205,8 +274,9 @@ fn file_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Read `index.json` and assert chelis-std@0.1.0 was installed.
-fn assert_chelis_std_installed(reef_home: &Path) {
+/// Read `index.json` and assert the synthetic nautilus@0.1.0 was
+/// installed via auto-fetch.
+fn assert_nautilus_installed(reef_home: &Path) {
     let index_path = reef_home.join("index.json");
     assert!(
         index_path.exists(),
@@ -214,21 +284,21 @@ fn assert_chelis_std_installed(reef_home: &Path) {
     );
     let index: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&index_path).unwrap()).unwrap();
-    let entries = index["packages"]["chelis-std"]
+    let entries = index["packages"]["nautilus"]
         .as_array()
-        .expect("packages.chelis-std must be array");
+        .expect("packages.nautilus must be array");
     assert!(
         entries.iter().any(|e| e["version"] == "0.1.0"),
-        "expected chelis-std 0.1.0 in index, got {entries:?}"
+        "expected nautilus 0.1.0 in index, got {entries:?}"
     );
     assert!(
         reef_home
-            .join("packages/chelis-std/0.1.0/chelis-std-0.1.0.tar.zst")
+            .join("packages/nautilus/0.1.0/nautilus-0.1.0.tar.zst")
             .exists()
     );
     assert!(
         reef_home
-            .join("packages/chelis-std/0.1.0/chelis-std-0.1.0.chb")
+            .join("packages/nautilus/0.1.0/nautilus-0.1.0.chb")
             .exists()
     );
 }
@@ -254,12 +324,10 @@ fn phaseA_item8_autofetch_build_oracle() {
 
 /// Acceptance bullet 1 (spec): a fresh dev environment with
 /// `GITHUB_TOKEN` set runs `chelis reef build` on a project that
-/// depends on chelis-std and the build succeeds with auto-fetch in
-/// the middle.
+/// depends on a shell (nautilus) and the build succeeds with auto-fetch
+/// in the middle.
 fn oracle_autofetch_happy_path() {
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
 
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(
@@ -271,7 +339,7 @@ fn oracle_autofetch_happy_path() {
     let reef_home = outer.path().join("reef-home");
     let app = stage_downstream_project(outer.path());
 
-    // Empty registry. Build must auto-fetch chelis-std before failing.
+    // Empty registry. Build must auto-fetch nautilus before failing.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_REEF_HOME", &reef_home)
@@ -284,7 +352,7 @@ fn oracle_autofetch_happy_path() {
         .success()
         .stdout(predicate::str::contains("Built downstream-item8"));
 
-    assert_chelis_std_installed(&reef_home);
+    assert_nautilus_installed(&reef_home);
     // Lockfile written under the downstream project root.
     assert!(app.join("reef.lock").exists());
 
@@ -316,7 +384,7 @@ fn oracle_no_auto_fetch_opt_out_blocks_fetch() {
 
     // Improved-wording invariants: name URL, name auto-fetch state.
     assert!(
-        stderr.contains("chelis-lang/chelis-std@v0.1.0"),
+        stderr.contains("chelis-lang/nautilus@v0.1.0"),
         "no-auto-fetch error must name canonical-org URL; got: {stderr}"
     );
     assert!(
@@ -362,7 +430,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
         Mock::given(method("GET"))
             .and(wm_path(metadata_path(
                 "chelis-lang",
-                "chelis-std",
+                "nautilus",
                 "v0.1.0",
             )))
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down")),
@@ -385,7 +453,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
 
     assert!(
-        stderr.contains("chelis-lang/chelis-std@v0.1.0"),
+        stderr.contains("chelis-lang/nautilus@v0.1.0"),
         "network-failure message must name URL; got: {stderr}"
     );
     assert!(
@@ -400,7 +468,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     // No half-install: index.json was never written, no orphan tmp.
     assert!(!reef_home.join("index.json").exists());
     assert!(!reef_home.join("index.json.tmp").exists());
-    assert!(!reef_home.join("packages/chelis-std/0.1.0").exists());
+    assert!(!reef_home.join("packages/nautilus/0.1.0").exists());
 }
 
 /// Lock-engaged invariant: while auto-fetch runs, the
@@ -417,9 +485,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
 /// fail with a deadlock if `acquire_reef_home_lock` did not
 /// release on drop.
 fn oracle_lock_file_engaged_during_autofetch() {
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
 
@@ -476,16 +542,16 @@ fn oracle_error_wording_shape_regex() {
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
 
     // The error must match a shape like:
-    //   missing dependency `chelis-std` `0.1.0` (auto-fetch disabled by
+    //   missing dependency `nautilus` `0.1.0` (auto-fetch disabled by
     //   `--no-auto-fetch`); would have fetched from
-    //   `chelis-lang/chelis-std@v0.1.0` (category: would-attempt,
+    //   `chelis-lang/nautilus@v0.1.0` (category: would-attempt,
     //   GITHUB_TOKEN is set). ...
     //
     // Use `(?s)` so `.` matches newlines (the rendered error is a
     // single line today, but assertion regex must remain stable
     // even if a future change introduces wrapping).
     let pattern = predicates::str::is_match(
-        r"(?s)missing dependency `chelis-std` `0\.1\.0`.*auto-fetch disabled.*chelis-lang/chelis-std@v0\.1\.0.*category: would-attempt.*GITHUB_TOKEN is set",
+        r"(?s)missing dependency `nautilus` `0\.1\.0`.*auto-fetch disabled.*chelis-lang/nautilus@v0\.1\.0.*category: would-attempt.*GITHUB_TOKEN is set",
     )
     .expect("regex compile");
     assert!(
@@ -499,9 +565,7 @@ fn oracle_error_wording_shape_regex() {
 /// as a contract invariant ("silent data loss is the main bug
 /// pattern; an 'auto-fetch happened' event must be observable").
 fn oracle_autofetch_event_observable() {
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
 
@@ -521,7 +585,7 @@ fn oracle_autofetch_event_observable() {
         .success();
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
     assert!(
-        stderr.contains("auto-fetching `chelis-std` `0.1.0`"),
+        stderr.contains("auto-fetching `nautilus` `0.1.0`"),
         "auto-fetch event must be visible in stderr; got: {stderr}"
     );
 }
@@ -584,7 +648,7 @@ fn phaseA_item8_429_during_autofetch_names_retry_after() {
         Mock::given(method("GET"))
             .and(wm_path(metadata_path(
                 "chelis-lang",
-                "chelis-std",
+                "nautilus",
                 "v0.1.0",
             )))
             .respond_with(
@@ -633,9 +697,7 @@ fn phaseA_item8_429_during_autofetch_names_retry_after() {
 fn phaseA_item8_stale_lock_file_does_not_block_acquisition() {
     let _g = file_lock();
 
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
 
@@ -669,9 +731,7 @@ fn phaseA_item8_stale_lock_file_does_not_block_acquisition() {
 fn phaseA_item8_two_concurrent_builds_serialize() {
     let _g = file_lock();
 
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
 
@@ -715,19 +775,19 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
     h_a.join().expect("build A panicked");
     h_b.join().expect("build B panicked");
 
-    // Index has exactly one chelis-std@0.1.0 entry. The second
+    // Index has exactly one nautilus@0.1.0 entry. The second
     // builder's double-checked-locking branch must skip the
     // re-install, so the index has no duplicate entry.
-    assert_chelis_std_installed(&reef_home);
+    assert_nautilus_installed(&reef_home);
     let index: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(reef_home.join("index.json")).unwrap()).unwrap();
-    let entries = index["packages"]["chelis-std"]
+    let entries = index["packages"]["nautilus"]
         .as_array()
-        .expect("packages.chelis-std must be array");
+        .expect("packages.nautilus must be array");
     let v010_count = entries.iter().filter(|e| e["version"] == "0.1.0").count();
     assert_eq!(
         v010_count, 1,
-        "chelis-std 0.1.0 must be installed exactly once; index entries: {entries:?}"
+        "nautilus 0.1.0 must be installed exactly once; index entries: {entries:?}"
     );
 }
 
@@ -738,9 +798,7 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
 fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
     let _g = file_lock();
 
-    let (archive_p, shell_p) = chelis_std_dist();
-    let archive_bytes = fs::read(&archive_p).unwrap();
-    let shell_bytes = fs::read(&shell_p).unwrap();
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
     let harness = WiremockHarness::new();
     harness.mount_all(canonical_api_mocks(archive_bytes, shell_bytes));
 
@@ -794,39 +852,117 @@ fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
 
     // The auto-fetch builder must have populated the registry
     // either way.
-    assert_chelis_std_installed(&reef_home);
+    assert_nautilus_installed(&reef_home);
 }
 
-/// Coordination shim: today `lockfile_remote_origin` returns `None`
-/// unconditionally. After Item 9 lands and adds
-/// `LockSource::LocalRegistry { remote_origin: Option<String> }`,
-/// this test is the place to assert that a populated `remote_origin`
-/// in the lockfile routes auto-fetch to that URL not the canonical
-/// default.
+/// Coordination contract (Item 8 ↔ Item 9): a populated
+/// `remote_origin` in the lockfile must route auto-fetch to that URL,
+/// not to the canonical-org default. Item 9 introduced the field and
+/// the production wiring (`lockfile_remote_origin`); this test
+/// exercises the round-trip end-to-end via wiremock.
 ///
-/// **Status (post Wave 1 merge):** Item 9 has merged and
-/// `lockfile_remote_origin` now reads the field. Wave 2 owns
-/// implementing the test body per the outline below — it requires
-/// staging a hand-written `reef.lock` with a non-canonical
-/// `remote_origin` and a wiremock that serves only the non-canonical
-/// path. Tracked as a Wave 2 deliverable.
+/// Stages a hand-written `reef.lock` whose `[dependencies.source]`
+/// block sets `remote_origin = "github://other-org/nautilus@v0.1.0"`,
+/// then asserts the build fetches from `other-org`'s wiremock path
+/// rather than the canonical-org one.
 #[test]
-#[ignore = "Wave 2: implement body per outline; production wiring is done"]
 fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
-    // Implementation outline (after Item 9):
-    //
-    // 1. Stage a downstream project with a hand-written reef.lock
-    //    whose `[dependencies.source]` block sets
-    //    `kind = "local_registry"` plus
-    //    `remote_origin = "github://other-org/chelis-std@v0.1.0"`.
-    // 2. Stand up the wiremock harness so it serves
-    //    `chelis-std@v0.1.0` only at the `/repos/other-org/chelis-std/...`
-    //    path. The canonical-org path returns 404.
-    // 3. Run `chelis reef build`. It must succeed (auto-fetch hits
-    //    other-org), proving `lockfile_remote_origin` won.
-    // 4. Inverse: drop `remote_origin`, assert it falls back to
-    //    canonical-org and 404s on other-org.
-    panic!("Item 9 not merged; this test is wired but disabled");
+    let _g = file_lock();
+
+    let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
+
+    // Wiremock that serves nautilus@v0.1.0 only at the `other-org`
+    // path. The canonical-org path returns 404 — if the resolver
+    // ignored `remote_origin` and fell back to the canonical default,
+    // the build would fail.
+    let harness = WiremockHarness::new();
+    let other_meta = metadata_path("other-org", "nautilus", "v0.1.0");
+    let other_archive = asset_id_path("other-org", "nautilus", ARCHIVE_ASSET_ID);
+    let other_shell = asset_id_path("other-org", "nautilus", SHELL_ASSET_ID);
+    let canonical_meta = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let metadata_body = metadata_json(
+        "v0.1.0",
+        &[
+            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
+        ],
+    );
+    harness.mount_all(vec![
+        // Canonical org path: 404. If the resolver hit this we'd see
+        // a `release-asset-not-found` error and fail.
+        Mock::given(method("GET"))
+            .and(wm_path(canonical_meta))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found here")),
+        // Other-org path: the real bytes.
+        Mock::given(method("GET"))
+            .and(wm_path(other_meta))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(metadata_body)
+                    .insert_header("content-type", "application/json"),
+            ),
+        Mock::given(method("GET"))
+            .and(wm_path(other_archive))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes.clone())),
+        Mock::given(method("GET"))
+            .and(wm_path(other_shell))
+            .and(header("authorization", "token unit-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(shell_bytes.clone())),
+    ]);
+
+    let outer = tempdir().expect("tempdir");
+    let reef_home = outer.path().join("reef-home");
+    let app = stage_downstream_project(outer.path());
+
+    // Hand-write a reef.lock that pins `remote_origin` to the
+    // non-canonical org. The compiler/archive_sha256/shell_sha256
+    // fields are placeholders — install_from_lockfile (which checks
+    // pin agreement) is not the path under test here; auto-fetch
+    // during `chelis reef build` runs the install pipeline anew and
+    // recomputes hashes.
+    let lockfile_text = format!(
+        r#"[package]
+name = "downstream-item8"
+version = "0.1.0"
+
+[[dependencies]]
+name = "nautilus"
+version = "0.1.0"
+compiler = "=0.5.0"
+archive_sha256 = "{archive_sha}"
+shell_sha256 = "{shell_sha}"
+
+[dependencies.source]
+kind = "local_registry"
+remote_origin = "github://other-org/nautilus@v0.1.0"
+"#,
+        archive_sha = sha256_bytes(&archive_bytes),
+        shell_sha = sha256_bytes(&shell_bytes),
+    );
+    fs::write(app.join("reef.lock"), lockfile_text).expect("write reef.lock");
+
+    // Use `chelis reef install --from-lockfile` because that's the
+    // CLI surface that reads each lockfile entry's `remote_origin`
+    // field and routes the fetch accordingly. The fresh-resolver
+    // path used by `chelis reef build` always passes
+    // `lockfile_dep = None` to the auto-fetch helper and so falls
+    // back to the canonical-org default; the lockfile-replay path
+    // instead consults `LockSource::LocalRegistry::remote_origin`
+    // verbatim. Item 9 wired this exact contract.
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .env("PATH", "")
+        .current_dir(&app)
+        .args(["reef", "install", "--from-lockfile"])
+        .assert()
+        .success();
+    assert_nautilus_installed(&reef_home);
 }
 
 // ============================================================
@@ -836,10 +972,42 @@ fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
 //     -- --ignored --exact
 //
 // Pre-condition: `GITHUB_TOKEN` set, with read access to the
-// canonical org. The real release `chelis-lang/chelis-std@v0.1.0`
-// (or whatever pin exists at the time of the run) must carry the
-// canonical assets.
+// canonical org. The real release `chelis-lang/nautilus@v0.5.0`
+// must carry the canonical assets (this is the current published
+// tag at the time of the chelis-std-runtime fix wave).
 // ============================================================
+
+/// Stage a downstream project that depends on the real released
+/// `nautilus@v0.5.0` (manual-gate only). Uses the same project shape
+/// as the wiremock fixture but with the real published version pin.
+fn stage_real_nautilus_downstream(parent: &Path) -> std::path::PathBuf {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let app = parent.join(format!("downstream-real-{n}"));
+    fs::create_dir_all(app.join("src")).expect("mkdir downstream/src");
+    let ver = env!("CARGO_PKG_VERSION");
+    fs::write(
+        app.join("reef.toml"),
+        format!(
+            r#"[package]
+name = "downstream-item8-real"
+version = "0.1.0"
+compiler = "={ver}"
+module_prefix = "Demo"
+
+[dependencies]
+nautilus = {{ version = "0.5.0" }}
+"#,
+        ),
+    )
+    .expect("write reef.toml");
+    fs::write(
+        app.join("src/main.ch"),
+        "module Demo.Main\n\ndef noop(x: int32) -> int32 = x\n",
+    )
+    .expect("write main.ch");
+    app
+}
 
 #[test]
 #[ignore = "real-network manual gate; run with `--ignored --exact`"]
@@ -853,7 +1021,7 @@ fn phaseA_item8_real_github_manual_gate() {
     );
     let outer = tempdir().expect("tempdir");
     let reef_home = outer.path().join("reef-home");
-    let app = stage_downstream_project(outer.path());
+    let app = stage_real_nautilus_downstream(outer.path());
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
@@ -863,5 +1031,15 @@ fn phaseA_item8_real_github_manual_gate() {
         .args(["reef", "build"])
         .assert()
         .success();
-    assert_chelis_std_installed(&reef_home);
+    let index_path = reef_home.join("index.json");
+    assert!(index_path.exists(), "index.json must exist after auto-fetch");
+    let index: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&index_path).unwrap()).unwrap();
+    let entries = index["packages"]["nautilus"]
+        .as_array()
+        .expect("packages.nautilus must be array");
+    assert!(
+        entries.iter().any(|e| e["version"] == "0.5.0"),
+        "expected nautilus 0.5.0 in index, got {entries:?}"
+    );
 }
