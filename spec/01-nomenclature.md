@@ -1,266 +1,787 @@
-# Chelis Language Specification: Nomenclature
+# Nomenclature
 
-**Version:** 0.2.0-draft
-**Status:** Authoritative specification draft
+The Chelis ecosystem's naming conventions, organized by layer. This is
+the canonical source of truth for identifier and filename conventions
+across the chelis monorepo and all downstream shell repos
+(`nautilus`, `coral`, `shoals`, `octant`).
+
+The conventions documented here fall into three categories:
+
+1. **Hard language constraints** (§1). Enforced by the parser, resolver,
+   or backend. Immovable; not subject to style choice.
+2. **Settled conventions** (§§2–9). Project-wide rules. Consistent
+   across the ecosystem. Enforced by the `chelis lint` tool.
+3. **Resolved decisions** (§11). Architectural questions surfaced
+   during the May 2026 ecosystem naming pass and now closed. Recorded
+   with their resolution so the rationale is visible.
+
+A standalone lint tool (`chelis lint`) verifies adherence to the
+settled conventions in §§2–9. CI runs it as a gate on every PR. Any
+deviation that isn't a hard language constraint is a lint failure.
 
 ---
 
-This document defines the current core terminology used throughout the Chelis specs.
-It deliberately focuses on settled, active meanings.
-Historical terminology and superseded proposals are kept out of this glossary.
+## 1. Hard language constraints
 
-## 1. Syntax Layers
+The parser, resolver, and backends enforce these. Style choices live
+inside them.
 
-### Surf
+### 1.1 Surf identifier grammar
 
-The human-facing syntax of Chelis.
-Surf is stored in `.ch` files and is meant for reading, review, and supervision.
-Surf includes sugar such as infix operators, pipes, pattern matching, and ergonomic type
-annotations.
+Surf identifiers split on first-character case at the lexer
+(`crates/chelis-surf/src/lexer.rs`):
 
-### Deep
+- Lowercase-leading → `Ident`. Used for values, functions, parameters,
+  dimensions.
+- Uppercase-leading → `TypeIdent`. Used for types, ADT constructors,
+  module-ladder components.
 
-The canonical machine-facing syntax of Chelis.
-Deep is stored in `.dp` files and is the source of truth for the compiler.
-Every Deep node has the canonical shape `(tag {} children...)`.
+Surf identifier charset is `[A-Za-z_][A-Za-z0-9_]*`. ASCII alphanumeric
+plus underscore. **No hyphens.**
 
-### Canonical Form
+### 1.2 Module-path lookup
 
-The unique printed form of a Deep program.
-Canonical printing normalizes structure and metadata placement so the same AST always
-prints the same way.
-The default canonical text is width-aware pretty Deep with 2-space indentation; the CLI
-may also expose non-canonical flat output for explicit machine pipelines.
+`module Foo.Bar` resolves to `foo/bar.ch` (relative to the package's
+`src/`). The desugarer lowercases each PascalCase component and joins
+with `/`. Consequence: `.ch` filenames are forced lowercase or
+snake_case to be importable.
 
-## 2. File and Artifact Terms
+### 1.3 Reserved keywords
 
-### `.ch`
+23 reserved Surf keywords, all lowercase:
 
-Surf source file.
+```
+def sig type dim macro match with fn module import
+if then else grad vmap jit realize copy tensor cast
+export par true false
+```
 
-### `.dp`
+Plus 7 reserved-for-Phase-2:
 
-Deep source file.
+```
+effect handler perform resume borrow where do
+```
 
-### `.chb`
+### 1.4 Deep tag vocabulary
 
-Binary Shell metadata artifact for the Reef package system.
-The name and role are settled; the full on-disk format is still implementation-owned.
+Closed vocabulary, hardcoded in `crates/chelis-deep/src/validate.rs`
+and emitted by `crates/chelis-deep/src/printer.rs`. Authoritative list
+in `spec/03-deep-syntax.md:262+`.
 
-### Shell
+- **Single-token tags are bare lowercase**: `app`, `var`, `lit`, `def`,
+  `sig`, `module`, `import`, `dim`, `deftype`, `variant`, `field`,
+  `arm`, `meta`.
+- **Compound tags use hyphens as the compound separator**: `t-fn`,
+  `t-prim`, `t-tensor`, `t-var`, `pat-var`, `pat-lit`, `pat-ctor`,
+  `d-name`, `d-var`, `d-lit`.
 
-A package or compiled unit in the Reef ecosystem.
-The term is ecosystem-facing and broader than a single file format.
+The vocabulary is closed and not user-controlled. The hyphen form
+exists deliberately so the compound names read with visual structure;
+see §1.5 for the corresponding grammar consequence.
 
-## 3. Ecosystem Names
+### 1.5 Deep symbol grammar
 
-### Reef
+Deep `Symbol` lexer accepts `[A-Za-z_][A-Za-z0-9_-]*`. Hyphens are
+admitted so the closed compound-tag vocabulary in §1.4 can use them as
+the compound separator.
 
-The Chelis package ecosystem and registry surface.
-The first shipped cut is local-first.
+The Surf-vs-Deep hyphen asymmetry is intentional structure, not a
+defect: Surf is the human authoring surface where operator ambiguity
+rules out hyphens; Deep is the compiler IR where compound tag names
+follow a deliberate convention. User-defined Deep symbols (variable
+names, function names) originate from Surf desugaring and inherit
+Surf's no-hyphen rule by construction — there is no path by which a
+hyphenated user symbol can enter Deep today.
 
-### Tide
+The corresponding lint rule (§12) enforces the narrower invariant:
+any Deep `Symbol` that is not in the closed tag vocabulary of §1.4
+must satisfy the Surf identifier charset `[A-Za-z_][A-Za-z0-9_]*`.
+The tag vocabulary is the allowlist; everything else passes through
+the same constraint Surf imposes.
 
-The interactive developer-facing layer for Chelis.
-In Phase 0i this means the REPL plus related CLI commands.
-In later phases it expands to include agent-facing APIs and tooling.
+### 1.6 Formatter behavior
 
-### Cove
+`chelis fmt` does not rewrite identifier case. Mixed styles survive
+round-trips. The formatter is not the place to enforce style rules;
+the lint is.
 
-The planned terminal UI environment built on top of Tide-era compiler services.
+### 1.7 Backend symbol emission
 
-### `reef.toml`
+C and HIP backends emit user names as-is. No symbol mangling, no case
+rewriting. Surf identifiers cross the language boundary literally.
 
-The planned project manifest for the Reef ecosystem.
+---
 
-## 4. Compiler Stages
+## 2. Filesystem and manifest layer
 
-Chelis uses the following stage names:
+### 2.1 Top-level repository directories
 
-### Parse
+**Rule:** kebab-case.
 
-Convert source text into Surf or Deep AST structures.
+Examples: `chelis`, `nautilus`, `coral`, `octant`, `shoals`. Single-word
+repo names stay single-word; multi-word names use hyphens.
 
-### Desugar
+### 2.2 Rust crate directories and `Cargo.toml` `package.name`
 
-Translate Surf AST into Deep AST.
-This is mechanical and syntax-directed.
+**Rule:** kebab-case.
 
-### Check
+Examples: `chelis-backend-c`, `chelis-cli`, `chelis-effects`,
+`chelis-runtime`, `tree-sitter-chelis-surf`.
 
-Type-check Deep AST, infer types, validate dimensions and precision, and produce
-fitness-oriented diagnostics.
+Rust standard hyphen→underscore coercion applies to library names:
+`chelis-python` (package) becomes `chelis_python` (lib symbol). This is
+a Rust language norm. See §11.2 for the orchestrator decision to keep
+this shoreline as documentation rather than rename.
 
-### Lower
+### 2.3 `.rs` module files
 
-Translate typed Deep AST into the RISC DAG.
+**Rule:** snake_case (Rust standard).
 
-### Transform
+Examples: `parser.rs`, `lexer.rs`, `span_merge.rs`, `optimize.rs`,
+`pipeline.rs`, `phase_a_item6_from_github.rs`.
 
-Apply DAG-to-DAG rewrites such as `grad`, `vmap`, and optimization passes.
+### 2.4 `.ch` (Surf) source files
 
-### Emit
+**Rule:** lowercase or snake_case (forced by §1.2).
 
-Translate the DAG into backend-specific source code such as C or future HIP kernels.
+Examples: `linalg.ch`, `pricing.ch`, `pattern_matching.ch`, `mlp.ch`,
+`cubic_hermite.ch`. Never PascalCase, kebab, or mixed-case.
 
-### Compile
+### 2.5 `.dp` (Deep) source files
 
-Invoke external toolchains where needed to produce runnable artifacts from emitted code.
+**Rule:** snake_case.
 
-### Evaluate
+Deep is generated, not authored. Test fixtures and translator outputs
+follow snake_case naming. Examples: `simple_def.dp`, `hello_tensor.dp`,
+`call_price.dp`.
 
-Execute the RISC DAG directly through the IR evaluator.
-This is the planned default interactive execution path.
+### 2.6 Reef package manifests
 
-## 5. CLI Terms
+**Rule:** Package `name` is kebab-case; `module_prefix` is PascalCase.
 
-The current command vocabulary used across docs is:
+Examples:
 
-- `chelis build`
-- `chelis check`
-- `chelis deep`
-- `chelis surf`
-- `chelis eval`
-- `chelis tide`
-- `chelis tide serve`
-- `chelis tide mcp`
-- `chelis tide lsp`
-- `chelis fmt`
-- `chelis validate`
-- `chelis cove`
+| Package         | `name`         | `module_prefix` |
+|-----------------|----------------|-----------------|
+| chelis-std      | `chelis-std`   | `Std`           |
+| nautilus        | `nautilus`     | `Nautilus`      |
+| coral           | `coral`        | `Coral`         |
+| shoals          | `shoals`       | `Shoals`        |
+| octant          | `octant`       | `Octant`        |
 
-Some commands are planned rather than already implemented.
-This glossary defines the names, not their implementation status.
+The `module_prefix` form is forced by Surf's case-split rule (§1.1):
+identifiers must be uppercase-leading to be module-path components.
+The short prefix `Std` is preferred over `ChelisStd` for the runtime
+package.
 
-### `chelis build`
+### 2.7 Cross-shell dependency keys
 
-Run the production compilation path through code generation.
-Today that means Surf or Deep input through type checking, lowering, C emission, and
-runtime artifact generation for external native compilation.
+**Rule:** kebab-case (matches the package `name`), with semantic-version
+strings.
 
-### `chelis check`
+```toml
+[dependencies]
+chelis-std = { version = "0.1.0" }
+nautilus   = { version = "0.5.0" }
+coral      = { version = "0.5.0" }
+```
 
-Run the front-end and type-checking path only, producing fitness-oriented diagnostics.
+### 2.8 Python files
 
-### `chelis deep`
+**Rule:** snake_case (PEP 8 throughout).
 
-Print the canonical Deep form of Surf input.
-The default output is pretty-printed canonical Deep; `--flat` is the explicit escape
-hatch for flat per-form output with top-level form separation preserved.
+Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
+`validate_book_examples.py`.
 
-### `chelis surf`
+### 2.9 Shell scripts
 
-Best-effort decompile Deep back into Surf.
+**Rule:** Don't write them. Project policy (`CLAUDE.md` Scripting
+Language Policy) prohibits shell scripts in favor of Python. Existing
+shell scripts must be ported.
 
-### `chelis eval`
+### 2.10 CI workflow filenames
 
-Evaluate an expression through the IR evaluator without going through C compilation.
+**Rule:** lowercase, no separator.
 
-### `chelis tide`
+Examples: `ci.yml`, `release.yml`, `nightly.yml`. Identical across all
+five ecosystem repos.
 
-Launch the interactive REPL-oriented mode.
+### 2.11 Hidden config conventions
 
-### `chelis tide serve`
+| Path                       | Convention                                                  |
+|----------------------------|-------------------------------------------------------------|
+| `.github/workflows/*.yml`  | lowercase no-separator                                      |
+| `.claude/skills/<name>/`   | kebab-case                                                  |
+| `.claude/commands/*.md`    | kebab-case                                                  |
+| `.claude/skills/*/SKILL.md`| SCREAMING_SNAKE_CASE (literal filename, see §8.3)           |
 
-Launch the Tide HTTP/JSON compiler service.
+### 2.12 Tree-sitter grammars
 
-### `chelis tide mcp`
+**Rule:** kebab-case crate names. Two parallel grammars:
+`tree-sitter-chelis-surf` and `tree-sitter-chelis-deep`.
 
-Launch the Tide MCP server on stdio.
+---
 
-### `chelis tide lsp`
+## 3. Identifier conventions: Surf
 
-Launch the Tide LSP server on stdio.
+### 3.1 Types and ADT constructors
 
-### `chelis fmt`
+**Rule:** PascalCase. Forced by Surf's case-split (§1.1).
 
-Format Surf or Deep code using the compiler-owned canonical style.
-`--check` verifies canonical formatting without rewriting the file.
+Examples: `Frame`, `Column`, `GroupedFrame`, `Hamt`, `KeyValue`,
+`YieldCurve`, `OrderBook`, `Decimal`, `Tokenizer`, `Json`, `JsonInt`,
+`JsonObject`, `AggSum`, `RoundHalfEven`, `Activation`, `Relu`,
+`Sigmoid`.
 
-### `chelis validate`
+ADT constructors follow the same rule: `Some`, `None`, `Ok`, `Err`,
+`Empty`, `Leaf`, `Collision`.
 
-Validate Surf or Deep syntax against the executable grammar conformance tool.
-Supported modes are `--surf`, `--deep`, and `--desugar`.
+### 3.2 Functions and values
 
-### `chelis cove`
+**Rule:** snake_case.
 
-Launch the Cove terminal coding environment.
+Examples: `predict`, `loss`, `inner_product`, `matvec`, `from_pairs`,
+`with_column`, `rolling_mean`, `golden_section_search`, `simpsons`.
 
-## 6. Type-System Terms
+### 3.3 Parameters
 
-### ADT
+**Rule:** Bimodal. Two registers, picked by the surrounding code's idiom.
 
-Algebraic data type with constructors and exhaustive pattern matching.
+- **Math-heavy code** (Shoals, Nautilus): single-letter parameters
+  match mathematical notation. `s` (spot), `k` (strike), `r` (rate),
+  `sigma`, `t`, `s0`, `mu`, `a`, `b`, `m`, `n`, `i`, `j`, `alpha`.
+- **Data-processing code** (Coral, Std): descriptive snake_case.
+  `col`, `col_name`, `df`, `values`, `entries`, `idx`, `hash`.
 
-### HM
+The bimodality is intentional: math code reads better in math notation,
+data code reads better in descriptive prose. **No camelCase parameters
+anywhere.** The narrow exception is index-plus-math-symbol composites
+(`dW`, `tA`, `c1I`) which are still single-token identifiers under
+Surf's lexer.
 
-Hindley-Milner inference as the basis of the Chelis type system.
+### 3.4 Dimensions
 
-### Named Dimensions
+**Rule:** snake_case or single letter. No PascalCase or camelCase.
 
-Tensor dimensions identified by names such as `batch`, `seq`, or `hidden`.
-They participate in type checking and do not silently reorder or broadcast.
+Examples: `seq`, `vocab`, `classes`, `batch`, `out_dim`, `hidden`,
+`features`, `n`, `b`, `m`, `k`, `p`.
 
-### Precision Types
+---
 
-Explicit numeric base types such as `f32`, `f64`, `bf16`, `int32`, and `bool`.
-Precision never changes implicitly.
+## 4. Identifier conventions: Rust
 
-### Fitness Score
+**Rule:** Rust standard.
 
-A graded compiler output describing how close a program is to type-correctness, together
-with structured diagnostics and repair suggestions.
+- Types and traits: `PascalCase`. Examples: `OctantError`, `SourceId`,
+  `Span`, `FunctionRegistry`, `MetaMap`, `MetaExpr`.
+- Functions and modules: `snake_case`. Examples: `parse_module`,
+  `lower_to_dag`, `emit_c`.
+- Constants: `SCREAMING_SNAKE_CASE`. Examples: `DEFAULT_MODEL`,
+  `API_URL`, `RETRYABLE_CODES`, `FALLBACK_CHAIN`.
 
-## 7. IR and Transform Terms
+No deviations.
 
-### RISC DAG
+---
 
-Chelis's typed intermediate representation after lowering.
-Programs become DAGs of a small primitive tensor-op set.
+## 5. Identifier conventions: Python
 
-### RISC Primitive
+**Rule:** PEP 8.
 
-One of the small set of tensor primitives that backends and transform passes operate on.
-See `spec/05-risc-primitives.md` for the authoritative list and semantics.
+- Functions and modules: `snake_case`.
+- Classes: `PascalCase`.
+- Constants: `SCREAMING_SNAKE_CASE`.
 
-### Adjoint
+Examples: `load_api_key`, `chelis_version`, `build_and_compile_canary`,
+`PDFLinkExtractor`, `DEFAULT_MODEL`.
 
-The reverse-mode differentiation rule for a primitive operation.
+No deviations in Chelis-authored Python.
 
-### `grad`
+---
 
-Reverse-mode automatic differentiation as a DAG rewrite.
+## 6. Module conventions
 
-### `vmap`
+### 6.1 Module ladder structure
 
-Vectorization as a DAG rewrite over an added batch dimension.
+**Rule:** Modules form a ladder rooted at the shell's `module_prefix`.
+Each component is a single PascalCase word or a Title-case compound.
 
-### `jit`
+Examples: `Nautilus.LinAlg`, `Coral.Frame`, `Shoals.Pricing`,
+`Std.Tensor`, `Std.Loss.CrossEntropy`, `Std.Nn.RmsNorm`.
 
-A future compilation-boundary marker.
-It remains part of the language design, but it does not imply a standalone JIT backend
-plan.
+### 6.2 Compound styling: Title-case, not ALL-CAPS
 
-## 8. Backend Terms
+**Rule:** When a module name component is a compound (multi-word or
+abbreviation), use Title-case for each word. Do not use ALL-CAPS for
+abbreviations.
 
-### Backend
+Examples:
 
-A code generation target for the lowered DAG.
+| Correct        | Incorrect       | Notes                          |
+|----------------|-----------------|--------------------------------|
+| `Hamt`         | `HAMT`          | hash-array-mapped trie         |
+| `Io`           | `IO`            | input/output                   |
+| `KlDiv`        | `KLDiv`         | KL divergence                  |
+| `Json`         | `JSON`          | JSON format                    |
+| `Lstm`         | `LSTM`          | recurrent network              |
 
-### C Backend
+The same rule applies to type constructors that name the abbreviation:
+the `Hamt` constructor is correct; `HAMT` would be the violation.
 
-The current reference backend.
-It emits portable C, uses BLAS where appropriate, and parallelizes loops with OpenMP.
+### 6.3 Module-name PascalCase per component
 
-### HIP Backend
+**Rule:** Every component of a module ladder is PascalCase, including
+each word inside a compound. Lowercase-after-first compounds are
+violations.
 
-The planned Phase 1 GPU path.
-Chelis will generate HIP kernel strings and compile them via `hiprtc`.
+Examples:
 
-### StableHLO Backend
+| Correct                          | Incorrect                       |
+|----------------------------------|---------------------------------|
+| `Nautilus.ExampleRootFind`       | `Nautilus.Examplerootfind`      |
+| `Nautilus.ExampleOdeDemo`        | `Nautilus.Exampleodedemo`       |
+| `Nautilus.ApiSmoke`              | `Nautilus.Apismoke`             |
+| `Demo.HelloTensor`               | `Demo.Hellotensor`              |
 
-A later integration backend for TPU and XLA-family interoperability.
+This rule is the one already documented in `spec/02-surf-syntax.md:79`
+("Module names are PascalCase. No nesting within a file.") applied
+consistently to every component.
 
-### FX Backend
+### 6.4 The runtime vs shell distinction
 
-A later integration backend for PyTorch ecosystem interoperability.
+`chelis-std` is the language **runtime**, not a shell. It version-marches
+with the compiler, ships bundled with the toolchain, and cannot be
+substituted independently. The reef lockfile records it as
+`LockSource::Bundled`. See `spec/design/chelis_canonical_reference.md`.
+
+`chelis-runtime` is a separate Rust crate at `chelis/crates/chelis-runtime/`
+supporting the C backend. Different artifact, different role.
+
+The ecosystem's other reef packages are **shells**: distributable
+libraries that build on `chelis-std`. The currently shipped shells
+are `nautilus`, `coral`, `shoals`, and `octant`. Designed but not
+yet shipped: `school`, `darwin`, `hull`, `beacon`.
+
+---
+
+## 7. Function naming patterns
+
+### 7.1 Prefix-namespacing policy
+
+**Rule:** Private/helper functions in a module get a prefix that's a
+shorthand for the module's domain. Public functions don't.
+
+The prefix is applied uniformly within the module to all internal
+helpers. The prefix is short (two-to-four letters), distinctive, and
+derived from the module's name or its primary subject matter.
+
+Examples:
+
+```chelis
+// Nautilus.LinAlg: internal helpers prefixed with `la_`
+def la_vec_sub(a, b) = ...
+def la_vec_add(a, b) = ...
+def la_basis_n_f32(n) = ...
+def la_qr_build_q(...) = ...
+
+// Nautilus.LinAlg: public functions with bare names
+def transpose(m) = ...
+def matmul_wrap(a, b) = ...
+def gram(m) = ...
+def qr_decompose(m) = ...
+```
+
+The rule covers both directions:
+
+- A public function should not carry a module prefix. `bs_call_scalar`
+  in `Shoals.Pricing` violates the rule because (a) it's public and
+  (b) the prefix `bs_` is not the module's shorthand. The fix is
+  `call_scalar`.
+- A private helper should carry the prefix uniformly. If a `Nautilus.LinAlg`
+  helper exists without the `la_` prefix, it's either a public function
+  (rule: drop "helper" status) or a violation (rule: add the prefix).
+
+The prefix is a domain shorthand, not the full module name. `Nautilus.LinAlg`
+uses `la_*`; `Coral.Frame` uses no internal prefix today (its private
+helpers, where they exist, would use `frame_*` or similar). The lint
+flags inconsistency within a module: either all internal helpers have
+the prefix or none do.
+
+### 7.2 Type-suffix policy
+
+**Rule:** Type and shape suffixes describe the **element type or
+shape of the principal argument**, never the container or dispatch
+form.
+
+#### Element-type suffixes
+
+`_int`, `_f32`, `_bool`, `_string` indicate that the function is
+monomorphized to that element type. They appear when a function has
+type-specific behavior that wouldn't be captured by HM inference, or
+when the function name benefits from being explicit about the type
+it operates on.
+
+```chelis
+def parse_int(s: string) -> Option[int64] = ...
+def parse_string(s: string) -> string = ...
+def parse_bool(s: string) -> Option[bool] = ...
+```
+
+These suffixes are **not** used on functions that work generically
+over the element type.
+
+#### Shape suffixes
+
+`_scalar`, `_vec` indicate the rank/structure of the principal
+argument. `_scalar` is rank-0; `_vec` is rank-1. Not used when the
+function works generically over rank.
+
+```chelis
+def softmax_vec(x: tensor[n, f32]) -> tensor[n, f32] = ...
+def relu_scalar(x: f32) -> f32 = ...
+```
+
+#### Container-form distinction is never a type suffix
+
+If a function operates on a different container type (e.g., a Frame
+column rather than a raw tensor), use a distinct mechanism:
+
+- A `_col` suffix denotes a column-form variant of the same
+  operation, taking a Frame plus a column name.
+- A different module namespace if the function genuinely belongs
+  there (e.g., functions that primarily operate on Frames belong in
+  `Coral.Frame.*`).
+- A different verb if the operation differs structurally.
+
+**Never** overload an element-type suffix to mean "dispatch form."
+
+```chelis
+// Correct
+def is_nan(t: tensor[n, f32]) -> tensor[n, bool] = ...     // tensor variant
+def is_nan_col(f: Frame, name: string) -> tensor[n, bool] = ... // column variant
+
+// Incorrect: `_int` here means "Frame variant taking int column",
+// which conflates element type with dispatch form.
+def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = ...
+```
+
+The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,
+`count_nan_int`, `fill_nan_int`, `drop_nan_int`) is renamed to the
+`*_col` form per this rule. The `_int` was extraneous: column dtype
+is inferred when the column is fetched.
+
+---
+
+## 8. Documentation conventions
+
+### 8.1 Spec files
+
+**Rule:** Numeric prefix + kebab-case for the top-level numbered
+specs in `chelis/spec/`.
+
+```
+00-context.md
+01-nomenclature.md
+02-surf-syntax.md
+...
+12-roadmap.md
+```
+
+### 8.2 Design files
+
+**Rule:** snake_case in `chelis/spec/design/`.
+
+Examples: `phase1a_kernel_codegen.md`, `chelis_canonical_reference.md`,
+`phase3j_pre_release.md`, `grad_eval_host_runtime.md`.
+
+The historical kebab-case minority files (`grad-eval-host-runtime.md`,
+`host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to
+snake_case.
+
+### 8.3 Per-shell `docs/`
+
+**Rule:** snake_case for narrative documents. SCREAMING_SNAKE_CASE for
+status reports.
+
+Narrative documents (architecture descriptions, error-message catalogs,
+extending guides):
+
+```
+architecture.md
+error_messages.md
+extending.md
+supported_subset.md
+```
+
+Status reports (release notes, benchmark results, upstream-bug
+tracking):
+
+```
+STATUS.md
+RELEASES.md
+UPSTREAM_BUGS.md
+BENCHMARK_FINDINGS.md
+EVAL_STARTUP_FINDINGS.md
+```
+
+The SCREAMING_SNAKE convention is grandfathered from the existing
+nautilus/coral practice and applies project-wide for status reports.
+Single-word status-report filenames (`SKILL.md`, `STATUS.md`) follow
+the same SCREAMING_SNAKE rule and collapse visually to looking like
+PascalCase.
+
+### 8.4 Versioned reports
+
+**Rule:** snake_case with version markers in underscored form.
+
+```
+red_team_v0_4_0_pre_tag.md
+red_team_o3.md
+red_team_o4.md
+red_team_pre_v0_1_0.md
+```
+
+The historical kebab+version style (`red-team-v0.2.0-final.md`)
+renames forward.
+
+### 8.5 mdBook book chapters (deliberate exception)
+
+**Rule:** kebab-case. `chelis/docs/book/src/*.md`.
+
+mdBook book chapters expect kebab-case URLs for stability across
+renderers. This is a deliberate exception from the broader
+documentation convention; the rest of the project uses snake_case.
+
+```
+first-program.md
+cli.md
+install.md
+reef.md
+effects.md
+```
+
+---
+
+## 9. Project-cutting conventions
+
+### 9.1 Phase identifiers
+
+**Rule:** lowercase `phase` + digit + lowercase letter.
+
+Established by historical practice (`phase3j`, `phase1a`, `phase5`).
+Phase A artifacts use the same form: `phase_a` in filenames,
+`phase-a` in branch names.
+
+```
+phase_a_item6_from_github.rs    // Rust file (snake)
+feat/phase-a-item6-from-github  // git branch (kebab)
+phase-a-item6                   // commit scope (kebab)
+```
+
+### 9.2 Branch naming
+
+**Rule:** `{type}/{phase-id}-{item-slug-kebab}`.
+
+Type prefixes follow conventional commits (`feat`, `fix`, `test`,
+`docs`, `style`, `chore`, `refactor`).
+
+```
+feat/phase-a-item6-from-github
+fix/phase-a-chelis-std-runtime
+docs/spec-nomenclature-expansion
+```
+
+### 9.3 Commit conventions
+
+**Rule:** Conventional commits.
+
+```
+feat(phase-a-item9): add lockfile remote_origin
+test(phase-a-item8): bootstrap parallel install
+style(reef): rename phaseA tests to phase_a
+docs(spec): expand nomenclature with style rules
+```
+
+### 9.4 CI workflows
+
+**Rule:** Three workflow files per repo, identical names across all
+five repos.
+
+```
+.github/workflows/ci.yml
+.github/workflows/release.yml
+.github/workflows/nightly.yml
+```
+
+---
+
+## 10. Test naming
+
+### 10.1 Surf test functions
+
+**Rule:** `def test_*` for unit tests; `def example_*` for illustrative
+example functions in the same files.
+
+```chelis
+def test_softmax_sums_to_one() = ...
+def example_simple_inference() = ...
+```
+
+### 10.2 Rust test functions
+
+**Rule:** snake_case, descriptive.
+
+```rust
+#[test] fn roundtrip_simple_def() { ... }
+#[test] fn span_id_unicode_preserved_bit_for_bit() { ... }
+#[test] fn dim_params_produce_d_var() { ... }
+```
+
+### 10.3 Insta snapshot tests
+
+**Rule:** `{context}__{section}__{test_name}.snap` with snake_case
+components.
+
+```
+cli__error_format__parse_error_format.snap
+cli__error_format__type_error_format.snap
+parser__roundtrip__simple_def.snap
+```
+
+Insta's double-underscore separator is the canonical separator for
+snapshot test files across the ecosystem.
+
+---
+
+## 11. Resolved decisions
+
+These were open architectural questions during the May 2026 ecosystem
+naming pass. Each is now closed with the orchestrator's resolution
+recorded. The lint enforces the resolved rule.
+
+### 11.1 Surf hyphen support — resolved: keep Deep grammar; document asymmetry as intentional
+
+**Status:** closed.
+
+The original framing surfaced this as a "latent round-trip risk":
+Deep's `Symbol` lexer accepts hyphens (`[A-Za-z_][A-Za-z0-9_-]*`);
+Surf does not. A first-pass plan proposed tightening the Deep lexer
+to reject hyphens.
+
+That plan was based on incorrect facts. The Deep tag vocabulary
+(§1.4) deliberately uses hyphens as the compound separator: `t-fn`,
+`t-prim`, `pat-ctor`, `pat-var`, `d-name`, `d-var`, `d-lit`. The
+hardcoded list lives in `crates/chelis-deep/src/validate.rs`; the
+printer at `crates/chelis-deep/src/printer.rs` emits these hyphenated
+forms; checked-in `.dp` fixtures depend on parsing them. Closing the
+loose side of the asymmetry would have required renaming the entire
+compound-tag vocabulary and breaking every checked-in `.dp` fixture
+plus the round-trip lexer test that explicitly asserts `x-y` lexes
+as a single Symbol.
+
+The actual resolution: **the Surf-vs-Deep hyphen asymmetry is by
+design and documented as such.** Surf is the human authoring surface
+where operator ambiguity rules out hyphens. Deep is the compiler IR
+where compound tag names follow a deliberate naming convention that
+gives the closed vocabulary its visual structure. User-defined Deep
+symbols originate from Surf desugaring and inherit Surf's no-hyphen
+rule by construction; there is no path by which a hyphenated user
+symbol can enter Deep today.
+
+The lint rule (§12) captures the actual narrower invariant: any Deep
+`Symbol` that is not in the closed tag vocabulary of §1.4 must
+satisfy the Surf identifier charset `[A-Za-z_][A-Za-z0-9_]*`. This
+rule fires if a future Deep emitter accidentally produces a
+hyphenated user symbol while leaving the legitimate compound-tag use
+untouched.
+
+The three candidate resolutions considered, for historical
+visibility:
+
+- (a) Allow hyphens in Surf with mandatory whitespace around `-`.
+  Breaking parse change; rejected.
+- (b) Allow hyphens in Surf in restricted positions. Complex;
+  rejected.
+- (c) Tighten the Deep lexer to reject hyphens. Initially preferred
+  on the assumption that no hyphenated Deep symbols existed. Rejected
+  once evidence showed the entire compound-tag vocabulary uses
+  hyphens.
+- (d, chosen) Document the asymmetry as intentional structure; keep
+  both lexers as-is; rely on the user-symbol-charset lint rule.
+
+### 11.2 Rust hyphen→underscore lib name — resolved: documented shoreline crossing
+
+**Status:** closed.
+
+`chelis-python` package name maps to `chelis_python` lib name per
+Rust standard hyphen→underscore coercion. The orchestrator
+resolution: **document this as a known shoreline crossing imposed
+by Rust language norms; no rename.** §2.2 records the rule;
+the implicit hyphen→underscore in lib symbols is the Rust
+standard, not a project-specific deviation.
+
+The two alternatives considered:
+
+- Rename the package name to `chelis_python` so package and lib
+  align (kebab → snake migration). Would have set precedent for the
+  kebab convention being violated for Rust packages. Rejected.
+- Rename the lib name to break the Rust standard (not actually
+  possible without hacks). Rejected.
+
+---
+
+## 12. Enforcement
+
+The `chelis lint` tool reads source files and reports violations of
+the settled conventions in §§2–10 with `file:line` references, plus
+the Deep user-symbol rule from §1.5 / §11.1. The lint runs as a CI
+gate on every repo. Violations are blocking unless explicitly waived
+in the style guide (e.g., the mdBook exception in §8.5).
+
+The lint is the persistent artifact: it prevents drift after a
+cleanup pass. Without the lint, fixing today's outliers does not
+prevent tomorrow's. CI invokes it via:
+
+```
+cargo run -p chelis-lint --
+```
+
+A successful run reports zero violations across every file in the
+repo. A failing run lists the violations, each with the rule
+reference and the file:line of the offending identifier or filename.
+
+Exception entries inside the lint must carry a rule-id cross-reference
+to a section of this document, not free-form prose. The schema:
+
+```rust
+struct Exception {
+    pattern: GlobPattern,        // file or identifier glob the exception applies to
+    rule_id: RuleId,             // the rule being waived
+    cross_ref: SectionRef,       // section in spec/01-nomenclature.md that explains why
+}
+```
+
+`cross_ref` is mandatory; entries without a resolvable spec section
+are build-time errors. This discipline closes the loophole that lets
+post-hoc justifications accrete in the lint config: every waiver has
+to point at a documented rule that explicitly carves out the case.
+
+---
+
+## 13. References
+
+- `spec/02-surf-syntax.md`: Surf grammar, module-path mapping,
+  reserved words.
+- `spec/03-deep-syntax.md`: Deep tag vocabulary, symbol grammar.
+- `spec/design/chelis_canonical_reference.md`: runtime-vs-shell
+  distinction.
+- `crates/chelis-surf/src/lexer.rs`: Surf identifier grammar.
+- `crates/chelis-deep/src/lexer.rs`: Deep symbol grammar.
+- `crates/chelis-deep/src/validate.rs`: closed Deep tag vocabulary.
+- `crates/chelis-deep/src/printer.rs`: Deep tag emission.
+- `crates/chelis-surf/src/format.rs`: formatter behavior re:
+  identifier case.
+- `crates/chelis-backend-c/src/emit.rs`: backend symbol emission.
+- `crates/chelis-lint/`: lint implementation.
+- `docs/ecosystem_naming_snapshot.md`: empirical snapshot of the
+  May 2026 ecosystem state and the cleanup inventory.
+- `CLAUDE.md` Surf Style Guide: Surf code-style guidance.
