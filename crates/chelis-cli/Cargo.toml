@@ -36,6 +36,7 @@ walkdir = "2"
 assert_cmd = "2"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 chelis-shell.workspace = true
+chelis-std-bundle.workspace = true
 predicates = "3"
 sha2 = "0.10"
 tar = "0.4"
