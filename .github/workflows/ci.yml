@@ -39,14 +39,13 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Naming lint (chelis lint)
-        # Per spec/01-nomenclature.md, `chelis lint` enforces ecosystem
-        # naming conventions. Currently informational while Phase 3
-        # cleanup is in flight: the chelis monorepo still has snapshot
-        # §8 #1, #4, #9 violations and Std.IO sibling-sweep finds.
-        # Switch to `--check` once Wave A lands (the post-sweep state
-        # should report zero violations).
-        run: cargo run -p chelis-cli --bin chelis --quiet -- lint .
+      - name: Naming lint (chelis lint --check)
+        # Per spec/01-nomenclature.md §12, `chelis lint` enforces
+        # ecosystem naming conventions. Gating mode (--check exits
+        # nonzero on any violation): the post-Wave-A/B/C/red-team
+        # state of chelis main reports zero violations across all 9
+        # rules. New violations introduced by a PR fail this step.
+        run: cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
 
       - name: Unit tests
         run: cargo test --workspace --lib

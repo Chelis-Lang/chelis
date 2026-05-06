@@ -167,6 +167,59 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     "Safetensors",
 ];
 
+/// Known PascalCase compound module/type names in the Chelis ecosystem.
+/// A component that matches the *lowercase-after-first* form of one of
+/// these (e.g., `Linalg` for `LinAlg`, `Groupby` for `GroupBy`) is a
+/// definite §6.3 violation — the upstream is using the compound form,
+/// the local copy isn't. This catches the sibling-sweep mutation case
+/// that the long-lowercase-run heuristic misses.
+const KNOWN_PASCAL_COMPOUNDS: &[&str] = &[
+    "LinAlg",
+    "GroupBy",
+    "RmsNorm",
+    "CurveFit",
+    "OrderBook",
+    "CrossEntropy",
+    "ApiSmoke",
+    "ExampleRootFind",
+    "ExampleOdeDemo",
+    "ExampleDistributions",
+    "ExampleIntegration",
+    "ExampleOptim",
+    "HelloTensor",
+    "KeyValue",
+    "ColumnType",
+    "GroupedFrame",
+    "AggSum",
+    "AggMean",
+    "AggMax",
+    "AggMin",
+    "AggCount",
+    "RoundUp",
+    "RoundDown",
+    "RoundHalfEven",
+    "RoundHalfUp",
+];
+
+/// If `component` is the lowercase-after-first form of a known PascalCase
+/// compound, return the canonical compound. Otherwise `None`.
+///
+/// `LinAlg` → first-cap-form is `Linalg`. So `is_compound_lowercase_form("Linalg")`
+/// returns `Some("LinAlg")`.
+fn known_compound_lowercase_form(component: &str) -> Option<&'static str> {
+    for compound in KNOWN_PASCAL_COMPOUNDS {
+        let first_cap_form: String = compound
+            .chars()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c } else { c.to_ascii_lowercase() })
+            .collect();
+        if component == first_cap_form.as_str() && component != *compound {
+            return Some(compound);
+        }
+    }
+    None
+}
+
 /// Return `Some(reason)` if the component is a §6.3 violation, `None` if
 /// it's clean. Reasons are intended to be human-readable explanations of
 /// what the rule flagged.
@@ -176,8 +229,20 @@ fn component_violation(s: &str) -> Option<&'static str> {
     if !s.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         return Some("does not start with an uppercase letter");
     }
+    // Allowlist short-circuits before the compound-lowercase-form check.
+    // Some allowlisted single-word names (e.g., `Orderbook`, accepted as
+    // the canonical Shoals.Orderbook module name) collide with the
+    // lowercase-form of a known compound (`OrderBook` is in
+    // KNOWN_PASCAL_COMPOUNDS). The single-word allowlist wins.
     if KNOWN_SINGLE_WORDS.contains(&s) {
         return None;
+    }
+    // Targeted check for the sibling-sweep mutation case: known PascalCase
+    // compounds with their internal capital flattened (e.g., `Linalg` for
+    // `LinAlg`). Catches violations the long-lowercase-run heuristic
+    // misses for shorter compounds.
+    if known_compound_lowercase_form(s).is_some() {
+        return Some("matches the lowercase-after-first form of a known PascalCase compound");
     }
     // Heuristic: a component with no internal capital and a long lowercase
     // run (>= 7 lowercase letters in a row) is suspicious. A real single
@@ -236,6 +301,36 @@ mod tests {
     #[test]
     fn flags_hellotensor() {
         assert!(component_violation("Hellotensor").is_some());
+    }
+
+    #[test]
+    fn flags_known_compound_lowercase_form_linalg() {
+        // §6.3 sibling-sweep: `Linalg` is the flattened form of `LinAlg`.
+        // The 7-char threshold misses it (5 lowercase only) but the
+        // known-compound check catches it.
+        assert!(component_violation("Linalg").is_some());
+    }
+
+    #[test]
+    fn flags_known_compound_lowercase_form_groupby() {
+        assert!(component_violation("Groupby").is_some());
+    }
+
+    #[test]
+    fn flags_known_compound_lowercase_form_rmsnorm() {
+        assert!(component_violation("Rmsnorm").is_some());
+    }
+
+    #[test]
+    fn flags_known_compound_lowercase_form_curvefit() {
+        assert!(component_violation("Curvefit").is_some());
+    }
+
+    #[test]
+    fn accepts_canonical_compound_form() {
+        assert_eq!(component_violation("LinAlg"), None);
+        assert_eq!(component_violation("GroupBy"), None);
+        assert_eq!(component_violation("RmsNorm"), None);
     }
 
     #[test]

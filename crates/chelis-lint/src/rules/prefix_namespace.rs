@@ -153,7 +153,27 @@ const COMMON_VERB_PREFIXES: &[&str] = &[
     // precomputed-sqrt constants, `two_*` is "two" math constants. None
     // are domain-shorthand sub-namespaces.
     "nan", "sqrt", "two", // Domain verbs (shared meaning, not shorthand)
-    "put", "call", // Type prefixes (orthogonal to domain shorthand)
+    "put", "call",
+    // Time/date accessor verbs in Std.Time — `date_*`/`day_*`/`days_*`
+    // are coherent date-handling helpers parallel to `hour_*`/`year_*`
+    // patterns elsewhere.
+    "date", "day", "days", "year", "month", "hour", "min", "sec",
+    // Aggregation verbs in dataframe code (Coral.Frame, Coral.GroupBy):
+    // `sum_*`, `mean_*`, `max_*`, `min_*`, `count_*` (already), `mask_*`.
+    "mean", "max", "mask", "sum",
+    // Data-structure operation verbs (Coral.Frame internals):
+    // `list_*`, `key_*`, `hash_*`, `enum_*`, `char_*`, `ints_*`, `agg_*`,
+    // `melt_*`, `csv_*`, `json_*`. Each names a coherent op-on-X family.
+    "list", "key", "hash", "enum", "char", "ints", "agg", "melt", "csv", "json",
+    // Join / set-relation idioms (Coral.GroupBy / Coral.Join):
+    // `left_*`, `right_*`, `inner_*`, `outer_*`, `full_*`, `join_*`.
+    "left", "right", "inner", "outer", "full", "join",
+    // RNG seed accessor verbs in Std.Tokenizer.
+    "seed",
+    // Example-module-only fixture-helper prefixes (Nautilus.ExampleODEDemo,
+    // Nautilus.ExampleOptim): `eo_*` and `eop_*` build per-example
+    // problem fixtures.
+    "eo", "eop", // Type prefixes (orthogonal to domain shorthand)
     "int", "f32", "f64", "i32", "i64", "u32", "u64", "u8", "str", "vec", "ref", "ptr",
 ];
 
@@ -170,7 +190,8 @@ const MODEL_NAMESPACE_PREFIXES: &[&str] = &[
     // Numerical methods (Shoals.Properties.Greeks; Nautilus.CurveFit; Nautilus.LinAlg)
     "fd", "lm", "cg",
     // Mathematical-object families (Nautilus.Special; Nautilus.Distributions; Nautilus.LinAlg)
-    "airy", "beta", "chi", "det", "eig", "inv", "erf",
+    "airy", "beta", "chi", "det", "eig", "inv", "erf", // Math function families
+    "lamb",
 ];
 
 /// Extract a 2–4 lowercase-letter prefix followed by `_` from a function
