@@ -77,9 +77,9 @@ def main() -> int:
     profile_dir = "debug" if args.debug else "release"
 
     # Step 1: build the chelis CLI.
-    print(f"[1/4] cargo build -p chelis {' '.join(profile_flag)}", file=sys.stderr)
+    print(f"[1/4] cargo build -p chelis-cli {' '.join(profile_flag)}", file=sys.stderr)
     rc = subprocess.run(
-        ["cargo", "build", "-p", "chelis", *profile_flag],
+        ["cargo", "build", "-p", "chelis-cli", *profile_flag],
         cwd=repo,
     ).returncode
     if rc != 0:
