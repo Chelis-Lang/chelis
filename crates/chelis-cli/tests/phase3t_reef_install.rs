@@ -5,14 +5,14 @@
 //! because no `chelis reef install / add / fetch` subcommand existed.
 //!
 //! This file exercises the new `chelis reef install --from-monorepo
-//! <chelis-repo-path> chelis-std=0.1.0` form against the actual
+//! <chelis-repo-path> chelis-std=0.2.0` form against the actual
 //! `packages/chelis-std/dist/` artifacts shipped in this monorepo, with
 //! `CHELIS_REEF_HOME` pointing inside a tempdir for total isolation
 //! from the developer's real `~/.chelis/reef/`.
 //!
 //! Coverage:
 //!   * Positive: install populates the registry and a downstream
-//!     `chelis check` against `chelis-std = "0.1.0"` returns score 1.
+//!     `chelis check` against `chelis-std = "0.2.0"` returns score 1.
 //!   * Positive (no args): install with no name selectors installs
 //!     every package in the monorepo's `packages/`.
 //!   * Negative: requesting a package that doesn't exist in the
@@ -37,7 +37,7 @@ fn monorepo_root() -> PathBuf {
 
 fn dist_artifacts_present() -> bool {
     let dist = monorepo_root().join("packages/chelis-std/dist");
-    dist.join("chelis-std-0.1.0.chb").exists() && dist.join("chelis-std-0.1.0.tar.zst").exists()
+    dist.join("chelis-std-0.2.0.chb").exists() && dist.join("chelis-std-0.2.0.tar.zst").exists()
 }
 
 #[test]
@@ -71,17 +71,17 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
             "install",
             "--from-monorepo",
             monorepo.to_str().unwrap(),
-            "chelis-std=0.1.0",
+            "chelis-std=0.2.0",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed chelis-std 0.1.0"));
+        .stdout(predicate::str::contains("Installed chelis-std 0.2.0"));
 
     // Post-condition: the registry layout matches what
     // load_registry_package expects.
-    let pkg_dir = reef_home.join("packages/chelis-std/0.1.0");
-    let archive = pkg_dir.join("chelis-std-0.1.0.tar.zst");
-    let shell = pkg_dir.join("chelis-std-0.1.0.chb");
+    let pkg_dir = reef_home.join("packages/chelis-std/0.2.0");
+    let archive = pkg_dir.join("chelis-std-0.2.0.tar.zst");
+    let shell = pkg_dir.join("chelis-std-0.2.0.chb");
     assert!(
         archive.exists(),
         "archive must exist at {}",
@@ -105,7 +105,7 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
         .expect("index.packages.chelis-std must be an array");
     assert_eq!(chelis_std.len(), 1);
     let entry = &chelis_std[0];
-    assert_eq!(entry["version"], "0.1.0");
+    assert_eq!(entry["version"], "0.2.0");
     // `compiler` is whatever the prebuilt shell was built against; it
     // must be a non-empty string.
     let compiler = entry["compiler"].as_str().expect("compiler string");
@@ -134,12 +134,12 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
         format!(
             r#"[package]
 name = "downstream"
-version = "0.1.0"
+version = "0.2.0"
 compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -187,13 +187,13 @@ fn reef_install_from_monorepo_no_args_installs_every_package() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed chelis-std 0.1.0"));
+        .stdout(predicate::str::contains("Installed chelis-std 0.2.0"));
 
     // chelis-std is the only package in `packages/` today, so no-args
     // install must have populated it.
     assert!(
         reef_home
-            .join("packages/chelis-std/0.1.0/chelis-std-0.1.0.chb")
+            .join("packages/chelis-std/0.2.0/chelis-std-0.2.0.chb")
             .exists()
     );
 }
@@ -212,7 +212,7 @@ fn reef_install_from_monorepo_unknown_package_errors_cleanly() {
             "install",
             "--from-monorepo",
             monorepo.to_str().unwrap(),
-            "nonexistent-pkg=0.1.0",
+            "nonexistent-pkg=0.2.0",
         ])
         .assert()
         .failure()
@@ -286,7 +286,7 @@ fn reef_install_respects_chelis_reef_home_isolation() {
             "install",
             "--from-monorepo",
             monorepo.to_str().unwrap(),
-            "chelis-std=0.1.0",
+            "chelis-std=0.2.0",
         ])
         .assert()
         .success();

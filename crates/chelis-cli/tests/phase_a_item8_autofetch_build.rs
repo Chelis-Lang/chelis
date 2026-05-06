@@ -65,7 +65,7 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.5.0"
+compiler = "=0.6.0"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -109,7 +109,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.5.0".to_string(),
+        compiler: "=0.6.0".to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -121,9 +121,9 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
 /// target. No filesystem dependencies; everything is in-memory.
 fn synthetic_nautilus_artifacts() -> (Vec<u8>, Vec<u8>) {
     // Empty deps — nautilus is the leaf in this fixture's graph.
-    let archive = build_test_archive("nautilus", "0.1.0", &[]);
+    let archive = build_test_archive("nautilus", "0.2.0", &[]);
     let archive_sha = sha256_bytes(&archive);
-    let shell = build_test_shell_bytes("nautilus", "0.1.0", &archive_sha);
+    let shell = build_test_shell_bytes("nautilus", "0.2.0", &archive_sha);
     (archive, shell)
 }
 
@@ -158,19 +158,19 @@ fn metadata_json(tag: &str, assets: &[(u64, &str)]) -> String {
 const ARCHIVE_ASSET_ID: u64 = 2001;
 const SHELL_ASSET_ID: u64 = 2002;
 
-/// Build the canonical-API mocks for `chelis-lang/nautilus@v0.1.0`.
-/// The fixture pins to the synthetic `nautilus@0.1.0` so the wiremock
+/// Build the canonical-API mocks for `chelis-lang/nautilus@v0.2.0`.
+/// The fixture pins to the synthetic `nautilus@0.2.0` so the wiremock
 /// path-based matchers cannot accidentally race against another test's
 /// `nautilus` mock.
 fn canonical_api_mocks(archive_bytes: Vec<u8>, shell_bytes: Vec<u8>) -> Vec<Mock> {
-    let meta_path = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let meta_path = metadata_path("chelis-lang", "nautilus", "v0.2.0");
     let archive_url_path = asset_id_path("chelis-lang", "nautilus", ARCHIVE_ASSET_ID);
     let shell_url_path = asset_id_path("chelis-lang", "nautilus", SHELL_ASSET_ID);
     let metadata_body = metadata_json(
-        "v0.1.0",
+        "v0.2.0",
         &[
-            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
-            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
+            (ARCHIVE_ASSET_ID, "nautilus-0.2.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.2.0.chb"),
         ],
     );
     vec![
@@ -226,7 +226,7 @@ impl WiremockHarness {
 }
 
 /// Stage a tiny `downstream` package that depends on `nautilus =
-/// "0.1.0"` (a synthetic shell mocked by the wiremock fixture). The
+/// "0.2.0"` (a synthetic shell mocked by the wiremock fixture). The
 /// runtime (`chelis-std`) is implicit and not declared.
 fn stage_downstream_project(parent: &Path) -> std::path::PathBuf {
     // Use a unique name per test invocation to avoid path-name
@@ -243,12 +243,12 @@ fn stage_downstream_project(parent: &Path) -> std::path::PathBuf {
         format!(
             r#"[package]
 name = "downstream-item8"
-version = "0.1.0"
+version = "0.2.0"
 compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-nautilus = {{ version = "0.1.0" }}
+nautilus = {{ version = "0.2.0" }}
 "#,
         ),
     )
@@ -274,7 +274,7 @@ fn file_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Read `index.json` and assert the synthetic nautilus@0.1.0 was
+/// Read `index.json` and assert the synthetic nautilus@0.2.0 was
 /// installed via auto-fetch.
 fn assert_nautilus_installed(reef_home: &Path) {
     let index_path = reef_home.join("index.json");
@@ -288,17 +288,17 @@ fn assert_nautilus_installed(reef_home: &Path) {
         .as_array()
         .expect("packages.nautilus must be array");
     assert!(
-        entries.iter().any(|e| e["version"] == "0.1.0"),
-        "expected nautilus 0.1.0 in index, got {entries:?}"
+        entries.iter().any(|e| e["version"] == "0.2.0"),
+        "expected nautilus 0.2.0 in index, got {entries:?}"
     );
     assert!(
         reef_home
-            .join("packages/nautilus/0.1.0/nautilus-0.1.0.tar.zst")
+            .join("packages/nautilus/0.2.0/nautilus-0.2.0.tar.zst")
             .exists()
     );
     assert!(
         reef_home
-            .join("packages/nautilus/0.1.0/nautilus-0.1.0.chb")
+            .join("packages/nautilus/0.2.0/nautilus-0.2.0.chb")
             .exists()
     );
 }
@@ -384,7 +384,7 @@ fn oracle_no_auto_fetch_opt_out_blocks_fetch() {
 
     // Improved-wording invariants: name URL, name auto-fetch state.
     assert!(
-        stderr.contains("chelis-lang/nautilus@v0.1.0"),
+        stderr.contains("chelis-lang/nautilus@v0.2.0"),
         "no-auto-fetch error must name canonical-org URL; got: {stderr}"
     );
     assert!(
@@ -428,7 +428,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.1.0")))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.2.0")))
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down")),
     ]);
 
@@ -449,7 +449,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
 
     assert!(
-        stderr.contains("chelis-lang/nautilus@v0.1.0"),
+        stderr.contains("chelis-lang/nautilus@v0.2.0"),
         "network-failure message must name URL; got: {stderr}"
     );
     assert!(
@@ -464,7 +464,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
     // No half-install: index.json was never written, no orphan tmp.
     assert!(!reef_home.join("index.json").exists());
     assert!(!reef_home.join("index.json.tmp").exists());
-    assert!(!reef_home.join("packages/nautilus/0.1.0").exists());
+    assert!(!reef_home.join("packages/nautilus/0.2.0").exists());
 }
 
 /// Lock-engaged invariant: while auto-fetch runs, the
@@ -538,16 +538,16 @@ fn oracle_error_wording_shape_regex() {
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
 
     // The error must match a shape like:
-    //   missing dependency `nautilus` `0.1.0` (auto-fetch disabled by
+    //   missing dependency `nautilus` `0.2.0` (auto-fetch disabled by
     //   `--no-auto-fetch`); would have fetched from
-    //   `chelis-lang/nautilus@v0.1.0` (category: would-attempt,
+    //   `chelis-lang/nautilus@v0.2.0` (category: would-attempt,
     //   GITHUB_TOKEN is set). ...
     //
     // Use `(?s)` so `.` matches newlines (the rendered error is a
     // single line today, but assertion regex must remain stable
     // even if a future change introduces wrapping).
     let pattern = predicates::str::is_match(
-        r"(?s)missing dependency `nautilus` `0\.1\.0`.*auto-fetch disabled.*chelis-lang/nautilus@v0\.1\.0.*category: would-attempt.*GITHUB_TOKEN is set",
+        r"(?s)missing dependency `nautilus` `0\.2\.0`.*auto-fetch disabled.*chelis-lang/nautilus@v0\.2\.0.*category: would-attempt.*GITHUB_TOKEN is set",
     )
     .expect("regex compile");
     assert!(
@@ -581,7 +581,7 @@ fn oracle_autofetch_event_observable() {
         .success();
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
     assert!(
-        stderr.contains("auto-fetching `nautilus` `0.1.0`"),
+        stderr.contains("auto-fetching `nautilus` `0.2.0`"),
         "auto-fetch event must be visible in stderr; got: {stderr}"
     );
 }
@@ -642,7 +642,7 @@ fn phaseA_item8_429_during_autofetch_names_retry_after() {
     let harness = WiremockHarness::new();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.1.0")))
+            .and(wm_path(metadata_path("chelis-lang", "nautilus", "v0.2.0")))
             .respond_with(
                 ResponseTemplate::new(429)
                     .insert_header("Retry-After", "300")
@@ -767,7 +767,7 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
     h_a.join().expect("build A panicked");
     h_b.join().expect("build B panicked");
 
-    // Index has exactly one nautilus@0.1.0 entry. The second
+    // Index has exactly one nautilus@0.2.0 entry. The second
     // builder's double-checked-locking branch must skip the
     // re-install, so the index has no duplicate entry.
     assert_nautilus_installed(&reef_home);
@@ -776,10 +776,10 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
     let entries = index["packages"]["nautilus"]
         .as_array()
         .expect("packages.nautilus must be array");
-    let v010_count = entries.iter().filter(|e| e["version"] == "0.1.0").count();
+    let v010_count = entries.iter().filter(|e| e["version"] == "0.2.0").count();
     assert_eq!(
         v010_count, 1,
-        "nautilus 0.1.0 must be installed exactly once; index entries: {entries:?}"
+        "nautilus 0.2.0 must be installed exactly once; index entries: {entries:?}"
     );
 }
 
@@ -854,7 +854,7 @@ fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
 /// exercises the round-trip end-to-end via wiremock.
 ///
 /// Stages a hand-written `reef.lock` whose `[dependencies.source]`
-/// block sets `remote_origin = "github://other-org/nautilus@v0.1.0"`,
+/// block sets `remote_origin = "github://other-org/nautilus@v0.2.0"`,
 /// then asserts the build fetches from `other-org`'s wiremock path
 /// rather than the canonical-org one.
 #[test]
@@ -863,20 +863,20 @@ fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
 
     let (archive_bytes, shell_bytes) = synthetic_nautilus_artifacts();
 
-    // Wiremock that serves nautilus@v0.1.0 only at the `other-org`
+    // Wiremock that serves nautilus@v0.2.0 only at the `other-org`
     // path. The canonical-org path returns 404 — if the resolver
     // ignored `remote_origin` and fell back to the canonical default,
     // the build would fail.
     let harness = WiremockHarness::new();
-    let other_meta = metadata_path("other-org", "nautilus", "v0.1.0");
+    let other_meta = metadata_path("other-org", "nautilus", "v0.2.0");
     let other_archive = asset_id_path("other-org", "nautilus", ARCHIVE_ASSET_ID);
     let other_shell = asset_id_path("other-org", "nautilus", SHELL_ASSET_ID);
-    let canonical_meta = metadata_path("chelis-lang", "nautilus", "v0.1.0");
+    let canonical_meta = metadata_path("chelis-lang", "nautilus", "v0.2.0");
     let metadata_body = metadata_json(
-        "v0.1.0",
+        "v0.2.0",
         &[
-            (ARCHIVE_ASSET_ID, "nautilus-0.1.0.tar.zst"),
-            (SHELL_ASSET_ID, "nautilus-0.1.0.chb"),
+            (ARCHIVE_ASSET_ID, "nautilus-0.2.0.tar.zst"),
+            (SHELL_ASSET_ID, "nautilus-0.2.0.chb"),
         ],
     );
     harness.mount_all(vec![
@@ -918,18 +918,18 @@ fn phaseA_item8_lockfile_remote_origin_honored_when_present() {
     let lockfile_text = format!(
         r#"[package]
 name = "downstream-item8"
-version = "0.1.0"
+version = "0.2.0"
 
 [[dependencies]]
 name = "nautilus"
-version = "0.1.0"
-compiler = "=0.5.0"
+version = "0.2.0"
+compiler = "=0.6.0"
 archive_sha256 = "{archive_sha}"
 shell_sha256 = "{shell_sha}"
 
 [dependencies.source]
 kind = "local_registry"
-remote_origin = "github://other-org/nautilus@v0.1.0"
+remote_origin = "github://other-org/nautilus@v0.2.0"
 "#,
         archive_sha = sha256_bytes(&archive_bytes),
         shell_sha = sha256_bytes(&shell_bytes),
@@ -983,12 +983,12 @@ fn stage_real_nautilus_downstream(parent: &Path) -> std::path::PathBuf {
         format!(
             r#"[package]
 name = "downstream-item8-real"
-version = "0.1.0"
+version = "0.2.0"
 compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-nautilus = {{ version = "0.5.0" }}
+nautilus = {{ version = "0.6.0" }}
 "#,
         ),
     )
@@ -1040,7 +1040,7 @@ fn phaseA_item8_real_github_manual_gate() {
         .as_array()
         .expect("packages.nautilus must be array");
     assert!(
-        entries.iter().any(|e| e["version"] == "0.5.0"),
+        entries.iter().any(|e| e["version"] == "0.6.0"),
         "expected nautilus 0.5.0 in index, got {entries:?}"
     );
 }

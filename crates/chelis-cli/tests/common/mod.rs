@@ -112,7 +112,7 @@ compiler = "={COMPILER_VERSION}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#
         ),
     )
@@ -153,7 +153,7 @@ compiler = "={COMPILER_VERSION}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#
         ),
     );

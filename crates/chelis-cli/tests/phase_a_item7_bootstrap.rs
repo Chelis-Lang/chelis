@@ -90,7 +90,7 @@ fn build_test_archive(
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.5.0"
+compiler = "=0.6.0"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -138,7 +138,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.5.0".to_string(),
+        compiler: "=0.6.0".to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -431,9 +431,9 @@ fn phaseA_item7_bootstrap_oracle() {
 /// Expected install order: C, B, A (deps before dependents).
 fn oracle_linear_chain_topo_order() {
     let shells = vec![
-        SyntheticShell::new("chelis-lang", "A", "v0.1.0", "0.1.0", vec![("B", "0.1.0")]),
-        SyntheticShell::new("chelis-lang", "B", "v0.1.0", "0.1.0", vec![("C", "0.1.0")]),
-        SyntheticShell::new("chelis-lang", "C", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "A", "v0.2.0", "0.2.0", vec![("B", "0.2.0")]),
+        SyntheticShell::new("chelis-lang", "B", "v0.2.0", "0.2.0", vec![("C", "0.2.0")]),
+        SyntheticShell::new("chelis-lang", "C", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -455,13 +455,13 @@ fn oracle_linear_chain_topo_order() {
     for repo in &["A", "B", "C"] {
         assert!(
             registry
-                .join(format!("packages/{repo}/0.1.0/{repo}-0.1.0.chb"))
+                .join(format!("packages/{repo}/0.2.0/{repo}-0.2.0.chb"))
                 .exists(),
             "{repo} shell missing from registry"
         );
         assert!(
             registry
-                .join(format!("packages/{repo}/0.1.0/{repo}-0.1.0.tar.zst"))
+                .join(format!("packages/{repo}/0.2.0/{repo}-0.2.0.tar.zst"))
                 .exists(),
             "{repo} archive missing from registry"
         );
@@ -475,25 +475,25 @@ fn oracle_diamond_topo_order() {
         SyntheticShell::new(
             "chelis-lang",
             "DA",
-            "v0.1.0",
-            "0.1.0",
-            vec![("DB", "0.1.0"), ("DC", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("DB", "0.2.0"), ("DC", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "DB",
-            "v0.1.0",
-            "0.1.0",
-            vec![("DD", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("DD", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "DC",
-            "v0.1.0",
-            "0.1.0",
-            vec![("DD", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("DD", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "DD", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "DD", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -533,16 +533,16 @@ fn oracle_cycle_named() {
         SyntheticShell::new(
             "chelis-lang",
             "ZA",
-            "v0.1.0",
-            "0.1.0",
-            vec![("ZB", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("ZB", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "ZB",
-            "v0.1.0",
-            "0.1.0",
-            vec![("ZA", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("ZA", "0.2.0")],
         ),
     ];
     let harness = fixture_for_shells(&shells);
@@ -575,9 +575,9 @@ fn oracle_missing_dep_named() {
     let shells = vec![SyntheticShell::new(
         "chelis-lang",
         "MA",
-        "v0.1.0",
-        "0.1.0",
-        vec![("MB", "0.1.0")],
+        "v0.2.0",
+        "0.2.0",
+        vec![("MB", "0.2.0")],
     )];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -602,7 +602,7 @@ fn oracle_missing_dep_named() {
 
 /// Default-list path:
 ///
-/// 1. Explicit list `<org>/foo@v0.1.0 <org>/bar@v0.1.0` against
+/// 1. Explicit list `<org>/foo@v0.2.0 <org>/bar@v0.2.0` against
 ///    wiremock — installs both in correct order.
 /// 2. Empty default list parses (we cannot exercise it against real
 ///    network in this oracle; the manual gate covers that).
@@ -612,16 +612,16 @@ fn oracle_default_list_path() {
         SyntheticShell::new(
             "chelis-lang",
             "foo",
-            "v0.1.0",
-            "0.1.0",
-            vec![("bar", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("bar", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "bar", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "bar", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let inputs = vec!["chelis-lang/foo@v0.1.0", "chelis-lang/bar@v0.1.0"];
+    let inputs = vec!["chelis-lang/foo@v0.2.0", "chelis-lang/bar@v0.2.0"];
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("explicit two-shell bootstrap");
     let order = harness.install_order();
@@ -648,18 +648,18 @@ fn oracle_per_shell_atomicity_preserved() {
     let pa = SyntheticShell::new(
         "chelis-lang",
         "PA",
-        "v0.1.0",
-        "0.1.0",
-        vec![("PB", "0.1.0")],
+        "v0.2.0",
+        "0.2.0",
+        vec![("PB", "0.2.0")],
     );
     let pb = SyntheticShell::new(
         "chelis-lang",
         "PB",
-        "v0.1.0",
-        "0.1.0",
-        vec![("PC", "0.1.0")],
+        "v0.2.0",
+        "0.2.0",
+        vec![("PC", "0.2.0")],
     );
-    let pc = SyntheticShell::new("chelis-lang", "PC", "v0.1.0", "0.1.0", vec![]);
+    let pc = SyntheticShell::new("chelis-lang", "PC", "v0.2.0", "0.2.0", vec![]);
 
     // Stand up wiremock manually so PB can be served with a tampered
     // shell (archive_sha256 set to a wrong value).
@@ -758,10 +758,10 @@ fn oracle_per_shell_atomicity_preserved() {
     // PC was installed before PB tried; PC's bytes must be on disk and
     // index.json must mention PC.
     assert!(
-        registry.join("packages/PC/0.1.0/PC-0.1.0.chb").exists(),
+        registry.join("packages/PC/0.2.0/PC-0.2.0.chb").exists(),
         "PC must be installed before PB validation fired"
     );
-    assert!(registry.join("packages/PC/0.1.0/PC-0.1.0.tar.zst").exists());
+    assert!(registry.join("packages/PC/0.2.0/PC-0.2.0.tar.zst").exists());
 
     // PB's shell-bytes endpoint was hit (recorded), but the install
     // step failed; the package directory MAY exist with copied bytes
@@ -802,11 +802,11 @@ fn oracle_cli_surface_dispatches_to_install_bootstrap() {
         SyntheticShell::new(
             "chelis-lang",
             "cli-foo",
-            "v0.1.0",
-            "0.1.0",
-            vec![("cli-bar", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("cli-bar", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "cli-bar", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "cli-bar", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -822,13 +822,13 @@ fn oracle_cli_surface_dispatches_to_install_bootstrap() {
             "reef",
             "install",
             "--bootstrap",
-            "chelis-lang/cli-foo@v0.1.0",
-            "chelis-lang/cli-bar@v0.1.0",
+            "chelis-lang/cli-foo@v0.2.0",
+            "chelis-lang/cli-bar@v0.2.0",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Installed cli-foo 0.1.0"))
-        .stdout(predicate::str::contains("Installed cli-bar 0.1.0"));
+        .stdout(predicate::str::contains("Installed cli-foo 0.2.0"))
+        .stdout(predicate::str::contains("Installed cli-bar 0.2.0"));
 
     let order = harness.install_order();
     assert_eq!(order, vec!["cli-bar", "cli-foo"]);
@@ -843,9 +843,9 @@ fn oracle_cli_mutex_with_from_github_and_from_monorepo() {
             "reef",
             "install",
             "--bootstrap",
-            "chelis-lang/x@v0.1.0",
+            "chelis-lang/x@v0.2.0",
             "--from-github",
-            "chelis-lang/y@v0.1.0",
+            "chelis-lang/y@v0.2.0",
         ])
         .assert()
         .failure();
@@ -856,7 +856,7 @@ fn oracle_cli_mutex_with_from_github_and_from_monorepo() {
             "reef",
             "install",
             "--bootstrap",
-            "chelis-lang/x@v0.1.0",
+            "chelis-lang/x@v0.2.0",
             "--from-monorepo",
             ".",
         ])
@@ -875,23 +875,23 @@ fn phaseA_item7_three_shell_cycle_named() {
         SyntheticShell::new(
             "chelis-lang",
             "T3A",
-            "v0.1.0",
-            "0.1.0",
-            vec![("T3B", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("T3B", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "T3B",
-            "v0.1.0",
-            "0.1.0",
-            vec![("T3C", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("T3C", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "T3C",
-            "v0.1.0",
-            "0.1.0",
-            vec![("T3A", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("T3A", "0.2.0")],
         ),
     ];
     let harness = fixture_for_shells(&shells);
@@ -924,9 +924,9 @@ fn phaseA_item7_self_loop_is_one_cycle() {
     let shells = vec![SyntheticShell::new(
         "chelis-lang",
         "self-dep",
-        "v0.1.0",
-        "0.1.0",
-        vec![("self-dep", "0.1.0")],
+        "v0.2.0",
+        "0.2.0",
+        vec![("self-dep", "0.2.0")],
     )];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -964,23 +964,23 @@ fn phaseA_item7_manifest_read_failure_is_typed() {
         builder.finish().expect("finish");
     }
     let archive_bytes = zstd::stream::encode_all(Cursor::new(tar_bytes), 19).expect("zstd");
-    let shell_bytes = build_test_shell_bytes("bad", "0.1.0", &sha256_bytes(&archive_bytes));
+    let shell_bytes = build_test_shell_bytes("bad", "0.2.0", &sha256_bytes(&archive_bytes));
 
     let harness = WiremockHarness::new();
     let metadata_body = serde_json::json!({
         "id": 1u64,
-        "tag_name": "v0.1.0",
+        "tag_name": "v0.2.0",
         "assets": [
-            {"id": 100u64, "name": "bad-0.1.0.tar.zst",
+            {"id": 100u64, "name": "bad-0.2.0.tar.zst",
              "size": archive_bytes.len() as u64},
-            {"id": 101u64, "name": "bad-0.1.0.chb",
+            {"id": 101u64, "name": "bad-0.2.0.chb",
              "size": shell_bytes.len() as u64},
         ]
     })
     .to_string();
     harness.mount_all(vec![
         Mock::given(method("GET"))
-            .and(wm_path("/repos/chelis-lang/bad/releases/tags/v0.1.0"))
+            .and(wm_path("/repos/chelis-lang/bad/releases/tags/v0.2.0"))
             .and(header("authorization", "token unit-test-token"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1000,7 +1000,7 @@ fn phaseA_item7_manifest_read_failure_is_typed() {
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
     let err = lib_install_bootstrap(
-        &["chelis-lang/bad@v0.1.0"],
+        &["chelis-lang/bad@v0.2.0"],
         &harness.uri(),
         Some("unit-test-token"),
         &registry,
@@ -1022,25 +1022,25 @@ fn phaseA_item7_duplicate_package_versions_rejected() {
     let _g = file_lock();
     // Same package name appearing at two different versions in the
     // input list. The bootstrap must refuse this rather than picking.
-    let shell_v1 = SyntheticShell::new("chelis-lang", "dup", "v0.1.0", "0.1.0", vec![]);
-    let shell_v2 = SyntheticShell::new("chelis-lang", "dup", "v0.2.0", "0.2.0", vec![]);
+    let shell_v1 = SyntheticShell::new("chelis-lang", "dup", "v0.2.0", "0.2.0", vec![]);
+    let shell_v2 = SyntheticShell::new("chelis-lang", "dup", "v0.3.0", "0.3.0", vec![]);
     let harness = fixture_for_shells(&[shell_v1.clone(), shell_v2.clone()]);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let inputs = ["chelis-lang/dup@v0.1.0", "chelis-lang/dup@v0.2.0"];
+    let inputs = ["chelis-lang/dup@v0.2.0", "chelis-lang/dup@v0.3.0"];
     let err = lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect_err("duplicate versions must fail");
     let msg = err.to_string();
     match err {
         chelis_reef::BootstrapError::DuplicateVersion { package, versions } => {
             assert_eq!(package, "dup");
-            assert!(versions.contains(&"0.1.0".to_string()));
             assert!(versions.contains(&"0.2.0".to_string()));
+            assert!(versions.contains(&"0.3.0".to_string()));
         }
         other => panic!("expected DuplicateVersion, got: {other:?}"),
     }
     assert!(
-        msg.contains("0.1.0") && msg.contains("0.2.0"),
+        msg.contains("0.2.0") && msg.contains("0.3.0"),
         "Display must list both versions: {msg}"
     );
 }
@@ -1072,11 +1072,11 @@ fn phaseA_item7_auth_failure_aborts_before_first_install() {
         SyntheticShell::new(
             "chelis-lang",
             "AuthA",
-            "v0.1.0",
-            "0.1.0",
-            vec![("AuthB", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("AuthB", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "AuthB", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "AuthB", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
@@ -1109,31 +1109,31 @@ fn phaseA_item7_idempotence_byte_identical_state() {
         SyntheticShell::new(
             "chelis-lang",
             "idemA",
-            "v0.1.0",
-            "0.1.0",
-            vec![("idemB", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("idemB", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "idemB", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "idemB", "v0.2.0", "0.2.0", vec![]),
     ];
     let harness = fixture_for_shells(&shells);
     let dir = tempdir().expect("tempdir");
     let registry = dir.path().join("reef-home");
-    let inputs = ["chelis-lang/idemA@v0.1.0", "chelis-lang/idemB@v0.1.0"];
+    let inputs = ["chelis-lang/idemA@v0.2.0", "chelis-lang/idemB@v0.2.0"];
 
     // First run.
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("first run");
     let first_archive =
-        fs::read(registry.join("packages/idemA/0.1.0/idemA-0.1.0.tar.zst")).unwrap();
-    let first_shell = fs::read(registry.join("packages/idemA/0.1.0/idemA-0.1.0.chb")).unwrap();
+        fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.tar.zst")).unwrap();
+    let first_shell = fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.chb")).unwrap();
     let first_index = fs::read_to_string(registry.join("index.json")).unwrap();
 
     // Second run against the same registry.
     lib_install_bootstrap(&inputs, &harness.uri(), Some("unit-test-token"), &registry)
         .expect("second run");
     let second_archive =
-        fs::read(registry.join("packages/idemA/0.1.0/idemA-0.1.0.tar.zst")).unwrap();
-    let second_shell = fs::read(registry.join("packages/idemA/0.1.0/idemA-0.1.0.chb")).unwrap();
+        fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.tar.zst")).unwrap();
+    let second_shell = fs::read(registry.join("packages/idemA/0.2.0/idemA-0.2.0.chb")).unwrap();
     let second_index = fs::read_to_string(registry.join("index.json")).unwrap();
 
     assert_eq!(
@@ -1151,35 +1151,35 @@ fn phaseA_item7_order_independence_of_input_list() {
         SyntheticShell::new(
             "chelis-lang",
             "OA",
-            "v0.1.0",
-            "0.1.0",
-            vec![("OB", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("OB", "0.2.0")],
         ),
         SyntheticShell::new(
             "chelis-lang",
             "OB",
-            "v0.1.0",
-            "0.1.0",
-            vec![("OC", "0.1.0")],
+            "v0.2.0",
+            "0.2.0",
+            vec![("OC", "0.2.0")],
         ),
-        SyntheticShell::new("chelis-lang", "OC", "v0.1.0", "0.1.0", vec![]),
+        SyntheticShell::new("chelis-lang", "OC", "v0.2.0", "0.2.0", vec![]),
     ];
 
     let permutations = [
         vec![
-            "chelis-lang/OA@v0.1.0",
-            "chelis-lang/OB@v0.1.0",
-            "chelis-lang/OC@v0.1.0",
+            "chelis-lang/OA@v0.2.0",
+            "chelis-lang/OB@v0.2.0",
+            "chelis-lang/OC@v0.2.0",
         ],
         vec![
-            "chelis-lang/OC@v0.1.0",
-            "chelis-lang/OB@v0.1.0",
-            "chelis-lang/OA@v0.1.0",
+            "chelis-lang/OC@v0.2.0",
+            "chelis-lang/OB@v0.2.0",
+            "chelis-lang/OA@v0.2.0",
         ],
         vec![
-            "chelis-lang/OB@v0.1.0",
-            "chelis-lang/OA@v0.1.0",
-            "chelis-lang/OC@v0.1.0",
+            "chelis-lang/OB@v0.2.0",
+            "chelis-lang/OA@v0.2.0",
+            "chelis-lang/OC@v0.2.0",
         ],
     ];
 

@@ -1794,7 +1794,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -2812,7 +2812,7 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.1.0"));
+        .stdout(predicate::str::contains("Built chelis-std 0.2.0"));
 
     assert!(pkg.join("reef.lock").exists());
     assert!(pkg.join("dist/chelis-std-0.1.0.chb").exists());
@@ -2846,7 +2846,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -2926,7 +2926,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.1.0" }}
+chelis-std = {{ version = "0.2.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),

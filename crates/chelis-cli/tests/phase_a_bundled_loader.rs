@@ -14,7 +14,7 @@
 //!    against an empty `$CHELIS_REEF_HOME`. The lockfile carries a
 //!    `chelis-std` entry with `LockSource::Bundled`.
 //! 2. **Explicit-runtime project builds.** Same shape, but the
-//!    project lists `chelis-std = { version = "0.1.0" }` explicitly.
+//!    project lists `chelis-std = { version = "0.2.0" }` explicitly.
 //!    The lockfile is structurally identical to the implicit case
 //!    (synthesis is idempotent).
 //! 3. **Wipe-and-rebuild.** After the first build, the test wipes
@@ -51,7 +51,7 @@ fn write_implicit_runtime_project(root: &Path, module_prefix: &str) {
         format!(
             r#"[package]
 name = "downstream"
-version = "0.1.0"
+version = "0.2.0"
 compiler = "{compiler}"
 module_prefix = "{module_prefix}"
 
@@ -75,7 +75,7 @@ fn write_explicit_runtime_project(root: &Path, module_prefix: &str, std_version:
         format!(
             r#"[package]
 name = "downstream"
-version = "0.1.0"
+version = "0.2.0"
 compiler = "{compiler}"
 module_prefix = "{module_prefix}"
 
@@ -111,7 +111,7 @@ fn assert_chelis_std_bundled_entry(lock: &ReefLock) {
                     .collect::<Vec<_>>()
             )
         });
-    assert_eq!(entry.version, "0.1.0", "bundled chelis-std version");
+    assert_eq!(entry.version, "0.2.0", "bundled chelis-std version");
     match &entry.source {
         LockSource::Bundled { compiler_version } => {
             // The compiler_version field records the version of the
@@ -172,7 +172,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         let dir = tempdir().expect("tempdir");
         let pkg_root = dir.path().join("explicit-pkg");
         let reef_home = dir.path().join("reef-home");
-        write_explicit_runtime_project(&pkg_root, "Explicit", "0.1.0");
+        write_explicit_runtime_project(&pkg_root, "Explicit", "0.2.0");
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -248,7 +248,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
         let dir = tempdir().expect("tempdir");
         let pkg_root = dir.path().join("wipe-std-only");
         let reef_home = dir.path().join("reef-home");
-        write_explicit_runtime_project(&pkg_root, "WipeStdOnly", "0.1.0");
+        write_explicit_runtime_project(&pkg_root, "WipeStdOnly", "0.2.0");
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
@@ -294,7 +294,7 @@ fn phaseA_item1_negative_parity_explicit_version_mismatch() {
 
     let stderr = String::from_utf8_lossy(&assert_out.get_output().stderr).to_string();
     assert!(
-        stderr.contains("chelis-std") && stderr.contains("9.9.9") && stderr.contains("0.1.0"),
+        stderr.contains("chelis-std") && stderr.contains("9.9.9") && stderr.contains("0.2.0"),
         "soft-verify error must name both versions; got stderr:\n{stderr}"
     );
 

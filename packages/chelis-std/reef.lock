@@ -1,6 +1,15 @@
-dependencies = []
-
 [package]
 name = "chelis-std"
+version = "0.2.0"
+
+[[dependencies]]
+name = "chelis-std"
 version = "0.1.0"
+compiler = "=0.6.0"
+archive_sha256 = "3aaf809a88ee55f61c823134a84e11d45861657fe209d8dc13ffe9130d05b103"
+shell_sha256 = "31f0cfd20af4709464127cffb4bf6c1e88a28b3ef913388a3af4d7ad25ab2451"
+
+[dependencies.source]
+kind = "bundled"
+compiler_version = "0.6.0"
 
