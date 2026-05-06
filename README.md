@@ -69,26 +69,29 @@ workflow.
 
 ```text
 crates/
-  chelis-shell/      .chb Shell metadata
-  chelis-reef/       Reef manifests, lockfiles, local registry, package linker
-  chelis-deep/       Deep parser and canonical printer
-  chelis-surf/       Surf parser, desugaring, decompilation
-  chelis-types/      Type checker, dimensions, precision, fitness
-  chelis-effects/    Effect inference/checking over annotated Deep
-  chelis-ir/         RISC DAG, lowering, transforms, evaluator
-  chelis-runtime/    Rust runtime library and C ABI header
-  chelis-backend-c/  C backend code emitter
-  chelis-backend-hip/ HIP backend code emitter
-  chelis-tide/       Tide HTTP/JSON API and MCP server
-  chelis-lsp/        Tide Language Server Protocol support
-  chelis-cove/       Cove terminal coding environment
-  chelis-cli/        CLI binary
-editors/vscode/      VS Code-compatible extension and TextMate grammars
-grammars/            Tree-sitter grammars for Surf and Deep
-packages/chelis-std/ Reef-packaged standard library
-docs/book/           mdBook source for developer-facing docs
-examples/            Executable example programs
-spec/                Numbered language specs and design docs
+  chelis-shell/        .chb Shell metadata
+  chelis-reef/         Reef manifests, lockfiles, local registry, package linker
+  chelis-std-bundle/   Compile-time-embedded chelis-std runtime artifacts
+  chelis-deep/         Deep parser and canonical printer
+  chelis-surf/         Surf parser, desugaring, decompilation
+  chelis-types/        Type checker, dimensions, precision, fitness
+  chelis-effects/      Effect inference/checking over annotated Deep
+  chelis-ir/           RISC DAG, lowering, transforms, evaluator
+  chelis-runtime/      Rust runtime library and C ABI header
+  chelis-backend-c/    C backend code emitter
+  chelis-backend-hip/  HIP backend code emitter
+  chelis-tide/         Tide HTTP/JSON API and MCP server
+  chelis-lsp/          Tide Language Server Protocol support
+  chelis-cove/         Cove terminal coding environment
+  chelis-cli/          CLI binary
+editors/vscode/        VS Code-compatible extension and TextMate grammars
+grammars/              Tree-sitter grammars for Surf and Deep
+packages/chelis-std/   Source for the chelis-std language runtime
+                       (compiler-bundled, not installed via reef; bytes
+                       embedded by chelis-std-bundle)
+docs/book/             mdBook source for developer-facing docs
+examples/              Executable example programs
+spec/                  Numbered language specs and design docs
 ```
 
 ## Key Ideas
