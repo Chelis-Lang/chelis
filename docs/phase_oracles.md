@@ -75,6 +75,20 @@ Status legend:
 | 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
 | 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `phase3t_test_smoke.rs`, `phase3t_test_std.rs`, `phase3t_pseudo_nautilus.rs` cover the smoke + pseudo-nautilus pieces) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + aspirational (downstream test migration) + manual gate (scipy parity) |
 
+## Phase A (Reef Distribution Unblock)
+
+| Phase | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| A · Item 6 (`--from-github`) | `cargo test -p chelis-cli --test phaseA_item6_from_github phaseA_item6_from_github_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 6 | default gate |
+| A · Item 7 (`--bootstrap`) | `cargo test -p chelis-cli --test phaseA_item7_bootstrap phaseA_item7_bootstrap_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 | default gate |
+| A · Item 8 (auto-fetch during build) | `cargo test -p chelis-cli --test phaseA_item8_autofetch_build phaseA_item8_autofetch_build_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 8 | default gate |
+| A · Item 9 (lockfile remote-origin) | `cargo test -p chelis-cli --test phaseA_item9_lockfile_origin phaseA_item9_lockfile_origin_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 9 | default gate |
+| A · Bundled chelis-std loader | `cargo test -p chelis-cli --test phaseA_bundled_loader phaseA_bundled_chelis_std_loader_property_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 (bundling) + `spec/design/chelis_canonical_reference.md` §5.4 | default gate |
+| A · Real-network end-to-end (Item 6) | `cargo test -p chelis-cli phaseA_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 6 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 7) | `cargo test -p chelis-cli phaseA_item7_real_bootstrap_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 7 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 8) | `cargo test -p chelis-cli phaseA_item8_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 8 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 9) | `cargo test -p chelis-cli phaseA_item9_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 9 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+
 ## Phase M (Metal Backend)
 
 | Phase | Oracle command | Owning spec doc | Status |
