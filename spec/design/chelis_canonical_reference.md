@@ -160,13 +160,19 @@ principle write an alternative to (alternative scipy/pandas/etc.). Shells are
 fetched and installed via reef from network releases; the runtime is not.
 
 Lockfile entries for the runtime use `LockSource::Bundled
-{ compiler_version }` to make the distinction explicit and auditable. A
-declaration of `chelis-std = { version = "X" }` in a downstream `reef.toml`
-soft-verifies against the compiler's bundled runtime version: matching is
-recorded as `Bundled`, mismatching surfaces a typed error naming both
-versions. Auto-fetch from GitHub is intentionally disabled for the runtime;
-`reef install --bootstrap chelis-std` is rejected with a typed error
-explaining the runtime is compiler-bundled.
+{ compiler_version }` to make the distinction explicit and auditable. The
+entry is synthesized into every project's lockfile based on the project's
+own `compiler =` pin, regardless of whether `chelis-std` appears in
+`[dependencies]`: the pin IS the runtime declaration. A declaration of
+`chelis-std = { version = "X" }` in a downstream `reef.toml` soft-verifies
+against the compiler's bundled runtime version: matching is recorded as
+`Bundled` (idempotent with the synthesized entry), mismatching surfaces a
+typed error naming both versions. The runtime bytes themselves are
+compile-time-embedded into the chelis binary via `include_bytes!()` in
+`crates/chelis-std-bundle`; the loader serves them directly without
+consulting the local registry. Auto-fetch from GitHub is intentionally
+disabled for the runtime; `reef install --bootstrap chelis-std` is
+rejected with a typed error explaining the runtime is compiler-bundled.
 
 Shells layered on the runtime. `nautilus` and `coral` are independent and can land in
 parallel; `shoals` depends on both. `octant` Part A (LaTeX ↔ Deep bridge, parser +
