@@ -3880,32 +3880,39 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
         .filter(|(name, _)| *name != &graph.root_package)
         .map(|(name, package)| {
             // chelis-std is the language runtime, not a shell. Regardless
-            // of how it was loaded into the graph (from the local
-            // registry, from a path dep, etc.), we record it in the
-            // lockfile as `Bundled` so a reader can see at a glance
-            // that the bytes ship with the compiler. See
-            // `compiler_bundled_chelis_std_version` and
-            // `crates/chelis-reef/src/lib.rs` § "BUNDLED_CHELIS_STD_VERSION"
-            // for the runtime-vs-shell criterion.
-            let source = if name.as_str() == CHELIS_STD_PACKAGE_NAME {
-                LockSource::bundled_for_current_compiler()
-            } else {
-                match &package.source {
-                    LoadedSourceKind::Path { relative } => LockSource::Path {
-                        path: relative.clone(),
-                    },
-                    LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
-                        remote_origin: package.remote_origin.clone(),
-                    },
-                    // `Root` is a defensive fallback for the build-lockfile
-                    // path: the root package is not normally a dependency.
-                    // If it ever shows up here, treat it as an unrecorded
-                    // local-registry source so the lockfile stays well-
-                    // formed.
-                    LoadedSourceKind::Root => LockSource::LocalRegistry {
-                        remote_origin: None,
-                    },
-                }
+            // of how it was loaded into the graph (the bundled-bytes
+            // path now serves the runtime regardless of registry
+            // state), we record it in the lockfile as `Bundled` so a
+            // reader can see at a glance that the bytes ship with the
+            // compiler. The archive/shell SHA256s come from the
+            // embedded bundle bytes for both the via-graph and the
+            // synthesized paths so a lockfile written by either is
+            // byte-identical for chelis-std.
+            if name.as_str() == CHELIS_STD_PACKAGE_NAME {
+                return LockedDependency {
+                    name: name.clone(),
+                    version: package.id.version.clone(),
+                    source: LockSource::bundled_for_current_compiler(),
+                    compiler: package.manifest.package.compiler.clone(),
+                    archive_sha256: chelis_std_bundle::archive_sha256(),
+                    shell_sha256: chelis_std_bundle::shell_sha256(),
+                };
+            }
+            let source = match &package.source {
+                LoadedSourceKind::Path { relative } => LockSource::Path {
+                    path: relative.clone(),
+                },
+                LoadedSourceKind::LocalRegistry => LockSource::LocalRegistry {
+                    remote_origin: package.remote_origin.clone(),
+                },
+                // `Root` is a defensive fallback for the build-lockfile
+                // path: the root package is not normally a dependency.
+                // If it ever shows up here, treat it as an unrecorded
+                // local-registry source so the lockfile stays well-
+                // formed.
+                LoadedSourceKind::Root => LockSource::LocalRegistry {
+                    remote_origin: None,
+                },
             };
             let archive_sha256 = package
                 .shell
@@ -3930,6 +3937,36 @@ fn build_lockfile(graph: &PackageGraph) -> ReefLock {
             }
         })
         .collect::<Vec<_>>();
+
+    // Phase A correction (Item 1): blanket synthesis on the project's
+    // compiler pin. Every reef.toml has a `compiler =` pin (validated
+    // by `validate_manifest`), and that pin IS the runtime declaration.
+    // The chelis-std runtime is implicit: programs depend on it the
+    // way Rust programs depend on `core`/`std`. Lockfiles must record
+    // it explicitly so a reader can audit the runtime version and a
+    // re-build on another machine resolves to the same bytes.
+    //
+    // If chelis-std is already in the dep graph (because the project
+    // listed it explicitly in `[dependencies]`, or a transitive shell
+    // pulled it in), the closure above already produced a `Bundled`
+    // entry — synthesis is a no-op. Otherwise, append one here using
+    // the bundled archive/shell SHA256s, the compiler-bundled version,
+    // and the project's own compiler pin (which `validate_manifest`
+    // guarantees equals `CURRENT_COMPILER_VERSION` today).
+    if !dependencies
+        .iter()
+        .any(|d| d.name == CHELIS_STD_PACKAGE_NAME)
+    {
+        dependencies.push(LockedDependency {
+            name: CHELIS_STD_PACKAGE_NAME.to_string(),
+            version: BUNDLED_CHELIS_STD_VERSION.to_string(),
+            source: LockSource::bundled_for_current_compiler(),
+            compiler: root.manifest.package.compiler.clone(),
+            archive_sha256: chelis_std_bundle::archive_sha256(),
+            shell_sha256: chelis_std_bundle::shell_sha256(),
+        });
+    }
+
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
     ReefLock {
         package: root.id.clone(),
