@@ -19,12 +19,11 @@ use walkdir::WalkDir;
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
-/// Version of `chelis-std` that ships bundled with this compiler. The
-/// canonical home of this version string is
-/// `packages/chelis-std/reef.toml`'s `[package].version` field; the
-/// constant here is hand-maintained in lockstep with that file. The
-/// `bundled_chelis_std_version_matches_packages_manifest` unit test
-/// asserts the two stay in sync.
+/// Version of `chelis-std` that ships bundled with this compiler.
+/// Re-exported from [`chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION`],
+/// which is the single source of truth: that crate is also where the
+/// `include_bytes!()` for the runtime archive + shell live, and the
+/// version string is keyed off the dist filenames.
 ///
 /// chelis-std is the language runtime, not a shell — it version-marches
 /// with the compiler and cannot be substituted. Programs implicitly
@@ -32,7 +31,7 @@ const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 /// Lockfile entries for chelis-std use [`LockSource::Bundled`] (not
 /// [`LockSource::LocalRegistry`]) to make this distinction explicit and
 /// auditable.
-const BUNDLED_CHELIS_STD_VERSION: &str = "0.1.0";
+const BUNDLED_CHELIS_STD_VERSION: &str = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
 
 /// Public accessor for the version of chelis-std bundled with this
 /// compiler. Use this when you need to emit a `LockSource::Bundled`
@@ -3021,17 +3020,22 @@ fn reconstruct_graph_from_lockfile(
         }
         match &dep.source {
             LockSource::Bundled { .. } => {
-                // chelis-std is the language runtime. In this wave its
-                // module-loading still goes through the local registry
-                // (callers install via the monorepo source); the
-                // `Bundled` variant is recorded for audit but the
-                // resolver loads modules the same way `LocalRegistry`
-                // does. Future work: a true bundled-loader path that
-                // supplants the registry for the runtime.
+                // chelis-std is the language runtime and ships
+                // bundled inside the chelis binary
+                // (`crates/chelis-std-bundle`). `load_registry_package`
+                // special-cases the runtime: when name == chelis-std
+                // and the requested version matches the bundled
+                // version, it returns the embedded bytes immediately.
+                // No `$CHELIS_REEF_HOME` access, no installer
+                // prerequisite. The fallback through the local-
+                // registry path only fires on a version mismatch,
+                // which soft-verify should already have caught
+                // upstream.
                 let dep_name = dep.name.clone();
                 let dep_version = dep.version.clone();
                 let dep_name_t = dep_name.clone();
                 let dep_version_t = dep_version.clone();
+                let bundled = compiler_bundled_chelis_std_version().to_string();
                 let timeout_result = run_with_timeout(
                     move || {
                         load_registry_package(&dep_name_t, &dep_version_t).map_err(|e| match e {
@@ -3040,10 +3044,11 @@ fn reconstruct_graph_from_lockfile(
                             | LoadRegistryError::MissingPackageDir => {
                                 format!(
                                     "missing dependency `{dep_name_t}` `{dep_version_t}`: \
-                                     this is the language runtime (`chelis-std`), which ships \
-                                     with the compiler. Install it from the monorepo source \
-                                     via `chelis reef install --from-monorepo` — auto-fetch \
-                                     from GitHub is intentionally disabled for the runtime."
+                                     this is the language runtime (`chelis-std`), which is \
+                                     bundled inside the chelis compiler. This compiler bundles \
+                                     chelis-std `{bundled}`; the lockfile pins `{dep_version_t}`. \
+                                     Use a chelis whose bundled runtime matches the lockfile, or \
+                                     update the lockfile to match the compiler's bundled version."
                                 )
                             }
                         })
@@ -3419,6 +3424,48 @@ struct InstalledPackage {
     remote_origin: Option<String>,
 }
 
+/// Process-stable cache of the chelis-std bundle's extracted layout.
+/// First call extracts the embedded archive into a `tempfile::TempDir`
+/// whose lifetime is tied to this `OnceLock` (i.e. the duration of
+/// the process). Subsequent calls reuse the same on-disk root.
+///
+/// `tempfile::TempDir` cleans up at drop, so the extracted tree is
+/// removed when the process exits — no stale state outlives a build
+/// invocation.
+static CHELIS_STD_BUNDLE_ROOT: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
+    std::sync::OnceLock::new();
+
+/// Extract the embedded chelis-std bytes (if not already extracted
+/// for this process), decode the embedded shell, and return them
+/// shaped like a normal [`InstalledPackage`].
+///
+/// The returned `root` is a process-lifetime tempdir under the OS
+/// tempdir (typically `/tmp`), with the chelis-std reef-package
+/// layout: `reef.toml`, `src/`, etc. `load_package_modules` walks
+/// this exactly the same way it walks a registry-cached extract.
+///
+/// `remote_origin` is `None` because there is no remote origin for
+/// the runtime — its bytes come from the compiler binary itself.
+fn load_bundled_chelis_std() -> Result<InstalledPackage, LoadRegistryError> {
+    let dir_result = CHELIS_STD_BUNDLE_ROOT.get_or_init(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("chelis-std-bundle-")
+            .tempdir()
+            .map_err(|e| format!("failed to create chelis-std bundle tempdir: {e}"))?;
+        chelis_std_bundle::extract_into(dir.path())?;
+        Ok(dir)
+    });
+    let dir = dir_result.as_ref().map_err(|e| LoadRegistryError::Other(e.clone()))?;
+    let shell = chelis_shell::decode_shell(chelis_std_bundle::CHELIS_STD_SHELL).map_err(|e| {
+        LoadRegistryError::Other(format!("failed to decode embedded chelis-std shell: {e}"))
+    })?;
+    Ok(InstalledPackage {
+        root: dir.path().to_path_buf(),
+        shell,
+        remote_origin: None,
+    })
+}
+
 /// Typed result for [`load_registry_package`]. Item 8 introduces this
 /// enum so the auto-fetch decision point can discriminate "the package
 /// is simply not in the registry yet" from "the package is in the
@@ -3456,6 +3503,25 @@ impl LoadRegistryError {
 }
 
 fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, LoadRegistryError> {
+    // Phase A correction: chelis-std is the language runtime and ships
+    // bundled inside the chelis binary. Serve from the embedded bytes
+    // before consulting the on-disk registry. This makes the runtime
+    // reachable on a machine that has *no* `$CHELIS_REEF_HOME` at all
+    // — the bytes come from `include_bytes!()` in
+    // `chelis-std-bundle`, not from the filesystem.
+    //
+    // Falls through to the local-registry path if the requested
+    // version disagrees with the bundled version. Soft-verify in
+    // `resolve_package_recursive` already errors before we get here
+    // when an explicit declaration mismatches, so this fallback is
+    // defensive — it should never fire in practice. If it does, the
+    // local-registry path will produce the standard
+    // `MissingFromIndex` / mismatch errors.
+    if name == CHELIS_STD_PACKAGE_NAME && version == chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
+    {
+        return load_bundled_chelis_std();
+    }
+
     let registry_root = registry_root().map_err(LoadRegistryError::Other)?;
     let index = read_registry_index(&registry_root).map_err(LoadRegistryError::Other)?;
     let Some(expected) = index
