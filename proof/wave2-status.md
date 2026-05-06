@@ -32,11 +32,15 @@ Use `cd proof/lean && lake build` as the authoritative branch-health check.
   - a handled product-seed counterexample showing that the legacy public `adjointFrom` theorem surface is still false: `handle` still routes through the tensor-only clause path, so a structured cotangent seed can hit a tensor-only `copy` before the `mul` case is even in play
   - a higher-order counterexample showing that unrestricted `adjointTypedFrom` is also false on raw terms, because the typed transform still needs an explicit supported-fragment premise to exclude `abs` / `app` / nested `grad` / nested `vmap`
   - a concrete `mul` context-gap counterexample showing that the current private shape-only helper is false on arbitrary seed-only contexts, because the transformed `mul` term replays raw source operands and therefore needs source-context information in the theorem statement
-- The branch still contains 4 `sorry` sites in `LaCaDiLE/AdjointTyping.lean`, grouped into 2 blocker families:
+- The downstream theorem package now has non-vacuous intermediate theorem surfaces rather than raw `True` stubs:
+  - `ADCorrectness.lean` exports an abstract `PrimitiveADSpec`-parameterized theorem for the supported first-order fragment
+  - `DimSafety.lean` exports primitive-redex shape safety under an explicit store-shape sidecar
+  - `EffectCorrectness.lean` exports the current-frontier unhandled-perform exclusion using `StuckOnPerform`
+  - `Store.lean` now splits `StoreWf` live-domain agreement from `StoreShapeConsistent` tensor-shape agreement, and `LinearityInvariant` is no longer the literal `True`
+- The branch now contains 7 live `sorry` sites in `LaCaDiLE/AdjointTyping.lean`, grouped into 2 blocker families:
   - the live executable `mul` branch of the private typed helper
-  - the live executable clause-list `cons` pair-seed branch of the same helper stack
-  - two parallel legacy exact-output `sorry`s that remain in commented proof blocks and are no longer on the active theorem path
-  The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape and explicit `AdjointFreeCtxSupported` / `AdjointTermFresh` tracking. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining live `mul` / `cons` cases.
+  - the pair-side cotangent/clause-threading stack
+  The obsolete exact-output proof blocks have been deleted rather than left commented in-tree. The public typed theorem and the `tgrad` preservation plumbing are already on `adjointTypedFrom` / `adjointTypedClausesFrom` with the slot-threaded existential output shape and explicit `AdjointFreeCtxSupported` / `AdjointTermFresh` tracking. The remaining AD repair is therefore to replace the private shape-only helper with an honest source-typed supported-domain induction, then close the remaining live `mul` / pair-clause cases.
 
 The current theorem-shape boundary is now explicit in Lean:
 
@@ -79,6 +83,9 @@ The current theorem-shape boundary is now explicit in Lean:
    - replace the admitted private shape-only helper with a source-typed supported-domain induction
    - thread the supported-fragment premises through typing, substitution, and stepping
    - solve the remaining local `mul` and clause-list `cons` cases
+
+3. Downstream theorem package
+   The active Lean package no longer contains raw `True` theorem stubs in `ADCorrectness.lean`, `DimSafety.lean`, or `EffectCorrectness.lean`. These are still intermediate surfaces: AD correctness is abstract over `PrimitiveADSpec`, dimension safety is primitive-redex-local with a store-shape sidecar, and effect correctness is current-frontier rather than multi-step. Final closure therefore still requires strengthening them over the final runtime theorem surface.
 
 ## Next Moves
 

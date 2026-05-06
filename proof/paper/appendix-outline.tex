@@ -5,19 +5,19 @@
 \section*{Supplement Outline}
 
 \paragraph{Appendix A. Honest theorem-status snapshot.}
-Record the exact branch state at submission time: green \texttt{lake build}, one executable admit in \texttt{AdjointTyping.lean}, \texttt{adjointFrom} still legacy on handled product seeds, and preservation currently staged through \texttt{RuntimeLinear} plus the partial \texttt{HandlerAwareRuntimeLinear} / \texttt{HandlerAwareRuntimeDebt} boundary.
+Record the exact branch state at submission time: green \texttt{lake build}, seven live admissions in \texttt{AdjointTyping.lean}, \texttt{adjointFrom} still legacy on handled product seeds, and preservation staged through the explicit \texttt{RuntimeSafeResidualDebt} boundary exported by \texttt{runtimeSafeConfig\_step\_or\_residualDebt} and \texttt{preservation\_runtimeSafeConfig\_or\_residualDebt}.
 
 \paragraph{Appendix B. Structural lemmas.}
 Substitution, weakening and inversion helpers, \texttt{addDim} typing, and the closed \texttt{vmap} shape lemmas.
 
 \paragraph{Appendix C. Progress and preservation.}
-Full proof of progress. For preservation, separate the executable closed-program theorem from the final multi-step story. Include the counterexamples to unconditional preservation, \texttt{RuntimeLinear}, \texttt{ActiveRuntimeLinear}, and \texttt{DeepActiveRuntimeLinear}, then state the current \texttt{HandlerAwareRuntimeLinear} boundary and its remaining debt cases.
+Full proof of progress. For preservation, separate the executable closed-program theorem from the final multi-step story. Include the counterexamples to unconditional preservation, \texttt{RuntimeLinear}, \texttt{ActiveRuntimeLinear}, and \texttt{DeepActiveRuntimeLinear}, then state the current \texttt{RuntimeSafeResidualDebt} boundary and its remaining debt cases.
 
 \paragraph{Appendix D. Linearity and effects.}
 Store wellformedness preservation, live-location correspondence, and effect-row monotonicity. Make clear which arguments already close mechanically and which still depend on the final handler-aware invariant package.
 
 \paragraph{Appendix E. Adjoint typing.}
-Restate the paper lemma on the typed transform surface \texttt{adjointTypedFrom} / \texttt{adjointTypedClausesFrom}. Record the handled product-seed counterexample to legacy \texttt{adjointFrom} as the reason the public theorem surface moves. Isolate the remaining \texttt{mul} tape and effect-row obligation.
+Restate the paper lemma on the typed transform surface \texttt{adjointTypedFrom} / \texttt{adjointTypedClausesFrom}. Record the handled product-seed counterexample to legacy \texttt{adjointFrom} as the reason the public theorem surface moves. Isolate the remaining \texttt{mul} replay gap and pair/clause cotangent-threading obligations.
 
 \paragraph{Appendix F. AD correctness roadmap.}
 State the denotational objects, primitive derivative lemmas, and the bridge required for the final theorem. Keep this appendix honest about what is proved on branch versus what remains planned.

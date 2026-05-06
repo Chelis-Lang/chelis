@@ -3,7 +3,8 @@
 -- WS2.8 target: no well-typed program accesses a deallocated location.
 -- Structural form: `Step` preserves `StoreWf` and the invariant that the
 -- live locations in the store correspond to linear bindings in Γ.
--- Phase 1 skeleton: stub.
+-- Current branch also exposes the explicit runtime residual-debt
+-- boundary that remains before the final multi-step theorem.
 
 import LaCaDiLE.Syntax
 import LaCaDiLE.Store
@@ -741,6 +742,26 @@ private theorem runtimeSafeConfig_pair_right
     (runtimeSafeConfig_plug (sigma := sigma) (E := EvalCtx.pairR e1) (e := e2)
       (by simpa [plug] using h)).1
 
+/-- Reassemble the public runtime-safety invariant through the `copy`
+    evaluation frame once the inner reduct is known safe. This closes
+    the safe-inner copy-context family independently of the surrounding
+    one-step classifier; the remaining `copy` residual constructor is
+    only for propagation of an inner residual-debt step. -/
+theorem runtimeSafeConfig_copy_of_inner
+    {sigma : Store} {e : Term}
+    (h : RuntimeSafeConfig ⟨sigma, e⟩) :
+    RuntimeSafeConfig ⟨sigma, Term.copy e⟩ := by
+  rcases h with ⟨hTerm, hLive⟩
+  rcases hTerm with ⟨hHandler, hSubst⟩
+  refine ⟨⟨?_, ?_⟩, ?_⟩
+  · simpa [HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
+      (show ActiveRuntimeLinear e ∧ HandlerAwareRuntimeLinear e from
+        ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩)
+  · simpa [SubstAwareRuntimeLinear, activeVarRefs] using
+      (show (activeVarRefs e).Nodup ∧ SubstAwareRuntimeLinear e from
+        ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)
+  · simpa [StoreLiveLocRefs, locRefs] using hLive
+
 /-- Precise config-level one-step theorem for the runtime-safety
     sidecar. This closes the store-safe head rules and removes the
     broad arbitrary-context debt export, reporting only the exact
@@ -927,19 +948,9 @@ theorem runtimeSafeConfig_step_or_residualDebt
               (RuntimeSafeResidualDebt.ctx
                 (RuntimeSafeCtxDebt.letBind sigma sigma' x e2 e e' h_inner))
         | copy =>
-            have hPlug : SubstAwareHandlerRuntimeLinear (plug EvalCtx.copy e') := by
-              rcases hInner'.1 with ⟨hHandler, hSubst⟩
-              exact ⟨by
-                  simpa [plug, HandlerAwareRuntimeLinear, ActiveRuntimeLinear, activeLocRefs] using
-                    (show ActiveRuntimeLinear e' ∧ HandlerAwareRuntimeLinear e' from
-                      ⟨handlerAwareRuntimeLinear_active hHandler, hHandler⟩),
-                by
-                  simpa [plug, SubstAwareRuntimeLinear, activeVarRefs] using
-                    (show (activeVarRefs e').Nodup ∧ SubstAwareRuntimeLinear e' from
-                      ⟨substAwareRuntimeLinear_activeNodup hSubst, hSubst⟩)⟩
-            have hCtx' : RuntimeSafeCtx sigma' EvalCtx.copy := by
-              simp [RuntimeSafeCtx, DeepActiveCtx, StoreLiveCtxLocRefs, ctxLocRefs]
-            exact Or.inl (runtimeSafeConfig_ctx hCtx' hInner' hPlug)
+            exact Or.inl (by
+              simpa [plug] using
+                (runtimeSafeConfig_copy_of_inner (sigma := sigma') (e := e') hInner'))
         | letpair x y e2 =>
             exact Or.inr
               (RuntimeSafeResidualDebt.ctx

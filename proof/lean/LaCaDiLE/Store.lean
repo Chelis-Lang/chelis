@@ -22,21 +22,40 @@ def storeTypDom (Sigma : StoreTyp) : List Loc :=
   Sigma.map Prod.fst
 
 /-- Store well-formedness: every live location in `sigma` has a corresponding
-    entry in `Sigma`, and the tensor value's shape matches the store-typing
-    type. Phase 1 states this structurally without proving preservation;
-    Phase 2 WS2.8 will prove that `Step` preserves `StoreWf`. -/
+    entry in `Sigma`, and every store-typing entry is live in `sigma`.
+    Tensor-shape agreement is tracked separately by
+    `StoreShapeConsistent`. -/
 def StoreWf (sigma : Store) (Sigma : StoreTyp) : Prop :=
   (∀ ell, ell ∈ storeTypDom Sigma → (storeLookup sigma ell).isSome) ∧
   (∀ ell, (storeLookup sigma ell).isSome → ell ∈ storeTypDom Sigma)
 
-/-- Linearity soundness invariant (structural form): the set of live
-    locations in `sigma` is exactly the set of locations owned by the
-    linear context `Gamma`. Each linear binding `x : tensor[ds]` in `Gamma`
-    owns a location whose type in `Sigma` is `tensor[ds]`. This predicate
-    will appear as a premise/conclusion in Phase 2's preservation proof. -/
-def LinearityInvariant (_sigma : Store) (_Sigma : StoreTyp)
-    (_Gamma : LinearCtx) : Prop :=
-  True  -- Phase 1: stated but not formalized in detail; filled in Phase 2.
+/-- Store/type shape consistency for runtime tensor locations. `StoreWf`
+    tracks live-domain agreement; this predicate tracks the tensor-shape
+    agreement needed by dimension-safety corollaries. -/
+def StoreShapeConsistent (sigma : Store) (Sigma : StoreTyp) : Prop :=
+  ∀ ell ds w,
+    storeTypLookup Sigma ell = some (Typ.tensor ds) →
+    storeLookup sigma ell = some w →
+    w.shape = ds
+
+/-- Linearity soundness invariant checkpoint. Each linear binding
+    `x : tensor[ds]` in `Gamma`
+    owns a live location whose type in `Sigma` is `tensor[ds]`.
+
+    `LinearCtx` does not currently store a variable-to-location map, so
+    ownership is expressed at the available precision: every live tensor
+    binding has a matching live tensor location, and every tensor-typed
+    store entry agrees with its runtime shape. -/
+def LinearityInvariant (sigma : Store) (Sigma : StoreTyp)
+    (Gamma : LinearCtx) : Prop :=
+  StoreWf sigma Sigma ∧
+  StoreShapeConsistent sigma Sigma ∧
+  ∀ x ds,
+    (x, some (Typ.tensor ds)) ∈ Gamma →
+    ∃ ell w,
+      storeTypLookup Sigma ell = some (Typ.tensor ds) ∧
+      storeLookup sigma ell = some w ∧
+      w.shape = ds
 
 /-- Extend a store typing with a fresh location. Used by Preservation
     on the store-allocating Step rules (tconst, copy, tadd, tmul, tsum,

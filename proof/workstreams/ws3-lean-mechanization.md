@@ -63,11 +63,11 @@ That premise is still not the final answer. The current branch now also shows:
 - `ActiveRuntimeLinear` repairs the captured-handler context counterexamples
 - but `ActiveRuntimeLinear` is still too weak for direct handled operations, because a dormant clause body can become active in one step and expose duplicated locations
 - and the recursive `DeepActiveRuntimeLinear` repair is still not compositional: a typed beta step can expose a dormant clause beside an active sibling with the same location, and one contextual `handleOpDirect` step later the invariant fails
-- `Operational.lean` now packages the next candidate as `HandlerAwareRuntimeLinear`, and `LinearitySoundness.lean` proves a partial one-step `HandlerAwareRuntimeLinear c2.term ∨ HandlerAwareRuntimeDebt c1 c2` boundary from a `RuntimeLinear` start
+- `LinearitySoundness.lean` now exports the narrowed config-level `runtimeSafeConfig_step_or_residualDebt` boundary, and `Preservation.lean` exports `preservation_runtimeSafeConfig_or_residualDebt`
 
 So the immediate remaining preservation work is:
 
-- close the current `HandlerAwareRuntimeLinear` / `HandlerAwareRuntimeDebt` boundary into the public multi-step theorem
+- close or refine the current `RuntimeSafeResidualDebt` boundary into the public multi-step theorem
 - the preservation file itself is syntactically closed on the executable branch, including `tgrad` and `tvmap`, but the `tgrad` branch is not yet an honest endpoint because it still imports an admitted public adjoint theorem surface
 - the remaining AD-side admission has therefore not stayed isolated inside `AdjointTyping.lean`; it still reaches the `tgrad` preservation story until the private source-typed AD helper is closed and the remaining `mul` case is discharged
 
@@ -83,7 +83,7 @@ Corollary of preservation + effect monotonicity lemma. Relatively small.
 
 Store invariant maintenance proof. Case analysis on reduction rules showing the live-location invariant is preserved. Depends on WS3.3 (store model).
 
-This workstream now also carries the runtime-side invariant needed to make preservation compositional. The earlier “preserve `RuntimeLinear`” theorem shape is now known to be false, and the first “preserve `ActiveRuntimeLinear`” repair is also insufficient. The recursive `DeepActiveRuntimeLinear` repair is still too weak because it does not constrain dormant clause bodies relative to the surrounding active frame. The branch now defines the stronger cross-boundary predicate `HandlerAwareRuntimeLinear` in `Operational.lean`, but the exported branch boundary has already moved to the narrowed residual config theorem surface: `LinearitySoundness.lean` proves the closed head rules and exports `runtimeSafeConfig_step_or_residualDebt`, while `Preservation.lean` exports `preservation_runtimeSafeConfig_or_residualDebt`; the older `_or_debt` theorems remain only as compatibility wrappers. A newer fully generic `RuntimeSafeConfig` wrapper is still not final: a concrete `handleOpCtx` witness shows that generic closure for that public surface is false. The actual remaining task is therefore to discharge or refine those residual debt cases with the right typing, one-shot, and store-freshness side conditions so the final public theorem can say that the stronger handler-aware boundary:
+This workstream now also carries the runtime-side invariant needed to make preservation compositional. The earlier “preserve `RuntimeLinear`” theorem shape is now known to be false, and the first “preserve `ActiveRuntimeLinear`” repair is also insufficient. The recursive `DeepActiveRuntimeLinear` repair is still too weak because it does not constrain dormant clause bodies relative to the surrounding active frame. The branch still contains those candidate predicates for the counterexample trail, but the exported branch boundary has moved to the narrowed residual config theorem surface: `LinearitySoundness.lean` proves the closed head rules and exports `runtimeSafeConfig_step_or_residualDebt`, while `Preservation.lean` exports `preservation_runtimeSafeConfig_or_residualDebt`; the older `_or_debt` theorems remain only as compatibility wrappers. A newer fully generic `RuntimeSafeConfig` wrapper is still not final: a concrete `handleOpCtx` witness shows that generic closure for that public surface is false. The actual remaining task is therefore to discharge or refine those residual debt cases with the right typing, one-shot, and store-freshness side conditions so the final public theorem can say that the stronger handler-aware boundary:
 
 - ignores dormant clause bodies for captured-continuation duplication, but
 - still constrains dormant clause bodies strongly enough for `handleOpDirect`
@@ -91,4 +91,4 @@ This workstream now also carries the runtime-side invariant needed to make prese
 
 ## WS3.14 — `ADCorrectness.lean`
 
-The hardest file. Requires a denotational semantics mapping terms to mathematical functions, plus a proof that the adjoint transformation computes the derivative. Full mechanization remains required.
+This file is no longer a raw `True` stub. It now exposes an abstract `PrimitiveADSpec` theorem for the supported first-order fragment. The final package still needs either a concrete denotational instantiation or a deliberately documented abstract semantic contract, plus red-team review once the syntactic AD admissions are closed.

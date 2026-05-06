@@ -4,6 +4,12 @@
 **Audit performed:** Session of 2026-04-13
 **Verdict:** **PHASE 2 GO** (after the HIGH fixes in this commit)
 
+**Status note:** this file is a historical audit of `f871d76`, not a
+current branch-health report. The current branch builds with
+`cd proof/lean && lake build`; the live admission audit now reports 7
+`sorry` sites, all in `proof/lean/LaCaDiLE/AdjointTyping.lean`. See
+`proof/plan.md` and `proof/wave2-status.md` for the active proof state.
+
 ---
 
 ## Context
@@ -38,7 +44,7 @@ verification before committing.
 
 | Check | Status | Evidence |
 |---|---|---|
-| `lake clean && lake build` | ✅ | 17/17 jobs; 5 `sorry` warnings in expected Phase 2 theorem bodies |
+| `lake clean && lake build` | ✅ | Historical at `f871d76`: build passed with the expected Phase 2 theorem-body admissions. Current branch status is tracked in `proof/plan.md`. |
 | `sorry` in theorem bodies only | ✅ | none in constructor premises, `def` bodies, or `where` clauses |
 | No `axiom` | ✅ | grep empty |
 | `partial def` count | ✅ | exactly 2: `subst` and `adjoint`, both documented |
@@ -197,9 +203,10 @@ as MEDIUM C-M1 (discipline drift, not a soundness issue).
 
 ### Adversarial probes
 
-- **`sorry`/`axiom` audit:** 5 `sorry` occurrences, all in theorem
-  bodies (Substitution, AdjointTyping, Progress, Preservation,
-  LinearitySoundness). Zero `axiom`/`opaque`.
+- **`sorry`/`axiom` audit:** Historical at `f871d76`: the remaining
+  admissions were all in theorem bodies (Substitution, AdjointTyping,
+  Progress, Preservation, LinearitySoundness). Current branch admission
+  count is 7, all in `AdjointTyping.lean`. Zero `axiom`/`opaque`.
 - **`prove.py` hostile inputs:** nonexistent file → exit 3 with
   clean error; SQL-injection theorem name → exit 3 with clean error
   (name treated as opaque); `--passes 0` → argparse error exit 2.
