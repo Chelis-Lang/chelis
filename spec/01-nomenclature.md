@@ -406,6 +406,54 @@ helpers, where they exist, would use `frame_*` or similar). The lint
 flags inconsistency within a module: either all internal helpers have
 the prefix or none do.
 
+### 7.1.1 Model/algorithm sub-namespace prefixes
+
+**Rule:** A function-name prefix may name a **model, algorithm,
+mathematical object, or numerical method** within a module whose
+domain hosts multiple coexisting variants of the same conceptual
+operation. The prefix is short (two-to-four lowercase letters),
+uniformly applied to every member of that variant family within the
+module, and refers to a named mathematical object — not the module's
+domain shorthand of §7.1.
+
+§7.1.1 separates this case from the §7.1 helper-marker rule. The
+distinction is:
+
+- §7.1 prefix marks a private internal helper. The bare-name surface
+  of the module is the public API.
+- §7.1.1 prefix marks one of several public model/algorithm variants
+  the module hosts. Each variant carries its own prefix uniformly;
+  the module name describes the domain (`Pricing`, `Stochastic`),
+  not any single variant.
+
+Recognized model/algorithm sub-namespaces in the current ecosystem:
+
+| Prefix | Meaning                            | Module(s)                       |
+|--------|------------------------------------|---------------------------------|
+| `bs_`  | Black-Scholes analytical pricing   | `Shoals.Pricing`                |
+| `mc_`  | Monte-Carlo simulation pricing     | `Shoals.Pricing`                |
+| `gbm_` | Geometric Brownian motion paths    | `Shoals.Stochastic`             |
+| `fd_`  | Finite-difference numerical method | `Shoals.Properties.Greeks`      |
+| `lm_`  | Levenberg-Marquardt fitting        | `Nautilus.CurveFit`             |
+| `cg_`  | Conjugate gradient solver          | `Nautilus.LinAlg`               |
+| `airy_`| Airy-function family               | `Nautilus.Special`              |
+| `beta_`| Beta distribution / function       | `Nautilus.Distributions`        |
+| `chi_` | Chi-squared distribution           | `Nautilus.Distributions`        |
+| `det_` | Determinant of fixed-rank matrix   | `Nautilus.LinAlg`               |
+| `eig_` | Eigenvalue helpers                 | `Nautilus.LinAlg`               |
+| `inv_` | Matrix inverse of fixed rank       | `Nautilus.LinAlg`               |
+
+A prefix qualifies for §7.1.1 only when (a) it is uniformly applied
+to every member of its family within the module, and (b) the family
+names a coherent mathematical object. Single-use prefixes don't
+qualify; inconsistent application within a family doesn't qualify
+(those remain §7.1 violations).
+
+The lint tracks these in `crates/chelis-lint/src/rules/prefix_namespace.rs`
+under `MODEL_NAMESPACE_PREFIXES`. Adding a new model/algorithm
+prefix requires both updating that table and updating this section's
+recognized-list.
+
 ### 7.2 Type-suffix policy
 
 **Rule:** Type and shape suffixes describe the **element type or

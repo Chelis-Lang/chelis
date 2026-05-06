@@ -143,14 +143,33 @@ const COMMON_VERB_PREFIXES: &[&str] = &[
     "lookup", "drop", "fill", "count", "any", "all", "map", "fold", "reduce", "scan", "iter",
     "zip", "flat", "chain", "zero", "one", "init", "create", "alloc", "free", "log", "trace",
     "debug", "warn", "info", "error", "panic",
-    // Domain verbs (shared meaning, not shorthand)
+    // Generic accessor-verb idioms (§7.1 doesn't apply — same shape as
+    // top_*/head_*/first_*).
+    "best", // Domain verbs (shared meaning, not shorthand)
     "put", "call", // Type prefixes (orthogonal to domain shorthand)
     "int", "f32", "f64", "i32", "i64", "u32", "u64", "u8", "str", "vec", "ref", "ptr",
 ];
 
+/// Recognized model/algorithm sub-namespace prefixes per §7.1.1. These
+/// name distinct models, algorithms, mathematical objects, or numerical
+/// methods within a module that hosts multiple coexisting variants. The
+/// prefix is uniformly applied to every member of its family. See §7.1.1
+/// of `chelis/spec/01-nomenclature.md` for the canonical list and the
+/// criteria for adding new entries.
+const MODEL_NAMESPACE_PREFIXES: &[&str] = &[
+    // Pricing models (Shoals.Pricing)
+    "bs", "mc", // Stochastic processes (Shoals.Stochastic)
+    "gbm",
+    // Numerical methods (Shoals.Properties.Greeks; Nautilus.CurveFit; Nautilus.LinAlg)
+    "fd", "lm", "cg",
+    // Mathematical-object families (Nautilus.Special; Nautilus.Distributions; Nautilus.LinAlg)
+    "airy", "beta", "chi", "det", "eig", "inv",
+];
+
 /// Extract a 2–4 lowercase-letter prefix followed by `_` from a function
-/// name. Returns the prefix without the underscore. Filters out the
-/// common-verb prefixes in [`COMMON_VERB_PREFIXES`].
+/// name. Returns the prefix without the underscore. Filters out both the
+/// common-verb prefixes in [`COMMON_VERB_PREFIXES`] and the recognized
+/// §7.1.1 model/algorithm prefixes in [`MODEL_NAMESPACE_PREFIXES`].
 fn extract_short_prefix(name: &str) -> Option<String> {
     let bytes = name.as_bytes();
     for end in 2..=4 {
@@ -160,6 +179,9 @@ fn extract_short_prefix(name: &str) -> Option<String> {
         if bytes[end] == b'_' && bytes[..end].iter().all(|b| b.is_ascii_lowercase()) {
             let prefix = &name[..end];
             if COMMON_VERB_PREFIXES.contains(&prefix) {
+                return None;
+            }
+            if MODEL_NAMESPACE_PREFIXES.contains(&prefix) {
                 return None;
             }
             return Some(prefix.to_string());
@@ -220,16 +242,13 @@ mod tests {
 
     #[test]
     fn extract_short_prefix_examples() {
+        // la_ is a domain shorthand (matches LinAlg) — extracted, then
+        // accepted by the rule when the module is LinAlg.
         assert_eq!(extract_short_prefix("la_vec_sub"), Some("la".to_string()));
-        assert_eq!(
-            extract_short_prefix("bs_call_scalar"),
-            Some("bs".to_string())
-        );
-        assert_eq!(extract_short_prefix("mc_solve"), Some("mc".to_string()));
-        assert_eq!(
-            extract_short_prefix("gbm_terminal"),
-            Some("gbm".to_string())
-        );
+        // bs_/mc_/gbm_ are §7.1.1 model namespaces — filtered, return None.
+        assert_eq!(extract_short_prefix("bs_call_scalar"), None);
+        assert_eq!(extract_short_prefix("mc_solve"), None);
+        assert_eq!(extract_short_prefix("gbm_terminal"), None);
         assert_eq!(
             extract_short_prefix("pric_helper"),
             Some("pric".to_string())
@@ -254,6 +273,29 @@ mod tests {
         // Domain verbs that have shared meaning across modules.
         assert_eq!(extract_short_prefix("put_call_parity"), None);
         assert_eq!(extract_short_prefix("call_price"), None);
+        // Generic accessor-verb idioms (best_bid, best_ask).
+        assert_eq!(extract_short_prefix("best_bid"), None);
+        assert_eq!(extract_short_prefix("best_ask"), None);
+    }
+
+    #[test]
+    fn model_namespace_prefixes_skipped() {
+        // §7.1.1 recognized model/algorithm sub-namespaces.
+        assert_eq!(extract_short_prefix("bs_call_scalar"), None);
+        assert_eq!(extract_short_prefix("mc_call_price"), None);
+        assert_eq!(extract_short_prefix("gbm_path"), None);
+        assert_eq!(
+            extract_short_prefix("fd_delta_in_unit_range_for_call"),
+            None
+        );
+        assert_eq!(extract_short_prefix("lm_jcol"), None);
+        assert_eq!(extract_short_prefix("cg_solve"), None);
+        assert_eq!(extract_short_prefix("airy_ai"), None);
+        assert_eq!(extract_short_prefix("beta_pdf"), None);
+        assert_eq!(extract_short_prefix("chi_squared_cdf"), None);
+        assert_eq!(extract_short_prefix("det_2x2"), None);
+        assert_eq!(extract_short_prefix("eig_2x2"), None);
+        assert_eq!(extract_short_prefix("inv_2x2"), None);
     }
 
     #[test]
@@ -294,24 +336,32 @@ mod tests {
     }
 
     #[test]
-    fn flags_bs_prefix_in_pricing() {
-        // The snapshot §8 #7 case: bs_ in Shoals.Pricing.
+    fn accepts_bs_prefix_in_pricing_per_section_7_1_1() {
+        // Snapshot §8 #7 case, post-§7.1.1 amendment: bs_ in
+        // Shoals.Pricing is a recognized model sub-namespace. The lint
+        // does NOT fire — Outcome A from the brief.
         let src = "module Shoals.Pricing\ndef bs_call_scalar(s: f32) = todo\ndef bs_put_scalar(s: f32) = todo\ndef call_prices(s: f32) = todo\ndef put_prices(s: f32) = todo\n";
         let v = run(src);
-        // Both bs_call_scalar and bs_put_scalar should fire.
-        assert_eq!(v.len(), 2, "got: {v:?}");
-        assert!(v[0].message.contains("bs_"));
+        assert!(v.is_empty(), "got: {v:?}");
     }
 
     #[test]
-    fn flags_mc_prefix_in_stochastic() {
+    fn accepts_mc_and_gbm_prefixes_per_section_7_1_1() {
+        // Both mc_ (Monte-Carlo pricing) and gbm_ (geometric Brownian
+        // motion) are §7.1.1 recognized prefixes. The rule does not fire.
         let src = "module Shoals.Stochastic\ndef mc_step(s: f32) = todo\ndef mc_solve(s: f32) = todo\ndef gbm_terminal(s: f32) = todo\ndef gbm_path(s: f32) = todo\n";
         let v = run(src);
-        // Two prefixes (mc_, gbm_), 4 functions total. Each non-matching
-        // prefix used by ≥2 functions fires. Stochastic's expected
-        // shorthand includes `s`, `st`, `sto`, `stoc`, `stochastic`.
-        // Neither mc nor gbm matches.
-        assert_eq!(v.len(), 4, "got: {v:?}");
+        assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn still_flags_unrecognized_prefix_with_2_plus_uses() {
+        // A prefix not in either filter list, used by 2+ functions, with
+        // no module-shorthand match → fires (closer-read trigger).
+        // `xyz_` is fictional; not in any allowlist.
+        let src = "module Foo.Bar\ndef xyz_alpha(s: f32) = todo\ndef xyz_beta(s: f32) = todo\n";
+        let v = run(src);
+        assert_eq!(v.len(), 2, "got: {v:?}");
     }
 
     #[test]
