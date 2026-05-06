@@ -559,6 +559,19 @@ reef.md
 effects.md
 ```
 
+#### Tool-required exceptions inside `chelis/docs/book/src/`
+
+Two filenames inside the mdBook source tree are determined by mdBook
+itself, not by this spec, and are exempt from the kebab-case rule:
+
+- `SUMMARY.md` — the mdBook table-of-contents file. mdBook requires
+  this literal filename.
+- `README.md` — the mdBook chapter-index file. mdBook resolves the
+  index page from this literal filename.
+
+The exemption is for exactly these two filenames. Other uppercase
+files inside `docs/book/src/` are still violations of §8.5.
+
 ---
 
 ## 9. Project-cutting conventions
