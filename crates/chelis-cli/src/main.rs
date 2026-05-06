@@ -4017,13 +4017,21 @@ fn cmd_lint(
             return Err(format!("no rule with id '{id}'").into());
         }
     }
+    // The exception list is currently empty — the rule-internal
+    // allowlists (e.g., module_pascal_components::KNOWN_SINGLE_WORDS)
+    // cover the common cases. As the lint surfaces new closer-read
+    // candidates and the orchestrator records §-cross-refs for
+    // legitimate exceptions, entries land here.
+    let exceptions: Vec<chelis_lint::Exception> = Vec::new();
     let mut total = 0usize;
     for target in &targets {
-        let violations = chelis_lint::lint(target, &rules)?;
-        for v in &violations {
+        let raw_violations = chelis_lint::lint(target, &rules)?;
+        let kept =
+            chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
+        for v in &kept {
             println!("{v}");
         }
-        total += violations.len();
+        total += kept.len();
     }
     if check && total > 0 { Ok(1) } else { Ok(0) }
 }
