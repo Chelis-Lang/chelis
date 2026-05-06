@@ -1083,36 +1083,11 @@ fn phaseA_item9_real_github_manual_gate() {
     let dev_b_registry = dir.path().join("dev-b-real-home");
     let pkg_root = dir.path().join("real-pkg");
 
-    // Step 0: pre-install the runtime from the monorepo source.
-    // Auto-fetch is intentionally disabled for chelis-std (it ships
-    // with the compiler), so the manual gate must seed it explicitly
-    // — production ships the runtime bytes alongside the compiler
-    // binary; this manual-gate scaffolding mirrors that flow.
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_REEF_HOME", &dev_a_registry)
-        .args([
-            "reef",
-            "install",
-            "--from-monorepo",
-            monorepo_root().to_str().unwrap(),
-            "chelis-std=0.1.0",
-        ])
-        .assert()
-        .success();
-    // Dev B also needs the runtime in their fresh registry.
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_REEF_HOME", &dev_b_registry)
-        .args([
-            "reef",
-            "install",
-            "--from-monorepo",
-            monorepo_root().to_str().unwrap(),
-            "chelis-std=0.1.0",
-        ])
-        .assert()
-        .success();
+    // chelis-std is now bundled inside the chelis binary
+    // (`crates/chelis-std-bundle`), so neither dev A's nor dev B's
+    // registry needs to be pre-seeded with the runtime. The
+    // `chelis reef build` invocations below resolve chelis-std from
+    // the embedded bytes directly.
 
     // Step 1: install Nautilus from the real GitHub API.
     let result = chelis_reef::install_from_github("chelis-lang/nautilus@v0.5.0", &dev_a_registry);

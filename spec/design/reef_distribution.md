@@ -218,6 +218,39 @@ it the same way Rust programs depend on `core`/`std`. Concretely:
   supplied the bytes for auditability. There is no archive to fetch
   and integrity comes from the compiler binary itself.
 
+**Bundling and lockfile synthesis (Phase A correction).** The runtime
+bytes — both the source archive (`.tar.zst`) and the shell
+(`.chb`) — are baked into the chelis binary at compile time via
+`include_bytes!()` in the `chelis-std-bundle` crate. The reef loader
+checks for chelis-std specifically and serves bytes from the embedded
+bundle; everything else falls through to the local-registry path.
+Two consequences:
+
+1. **Project-driven blanket synthesis.** Every reef.toml has a
+   `compiler =` pin, and that pin IS the runtime declaration.
+   `build_lockfile` therefore unconditionally records a
+   `LockSource::Bundled` chelis-std entry for every project,
+   regardless of whether the project listed chelis-std in
+   `[dependencies]`. The synthesis is idempotent with the explicit-
+   listing path: when chelis-std is in the dep graph, the same
+   `Bundled` entry is produced; when absent, the lockfile-build step
+   appends it after iterating the graph. The `archive_sha256` and
+   `shell_sha256` fields come from the embedded bundle bytes for
+   both paths so the recorded entry is byte-identical.
+2. **Compile-time embedding, not two-stage build.** Bundle artifacts
+   (`crates/chelis-std-bundle/dist/chelis-std-<version>.{tar.zst,chb}`)
+   are committed to the repo. The pipeline is "regenerate artifacts ->
+   commit -> build"; `scripts/regenerate_chelis_std_bundle.py` is the
+   canonical regen entry. The bundle crate's build.rs verifies the
+   dist files exist and emits `cargo:rerun-if-changed=` so cargo
+   invalidates the bundle when the bytes change.
+3. **No registry seeding required.** `chelis reef build` against a
+   project that depends on chelis-std (implicitly or explicitly)
+   succeeds against an empty `$CHELIS_REEF_HOME`. The bundled bytes
+   are reachable from the chelis binary, not from the filesystem.
+   Manual gates that previously pre-installed chelis-std via
+   `--from-monorepo` no longer need that step.
+
 **Acceptance oracle.**
 
 - A clean dev environment with `GITHUB_TOKEN` set runs `chelis reef

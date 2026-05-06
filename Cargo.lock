@@ -392,6 +392,7 @@ dependencies = [
  "chelis-reef",
  "chelis-runtime",
  "chelis-shell",
+ "chelis-std-bundle",
  "chelis-surf",
  "chelis-tide",
  "chelis-types",
@@ -548,6 +549,7 @@ dependencies = [
  "chelis-effects",
  "chelis-macros",
  "chelis-shell",
+ "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
  "reqwest",
@@ -578,6 +580,17 @@ version = "0.5.0"
 dependencies = [
  "bincode",
  "serde",
+]
+
+[[package]]
+name = "chelis-std-bundle"
+version = "0.5.0"
+dependencies = [
+ "chelis-shell",
+ "sha2",
+ "tar",
+ "tempfile",
+ "zstd",
 ]
 
 [[package]]
