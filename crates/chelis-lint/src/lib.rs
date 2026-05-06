@@ -21,6 +21,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod exceptions;
 pub mod registry;
 pub mod rules;
 pub mod surface;
