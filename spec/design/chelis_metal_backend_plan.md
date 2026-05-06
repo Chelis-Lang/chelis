@@ -699,7 +699,7 @@ After each phase lands, invoke `/red-team` (which routes to `redteam-exec`) — 
 
 Deferred (not in M0–M7, tracked as follow-ups):
 - Hoist `memory.rs` from per-backend copy into a shared crate once both GPU backends are stable
-- Convert `smoke_macos_accelerate.sh` to Python ("Never shell" cleanup)
+- ~~Convert `smoke_macos_accelerate.sh` to Python ("Never shell" cleanup)~~ Done; the runner is now `.github/scripts/smoke_macos_accelerate.py`.
 - MPS integration for matmul, GPU sort/cumsum, RNG kernel, async dispatch (see §10)
 
 ---

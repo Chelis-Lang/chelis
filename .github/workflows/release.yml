@@ -106,7 +106,7 @@ jobs:
           file target/release/chelis | grep -E 'arm64|aarch64'
 
       - name: Smoke test generated C with Accelerate
-        run: bash .github/scripts/smoke_macos_accelerate.sh ./target/release/chelis
+        run: python3 .github/scripts/smoke_macos_accelerate.py ./target/release/chelis
 
       - name: Determine version
         id: version

@@ -65,7 +65,7 @@ fn resolve_toolchain(requirements: CodegenRequirements, override_vars: &[&str]) 
     // `chelis_runtime/include/chelis_math.h`, regardless of whether BLAS is
     // requested.  Linking against the Accelerate framework is therefore
     // mandatory on macOS to resolve those symbols, mirroring what
-    // `.github/scripts/smoke_macos_accelerate.sh` does for the on-disk
+    // `.github/scripts/smoke_macos_accelerate.py` does for the on-disk
     // compile path.
     let blas_provider = if cfg!(target_os = "macos") {
         link_flags.push("-framework".to_string());
