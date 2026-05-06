@@ -442,6 +442,7 @@ Recognized model/algorithm sub-namespaces in the current ecosystem:
 | `det_` | Determinant of fixed-rank matrix   | `Nautilus.LinAlg`               |
 | `eig_` | Eigenvalue helpers                 | `Nautilus.LinAlg`               |
 | `inv_` | Matrix inverse of fixed rank       | `Nautilus.LinAlg`               |
+| `erf_` | Error-function family              | `Nautilus.Special`              |
 
 A prefix qualifies for §7.1.1 only when (a) it is uniformly applied
 to every member of its family within the module, and (b) the family

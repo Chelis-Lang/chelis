@@ -145,7 +145,14 @@ const COMMON_VERB_PREFIXES: &[&str] = &[
     "debug", "warn", "info", "error", "panic",
     // Generic accessor-verb idioms (§7.1 doesn't apply — same shape as
     // top_*/head_*/first_*).
-    "best", // Domain verbs (shared meaning, not shorthand)
+    "best", "top", "head", "tail", "last", "first",
+    // Test/construction helpers — `mk_*` is the test-fixture-builder
+    // idiom paralleling `new_*`/`make_*`.
+    "mk",
+    // Constant / utility prefixes — `nan_*` is NaN guards, `sqrt_*` is
+    // precomputed-sqrt constants, `two_*` is "two" math constants. None
+    // are domain-shorthand sub-namespaces.
+    "nan", "sqrt", "two", // Domain verbs (shared meaning, not shorthand)
     "put", "call", // Type prefixes (orthogonal to domain shorthand)
     "int", "f32", "f64", "i32", "i64", "u32", "u64", "u8", "str", "vec", "ref", "ptr",
 ];
@@ -163,7 +170,7 @@ const MODEL_NAMESPACE_PREFIXES: &[&str] = &[
     // Numerical methods (Shoals.Properties.Greeks; Nautilus.CurveFit; Nautilus.LinAlg)
     "fd", "lm", "cg",
     // Mathematical-object families (Nautilus.Special; Nautilus.Distributions; Nautilus.LinAlg)
-    "airy", "beta", "chi", "det", "eig", "inv",
+    "airy", "beta", "chi", "det", "eig", "inv", "erf",
 ];
 
 /// Extract a 2–4 lowercase-letter prefix followed by `_` from a function
