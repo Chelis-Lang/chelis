@@ -6,6 +6,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-06
+
+Bootstrap-list patch. Updates DEFAULT_BOOTSTRAP_LIST in
+crates/chelis-reef/src/lib.rs to point at the post-rename shell
+tags (nautilus v0.6.0, coral v0.6.0, shoals v0.3.0, octant v0.4.1).
+Required reef bundle rebuild against compiler =0.6.1 (from =0.6.0)
+and propagated test-fixture pin updates.
+
+No API or runtime change beyond the bootstrap-list and pin bumps.
+
 ## [0.6.0] — 2026-05-06
 
 Ecosystem-wide naming-convention sweep. Codifies the cross-shell

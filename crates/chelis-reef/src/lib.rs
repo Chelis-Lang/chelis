@@ -2183,10 +2183,10 @@ impl std::fmt::Display for LockfileInstallError {
 /// in `spec/design/reef_distribution.md`; until then this list is the
 /// hard-coded source of truth.
 pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
-    ("nautilus", "v0.5.0"),
-    ("coral", "v0.5.0"),
-    ("shoals", "v0.2.0"),
-    ("octant", "v0.4.0"),
+    ("nautilus", "v0.6.0"),
+    ("coral", "v0.6.0"),
+    ("shoals", "v0.3.0"),
+    ("octant", "v0.4.1"),
 ];
 
 /// Distinct error categories surfaced by the bootstrap install path.

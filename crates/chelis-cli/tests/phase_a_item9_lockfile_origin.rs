@@ -106,7 +106,7 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -147,7 +147,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.0".to_string(),
+        compiler: "=0.6.1".to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -312,7 +312,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 archive_sha256 = "deadbeef"
 shell_sha256 = "cafebabe"
 
@@ -322,7 +322,7 @@ kind = "local_registry"
 [[dependencies]]
 name = "neighbor"
 version = "0.2.0"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 archive_sha256 = "abcd"
 shell_sha256 = "ef01"
 
@@ -369,7 +369,7 @@ fn oracle_roundtrip_with_and_without_origin() {
                 name: name.to_string(),
                 version: "0.2.0".to_string(),
                 source,
-                compiler: "=0.6.0".to_string(),
+                compiler: "=0.6.1".to_string(),
                 archive_sha256: "ABC".to_string(),
                 shell_sha256: "DEF".to_string(),
             }],
@@ -404,7 +404,7 @@ fn oracle_roundtrip_with_and_without_origin() {
 
     // Bundled (the language runtime). Same fixed-point property.
     let bundled_source = LockSource::Bundled {
-        compiler_version: "0.6.0".to_string(),
+        compiler_version: "0.6.1".to_string(),
     };
     let lock = synth_lock(bundled_source, "chelis-std");
     let serialized = toml::to_string_pretty(&lock).expect("serialize bundled");
@@ -413,7 +413,7 @@ fn oracle_roundtrip_with_and_without_origin() {
         "Bundled variant must serialize with `bundled` tag; got: {serialized}"
     );
     assert!(
-        serialized.contains("compiler_version = \"0.6.0\""),
+        serialized.contains("compiler_version = \"0.6.1\""),
         "Bundled must record compiler_version; got: {serialized}"
     );
     let parsed: ReefLock = toml::from_str(&serialized).expect("parse bundled");
@@ -798,7 +798,7 @@ fn phaseA_item9_old_chelis_std_lockfile_migrates_to_bundled() {
         r#"[package]
 name = "downstream"
 version = "0.2.0"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 module_prefix = "Downstream"
 "#,
     )
@@ -815,7 +815,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
@@ -928,7 +928,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "9.9.9"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
@@ -1097,7 +1097,7 @@ fn phaseA_item9_real_github_manual_gate() {
     // remote_origin. The shape mirrors `seed_downstream_package` but
     // depends on Nautilus instead of chelis-std because that's what
     // the real release ships.
-    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.6.0", "Real");
+    seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.6.1", "Real");
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_REEF_HOME", &dev_a_registry)

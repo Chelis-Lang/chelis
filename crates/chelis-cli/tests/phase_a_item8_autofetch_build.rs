@@ -65,7 +65,7 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -109,7 +109,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.0".to_string(),
+        compiler: "=0.6.1".to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -923,7 +923,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "0.2.0"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 archive_sha256 = "{archive_sha}"
 shell_sha256 = "{shell_sha}"
 
@@ -988,7 +988,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-nautilus = {{ version = "0.6.0" }}
+nautilus = {{ version = "0.6.1" }}
 "#,
         ),
     )
@@ -1040,7 +1040,7 @@ fn phaseA_item8_real_github_manual_gate() {
         .as_array()
         .expect("packages.nautilus must be array");
     assert!(
-        entries.iter().any(|e| e["version"] == "0.6.0"),
+        entries.iter().any(|e| e["version"] == "0.6.1"),
         "expected nautilus 0.5.0 in index, got {entries:?}"
     );
 }

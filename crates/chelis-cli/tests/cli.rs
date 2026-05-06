@@ -2815,8 +2815,8 @@ fn reef_build_emits_shell_and_archive() {
         .stdout(predicate::str::contains("Built chelis-std 0.2.0"));
 
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.1.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.1.0.tar.zst").exists());
+    assert!(pkg.join("dist/chelis-std-0.2.0.chb").exists());
+    assert!(pkg.join("dist/chelis-std-0.2.0.tar.zst").exists());
 }
 
 #[test]

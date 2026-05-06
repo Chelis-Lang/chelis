@@ -1317,10 +1317,10 @@ fn phaseA_item6_help_lists_from_github_flag() {
 
 /// Tag pinned to the canonical `chelis-lang/nautilus` release this
 /// manual gate validates against. Bump on each new Nautilus release.
-const MANUAL_GATE_NAUTILUS_TAG: &str = "v0.5.0";
+const MANUAL_GATE_NAUTILUS_TAG: &str = "v0.6.0";
 /// Version string derived from the tag (leading `v` stripped). Used
 /// for the asset filenames and the on-disk package directory.
-const MANUAL_GATE_NAUTILUS_VERSION: &str = "0.6.0";
+const MANUAL_GATE_NAUTILUS_VERSION: &str = "0.6.1";
 
 #[test]
 #[ignore = "real-network manual gate; run with `--ignored --exact`"]

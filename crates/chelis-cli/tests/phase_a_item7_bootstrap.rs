@@ -90,7 +90,7 @@ fn build_test_archive(
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.0"
+compiler = "=0.6.1"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -138,7 +138,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.0".to_string(),
+        compiler: "=0.6.1".to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
