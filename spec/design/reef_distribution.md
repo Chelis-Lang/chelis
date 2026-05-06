@@ -68,10 +68,13 @@ runs entirely on bytes already on disk; no code from the artifact executes.
 
 The pre-launch artifact backend is GitHub Releases on the canonical hosting
 org's repositories. Each shell repository maintains its own release tags
-(`v0.4.0` for Nautilus, `v0.4.0` for Coral, `v0.1.0` for Shoals,
-`v0.1.0` for Octant — each shell's own semver trajectory; the version is
-not synchronized across shells). Each release attaches the prebuilt
-`<name>-<version>.chb` and `<name>-<version>.tar.zst` files.
+(`v0.5.0` for Nautilus, `v0.5.0` for Coral, `v0.2.0` for Shoals,
+`v0.4.0` for Octant — each shell's own semver trajectory; the version is
+not synchronized across shells; the live pins are tracked in
+`DEFAULT_BOOTSTRAP_LIST` in `crates/chelis-reef/src/lib.rs`). Each release
+attaches the prebuilt `<name>-<version>.chb` and
+`<name>-<version>.tar.zst` files (filenames omit the leading `v` even
+though the tag carries it).
 
 The dev team has authenticated access to the canonical org. Authentication
 is via standard GitHub PATs supplied through the `GITHUB_TOKEN` environment
