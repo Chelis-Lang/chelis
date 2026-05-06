@@ -236,6 +236,17 @@ enum Command {
         #[clap(long, default_value = "30")]
         timeout: u64,
     },
+    /// Lint naming conventions per `spec/01-nomenclature.md`
+    Lint {
+        /// Paths to lint. Defaults to the current directory.
+        paths: Vec<PathBuf>,
+        /// Exit nonzero on any violation (CI use).
+        #[arg(long)]
+        check: bool,
+        /// Run only the rule with this id.
+        #[arg(long)]
+        rule: Option<String>,
+    },
     /// Internal: run the tests in a single file and emit NDJSON on stdout.
     /// Invoked by `chelis test` as a subprocess per file so a crash in one
     /// test file (e.g., stack overflow) does not kill every other test file.
@@ -446,6 +457,14 @@ fn main() {
             json,
             timeout,
         }) => match cmd_test(path.as_deref(), filter.as_deref(), json, timeout) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        },
+        Some(Command::Lint { paths, check, rule }) => match cmd_lint(paths, check, rule.as_deref())
+        {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("error: {err}");
@@ -3973,4 +3992,38 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
         }
         chelis_deep::ast::Expr::Atom(_, _) => {}
     }
+}
+
+/// `chelis lint` — naming-convention lint per `spec/01-nomenclature.md`.
+///
+/// Walks each path in `paths` (default: `.`), dispatches to every registered
+/// rule, prints violations as `path:line:col: rule (§ref): message`, and
+/// returns an exit code. With `--check`, exit nonzero on any violation
+/// (CI gate); otherwise exit 0 even when violations exist (informational).
+fn cmd_lint(
+    paths: Vec<PathBuf>,
+    check: bool,
+    rule_filter: Option<&str>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let targets = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths
+    };
+    let mut rules = chelis_lint::registry::all_rules();
+    if let Some(id) = rule_filter {
+        rules.retain(|r| r.id() == id);
+        if rules.is_empty() {
+            return Err(format!("no rule with id '{id}'").into());
+        }
+    }
+    let mut total = 0usize;
+    for target in &targets {
+        let violations = chelis_lint::lint(target, &rules)?;
+        for v in &violations {
+            println!("{v}");
+        }
+        total += violations.len();
+    }
+    if check && total > 0 { Ok(1) } else { Ok(0) }
 }

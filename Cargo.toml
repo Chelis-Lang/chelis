@@ -17,6 +17,7 @@ members = [
     "crates/chelis-backend-hip",
     "crates/chelis-backend-metal",
     "crates/chelis-validate",
+    "crates/chelis-lint",
     "crates/chelis-tide",
     "crates/chelis-lsp",
     "crates/chelis-cove",
@@ -47,6 +48,7 @@ chelis-backend-c = { path = "crates/chelis-backend-c" }
 chelis-backend-hip = { path = "crates/chelis-backend-hip" }
 chelis-backend-metal = { path = "crates/chelis-backend-metal" }
 chelis-validate = { path = "crates/chelis-validate" }
+chelis-lint = { path = "crates/chelis-lint" }
 chelis-tide = { path = "crates/chelis-tide" }
 chelis-lsp = { path = "crates/chelis-lsp" }
 chelis-cove = { path = "crates/chelis-cove" }

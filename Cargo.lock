@@ -387,6 +387,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-ir",
+ "chelis-lint",
  "chelis-lsp",
  "chelis-macros",
  "chelis-reef",
@@ -495,6 +496,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "chelis-lint"
+version = "0.5.0"
+dependencies = [
+ "regex",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

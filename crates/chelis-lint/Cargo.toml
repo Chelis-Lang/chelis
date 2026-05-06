@@ -1,0 +1,18 @@
+[package]
+name = "chelis-lint"
+description = "Naming-convention lint for the Chelis ecosystem (spec/01-nomenclature.md)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "chelis_lint"
+path = "src/lib.rs"
+
+[dependencies]
+regex = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
