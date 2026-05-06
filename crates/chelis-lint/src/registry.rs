@@ -1,9 +1,12 @@
 //! Rule registry — the central list of all lint rules, in dispatch order.
 
 use crate::Rule;
+use crate::rules;
 
-/// Return every rule the lint enforces. Rules are added here as their modules
-/// land in subsequent commits.
+/// Return every rule the lint enforces.
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
-    Vec::new()
+    vec![
+        Box::new(rules::no_shell_scripts::NoShellScripts),
+        Box::new(rules::phase_identifier_case::PhaseIdentifierCase),
+    ]
 }
