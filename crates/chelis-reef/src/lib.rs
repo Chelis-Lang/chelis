@@ -3455,7 +3455,9 @@ fn load_bundled_chelis_std() -> Result<InstalledPackage, LoadRegistryError> {
         chelis_std_bundle::extract_into(dir.path())?;
         Ok(dir)
     });
-    let dir = dir_result.as_ref().map_err(|e| LoadRegistryError::Other(e.clone()))?;
+    let dir = dir_result
+        .as_ref()
+        .map_err(|e| LoadRegistryError::Other(e.clone()))?;
     let shell = chelis_shell::decode_shell(chelis_std_bundle::CHELIS_STD_SHELL).map_err(|e| {
         LoadRegistryError::Other(format!("failed to decode embedded chelis-std shell: {e}"))
     })?;
@@ -3517,8 +3519,7 @@ fn load_registry_package(name: &str, version: &str) -> Result<InstalledPackage, 
     // defensive — it should never fire in practice. If it does, the
     // local-registry path will produce the standard
     // `MissingFromIndex` / mismatch errors.
-    if name == CHELIS_STD_PACKAGE_NAME && version == chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION
-    {
+    if name == CHELIS_STD_PACKAGE_NAME && version == chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION {
         return load_bundled_chelis_std();
     }
 

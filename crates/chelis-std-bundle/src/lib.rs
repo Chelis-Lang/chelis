@@ -114,9 +114,12 @@ pub fn extract_into(dest: &Path) -> Result<(), String> {
     let decoder = zstd::stream::read::Decoder::new(CHELIS_STD_ARCHIVE)
         .map_err(|e| format!("failed to start zstd decoder for chelis-std bundle: {e}"))?;
     let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(dest)
-        .map_err(|e| format!("failed to unpack chelis-std bundle into {}: {e}", dest.display()))?;
+    archive.unpack(dest).map_err(|e| {
+        format!(
+            "failed to unpack chelis-std bundle into {}: {e}",
+            dest.display()
+        )
+    })?;
     Ok(())
 }
 
