@@ -581,6 +581,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-std-bundle"
+version = "0.5.0"
+dependencies = [
+ "chelis-shell",
+ "sha2",
+ "tar",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "chelis-surf"
 version = "0.5.0"
 dependencies = [
