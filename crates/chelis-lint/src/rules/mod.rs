@@ -3,6 +3,7 @@
 //! Each rule corresponds to a section of `chelis/spec/01-nomenclature.md`.
 //! The mapping is recorded in [`crate::registry::all_rules`].
 
+pub mod deep_user_symbol_charset;
 pub mod doc_filename_convention;
 pub mod module_compound_titlecase;
 pub mod module_decl;

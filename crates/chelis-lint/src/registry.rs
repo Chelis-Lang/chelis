@@ -14,5 +14,6 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::snapshot_filename_pattern::SnapshotFilenamePattern),
         Box::new(rules::type_suffix_policy::TypeSuffixPolicy),
         Box::new(rules::prefix_namespace::PrefixNamespace),
+        Box::new(rules::deep_user_symbol_charset::DeepUserSymbolCharset),
     ]
 }
