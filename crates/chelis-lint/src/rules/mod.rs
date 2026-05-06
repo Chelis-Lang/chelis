@@ -9,5 +9,6 @@ pub mod module_decl;
 pub mod module_pascal_components;
 pub mod no_shell_scripts;
 pub mod phase_identifier_case;
+pub mod prefix_namespace;
 pub mod snapshot_filename_pattern;
 pub mod type_suffix_policy;
