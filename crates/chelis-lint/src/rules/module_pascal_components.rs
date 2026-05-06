@@ -159,6 +159,12 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     // Reef package additional_sources directory names used as module roots.
     "Properties",
     "References",
+    // External library names that the ecosystem mirrors as module
+    // components. These are single-word per the upstream library's own
+    // canonical naming; treating them as compounds (Safetensors →
+    // SafeTensors) would diverge from the upstream's PyPI/HuggingFace
+    // identity.
+    "Safetensors",
 ];
 
 /// Return `Some(reason)` if the component is a §6.3 violation, `None` if

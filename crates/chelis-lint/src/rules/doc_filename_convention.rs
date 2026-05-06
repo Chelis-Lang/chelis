@@ -44,10 +44,14 @@ enum Slot {
 }
 
 fn classify_doc(path: &Path) -> Slot {
-    let s = path.to_string_lossy();
-    if s.contains("/docs/book/src/") {
+    // §8.5: any mdBook source tree uses kebab-case. An mdBook source tree
+    // is detected by the presence of a `book.toml` in an ancestor directory.
+    // This generalizes the prior `chelis/docs/book/src/` hardcode to handle
+    // shell repos with different layouts (e.g., nautilus uses `docs/src/`).
+    if is_inside_mdbook_tree(path) {
         return Slot::BookSrc;
     }
+    let s = path.to_string_lossy();
     if s.contains("/spec/design/") {
         return Slot::SpecDesign;
     }
@@ -70,6 +74,16 @@ fn classify_doc(path: &Path) -> Slot {
         return Slot::Docs;
     }
     Slot::Other
+}
+
+/// Detect whether `path` sits inside an mdBook source tree. The mdBook
+/// source tree is conventionally `<repo>/docs/src/` (chelis-ecosystem
+/// default) or `<repo>/docs/book/src/` (legacy layout). Sibling files
+/// of `book.toml` (such as `nautilus/docs/RELEASES.md`) are NOT in the
+/// source tree — those are top-level docs/ files governed by §8.3.
+fn is_inside_mdbook_tree(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains("/docs/src/") || s.contains("/docs/book/src/")
 }
 
 /// True if the filename starts with `NN-` (two digits + hyphen), suggesting

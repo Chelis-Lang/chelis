@@ -116,6 +116,15 @@ impl Rule for TypeSuffixPolicy {
                 .map(|c| c.get(1).unwrap().as_str().trim().to_string());
             for suffix in SUFFIXES {
                 if func_name.ends_with(suffix.name) {
+                    // §7.2 "Parser/converter idiom" carve-out: when the
+                    // function name starts with a recognized parser-verb
+                    // prefix (parse_, unwrap_, is_some_, try_, as_,
+                    // from_, to_), the type-suffix names the type the
+                    // function tests-for or produces, not the principal
+                    // argument's element type. Skip the rule for these.
+                    if has_parser_verb_prefix(func_name) {
+                        continue;
+                    }
                     // Two violation modes per §7.2:
                     //
                     // (1) The suffix doesn't match anywhere in the
@@ -175,6 +184,20 @@ impl Rule for TypeSuffixPolicy {
         }
         out
     }
+}
+
+/// Recognized parser/converter verb prefixes per §7.2 "Parser/converter
+/// idiom". A function whose name starts with one of these may carry a
+/// type-suffix that names the type the function tests-for or produces
+/// rather than the principal argument's element type.
+const PARSER_VERB_PREFIXES: &[&str] = &[
+    "parse_", "unwrap_", "is_some_", "try_", "as_", "from_", "to_",
+];
+
+fn has_parser_verb_prefix(func_name: &str) -> bool {
+    PARSER_VERB_PREFIXES
+        .iter()
+        .any(|p| func_name.starts_with(p))
 }
 
 /// Word-boundary check: does `haystack` contain any of `needles` as a
@@ -269,6 +292,50 @@ mod tests {
         let src = "def parse_int(s: string) -> Option[int64] = todo\n";
         let v = run(src);
         assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_is_some_int_parser_idiom() {
+        // is_some_int(s: string) -> bool: neither arg nor return is int,
+        // but the parser-verb prefix `is_some_` triggers the §7.2
+        // parser/converter idiom carve-out.
+        let src = "def is_some_int(value: string) -> bool = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "parser-verb idiom must accept; got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_unwrap_int_parser_idiom() {
+        let src = "def unwrap_int(s: string) -> int64 = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_to_int_converter_idiom() {
+        let src = "def to_int(s: string) -> Option[int64] = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn accepts_from_string_converter_idiom() {
+        // from_string_to_bool follows the converter idiom even though
+        // _bool isn't in the signature directly — the verb prefix carves
+        // out the rule.
+        let src = "def from_string_to_bool(s: string) -> bool = todo\n";
+        let v = run(src);
+        assert!(v.is_empty(), "got: {v:?}");
+    }
+
+    #[test]
+    fn still_flags_dispatch_form_even_without_parser_prefix() {
+        // is_nan_int has no parser-verb prefix (`is_` alone is not in
+        // the list — only `is_some_`); first arg is Frame, so still fires.
+        let src = "def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = todo\n";
+        let v = run(src);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("dispatch form"));
     }
 
     #[test]

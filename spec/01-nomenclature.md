@@ -469,6 +469,32 @@ The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,
 `*_col` form per this rule. The `_int` was extraneous: column dtype
 is inferred when the column is fetched.
 
+#### Parser/converter idiom (allowed)
+
+A type-suffix may also describe **the type a function tests for or
+produces**, not just the type of the principal argument, when the
+function name begins with a parser/converter verb prefix:
+
+- `parse_*`, `unwrap_*`, `try_*`, `is_some_*`, `as_*`, `from_*`, `to_*`
+
+In these cases the suffix is naming what the function reads-out or
+asserts about, not what its argument's element type is. The principal
+argument is typically a string (or another carrier of the encoded
+data).
+
+```chelis
+def parse_int(s: string) -> Option[int64] = ...    // tests/produces int
+def unwrap_int(s: string) -> int64 = ...           // produces int (panicking)
+def is_some_int(s: string) -> bool = ...           // tests for int
+def is_some_float(s: string) -> bool = ...         // tests for float
+def from_string_to_bool(s: string) -> bool = ...   // converter
+```
+
+The lint accepts this idiom when both conditions hold: the function
+name starts with one of the recognized parser/converter prefixes, AND
+the suffix names a recognized element type (`_int`, `_f32`, `_f64`,
+`_bool`, `_string`).
+
 ---
 
 ## 8. Documentation conventions
@@ -552,7 +578,9 @@ renames forward.
 
 ### 8.5 mdBook book chapters (deliberate exception)
 
-**Rule:** kebab-case. `chelis/docs/book/src/*.md`.
+**Rule:** kebab-case. Applies to any mdBook source tree — defined as
+the directory containing the mdBook `book.toml` configuration plus its
+descendants (typically `<repo>/docs/src/` or `<repo>/docs/book/src/`).
 
 mdBook book chapters expect kebab-case URLs for stability across
 renderers. This is a deliberate exception from the broader
@@ -564,11 +592,17 @@ cli.md
 install.md
 reef.md
 effects.md
+cg-solve.md
+monte-carlo.md
 ```
 
-#### Tool-required exceptions inside `chelis/docs/book/src/`
+The detection is `book.toml`-based, not path-string-based, so any
+repo's mdBook layout works (chelis uses `docs/book/src/`; nautilus
+uses `docs/src/`; other shells can choose their own layout).
 
-Two filenames inside the mdBook source tree are determined by mdBook
+#### Tool-required exceptions inside any mdBook source tree
+
+Two filenames inside an mdBook source tree are determined by mdBook
 itself, not by this spec, and are exempt from the kebab-case rule:
 
 - `SUMMARY.md` — the mdBook table-of-contents file. mdBook requires
@@ -577,7 +611,7 @@ itself, not by this spec, and are exempt from the kebab-case rule:
   index page from this literal filename.
 
 The exemption is for exactly these two filenames. Other uppercase
-files inside `docs/book/src/` are still violations of §8.5.
+files inside an mdBook source tree are still violations of §8.5.
 
 ---
 
