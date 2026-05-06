@@ -106,7 +106,7 @@ impl Rule for PrefixNamespace {
             // Fire one violation per function, naming the prefix and the
             // module's expected shorthand for closer-read context.
             let module_path = decl.components.join(".");
-            let allowed_list: Vec<String> = allowed_prefixes.iter().cloned().collect();
+            let allowed_list: Vec<String> = allowed_prefixes.to_vec();
             let allowed_hint = if allowed_list.is_empty() {
                 "no shorthand could be derived".to_string()
             } else {
