@@ -2186,7 +2186,7 @@ pub const DEFAULT_BOOTSTRAP_LIST: &[(&str, &str)] = &[
     ("nautilus", "v0.5.0"),
     ("coral", "v0.5.0"),
     ("shoals", "v0.2.0"),
-    ("octant", "v0.3.3"),
+    ("octant", "v0.4.0"),
 ];
 
 /// Distinct error categories surfaced by the bootstrap install path.
