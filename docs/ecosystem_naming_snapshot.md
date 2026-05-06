@@ -50,8 +50,8 @@ must live inside them.
 | Surf identifier charset: `[A-Za-z_][A-Za-z0-9_]*` — ASCII alphanumeric + underscore only. **No hyphens.** | `crates/chelis-surf/src/lexer.rs:325-368` |
 | Module-path lookup: `module Foo.Bar` → `foo/bar.ch`. The desugarer lowercases each PascalCase component and joins with `/`. So `.ch` filenames must be all-lowercase / snake_case to be importable. | `spec/02-surf-syntax.md:79-91`, line 79: *"Module names are PascalCase. No nesting within a file."* |
 | 23 reserved Surf keywords, all lowercase: `def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast export par true false`. Plus 7 reserved-for-Phase-2: `effect handler perform resume borrow where do`. | `crates/chelis-surf/src/lexer.rs:372-395` |
-| Deep tag vocabulary: closed at 60 tags, all hardcoded snake_case (`app`, `var`, `lit`, …). | `spec/03-deep-syntax.md` |
-| Deep `Symbol` lexer accepts hyphens: `[A-Za-z_][A-Za-z0-9_-]*`. Looser than Surf — Deep symbols can contain characters Surf does not accept. | `crates/chelis-deep/src/lexer.rs:175-181` |
+| Deep tag vocabulary: closed at ~60 tags. Single-token tags are bare lowercase (`app`, `var`, `lit`, `def`, `sig`, `module`, `import`); compound tags use **hyphenated** form (`t-fn`, `t-prim`, `t-tensor`, `t-var`, `pat-var`, `pat-lit`, `pat-ctor`, `d-name`, `d-var`, `d-lit`). Hardcoded in `crates/chelis-deep/src/validate.rs` and emitted by `crates/chelis-deep/src/printer.rs`. | `spec/03-deep-syntax.md:262+` |
+| Deep `Symbol` lexer accepts hyphens: `[A-Za-z_][A-Za-z0-9_-]*`. This is intentional structure — the wider grammar exists so the closed compound-tag vocabulary can use hyphens as the compound separator. User-defined Deep symbols originate from Surf desugaring and inherit Surf's no-hyphen rule by construction; the asymmetry between Surf (no hyphens) and Deep (hyphens allowed) is a design choice, not a defect. | `crates/chelis-deep/src/lexer.rs:179-181` |
 | `chelis fmt` does not rewrite identifier case. Mixed styles survive round-trips. | `crates/chelis-surf/src/format.rs` |
 | C / HIP backends emit user names as-is; no symbol mangling. | `crates/chelis-backend-c/src/emit.rs:29-31` |
 
@@ -350,8 +350,8 @@ illustrative example functions in the same files (Shoals).
 
 ## 5. Snapshot — Deep layer
 
-- **Tag names**: closed 60-tag vocabulary, hardcoded snake_case (`app`, `var`, `lit`, `module`, `import`, `def`, `sig`, `t_fn`, `t_tensor`, `dim`). Not user-controlled.
-- **Symbol grammar**: `[A-Za-z_][A-Za-z0-9_-]*` — accepts hyphens, broader than Surf's identifier charset. No checked-in `.dp` corpus contains hyphenated symbols today; the asymmetry is latent.
+- **Tag names**: closed ~60-tag vocabulary. Single-token tags are bare lowercase: `app`, `var`, `lit`, `def`, `sig`, `module`, `import`, `dim`, `deftype`, `variant`, `field`, `arm`, `meta`. Compound tags use **hyphens** as the compound separator: `t-fn`, `t-prim`, `t-tensor`, `t-var`, `pat-var`, `pat-lit`, `pat-ctor`, `d-name`, `d-var`, `d-lit`. Authoritative list lives in `spec/03-deep-syntax.md:262+`; hardcoded in `crates/chelis-deep/src/validate.rs` and emitted by `crates/chelis-deep/src/printer.rs`. Not user-controlled.
+- **Symbol grammar**: `[A-Za-z_][A-Za-z0-9_-]*` — accepts hyphens. This is intentional, not a latent defect. The wider grammar exists so the closed compound-tag vocabulary can use hyphens (`t-fn`, `pat-ctor`, `d-name`) as the compound separator. User-defined Deep symbols (variable names, function names) originate from Surf desugaring and inherit Surf's no-hyphen rule by construction. The Surf-vs-Deep hyphen asymmetry is a working separation of concerns: Surf is the human authoring surface where operator ambiguity rules out hyphens; Deep is the compiler IR where compound tag names follow a deliberate naming convention.
 - **Module paths in Deep**: appear as `(module {} foo.bar …)` with dot-separated lowercase components — the result of Surf's PascalCase → lowercase desugaring.
 - **Snapshot test files (Octant)**: `cli__error_format__parse_error_format.snap`, `cli__error_format__type_error_format.snap`, `cli__error_format__unsupported_error_format.snap`. Insta-style double-underscore separator: `{context}__{section}__{test_name}.snap`. Octant is the only shell using this convention.
 
@@ -523,10 +523,20 @@ surrounding convention. Provided as input to a future remediation pass.
     a naming-convention issue per se, but a naming-data drift between
     shells.
 
-13. **Deep `Symbol` grammar accepts hyphens; Surf does not.** Latent
-    round-trip risk: any `.dp` document containing `my-name` cannot parse
-    back as Surf. No checked-in `.dp` corpora exhibit this today, but
-    the asymmetry is in `crates/chelis-deep/src/lexer.rs:175-181`.
+13. **Deep `Symbol` grammar accepts hyphens; Surf does not — intentional
+    structure, not a defect.** Earlier drafts of this snapshot framed the
+    asymmetry as a latent round-trip risk. That framing was incorrect.
+    Hyphens in Deep are the compound-tag separator: the closed vocabulary
+    uses `t-fn`, `t-prim`, `t-tensor`, `t-var`, `pat-var`, `pat-lit`,
+    `pat-ctor`, `d-name`, `d-var`, `d-lit`. User-defined Deep symbols
+    originate from Surf desugaring and inherit Surf's no-hyphen rule by
+    construction — there's no path by which a hyphenated user symbol can
+    enter Deep today. The actual rule that matters is narrower: a
+    user-defined Deep symbol (anything not in the closed tag vocabulary)
+    must satisfy the Surf identifier charset `[A-Za-z_][A-Za-z0-9_]*`.
+    The closed tag vocabulary is the allowlist; everything else passes
+    through the same constraint Surf imposes. This rule is enforceable by
+    the lint without changing the Deep lexer.
 
 14. **Phase-identifier case shift from old to current.** Historical
     phase docs use lowercase letter (`phase3j`, `phase1a`); current
