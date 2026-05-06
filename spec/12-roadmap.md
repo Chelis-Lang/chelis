@@ -65,7 +65,7 @@ changing language semantics. Detailed designs in
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| **A** | Distribution unblock — `chelis reef install --from-github`, `--bootstrap`, auto-fetch during build, lockfile remote-origin field. After Phase A: a fresh dev's onboarding is `git clone + GITHUB_TOKEN + chelis reef build`. ~3–4 days. | Planned |
+| **A** | Distribution unblock — `chelis reef install --from-github`, `--bootstrap`, auto-fetch during build, lockfile remote-origin field. After Phase A: a fresh dev's onboarding is `git clone + GITHUB_TOKEN + chelis reef build`. Includes the architectural correction that `chelis-std` is the language runtime (compiler-bundled, recorded as `LockSource::Bundled` in lockfiles for auditability), not a network-distributable shell. | ✅ Complete |
 | **B** | Effect taxonomy expansion — add `Network` and `Filesystem` variants to the `Effect` enum, annotate `Std.IO` and shells, ship `chelis audit --effects` CLI plus matching MCP tool. ~1.5 weeks. | Planned |
 | **C** | Capability enforcement — `chelis run --refuse Network,Filesystem` (signature-based pre-flight refusal, not runtime sandboxing) plus reef-side effect manifests at install time (`chelis reef install --print-effects`, `--refuse`). Depends on Phase B. ~1 week. | Planned |
 | **D** | Signing and registry server — artifact signing with publisher keys; public registry server replacing GitHub Releases as the artifact backend. Demand-driven; do not start without a specific driver. | Demand-driven |
