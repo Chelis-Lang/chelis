@@ -5,6 +5,7 @@ members = [
     "crates/chelis-compiler-api",
     "crates/chelis-python",
     "crates/chelis-shell",
+    "crates/chelis-std-bundle",
     "crates/chelis-reef",
     "crates/chelis-deep",
     "crates/chelis-macros",
@@ -35,6 +36,7 @@ chelis-deep = { path = "crates/chelis-deep" }
 chelis-runtime = { path = "crates/chelis-runtime" }
 chelis-compiler-api = { path = "crates/chelis-compiler-api" }
 chelis-shell = { path = "crates/chelis-shell" }
+chelis-std-bundle = { path = "crates/chelis-std-bundle" }
 chelis-reef = { path = "crates/chelis-reef" }
 chelis-macros = { path = "crates/chelis-macros" }
 chelis-surf = { path = "crates/chelis-surf" }
