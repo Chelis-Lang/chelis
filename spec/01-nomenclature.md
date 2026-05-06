@@ -476,7 +476,8 @@ is inferred when the column is fetched.
 ### 8.1 Spec files
 
 **Rule:** Numeric prefix + kebab-case for the top-level numbered
-specs in `chelis/spec/`.
+language specs in `chelis/spec/` only. The numbering reflects the
+chelis monorepo's authoritative language-spec ordering.
 
 ```
 00-context.md
@@ -486,12 +487,18 @@ specs in `chelis/spec/`.
 12-roadmap.md
 ```
 
+Shell repos (`nautilus`, `coral`, `shoals`, `octant`) have their own
+`spec/` directories holding per-shell phase plans and design notes.
+Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
+
 ### 8.2 Design files
 
-**Rule:** snake_case in `chelis/spec/design/`.
+**Rule:** snake_case in `chelis/spec/design/` and in any shell repo's
+top-level `spec/` directory.
 
 Examples: `phase1a_kernel_codegen.md`, `chelis_canonical_reference.md`,
-`phase3j_pre_release.md`, `grad_eval_host_runtime.md`.
+`phase3j_pre_release.md`, `grad_eval_host_runtime.md`,
+`phase3l.md` (shell repo phase plan).
 
 The historical kebab-case minority files (`grad-eval-host-runtime.md`,
 `host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to

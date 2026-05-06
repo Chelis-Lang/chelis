@@ -52,16 +52,31 @@ fn classify_doc(path: &Path) -> Slot {
         return Slot::SpecDesign;
     }
     if let Some(idx) = s.find("/spec/") {
-        // Top-level spec/*.md only — anything in spec/<subdir>/ is not §8.1.
         let after = &s[idx + "/spec/".len()..];
         if !after.contains('/') {
-            return Slot::SpecTop;
+            // Distinguish §8.1 (numbered language specs in chelis/spec/)
+            // from §8.2 (snake_case design/phase notes) by the filename
+            // itself: a leading `NN-` prefix indicates intent to be a
+            // numbered spec. Other names follow §8.2. This shape-based
+            // dispatch works for both absolute and relative paths.
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if numbered_spec_prefix(name) {
+                return Slot::SpecTop;
+            }
+            return Slot::SpecDesign;
         }
     }
     if s.contains("/docs/") {
         return Slot::Docs;
     }
     Slot::Other
+}
+
+/// True if the filename starts with `NN-` (two digits + hyphen), suggesting
+/// it intends to be a §8.1 numbered language spec.
+fn numbered_spec_prefix(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2] == b'-'
 }
 
 impl Rule for DocFilenameConvention {
@@ -154,10 +169,19 @@ mod tests {
     }
 
     #[test]
-    fn flags_snake_in_spec_top() {
+    fn shape_based_dispatch_snake_spec_is_design_form() {
+        // A non-numbered file in spec/ classifies as SpecDesign (§8.2),
+        // not SpecTop (§8.1). snake_case is allowed.
         let v = run("/repo/spec/surf_syntax.md");
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn flags_kebab_in_spec_when_not_numbered() {
+        // Non-numbered + kebab is a §8.2 snake_case violation.
+        let v = run("/repo/spec/surf-syntax.md");
         assert_eq!(v.len(), 1);
-        assert_eq!(v[0].spec_ref, "§8.1");
+        assert_eq!(v[0].spec_ref, "§8.2");
     }
 
     // Spec design (§8.2)
@@ -248,5 +272,32 @@ mod tests {
         assert!(run("/repo/README.md").is_empty());
         // CHANGELOG at repo root: ditto.
         assert!(run("/repo/CHANGELOG.md").is_empty());
+    }
+
+    // Shell repos' spec/ dirs use §8.2 snake_case, not §8.1 numeric-prefix.
+
+    #[test]
+    fn accepts_shell_spec_snake_case() {
+        // shoals/spec/phase3l.md is snake — pass under §8.2.
+        assert!(run("/home/jeff/Documents/scratch/shoals/spec/phase3l.md").is_empty());
+        assert!(run("/home/jeff/Documents/scratch/nautilus/spec/phase3j.md").is_empty());
+        assert!(run("/home/jeff/Documents/scratch/coral/spec/phase3k.md").is_empty());
+    }
+
+    #[test]
+    fn flags_shell_spec_kebab() {
+        // Shell spec dirs follow §8.2 (snake_case); kebab is a violation.
+        let v = run("/home/jeff/Documents/scratch/shoals/spec/phase-3l.md");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].spec_ref, "§8.2");
+    }
+
+    #[test]
+    fn flags_partially_numbered_spec_filename() {
+        // A file named `99-bad_format.md` claims numbered form but
+        // uses underscore instead of kebab — §8.1 violation.
+        let v = run("/repo/spec/99-bad_format.md");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].spec_ref, "§8.1");
     }
 }

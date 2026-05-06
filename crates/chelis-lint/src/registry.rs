@@ -12,5 +12,6 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::module_pascal_components::ModulePascalComponents),
         Box::new(rules::doc_filename_convention::DocFilenameConvention),
         Box::new(rules::snapshot_filename_pattern::SnapshotFilenamePattern),
+        Box::new(rules::type_suffix_policy::TypeSuffixPolicy),
     ]
 }
