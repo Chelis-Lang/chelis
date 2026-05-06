@@ -2,7 +2,7 @@
 //!
 //! `packages/chelis-std/tests/*.ch` is a corpus of in-language tests that
 //! exercise chelis-std's own modules (Std.Tensor, Std.Loss, Std.NN, Std.Init,
-//! Std.IO, Std.Optim, Std.Schedule, Std.Time, Std.Tokenizer, Std.Decimal). It
+//! Std.Io, Std.Optim, Std.Schedule, Std.Time, Std.Tokenizer, Std.Decimal). It
 //! is run via `chelis test packages/chelis-std/tests/`, but until now nothing
 //! in the default `cargo test --workspace` gate exercised it — a regression
 //! that broke a chelis-std test would only surface when somebody manually

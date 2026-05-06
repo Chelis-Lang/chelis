@@ -490,7 +490,7 @@ mapping/buffer.
 **CSV parsing:**
 
 ```chelis
-import Std.IO.Csv
+import Std.Io.Csv
 
 data = read_csv("train.csv")
 
@@ -504,12 +504,12 @@ first_label =
 Implementation: a simple CSV parser in pure Chelis (using string split, not a C library).
 Handles quoted fields and escaped commas. `read_csv` is the fail-loud public API;
 `try_read_csv` remains available for callers that want recovery as `Option`. Ships as a
-`Std.IO.Csv` module in chelis-std.
+`Std.Io.Csv` module in chelis-std.
 
 **JSON parsing:**
 
 ```chelis
-import Std.IO.Json
+import Std.Io.Json
 
 config = load_json("config.json")
 
@@ -583,8 +583,8 @@ def load_training_data(data_path: string, tok_path: string,
    file_exists, list_dir)
 2. Add memory-mapped I/O (mmap_file, mmap_read, mmap_len) backed by Rust runtime's
    memmap2
-3. Implement `Std.IO.Csv` as a pure Chelis package module
-4. Add Json ADT and implement `Std.IO.Json` as a pure Chelis parser
+3. Implement `Std.Io.Csv` as a pure Chelis package module
+4. Add Json ADT and implement `Std.Io.Json` as a pure Chelis parser
 5. Implement `Std.Tokenizer` with BPE encode/decode in pure Chelis
 6. Add `load_tokenizer` for HuggingFace tokenizer.json format
 7. Implement `batch_encode` bridging to pad_sequences from 3d
@@ -1014,7 +1014,7 @@ primitives and domain applications. The scipy competitor for Chelis — `scipy.s
   References: Giles 2008 (*An extended collection of matrix derivative results for
   forward and reverse mode AD*), Townsend 2016 (*Differentiating the Singular Value
   Decomposition*).
-- `Nautilus.Signal` ships as a typed API stub (like `Std.IO.Safetensors` was in 3a) —
+- `Nautilus.Signal` ships as a typed API stub (like `Std.Io.Safetensors` was in 3a) —
   correct signatures and documentation, implementation blocked by complex number support
   in Phase 5f.
 
@@ -1098,7 +1098,7 @@ flows through dataframe operations, enabling sensitivity analysis no existing da
 library supports.
 
 **Prerequisite:** 3h (gather, scatter, argsort for sort-by/group-by), 3d (collections
-for string columns), 3g (Std.IO.Csv/Json for data loading).
+for string columns), 3g (Std.Io.Csv/Json for data loading).
 
 **Verified compiler/std ground truth before Coral starts:**
 
@@ -1156,7 +1156,7 @@ actually composes (see coral spec §13 open question #7).
 | `Coral.Join` | Sort-merge join on typed key columns, left/inner/outer join variants | argsort, gather, concat |
 | `Coral.Reshape` | Pivot (long → wide), melt (wide → long), stack/unstack | Dict manipulation, tensor reshape |
 | `Coral.Window` | Rolling operations over numeric columns: `rolling_mean`, `rolling_sum`, `rolling_std`, `ewm` (exponentially weighted moving average). Expressible via `cumsum` tricks but worth naming. | cumsum, einsum |
-| `Coral.IO` | DataFrame-aware CSV loading (wraps `Std.IO.Csv`, auto-detects column types, returns typed DataFrame), JSON loading, DataFrame → CSV export, **`read_parquet` / `write_parquet` backed by the Rust `parquet2` crate in the runtime** (same integration pattern as `mmap_file` via `memmap2` in 3g). Parquet is the standard columnar format for ML datasets and the largest functional gap vs pandas. | `Std.IO.Csv`, `Std.IO.Json`, runtime `parquet2` FFI |
+| `Coral.IO` | DataFrame-aware CSV loading (wraps `Std.Io.Csv`, auto-detects column types, returns typed DataFrame), JSON loading, DataFrame → CSV export, **`read_parquet` / `write_parquet` backed by the Rust `parquet2` crate in the runtime** (same integration pattern as `mmap_file` via `memmap2` in 3g). Parquet is the standard columnar format for ML datasets and the largest functional gap vs pandas. | `Std.Io.Csv`, `Std.Io.Json`, runtime `parquet2` FFI |
 
 ### AD Through Dataframes
 

@@ -305,7 +305,7 @@ def read_parquet(path: String) -> Frame ! { IO }
 def write_parquet(df: Frame, path: String) -> () ! { IO }
 ```
 
-**CSV/JSON:** Wrap `Std.IO.Csv` and `Std.IO.Json`. Auto-detect column types: attempt numeric parse on each column, fall back to string. The wrapping layer builds a `Frame` from the parsed columns.
+**CSV/JSON:** Wrap `Std.Io.Csv` and `Std.Io.Json`. Auto-detect column types: attempt numeric parse on each column, fall back to string. The wrapping layer builds a `Frame` from the parsed columns.
 
 **Parquet:** Requires a Rust runtime addition. The `parquet2` crate reads/writes Parquet files. The integration pattern follows the same approach as `mmap` in 3g: the Rust runtime provides `chelis_read_parquet(path) -> Frame*` and `chelis_write_parquet(frame*, path)` functions, and Coral provides the Chelis-level wrappers with proper types and effect annotations.
 
@@ -383,7 +383,7 @@ A5. Coral.Frame sorting (sort_by via argsort + gather)
 A6. Coral.Frame concat (vertical concatenation)
 A7. Coral.GroupBy (group_by + agg_sum/mean/count/min/max, value_counts)
 A8. Coral.Window (rolling_mean/sum/std/min/max via cumsum, ewm via fold)
-A9. Coral.IO CSV/JSON (wrap Std.IO.Csv and Std.IO.Json)
+A9. Coral.IO CSV/JSON (wrap Std.Io.Csv and Std.Io.Json)
 A10. Coral.Join (inner_join, left_join via sort-merge)
 A11. Coral.Reshape (pivot, melt)
 A12. Coral.Frame describe (optional Nautilus.Stats cross-dependency)
@@ -698,7 +698,7 @@ cargo test -p chelis-cli phase3k_coral_oracle -- --exact
 | Dependency | What it provides | Status |
 |---|---|---|
 | `chelis v0.1.7` | Compiler, `libchelis_runtime.a`, all tensor primitives (gather, scatter, argsort, where, cumsum, concat, sort, einsum) | Shipped |
-| `chelis-std` | Std.IO.Csv, Std.IO.Json, Std.Time, Dict, List operations | Shipped |
+| `chelis-std` | Std.Io.Csv, Std.Io.Json, Std.Time, Dict, List operations | Shipped |
 | `nautilus` (optional) | Nautilus.Stats for `describe` | Shipped (v0.1.0) |
 | `parquet2` Rust crate | Parquet read/write in runtime | Not yet integrated — Phase B |
 
@@ -730,7 +730,7 @@ No upstream blockers for Phase A. Everything Coral needs for the core DataFrame,
 
 4. **What does `where_indices(mask)` look like in Chelis?** The filter implementation needs "indices where mask is true." Is there a builtin, or do we build it from `cumsum(cast(mask, int64))` + `gather`?
 
-5. **How does `Std.IO.Csv` represent parsed data?** Does it return `List[List[String]]` (rows of cells), or something typed? The CSV→Frame bridge layer depends on the answer.
+5. **How does `Std.Io.Csv` represent parsed data?** Does it return `List[List[String]]` (rows of cells), or something typed? The CSV→Frame bridge layer depends on the answer.
 
 6. **Can `Coral.Frame.describe` import from Nautilus optionally?** If Chelis doesn't support conditional/optional imports, `describe` either always depends on Nautilus (making it a required dependency) or lives in a separate `Coral.Stats` module that consumers import explicitly.
 

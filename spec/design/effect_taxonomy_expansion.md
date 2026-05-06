@@ -75,7 +75,7 @@ exist.
 - Annotate every chelis-std function that touches network or filesystem
   with the new effects. This is mechanical but exhaustive: each
   file-reading function gains `! { Filesystem }`; each network-touching
-  function gains `! { Network }`. The annotation pass runs across `Std.IO`
+  function gains `! { Network }`. The annotation pass runs across `Std.Io`
   (filesystem-touching functions), any `Std.Net` or future network-touching
   modules, and any helper that transitively reaches one.
 - Annotate the four shells (Coral, Nautilus, Shoals, Octant) so their
@@ -91,8 +91,8 @@ exist.
   `! {}` context; `chelis check` rejects it with a clear error.
 - A second test program calls a `Filesystem`-effecting function from a
   `! { Filesystem }` context; `chelis check` accepts it.
-- Every `Std.IO` function in chelis-std that opens a file declares
-  `! { Filesystem }`; verified by a corpus check that walks `Std.IO`
+- Every `Std.Io` function in chelis-std that opens a file declares
+  `! { Filesystem }`; verified by a corpus check that walks `Std.Io`
   exports and asserts presence of the effect on each.
 
 **Effort.** Roughly one focused week. Most of the cost is the exhaustive

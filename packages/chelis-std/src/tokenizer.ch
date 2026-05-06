@@ -1,5 +1,5 @@
 module Std.Tokenizer
-import Std.IO.Json (Json, json_array, json_get, json_int, json_object, json_string, try_load_json)
+import Std.Io.Json (Json, json_array, json_get, json_int, json_object, json_string, try_load_json)
 export (load_tokenizer, try_load_tokenizer, encode, decode, batch_encode)
 type Tokenizer =
   | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)

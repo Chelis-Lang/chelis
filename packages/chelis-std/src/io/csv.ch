@@ -1,4 +1,4 @@
-module Std.IO.Csv
+module Std.Io.Csv
 export (read_csv, try_read_csv)
 def read_csv(path: string) -> List[Dict[string, string]] = { match try_read_csv(path) with {
   | Some(rows) => rows

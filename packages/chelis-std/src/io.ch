@@ -1,4 +1,4 @@
-module Std.IO
+module Std.Io
 export (read_text, write_text, read_trimmed_lines, read_head_bytes, exists, list, mmap_size)
 def read_text(path: string) -> string = read_file(path)
 def write_text(path: string, contents: string) -> unit = write_file(path, contents)

@@ -32,9 +32,9 @@ The shipped `Effect` enum at `crates/chelis-types/src/types.rs:144-154` has five
 
 #### Planned expansion
 
-The current taxonomy is bounded but does not yet cover two categories that matter for the broader trust story. Network access and filesystem access are not separate variants today; they fold into either `Io` (in the case of stdout-style writes) or get inferred without effect annotation entirely (in the case of file reads, since no `Std.IO` function declares one yet). The expansion in `effect_taxonomy_expansion.md` is bounded to four items:
+The current taxonomy is bounded but does not yet cover two categories that matter for the broader trust story. Network access and filesystem access are not separate variants today; they fold into either `Io` (in the case of stdout-style writes) or get inferred without effect annotation entirely (in the case of file reads, since no `Std.Io` function declares one yet). The expansion in `effect_taxonomy_expansion.md` is bounded to four items:
 
-- **Item 1** — add `Network` and `Filesystem` variants to the `Effect` enum and annotate every `Std.IO` and shell function that touches them.
+- **Item 1** — add `Network` and `Filesystem` variants to the `Effect` enum and annotate every `Std.Io` and shell function that touches them.
 - **Item 2** — ship `chelis audit --effects <package.chb>` to surface the union of effects across a package's public API; same data exposed via Tide HTTP and as an MCP `chelis_audit` tool.
 - **Item 3** — `chelis run --refuse Network,Filesystem` for signature-based pre-flight refusal of binaries whose declared effects exceed an operator's allowlist (not runtime sandboxing; the binary is still trusted to honestly describe itself).
 - **Item 4** — wire effect aggregation into `chelis reef install` so the install path can `--print-effects` and `--refuse` at the package boundary.

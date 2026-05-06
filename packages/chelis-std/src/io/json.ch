@@ -1,4 +1,4 @@
-module Std.IO.Json
+module Std.Io.Json
 export (Json, load_json, parse_json, try_load_json, try_parse_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_object, json_is_null)
 type Json =
   | JsonNull

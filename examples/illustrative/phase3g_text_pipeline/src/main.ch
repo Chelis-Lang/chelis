@@ -1,6 +1,6 @@
 module Demo.Main
-import Std.IO.Csv (read_csv)
-import Std.IO.Json (load_json, json_bool, json_float, json_get, json_int)
+import Std.Io.Csv (read_csv)
+import Std.Io.Json (load_json, json_bool, json_float, json_get, json_int)
 import Std.Tokenizer (batch_encode, decode, encode, load_tokenizer)
 rows: List[Dict[string, string]] = read_csv("train.csv")
 first_row = index(rows, cast(0, int64))

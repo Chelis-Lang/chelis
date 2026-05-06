@@ -1,8 +1,8 @@
-module Std.Tests.IO.Csv
-import Std.IO.Csv (read_csv, try_read_csv)
+module Std.Tests.Io.Csv
+import Std.Io.Csv (read_csv, try_read_csv)
 import Std.Test (assert_eq_int, assert_eq_string, assert_true, fail)
 
--- Tests for `Std.IO.Csv`. The module's public surface is file-only:
+-- Tests for `Std.Io.Csv`. The module's public surface is file-only:
 -- `read_csv(path) -> List[Dict[string, string]]` and
 -- `try_read_csv(path) -> Option[List[Dict[string, string]]]`. There is no
 -- string-parsing entrypoint exported (the internal `parse_line` is private).

@@ -115,7 +115,7 @@ fn reef_std_io_module_checks_and_builds() {
         &format!(
             r#"module Demo.Main
 
-import Std.IO (read_trimmed_lines, read_head_bytes, exists, mmap_size)
+import Std.Io (read_trimmed_lines, read_head_bytes, exists, mmap_size)
 
 lines = read_trimmed_lines({dataset})
 head = read_head_bytes({dataset}, cast(4, int64))
@@ -176,7 +176,7 @@ fn reef_std_io_module_rejects_missing_export() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO (missing_symbol)
+import Std.Io (missing_symbol)
 
 x = missing_symbol("foo")
 "#,
@@ -288,7 +288,7 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
         &format!(
             r#"module Demo.Main
 
-import Std.IO.Json (load_json)
+import Std.Io.Json (load_json)
 
 cfg = load_json({bad})
 view = print(cfg)
@@ -335,7 +335,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
         &format!(
             r#"module Demo.Main
 
-import Std.IO.Json (try_load_json)
+import Std.Io.Json (try_load_json)
 
 ok = match try_load_json({bad}) with {{
   | Some(_) => true
@@ -390,7 +390,7 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
         &format!(
             r#"module Demo.Main
 
-import Std.IO.Csv (read_csv)
+import Std.Io.Csv (read_csv)
 
 rows = read_csv({bad})
 view = print(rows)
@@ -437,7 +437,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
         &format!(
             r#"module Demo.Main
 
-import Std.IO.Csv (try_read_csv)
+import Std.Io.Csv (try_read_csv)
 
 ok = match try_read_csv({bad}) with {{
   | Some(_) => true
@@ -488,7 +488,7 @@ fn reef_std_parquet_module_resolves_and_type_checks() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO.Parquet (read_parquet)
+import Std.Io.Parquet (read_parquet)
 
 def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
 "#,
@@ -524,7 +524,7 @@ fn reef_std_parquet_module_rejects_missing_export() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO.Parquet (nonexistent_parquet_fn)
+import Std.Io.Parquet (nonexistent_parquet_fn)
 
 x = nonexistent_parquet_fn("foo")
 "#,
@@ -564,7 +564,7 @@ fn reef_std_parquet_write_resolves_and_type_checks() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO.Parquet (write_parquet)
+import Std.Io.Parquet (write_parquet)
 
 def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
 "#,
@@ -604,7 +604,7 @@ fn reef_std_parquet_module_builds_cleanly() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO.Parquet (read_parquet, write_parquet)
+import Std.Io.Parquet (read_parquet, write_parquet)
 
 def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
 def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)

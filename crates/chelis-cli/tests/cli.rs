@@ -2935,7 +2935,7 @@ chelis-std = {{ version = "0.1.0" }}
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO.Safetensors (load_tensors)
+import Std.Io.Safetensors (load_tensors)
 
 export (main)
 

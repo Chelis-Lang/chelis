@@ -251,7 +251,7 @@ fn check_reef_does_not_export_propagates_to_stderr_unchanged() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.IO (missing_symbol)
+import Std.Io (missing_symbol)
 
 x = missing_symbol("foo")
 "#,

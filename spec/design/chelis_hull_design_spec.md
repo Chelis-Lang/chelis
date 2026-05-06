@@ -496,7 +496,7 @@ The core use case. Given a Deep source file, type-check it with both Hull's refe
 ```chelis
 import Hull.Parse (parse_deep_file)
 import Hull.Typing (type_check)
-import Std.IO (read_file, exec_command)
+import Std.Io (read_file, exec_command)
 
 -- Parse a Deep file and type-check with the reference checker
 def reference_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
