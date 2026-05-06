@@ -8,5 +8,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(rules::no_shell_scripts::NoShellScripts),
         Box::new(rules::phase_identifier_case::PhaseIdentifierCase),
+        Box::new(rules::module_compound_titlecase::ModuleCompoundTitlecase),
+        Box::new(rules::module_pascal_components::ModulePascalComponents),
     ]
 }
