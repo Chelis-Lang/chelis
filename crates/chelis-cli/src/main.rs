@@ -4026,8 +4026,7 @@ fn cmd_lint(
     let mut total = 0usize;
     for target in &targets {
         let raw_violations = chelis_lint::lint(target, &rules)?;
-        let kept =
-            chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
+        let kept = chelis_lint::exceptions::apply_exceptions(&raw_violations, &exceptions, target);
         for v in &kept {
             println!("{v}");
         }
