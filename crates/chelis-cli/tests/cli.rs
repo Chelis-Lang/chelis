@@ -4298,3 +4298,109 @@ fn target_metal_accepts_gpu_resource_region() {
         .assert()
         .success();
 }
+
+/// Bucket 6b: `chelis check <dir>` walks the directory tree, runs the
+/// per-file fitness pass, and emits one aggregated JSON record so callers
+/// (CI, IDEs) can lint a corpus without scripting a fan-out themselves.
+#[test]
+fn check_directory_walks_ch_files_and_aggregates_json() {
+    let dir = tempdir().expect("tempdir");
+    write_file(&dir.path().join("a.ch"), "def main() -> int32 = 0\n");
+    fs::create_dir_all(dir.path().join("nested")).expect("mkdir nested");
+    write_file(
+        &dir.path().join("nested").join("b.ch"),
+        "def main() -> int32 = 1\n",
+    );
+    // dot-prefixed file should be skipped by the walker
+    write_file(
+        &dir.path().join(".scratch.ch"),
+        "garbage that would fail to parse\n",
+    );
+    // non-.ch files are skipped
+    write_file(&dir.path().join("README.md"), "# not chelis\n");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value =
+        serde_json::from_str(&stdout).expect("check directory output must be valid JSON");
+    let files = parsed
+        .get("files")
+        .and_then(|v| v.as_array())
+        .expect("files array must exist");
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with("a.ch")),
+        "expected a.ch in {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("b.ch")),
+        "expected nested/b.ch in {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains(".scratch.ch")),
+        "dot-prefixed file should be skipped: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.ends_with("README.md")),
+        "non-.ch files must be skipped: {names:?}"
+    );
+}
+
+/// Bucket 6b: empty directory is a legitimate state (fresh project,
+/// every file filtered) — must not error.
+#[test]
+fn check_empty_directory_emits_empty_files_array() {
+    let dir = tempdir().expect("tempdir");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"files\":[]"),
+        "expected empty files array, got: {stdout}"
+    );
+}
+
+/// Bucket 6b regression: single-file `chelis check` continues to emit
+/// the legacy single-report JSON shape so existing tooling does not break.
+#[test]
+fn check_single_file_keeps_legacy_report_shape() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("solo.ch");
+    write_file(&path, "def main() -> int32 = 0\n");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout).expect("single-file check must remain JSON");
+    assert!(
+        parsed.get("score").is_some(),
+        "single-file shape must keep `score` at top level: {stdout}"
+    );
+    assert!(
+        parsed.get("files").is_none(),
+        "single-file shape must NOT introduce `files` aggregator: {stdout}"
+    );
+}

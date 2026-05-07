@@ -679,7 +679,9 @@ pub fn prepare_program_for_eval_file(
 pub fn prepare_reef_graph(context_dir: &Path) -> Result<PreparedReefGraph, String> {
     let Some(root) = find_package_root_for_dir(context_dir)? else {
         return Err(format!(
-            "no reef.toml found at or above {} — `chelis test` requires a reef package",
+            "no reef.toml found in `{}` or any parent up to $HOME — \
+             pass a path inside a reef package, run from inside one, or \
+             set --project-root",
             context_dir.display()
         ));
     };
