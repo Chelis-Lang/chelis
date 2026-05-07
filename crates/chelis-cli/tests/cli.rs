@@ -4273,6 +4273,195 @@ fn target_metal_rejects_cpu_resource_region() {
         .stderr(predicate::str::contains("cannot satisfy resource region"));
 }
 
+// =============================================================================
+// Bucket 3: activation primitive parity (relu, sigmoid, tanh, silu, gelu).
+//
+// These tests close the IR-evaluator/C-backend gap surfaced as
+// `unsupported builtin \`relu\` in host runtime` (and siblings). For each
+// activation we run a small program through both `chelis eval` (the
+// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime.rs`)
+// and `chelis build --target c` (whose generated code uses the
+// `chelis_host_*_f32` helpers in `chelis-backend-c/src/host_emit.rs`).
+//
+// Verification strategy: each program embeds `test_assert_close_tensor`
+// against an offline-computed expected tensor with `1e-4` tolerance.
+// Both lanes succeed (exit 0, no panic) iff their numerics agree to that
+// tolerance. The C lane also runs the compiled binary to exercise the
+// host-emit f32 helper end-to-end.
+// =============================================================================
+
+/// Run a Bucket 3 activation program through both lanes:
+///   1. `chelis eval --file <path>` (IR evaluator, runtime.rs)
+///   2. `chelis build --target c --output <out_dir>` followed by gcc + run
+///
+/// Returns the eval stdout and run stdout for any caller that wants to
+/// do additional shape comparison. The function asserts each step
+/// succeeds; failures bubble up with the lane name in the panic.
+fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, source_body);
+
+    // `chelis check` must pass cleanly.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+
+    // IR-evaluator lane.
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    // C-backend lane: build, compile, run.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source_file = format!("{name}.c");
+    let status = gcc_link_generated(&out_dir, &source_file, name);
+    assert!(
+        status.success(),
+        "{name}: gcc compile/link failed with status {status}"
+    );
+    let run_output = StdCommand::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "{name}: compiled binary failed with status {} stderr:\n{}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    (eval_stdout, run_output.stdout)
+}
+
+#[test]
+fn bucket3_relu_runs_in_eval_and_c_lanes() {
+    // relu(x) = max(0, x). Exact in any precision.
+    run_activation_parity(
+        "bucket3_relu",
+        r#"
+def relu_apply(x: tensor[5, f32]) -> tensor[5, f32] = relu(x)
+
+input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(0.0, f32), cast(3.5, f32), cast(-0.5, f32)])
+actual = relu_apply(input)
+expected = to_tensor([cast(1.0, f32), cast(0.0, f32), cast(0.0, f32), cast(3.5, f32), cast(0.0, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.000001, "relu pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_relu_eval_negative_rejects_unequal_input() {
+    // Negative test: a deliberately-wrong expected tensor should make
+    // `chelis eval` fail, locking the test_assert_close_tensor invariant.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bucket3_relu_neg.ch");
+    write_file(
+        &path,
+        r#"
+def relu_apply(x: tensor[3, f32]) -> tensor[3, f32] = relu(x)
+
+input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32)])
+actual = relu_apply(input)
+wrong = to_tensor([cast(1.0, f32), cast(99.0, f32), cast(3.0, f32)])
+ok = test_assert_close_tensor(actual, wrong, 0.000001, "relu wrong")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn bucket3_sigmoid_runs_in_eval_and_c_lanes() {
+    // sigmoid(0) = 0.5; sigmoid(1) ≈ 0.73105858; sigmoid(-1) ≈ 0.26894142.
+    // Both lanes go through `expf`-precision math (host-runtime mirrors
+    // chelis_host_sigmoid_f32 byte-for-byte modulo 1e-6 ulp).
+    run_activation_parity(
+        "bucket3_sigmoid",
+        r#"
+def sig_apply(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = sig_apply(input)
+expected = to_tensor([cast(0.5, f32), cast(0.7310586, f32), cast(0.26894143, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "sigmoid pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_tanh_runs_in_eval_and_c_lanes() {
+    // tanh(0) = 0; tanh(1) ≈ 0.76159418; tanh(-1) ≈ -0.76159418.
+    run_activation_parity(
+        "bucket3_tanh",
+        r#"
+def tanh_apply(x: tensor[3, f32]) -> tensor[3, f32] = tanh(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = tanh_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.76159418, f32), cast(-0.76159418, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "tanh pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_silu_runs_in_eval_and_c_lanes() {
+    // silu(x) = x * sigmoid(x).
+    // silu(0) = 0; silu(1) ≈ 0.73105858; silu(-1) ≈ -0.26894142.
+    run_activation_parity(
+        "bucket3_silu",
+        r#"
+def silu_apply(x: tensor[3, f32]) -> tensor[3, f32] = silu(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = silu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.7310586, f32), cast(-0.26894143, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
+    // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
+    // Tanh approximation matches `Std.Nn.Gelu.gelu_scalar` byte-for-byte.
+    run_activation_parity(
+        "bucket3_gelu",
+        r#"
+def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = gelu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-approx)")
+"#,
+    );
+}
+
 #[test]
 fn target_metal_accepts_gpu_resource_region() {
     let dir = tempdir().expect("tempdir");

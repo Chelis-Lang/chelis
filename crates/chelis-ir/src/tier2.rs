@@ -97,6 +97,133 @@ pub fn lower_sigmoid(
     add_synth(dag, RiscOp::Exp, vec![neg_log], ty.clone(), parent_span)
 }
 
+/// `tanh(x)` = `2 * sigmoid(2*x) - 1`
+///
+/// Decomposed via existing RISC primitives (Exp/Add/Mul/Neg/Log) so we
+/// avoid escalating the RISC vocabulary. The C backend numerics match
+/// the host-runtime helper `chelis_host_tanh_f32` to f32 ulp tolerance
+/// (both routes ultimately go through `expf`).
+pub fn lower_tanh(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
+    let two = add_synth(
+        dag,
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    let two_x = add_synth(dag, RiscOp::Mul, vec![two, x], ty.clone(), parent_span);
+    let sig_2x = lower_sigmoid(dag, two_x, ty, parent_span);
+    let two_again = add_synth(
+        dag,
+        RiscOp::Const { value: 2.0 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    let two_sig = add_synth(
+        dag,
+        RiscOp::Mul,
+        vec![two_again, sig_2x],
+        ty.clone(),
+        parent_span,
+    );
+    let neg_one = add_synth(
+        dag,
+        RiscOp::Const { value: -1.0 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    add_synth(
+        dag,
+        RiscOp::Add,
+        vec![two_sig, neg_one],
+        ty.clone(),
+        parent_span,
+    )
+}
+
+/// `silu(x)` = `x * sigmoid(x)` (a.k.a. swish).
+pub fn lower_silu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
+    let sig_x = lower_sigmoid(dag, x, ty, parent_span);
+    add_synth(dag, RiscOp::Mul, vec![x, sig_x], ty.clone(), parent_span)
+}
+
+/// `gelu(x)` via the tanh approximation:
+///
+///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+///
+/// Matches `Std.Nn.Gelu.gelu_scalar` and the host-runtime helper
+/// `activation_gelu_f32`. If/when an `Erf` RISC op lands, the
+/// erf-exact form can replace this — both lanes must move together.
+pub fn lower_gelu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
+    // c = sqrt(2/pi)
+    let c = add_synth(
+        dag,
+        RiscOp::Const {
+            value: 0.7978845608028654,
+        },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    let k = add_synth(
+        dag,
+        RiscOp::Const { value: 0.044715 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    // x^3 = x * x * x
+    let x_sq = add_synth(dag, RiscOp::Mul, vec![x, x], ty.clone(), parent_span);
+    let x_cu = add_synth(dag, RiscOp::Mul, vec![x_sq, x], ty.clone(), parent_span);
+    // k * x^3
+    let k_x_cu = add_synth(dag, RiscOp::Mul, vec![k, x_cu], ty.clone(), parent_span);
+    // x + k * x^3
+    let sum_inner = add_synth(dag, RiscOp::Add, vec![x, k_x_cu], ty.clone(), parent_span);
+    // c * (x + k * x^3)
+    let inner = add_synth(
+        dag,
+        RiscOp::Mul,
+        vec![c, sum_inner],
+        ty.clone(),
+        parent_span,
+    );
+    let tanh_inner = lower_tanh(dag, inner, ty, parent_span);
+    // 1 + tanh(inner)
+    let one = add_synth(
+        dag,
+        RiscOp::Const { value: 1.0 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    let one_plus_tanh = add_synth(
+        dag,
+        RiscOp::Add,
+        vec![one, tanh_inner],
+        ty.clone(),
+        parent_span,
+    );
+    // x * (1 + tanh(inner))
+    let x_mul = add_synth(
+        dag,
+        RiscOp::Mul,
+        vec![x, one_plus_tanh],
+        ty.clone(),
+        parent_span,
+    );
+    // 0.5 * x * (1 + tanh(inner))
+    let half = add_synth(
+        dag,
+        RiscOp::Const { value: 0.5 },
+        vec![],
+        ty.clone(),
+        parent_span,
+    );
+    add_synth(dag, RiscOp::Mul, vec![half, x_mul], ty.clone(), parent_span)
+}
+
 /// `div(a, b)` = `mul(a, recip(b))` where `recip(b) = exp(neg(log(b)))`
 pub fn lower_div(
     dag: &mut Dag,
