@@ -3,12 +3,12 @@
 
 Uses pygount for standard language counting with manual overrides for
 Chelis-specific file types (.ch, .dp, .pest, .scm) that pygount doesn't
-recognize. Outputs a markdown table to docs/loc_report.md.
+recognize. Outputs a markdown table to docs/archive/reports/loc_report.md.
 
 Requirements: pygount (pip install pygount)
 
 Usage:
-    python scripts/loc_report.py              # write to docs/loc_report.md
+    python scripts/loc_report.py              # write to docs/archive/reports/loc_report.md
     python scripts/loc_report.py --stdout     # print to stdout instead
     python scripts/loc_report.py --json       # print raw data as JSON
 """
@@ -40,7 +40,7 @@ class LangEntry:
         return self.code + self.comments + self.blanks
 
 
-DEFAULT_OUTPUT = "docs/loc_report.md"
+DEFAULT_OUTPUT = "docs/archive/reports/loc_report.md"
 
 # Directories to always skip
 SKIP_DIRS = {"target", ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}

@@ -137,7 +137,7 @@ Greps against the four shell repos plus chelis (excluding `target/`,
 
 - `Coral.Internal.HAMT` in source: **0 hits**. Matches in `chelis-lint` rule
   test fixtures (legitimate test of the rule) and in
-  `docs/ecosystem_naming_snapshot.md` (narrative archaeology) only.
+  `docs/archive/snapshots/ecosystem_naming_snapshot.md` (narrative archaeology) only.
 - Old Nautilus example modules (`ExampleRootFind` etc — checked for
   the `*lower`-tail forms): **0 hits in source `module` declarations**. All six
   modules are now PascalCase. The literal strings `Nautilus.Apismoke`,

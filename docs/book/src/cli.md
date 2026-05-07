@@ -51,15 +51,17 @@ is no on-disk source to canonicalize, so the gate does not apply.
 ## Typical Loop
 
 ```sh
-# Edit, then canonicalize and lint locally:
 chelis fmt --inplace app.ch
-chelis lint --check
+chelis lint --check app.ch
 
-# Then check, eval, build (each step re-runs the gate):
 chelis check app.ch
 chelis eval --file app.ch
 chelis build app.ch --target c --output out/
 ```
+
+Use this loop for project files and generated shell output. `fmt` makes the source
+canonical, `lint --check` catches naming/style drift, and the later commands re-run the
+same gate before doing semantic work.
 
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
@@ -73,6 +75,14 @@ itself lives outside `src/` and does not declare a top-level `module`.
   `gcc` or `hipcc` for you.
 - `lint` prints `path:line:col: rule_id (§spec_ref): message`; with
   `--check` it exits non-zero on any violation.
+
+## Shell Author Checklist
+
+- Generate Surf when humans will edit the result; generate Deep when a tool needs the
+  canonical AST shape.
+- Run `chelis fmt --inplace` before persisting generated `.ch` or `.dp` files.
+- Run `chelis check` on every generated entry point before publishing a shell artifact.
+- Treat `--allow-style-violations` as a local escape hatch, not part of a package build.
 
 For exact CLI semantics, use the numbered specs plus the CLI
 integration tests in the repo (notably

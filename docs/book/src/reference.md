@@ -1,7 +1,7 @@
 # Reference Map
 
 Use the book for onboarding and day-to-day usage. Use the specs and design docs for
-authoritative semantics and project state.
+authoritative semantics. Use repository agent docs only when changing Chelis itself.
 
 ## Primary References
 
@@ -22,5 +22,7 @@ authoritative semantics and project state.
 
 ## Agent-Facing Docs
 
-- `packages/chelis-std/SKILL.md`
-- `AGENTS.md`
+- `packages/chelis-std/SKILL.md` — downstream Chelis generation and shell-authoring
+  skill. Use it when writing Chelis, not when changing the compiler.
+- `AGENTS.md` and `agent-skills/` — repository governance and implementation workflows
+  for agents modifying Chelis itself.

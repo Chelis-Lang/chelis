@@ -5,7 +5,8 @@ Coral's cold `compile_reef_context` build, instrumented inside the
 three dominant phases (`build_type_env_from_library`,
 `check_phase0e_with_context`, `lower_program_to_library`).
 
-The previous agent's coarse-phase profile in `docs/perf_baseline.md`
+The previous agent's coarse-phase profile, now archived at
+`docs/archive/perf/perf_baseline_phase_j.md`,
 concluded the three phases were "structural, no fix attempted." This
 investigation refutes that conclusion: **two of the three phases have
 clearly bounded fixes** that explain the bulk of their cost.

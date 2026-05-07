@@ -130,10 +130,8 @@ Ship a reef package `octant` that can:
 
 This is the owning executable oracle for sub-phase `3n`. It is named here but
 **deliberately not implemented by this planning change** — its creation is
-owned by whoever picks up the 3n coding work (same pattern as the
-`phase3j_nautilus_oracle` and `phase3l_shoals_oracle` entries already named
-in `chelis_phase3_plan.md §3j` and `§3l` before those phases shipped). The
-oracle must exercise, in a single test file:
+owned by whoever picks up the 3n coding work. The oracle must exercise, in a
+single test file:
 
 1. The Black-Scholes `d_1` round-trip.
 2. The provenance-completeness invariant (every emitted Deep node carries a

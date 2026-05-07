@@ -1,4 +1,4 @@
-# Phase 3: Language Completeness - Expanded Implementation Plan
+# Phase 3: Language Completeness - Current Contract and Remaining Plan
 
 ## Context
 
@@ -7,8 +7,9 @@ Phase 2 shipped a feature-rich tensor computation language: effects, linearity, 
 Phases `3b` and `3b-ii` shipped Python interop, safetensors, and direct execution.
 Phase `3e` shipped the pipe-first public Surf idiom.
 
-But Chelis still depends on Python for every non-tensor part of a real AI program. It
-can define a transformer forward pass and compute gradients, but it still cannot:
+At the start of Phase 3, Chelis still depended on Python for every non-tensor part of a
+real AI program. It could define a transformer forward pass and compute gradients, but
+it still could not:
 
 - represent first-class scalar integers/floats/bools outside tensors
 - process strings as ordinary language values
@@ -17,8 +18,9 @@ can define a transformer forward pass and compute gradients, but it still cannot
 - read text/config/data files directly
 - tokenize text and batch it into model inputs
 
-That means Chelis is still a sophisticated tensor-compute DSL rather than a
-self-sufficient AI programming language.
+Those gaps drove the compiler/runtime and standard-library foundations that have since
+shipped through `3j`. The remaining Phase 3 work is now the shell ecosystem, native
+testing surface, and final teaching refresh.
 
 **Phase 3 deliverable:** a researcher can write, in pure Chelis, a program that reads
 text, tokenizes it, batches and pads it, runs a model, computes loss and gradients, and
@@ -41,55 +43,54 @@ Shipped foundations
 3b-ii: Direct Python Execution + NumPy
 3c: Scalar & String Foundation
 3d: Collections & Iteration
+3h: Core Numeric Primitives
+3m: Rust Runtime Rewrite
+3g: Data Loading & Tokenization
+3i: Standard Library Expansion
+3j-pre: Release Infra + Std Surface Expansion
+3j: Nautilus
 
 Remaining work
 
-3h: Core Numeric Primitives
-  -> 3m: Rust Runtime Rewrite
-  -> 3g: Data Loading & Tokenization
-  -> 3i: Standard Library Expansion
-  -> 3j-pre: Release Infra + Std Surface Expansion
-  -> 3j: Nautilus  ∥  3k: Coral        (parallel, independent)
-  -> 3l: Shoals  ∥  3n: Octant (Part A)  (parallel, both depend on 3j; 3l also needs 3k)
-  -> 3o: Octant (Part B)               (depends on both 3l and 3n)
+3k: Coral
+  -> 3l: Shoals
+3n: Octant (Part A)
+  -> 3o: Octant (Part B)               (also depends on 3l)
+3t: Chelis-Native Testing              (depends on fast package-aware eval)
   -> 3f: SKILL.md v2 Redo
 ```
 
-`3j` (nautilus) and `3k` (coral) run in parallel; neither depends on the other. `3l`
-(shoals) depends on both. `3n` (octant Part A) has the same prerequisite as `3l`
-(namely `3j` green) and runs in parallel with `3l`. `3o` (octant Part B) is
-sequential after both `3l` and `3n` because its finance-notation lowering paths
-require `Shoals.Stochastic`, `Shoals.Pricing`, and `Shoals.Curves`.
+`3j` (nautilus) has shipped in the downstream shell repo and is now a dependency for
+the remaining shell work. `3k` (coral) is the next unshipped domain shell. `3l`
+(shoals) depends on both `3j` and `3k`. `3n` (octant Part A) can proceed against
+`3j`; `3o` (octant Part B) is sequential after both `3l` and `3n` because its
+finance-notation lowering paths require `Shoals.Stochastic`, `Shoals.Pricing`, and
+`Shoals.Curves`. `3t` is remaining infrastructure for Chelis-native shell tests.
 
 **Recommended execution order:**
 
-1. `3h`: Core numeric primitives
-2. `3m`: Rust runtime rewrite
-3. `3g`: Data loading and tokenization
-4. `3i`: standard library expansion (`Std.Time`, `Std.Decimal`, `Std.Schedule`, `Std.Optim`, `Std.Nn.Generate`)
-5. `3j-pre`: release infrastructure + standard library surface expansion that `nautilus` and `coral` both assume
-6. `3j` ∥ `3k`: `nautilus` (numerical methods) and `coral` (typed dataframes) in parallel
-7. `3l` ∥ `3n`: `shoals` (finance) in parallel with `octant` Part A (LaTeX ↔ Deep parser, deterministic lowering, render, provenance)
-8. `3o`: `octant` Part B (finance-notation lowering through `shoals`, Greek rendering, notebook), depends on both `3l` and `3n`
-9. `3f`: SKILL.md v2 redo
+1. `3k`: Coral (typed dataframes)
+2. `3l` and `3n`: Shoals (finance) and Octant Part A (LaTeX ↔ Deep parser,
+   deterministic lowering, render, provenance), parallel where staffing allows
+3. `3o`: Octant Part B (finance-notation lowering through `shoals`, Greek rendering,
+   notebook), depends on both `3l` and `3n`
+4. `3t`: Chelis-native testing and package test migrations
+5. `3f`: SKILL.md v2 redo
 
 Shipped Phase 3 foundations stay in place and continue to constrain the remaining work:
 
 - `3e` defines the public Surf idiom new examples must follow
 - `3a` defines the package/distribution story new libraries should use
 - `3b` / `3b-ii` define the Python interop boundary the fuller language must still fit
+- `3c` / `3d` define the host-value and collection lane
+- `3h`, `3m`, `3g`, `3i`, `3j-pre`, and `3j` define the shipped compiler/runtime,
+  standard-library, release, and Nautilus surfaces that Coral/Shoals/Octant must build
+  against
 
-`3h` follows the shipped `3c`/`3d` foundations because real AI model code still needs
-practical tensor-language primitives such as `einsum`, `concat`, `gather`, and
-`clamp`. `3m` comes immediately after `3h` because the host-value/runtime layer is now
-the next architectural choke point: `3g`, `3i`, and the shell ecosystem should land on
-Rust runtime infrastructure rather than expanding `chelis_runtime.c`. `3g` then depends
-on that fuller host-and-tensor surface plus the cleaned-up runtime contract because
-tokenization, batching, and model ingress should not force awkward library or runtime
-workarounds. `3i` comes after `3g` because time/exact-decimal support rounds out the
-standard library rather than blocking the pure-AI workflow milestone. `3f` goes last
-because the teaching surface should describe the real full Phase 3 language, not a
-partially complete midpoint.
+The earlier dependency chain (`3h` → `3m` → `3g` → `3i` → `3j-pre` → `3j`) is now
+historical context, not remaining work. `3f` still goes last because the teaching
+surface should describe the real full Phase 3 language, not a partially complete
+midpoint.
 
 ---
 
@@ -296,6 +297,8 @@ Current shipped oracles for the executable collection slices:
 
 ## 3h: Core Numeric Primitives
 
+**Status:** shipped.
+
 **Goal:** close the most important tensor-language expressiveness gaps between the
 initial RISC + derived surface and the operations real models and numerical libraries
 expect to use directly.
@@ -372,6 +375,8 @@ Current shipped oracle for the executable `3h` slice:
 
 ## 3m: Rust Runtime Rewrite
 
+**Status:** shipped.
+
 **Goal:** replace the growing C runtime implementation with a Rust static library and
 clean up the host-value ABI before more runtime-heavy language/library work lands.
 
@@ -445,6 +450,8 @@ Manual HIP mirror gate:
 ---
 
 ## 3g: Data Loading and Tokenization
+
+**Status:** shipped.
 
 **Goal:** Chelis can load data from files and tokenize text, making it self-sufficient
 for the complete AI training pipeline.
@@ -611,7 +618,7 @@ def load_training_data(data_path: string, tok_path: string,
 Authoritative oracle:
 
 ```sh
-cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --nocapture
+cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture
 ```
 
 The checked-in illustrative Reef package at
@@ -626,6 +633,8 @@ The checked-in illustrative Reef package at
 ---
 
 ## 3i: Standard Library Expansion
+
+**Status:** shipped.
 
 **Goal:** Fill out the standard library modules needed for real model training and
 inference. Includes date/time types, exact decimal arithmetic, autoregressive generation
@@ -786,7 +795,7 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli --test phase3i_std -- --nocapture`
+`cargo test -p chelis-cli --test phase3i_std -- --ignored --nocapture`
 
 This is the owning executable oracle for the currently shipped `Std.Time`,
 `Std.Decimal`, `Std.Schedule`, `Std.Optim`, and `Std.Nn.Generate` surface. A later
@@ -796,6 +805,8 @@ gates.
 ---
 
 ## 3j-pre: Release Infrastructure + Std Surface Expansion
+
+**Status:** shipped.
 
 **Goal:** clear the infrastructure and `chelis-std` surface that both `nautilus` and
 `coral` depend on before either can start. This is the last pure-compiler + pure-`chelis-std`
@@ -987,9 +998,9 @@ needs both a positive numerical test and a negative shape/type test.
 
 ## 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 
-**Status:** shipped in the downstream Nautilus repo. `Nautilus v0.1.0` is
-published, and `chelis v0.1.7` is the compiler release that cleared the last
-documented core blockers for that first shell release.
+**Status:** shipped in the downstream Nautilus repo. `Nautilus v0.5.0` is the current
+released shell referenced by the canonical ecosystem table. `chelis v0.1.7` cleared the
+last documented core blockers for the first Nautilus shell release.
 
 **Goal:** A reef package providing the numerical methods that sit between raw tensor
 primitives and domain applications. The scipy competitor for Chelis — `scipy.stats` +
@@ -1073,7 +1084,7 @@ adjoint tier.
 ### Acceptance Oracle
 
 The authoritative ship signal for `3j` is the downstream Nautilus release gate:
-the green Nautilus `main` CI that produced the published `v0.1.0` release
+the green Nautilus `main` CI that produced the published release
 (tagged at commit `20c5553`). Chelis no longer treats an unimplemented
 monorepo `phase3j_nautilus_oracle` placeholder as the completion oracle for
 this phase.
@@ -1225,10 +1236,22 @@ No existing dataframe library supports this.
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli phase3k_coral_oracle -- --exact` — loads data into a
-DataFrame from both CSV and Parquet, filters rows (including NaN handling), applies a
-rolling window, groups by a column, aggregates, and verifies results match expected
-values. Plus a separate AD test computing `grad` through a filter-aggregate pipeline.
+Current in-repo authoritative oracle:
+
+```sh
+cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture
+```
+
+This gate covers the compiler and `chelis-std` prerequisites Coral currently depends on:
+where-indices behavior, bool-list tensor conversion, tensor-scalar comparison broadcasting,
+and negative parity for invalid mixed precision/list inputs. The older placeholder name
+`phase3k_coral_oracle` is not wired; do not use it as evidence for Phase 3k completion.
+
+Future downstream Coral completion will replace this prerequisite gate with a Coral-owned
+oracle that loads data into a DataFrame from both CSV and Parquet, filters rows
+(including NaN handling), applies a rolling window, groups by a column, aggregates, and
+verifies results match expected values. It should also include AD coverage through a
+filter-aggregate pipeline.
 
 **Effort:** medium. The core Frame/GroupBy/IO modules are the priority; Join, Reshape,
 and Window can ship with minimal implementations and grow. Parquet via `parquet2` is a
@@ -1340,15 +1363,15 @@ write their own references only for proprietary models. Full design:
 
 ### Acceptance Oracle
 
-`cargo test -p chelis-cli phase3l_shoals_oracle -- --ignored --exact` — prices
-a European call option via Black-Scholes and Monte Carlo, verifies convergence,
-computes Greeks via `grad`, loads market data via `coral`, and produces a risk
-report.
+`cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture`
+— prices a European call option via Black-Scholes and Monte Carlo, verifies
+convergence, computes Greeks via `grad`, loads market data via `coral`, and produces
+a risk report.
 
 **Manual gate.** Wall-clock ~5 minutes on AMD Ryzen AI Max+ 395 (driven by the
 host evaluator's 20K MC sample loop on Shoals). The test is marked `#[ignore]`
 to keep `cargo test --workspace` under the 60-second inner-loop budget defined
-in `CLAUDE.md`. Run before any release tag whose pitch includes Shoals
+in `AGENTS.md` / `CLAUDE.md`. Run before any release tag whose pitch includes Shoals
 end-to-end pricing. Skips with a clear message if a Shoals checkout is not
 present (set `CHELIS_SHOALS_PATH` or place `shoals/` as a sibling of the
 chelis monorepo root).
@@ -1599,7 +1622,7 @@ Every API surface table in the refreshed SKILL.md (`Std.*`, `Nautilus.*`, `Coral
 `Shoals.*`) carries a `Stability` column whose value is `stable` (signature will not
 change between releases — safe for training-corpus inclusion) or `alpha` (signature may
 change — excluded or down-weighted for training). This is the labeling convention the
-Phase 4a corpus-curation step relies on. Nautilus v0.1.0 candidates for `stable`: all
+Phase 4a corpus-curation step relies on. Nautilus candidates for `stable`: all
 of `Nautilus.Special`, all of `Nautilus.Distributions` (pdf/cdf/inv_cdf). Candidates
 for `alpha`: `Nautilus.CurveFit`, `Nautilus.SDE` (APIs may shift when autonomous
 `Random` sampling lands). Apply the same convention to `Coral` and `Shoals` when they
@@ -1797,24 +1820,24 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 | `3b-ii`: Direct execution + NumPy | shipped | `3b` | Engineering |
 | `3c`: Scalar and string foundation | shipped | `3e` | Engineering |
 | `3d`: Collections and iteration | shipped | `3c` | Engineering |
-| `3h`: Core numeric primitives | medium | `3d` | Engineering (RISC ops + AD + backends) |
-| `3m`: Rust runtime rewrite | large | `3h`, `3d` | Engineering (runtime ABI + codegen + CLI/build) |
-| `3g`: Data loading and tokenization | medium | `3h`, `3m` | Engineering (I/O + pure Chelis libraries) |
-| `3i`: Std library expansion | medium | `3h`, `3g` | Pure Chelis library (Time, Decimal, Generate, AdamW, Schedule) |
-| `3j-pre`: Release infra + Std surface expansion | medium | `3i` | Engineering (CI release, GitHub org, Std.Nn/Std.Loss/Std.Init additions) |
-| `3j`: Nautilus | large | `3h`, `3i`, `3j-pre` | Pure Chelis library + nalgebra-backed LinAlg with hand-written adjoints (stats, distributions, special, linalg, optim, ODE/SDE) |
+| `3h`: Core numeric primitives | shipped | `3d` | Engineering (RISC ops + AD + backends) |
+| `3m`: Rust runtime rewrite | shipped | `3h`, `3d` | Engineering (runtime ABI + codegen + CLI/build) |
+| `3g`: Data loading and tokenization | shipped | `3h`, `3m` | Engineering (I/O + pure Chelis libraries) |
+| `3i`: Std library expansion | shipped | `3h`, `3g` | Pure Chelis library (Time, Decimal, Generate, AdamW, Schedule) |
+| `3j-pre`: Release infra + Std surface expansion | shipped | `3i` | Engineering (CI release, GitHub org, Std.Nn/Std.Loss/Std.Init additions) |
+| `3j`: Nautilus | shipped | `3h`, `3i`, `3j-pre` | Downstream Reef shell with nalgebra-backed LinAlg and numerical methods |
 | `3k`: Coral | medium | `3h`, `3d`, `3g`, `3j-pre` | Pure Chelis library (dataframes, NaN handling, rolling windows, Parquet via `parquet2` FFI) |
 | `3l`: Shoals | medium | `3j`, `3k`, `3i` | Pure Chelis library (finance) |
 | `3t`: Native Testing | medium | Bug 9 fix, fast eval | Chelis library (`Std.Test`) + CLI (`chelis test` command) + test migrations for Nautilus and Coral |
 | `3f`: SKILL.md v2 | small | all above | Documentation |
 | Beacon (future) | TBD | `chelis-std` + DAG IR | Automated static analysis shell (value range inference, hazard detection). **Future**, not in Phase 3. |
 
-This phase is intentionally sequential and pragmatic. The remaining work is about making
-Chelis usable, not publishable. `3m` is the runtime/ABI choke point that must land
-before the next host-data phase. `3j-pre` gates both domain shells on a shared Std
-surface and a reliable release binary. `3j` (nautilus) and `3k` (coral) can overlap (no
-mutual dependency). `3l` depends on both. `3f` goes truly last because it must cover the
-complete ecosystem including the domain shells.
+This phase is intentionally pragmatic. The remaining work is now shell ecosystem and
+testing work rather than the earlier compiler/runtime foundations. `3k` is the next
+unshipped shell. `3l` depends on `3j` and `3k`. `3n` can proceed against `3j`, while
+`3o` waits for both `3n` and `3l`. `3t` gives reef packages a native test surface.
+`3f` goes truly last because it must cover the complete ecosystem including the domain
+shells.
 
 `school` (classical ML, sklearn competitor), `darwin` (evolutionary algorithms), `hull`
 (executable language specification), and `beacon` (automated static analysis on the

@@ -1,5 +1,8 @@
 # Install
 
+Chelis is developed from the repository today. Downstream users normally need the
+`chelis` CLI on `PATH`; shell authors also need Reef package commands.
+
 ## Rust Toolchain
 
 Chelis is built with stable Rust:
@@ -42,12 +45,28 @@ brew install gcc
 
 ## Build and Test the Repo
 
+From a Chelis checkout:
+
 ```sh
 cargo build --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+During normal downstream work, you rarely need the whole gate above. Use it when you are
+checking a local compiler build or preparing a change to Chelis itself.
+
+## Build the CLI
+
+```sh
+cargo build -p chelis-cli
+export PATH="$PWD/target/debug:$PATH"
+chelis --help
+```
+
+If you install a release build instead, make sure `chelis --help` works before starting
+the first program loop.
 
 ## Build the Book
 
@@ -60,3 +79,6 @@ mdbook build docs/book
 ```sh
 cargo test -p chelis-e2e --test skill_suite
 ```
+
+That test validates the checked `chelis-surf` and `chelis-deep` fences used as teaching
+examples. Fragment fences are intentionally illustrative only.

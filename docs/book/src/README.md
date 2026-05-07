@@ -1,13 +1,15 @@
-# Chelis Developer Book
+# Chelis User Book
 
 Chelis is a functional programming language for AI research. Surf is the readable syntax
 for humans. Deep is the canonical s-expression syntax for machines and the compiler.
 
-This book is the developer-facing usage guide. It explains how to install Chelis, write
-and run programs, use the CLI, and navigate the Reef package workflow.
+This book is the practical starting point for downstream users and shell authors. It
+covers local setup, the first program loop, CLI validation, the style gate, Reef package
+basics, examples, and the map from user docs to the authoritative specs.
 
-For language semantics and design rationale, use the numbered specs in `spec/` and the
-active design docs in `spec/design/`.
+If you are modifying Chelis itself, use the repository `AGENTS.md` and the shared
+`agent-skills/` workflows instead. This book is for using Chelis and authoring packages
+on top of it.
 
 ## What You Should Read First
 
@@ -16,6 +18,8 @@ active design docs in `spec/design/`.
 - [CLI Workflow](cli.md)
 - [Type System Basics](types.md)
 - [Reef and Packages](reef.md)
+- [Examples](examples.md)
+- [Reference Map](reference.md)
 
 ## A Small Surf Program
 

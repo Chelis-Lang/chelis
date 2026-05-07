@@ -1,40 +1,42 @@
 # Reef Distribution
 
-**Status:** Planning. Source-of-truth design for making reef end-to-end usable
-for the dev team during the pre-launch era. Companion to `chelis_trust_stack.md`
-and `effect_taxonomy_expansion.md` (which adds install-time effect manifests
-on top of the install path designed here).
+**Status:** Current Phase A distribution contract, with historical implementation-plan
+notes preserved for context. Phase A is complete in `spec/12-roadmap.md`: the shipped
+surface includes `chelis reef install --from-github`, `--bootstrap`, default-on
+auto-fetch during `chelis reef build`, lockfile `remote_origin`, and
+`chelis reef install --from-lockfile`. The public registry server remains deferred.
+
+Companion to `chelis_trust_stack.md` and `effect_taxonomy_expansion.md` (which adds
+install-time effect manifests on top of the install path described here).
 
 ---
 
 ## Context
 
-Reef is the Chelis package manager. It already has the foundational pieces:
-content-addressed local registry, validated install path, lockfile with
-`(name, version, source-kind, compiler-pin, archive_sha256, shell_sha256)`
-tuples, and SHA256 verification on install. What it does not have is a
-remote-fetch path. Today the only install source is `--from-monorepo`, which
-walks `<chelis-monorepo>/packages/` and discovers prebuilt artifacts there.
-Shells live in separate repositories outside that directory; consequently a
-new dev needs to clone four shell repos and manually publish them into the
-local registry in dependency order before `chelis reef build` will succeed
-in any downstream project.
+Reef is the Chelis package manager. It has a content-addressed local registry,
+validated install paths, lockfiles with `(name, version, source-kind, compiler-pin,
+archive_sha256, shell_sha256)` tuples, SHA256 verification on install, and remote
+fetch through canonical GitHub release assets.
 
-This design closes that gap by adding remote fetch from the canonical
-hosting org's release tags as the pre-launch artifact backend. The eventual
-public registry server is post-launch and is recorded here for
-forward-compatibility but explicitly not designed in this round.
+This document records the contract that closed the pre-launch distribution gap:
+canonical shell artifacts are fetched from the canonical hosting org's release tags,
+installed through the same validation path as local artifacts, and recorded with source
+provenance so fresh checkouts can reproduce dependency state. The eventual public
+registry server is post-launch and is recorded here for forward-compatibility but is
+not designed in this round.
 
 ---
 
 ## Background
 
-### What works today
+### Shipped surface
 
 - `chelis reef init` scaffolds a new package.
-- `chelis reef build` resolves dependencies (from the local registry only),
-  type-checks, lowers, and emits `dist/<name>-<version>.{chb,tar.zst}` plus
-  a `reef.lock` recording the resolved dependency tuples.
+- `chelis reef build` resolves dependencies from the local registry, and auto-fetches
+  missing dependencies from recorded or canonical GitHub release origins unless
+  `--no-auto-fetch` is passed. It type-checks, lowers, and emits
+  `dist/<name>-<version>.{chb,tar.zst}` plus a `reef.lock` recording the resolved
+  dependency tuples.
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.
@@ -42,27 +44,24 @@ forward-compatibility but explicitly not designed in this round.
   `<path>/packages/`, validates prebuilt artifacts (archive SHA256 match,
   shell readability, name/version agreement, embedded archive hash check),
   copies into the local registry, and updates the index.
+- `chelis reef install --from-github <org>/<repo>@<tag>` fetches release assets from
+  the GitHub API, validates the same artifact pair, records `remote_origin`, and
+  updates the index.
+- `chelis reef install --bootstrap [<org>/<repo>@<tag>...]` installs canonical shells
+  in topological dependency order, rejecting `chelis-std` because it is the bundled
+  runtime rather than a bootstrap target.
+- `chelis reef install --from-lockfile` re-fetches lockfile dependencies from their
+  recorded `remote_origin` and verifies bytes against the lockfile hashes.
 
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
 
-### What is missing
+### Historical gap this doc closed
 
-- Remote fetch. There is no path that downloads bytes from a URL and feeds
-  them into the validation+placement step.
-- Topological dependency-ordered install. Today a user must know to install
-  nautilus first, then coral (which depends on nautilus), etc., manually.
-  (chelis-std is the bundled runtime and is never installed via reef.)
-- Auto-fetch during `chelis reef build`. The build errors with "missing
-  from local registry index — run `chelis reef build` first to populate
-  the cache" at `crates/chelis-reef/src/lib.rs:1243-1245` if a dependency
-  is not pre-installed.
-- Lockfile origin records. Today the lockfile records `kind:
-  LocalRegistry` for any installed dependency, which is correct as a
-  description of where the bytes currently sit but loses the information
-  about where they came from. A second developer cloning the repo cannot
-  reproduce the install state without out-of-band knowledge of which
-  remote source to fetch from.
+Before Phase A, Reef only installed from monorepo-built artifacts. New developers had
+to clone shell repos and publish them into the local registry manually in dependency
+order, builds could not recover from an empty registry, and lockfiles did not record
+where installed bytes came from. Items 6-9 below are the shipped answer to that gap.
 
 ### Pre-launch backend choice
 
@@ -76,10 +75,10 @@ attaches the prebuilt `<name>-<version>.chb` and
 `<name>-<version>.tar.zst` files (filenames omit the leading `v` even
 though the tag carries it).
 
-The dev team has authenticated access to the canonical org. Authentication
-is via standard GitHub PATs supplied through the `GITHUB_TOKEN` environment
-variable, with an unauthenticated-fallback path that does not exist today
-(the canonical repos are private; unauthenticated fetch would simply 404).
+The dev team has authenticated access to the canonical org. Authentication is via
+standard GitHub PATs supplied through the `GITHUB_TOKEN` environment variable; there is
+no unauthenticated fallback because the canonical repos are private, so
+unauthenticated fetch would simply 404.
 
 The post-launch endgame is a registry server (Item 10). That is recorded
 here as future work but is not designed in this round.
@@ -96,9 +95,9 @@ here as future work but is not designed in this round.
 chelis reef install --from-github <org>/<repo>@<tag>
 ```
 
-`<tag>` is the shell's release tag, of the form `v<shell-version>` (e.g.
-`v0.4.0`, `v0.1.0`). This is the **shell's own version**, not the
-chelis-compiler version; the two are independent. The shell's
+`<tag>` is the shell's release tag, of the form `v<shell-version>` (for example,
+`v0.5.0` for the current Nautilus release). This is the **shell's own version**, not
+the chelis-compiler version; the two are independent. The shell's
 `compiler = "=X.Y.Z"` pin in its `reef.toml` is the constraint that links
 it to a chelis version.
 
@@ -150,9 +149,9 @@ Multiple `--from-github` flags are independent installs.
 
 **Acceptance oracle.**
 
-- `chelis reef install --from-github <org>/nautilus@v0.4.0` with
+- `chelis reef install --from-github <org>/nautilus@v0.5.0` with
   `GITHUB_TOKEN` set in env successfully fetches and installs Nautilus.
-  The local registry afterward has `packages/nautilus/0.4.0/` populated
+  The local registry afterward has `packages/nautilus/0.5.0/` populated
   identically to the `--from-monorepo` outcome.
 - Without the token, fails with a clear error pointing at the env var.
 - With a tampered local cache (alter the archive's hash), subsequent
@@ -167,8 +166,8 @@ Multiple `--from-github` flags are independent installs.
   helper's name is the stable reference.
 - `crates/chelis-cli/src/main.rs`: `--from-github` handler that parses
   the repo+tag and calls `install_from_github`. The CLI handler stays
-  thin — the HTTP layer lives in `chelis-reef` per the locked
-  decision in `phaseA_reef_distribution.md`. ~100 lines.
+  thin — the HTTP layer lives in `chelis-reef` per the locked layering
+  decision in this document. ~100 lines.
 - `crates/chelis-reef/Cargo.toml` adds
   `reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }`.
 
@@ -319,14 +318,14 @@ error catalog.
 ```toml
 [[dependencies]]
 name = "nautilus"
-version = "0.4.0"
-compiler = "=0.4.0"
+version = "0.5.0"
+compiler = "=<compiler-version>"
 archive_sha256 = "..."
 shell_sha256 = "..."
 
 [dependencies.source]
 kind = "local_registry"
-remote_origin = "github://<canonical-org>/nautilus@v0.4.0"
+remote_origin = "github://<canonical-org>/nautilus@v0.5.0"
 ```
 
 The `remote_origin` field is optional for backward compatibility;
@@ -390,25 +389,22 @@ Per item:
 - Item 9: a developer can re-create another developer's local
   registry state from the committed lockfile alone.
 
-After all four items land, a fresh dev environment's onboarding is
+With Items 6-9 shipped, a fresh dev environment's onboarding is
 `git clone <project> && export GITHUB_TOKEN=$(gh auth token) &&
 chelis reef build`. That is the experience.
 
 ---
 
-## Sequencing
+## Historical Sequencing
 
-Item 6 must land first; Items 7, 8, 9 each depend on Item 6's
-helper. Items 7-9 can land in any order after Item 6 and are
-roughly equal-effort (~half a day to one day each).
+Item 6 had to land first; Items 7, 8, 9 each depended on Item 6's helper.
+This section is retained as implementation history, not a remaining schedule.
 
 Item 10 is demand-driven and not part of this design's
 implementation scope.
 
-The combined Item 6-9 work is approximately 3-4 days of focused
-work. The upper-bound estimate is for time spent on auth-error
-catalogs, hash-mismatch error wording, and the corpus of
-integration tests against the canonical org.
+The original Item 6-9 estimate was 3-4 days of focused work. It is retained only to
+explain the scope of the shipped Phase A change set.
 
 ---
 
@@ -425,8 +421,8 @@ integration tests against the canonical org.
 - SHA256 verification logic already shipped (computes
   `archive_sha256` and `shell_sha256` per
   `LockedDependency` at `lib.rs:64-71`).
-- Lockfile schema (cargo-style toml serde). Item 9 adds an
-  optional field; round-trips via existing serde paths.
+- Lockfile schema (cargo-style toml serde). Item 9 added an optional field that
+  round-trips via existing serde paths.
 - `crates/chelis-cli/src/main.rs::cmd_reef_*` handlers as the
   command-dispatch entry points.
 - The error site at `lib.rs:1243-1245` for Item 8's insertion
@@ -464,7 +460,6 @@ integration tests against the canonical org.
   designed here gains a `--print-effects` and `--refuse` flag once
   the effect aggregation is available. The two designs share the
   install boundary.
-- `chelis_trust_stack.md` "Limits of the current trust stack"
-  references this doc as the planned distribution surface.
+- `chelis_trust_stack.md` references this doc as the Phase A distribution surface.
 - `spec/12-roadmap.md` Phase A (distribution unblock) covers
   Items 6-9 of this doc.

@@ -358,7 +358,7 @@ enum ReefCommand {
     /// Populates `~/.chelis/reef/packages/<name>/<version>/` and updates
     /// `~/.chelis/reef/index.json` from a known-good source.
     ///
-    /// Three source forms are supported:
+    /// Four source forms are supported:
     /// * `--from-monorepo <PATH>` — copy prebuilt artifacts out of a
     ///   chelis monorepo's `packages/<name>/dist/` directory.
     /// * `--from-github <ORG>/<REPO>@<TAG>` — fetch the release assets
@@ -376,8 +376,13 @@ enum ReefCommand {
     ///   without a recorded `remote_origin` (older monorepo-only
     ///   installs) error with a suggestion to re-run `--bootstrap` to
     ///   populate origins.
+    /// * `--bootstrap [<ORG>/<REPO>@<TAG>...]` — install canonical shell
+    ///   releases in dependency order. With no explicit entries, the
+    ///   built-in default list installs nautilus, coral, shoals, and
+    ///   octant. `chelis-std` is compiler-bundled and rejected as an
+    ///   explicit bootstrap target.
     ///
-    /// The three sources are mutually exclusive — exactly one of them
+    /// The four sources are mutually exclusive — exactly one of them
     /// must be supplied per invocation.
     ///
     /// `chelis reef build` does NOT auto-install dependencies. This is
@@ -1794,7 +1799,8 @@ fn cmd_test(
     // tests across every discovered file, skip the (expensive)
     // `compile_reef_context` build entirely. The pre-G' code paid the
     // full ~65 s parent overhead even for `chelis test --filter __no_match__`,
-    // a documented bottleneck in `docs/perf_baseline.md`. Surf-parsing
+    // a documented bottleneck in `docs/perf_baseline.md` and the archived
+    // Phase J notes. Surf-parsing
     // each test file is ~10 ms; that's the ceiling we accept here.
     //
     // We do this BEFORE `prepare_reef_graph` runs so a no-match
@@ -2694,7 +2700,7 @@ fn compile_check_in_exec_context(
 /// Phase G' (final) — with the linearity divergence root-caused (the
 /// monolithic `annotate_phase0e_program` was masking real
 /// use-after-consume violations because it built with an empty
-/// `AdtRegistry`; see `docs/lin_rca_report.md`) and chelis-std + the
+/// `AdtRegistry`; see `docs/archive/rca/lin_rca_report.md`) and chelis-std + the
 /// CLI test fixtures rewritten to use `&t` / `copy(t)` at the right
 /// sites, the `Context` arm now goes through
 /// `prepare_eval_in_context(ctx, source)`. Per-file work drops from

@@ -195,7 +195,7 @@ Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
 
 ### 2.9 Shell scripts
 
-**Rule:** Don't write them. Project policy (`CLAUDE.md` Scripting
+**Rule:** Don't write them. Project policy (`AGENTS.md` / `CLAUDE.md` Scripting
 Language Policy) prohibits shell scripts in favor of Python. Existing
 shell scripts must be ported.
 
@@ -921,6 +921,6 @@ to point at a documented rule that explicitly carves out the case.
   identifier case.
 - `crates/chelis-backend-c/src/emit.rs`: backend symbol emission.
 - `crates/chelis-lint/`: lint implementation.
-- `docs/ecosystem_naming_snapshot.md`: empirical snapshot of the
+- `docs/archive/snapshots/ecosystem_naming_snapshot.md`: empirical snapshot of the
   May 2026 ecosystem state and the cleanup inventory.
-- `CLAUDE.md` Surf Style Guide: Surf code-style guidance.
+- `AGENTS.md` / `CLAUDE.md` Surf Style Guide: Surf code-style guidance.
