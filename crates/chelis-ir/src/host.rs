@@ -548,13 +548,46 @@ fn lower_host_program(
         // signature ALSO contains a non-F32/Bool tensor, the DAG-only
         // fallback panics — so in that combination still force the wrapper.
         //
+        // Bucket 4d: a higher-order signature whose non-callable params and
+        // return type are *scalars* (e.g. `(model: f32 -> f32, x: f32) -> f32`)
+        // can never be DAG-lowered (the DAG-only path is tensor-only) and
+        // the host emitter handles `model(x)` cleanly because every value
+        // is a plain C scalar. Force the host wrapper for those signatures
+        // so they actually get a definition emitted -- the previous logic
+        // was silently dropping them, leaving `gcc` to fail with
+        // `implicit declaration of function 'apply'` on the caller side.
+        //
         // Known limitation: when a caller references a callable-param fn by
-        // name and that fn's body doesn't lower cleanly through the host
-        // wrapper, the def gets dropped from emission and the caller will
-        // fail gcc with `implicit declaration`. Tracked as a residual HOF
-        // emission issue (red-team A20.1).
+        // name with a tensor-typed shape (e.g. `(model: tensor[n, f32] ->
+        // f32, ...)`) and the body doesn't lower cleanly through the host
+        // wrapper, the def is still dropped from emission. Tracked as a
+        // residual HOF emission issue (red-team A20.1).
+        let scalar_only_callable_signature = has_callable_params
+            && lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
+                fn ty_is_scalar_or_callable_scalar(ty: &HostType) -> bool {
+                    match ty {
+                        HostType::Tensor(_) => false,
+                        HostType::Fn(params, ret) => {
+                            params.iter().all(ty_is_scalar_or_callable_scalar)
+                                && ty_is_scalar_or_callable_scalar(ret)
+                        }
+                        HostType::Option(inner) | HostType::List(inner) => {
+                            ty_is_scalar_or_callable_scalar(inner)
+                        }
+                        HostType::Tuple(items) => items.iter().all(ty_is_scalar_or_callable_scalar),
+                        HostType::Dict(k, v) => {
+                            ty_is_scalar_or_callable_scalar(k) && ty_is_scalar_or_callable_scalar(v)
+                        }
+                        // Primitive (f32/int32/bool/...), Unit -- scalar OK.
+                        _ => true,
+                    }
+                }
+                params.iter().all(ty_is_scalar_or_callable_scalar)
+                    && ty_is_scalar_or_callable_scalar(&ret)
+            });
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
+                || scalar_only_callable_signature
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
         let skip_for_lowered =
             lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
