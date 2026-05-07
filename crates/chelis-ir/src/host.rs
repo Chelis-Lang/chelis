@@ -625,8 +625,13 @@ fn lower_host_program(
             );
             host.functions.push(function);
         } else {
+            // Inline any local callable bindings in the global binding's
+            // body so `let g = grad(f); g(x)` rewrites to `(grad(f))(x)`
+            // before host lowering — same rationale as in
+            // `lower_host_function`.
+            let inlined_body = inline_local_callable_lets(body);
             let mut value = lower_host_expr(
-                body,
+                &inlined_body,
                 program,
                 &global_scope,
                 &mut host.global_tensor_helpers,
@@ -864,6 +869,15 @@ fn lower_host_function(
     } else {
         return None;
     };
+    // Inline any local callable bindings (fn / grad / vmap / vmap-grad)
+    // into the body before lowering. The host backend only recognizes
+    // grad/vmap forms in direct callee position of an `app`, so an alias
+    // like `let g = grad(f); g(x)` must be rewritten to the inline
+    // `(grad(f))(x)` form. Without this pass `g` lowers to an
+    // `__unresolved_grad` builtin and the call falls through to a
+    // generic `call(g, …)` host builtin, which `host_program_unresolved_call_sites`
+    // rejects pre-codegen.
+    let body_expr = inline_local_callable_lets(&body_expr);
     // If the declared return type is a tensor, the body must produce a
     // tensor even when downstream type-metadata annotations are missing
     // from the reef'd deep AST. Force the body through the tensor-helper
@@ -3247,6 +3261,28 @@ fn substitute_expr(
     }
 }
 
+/// Whether a let-bound value is a callable expression that can be β-substituted
+/// into every use site in the body. The host backend can only lower these
+/// callable forms directly in callee position of an `app` node, so an alias
+/// like `let g = grad(f); g(x)` must be rewritten to the inline form
+/// `(grad(f))(x)` before host-lane lowering. Recognizes:
+///   - `(fn (params …) body)` — anonymous function
+///   - `(grad … fn …)` — gradient transform
+///   - `(vmap … fn …)` — vmap transform
+///   - `(vmap-grad … fn …)` — vmap of grad
+///
+/// Looks through a wrapping `MetaExpr` so type-annotated bindings still match.
+fn is_inlinable_callable_binding_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(inner, _) => matches!(
+            tag(inner),
+            Some("fn") | Some("grad") | Some("vmap") | Some("vmap-grad")
+        ),
+        Expr::MetaExpr(meta, _) => is_inlinable_callable_binding_value(&meta.expr),
+        _ => false,
+    }
+}
+
 fn inline_local_callable_lets(expr: &Expr) -> Expr {
     let Expr::List(list, span) = expr else {
         return expr.clone();
@@ -3294,7 +3330,16 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
             continue;
         };
         let value = inline_local_callable_lets(value);
-        if matches!(&value, Expr::List(inner, _) if tag(inner) == Some("fn")) {
+        if is_inlinable_callable_binding_value(&value) {
+            // β-substitute the callable into every use site in the body.
+            // This applies to local fn bindings (`let f = fn (x) => …; f(y)`),
+            // and also to higher-order callable forms `grad`, `vmap`, and
+            // `vmap-grad` (`let g = grad(f); g(x)`). The grad/vmap forms are
+            // not first-class host values — the host backend recognizes them
+            // only when they appear directly in callee position of an `app`
+            // (the inline form `grad(f)(x)` lowers cleanly). Inlining the
+            // alias rewrites the let-bound form to the inline form so the
+            // host backend can lower it the same way.
             body = substitute_expr(
                 &body,
                 &HashMap::from([(name.to_string(), value)]),

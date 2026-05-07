@@ -1519,6 +1519,173 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
     );
 }
 
+/// Locally-bound `grad` alias form: `let g = grad(f, wrt=…); g(x)` must
+/// lower in the C backend the same way the inline form `grad(f)(x)` already
+/// does. The host backend recognizes `grad`/`vmap`/`vmap-grad` only in
+/// direct callee position of an `app` node — without explicit β-substitution
+/// of the alias the binding lowers to an `__unresolved_grad` builtin and
+/// `host_program_unresolved_call_sites` rejects the program pre-codegen.
+/// Verifies: build exits 0, the generated C contains no unresolved `call(…)`
+/// stubs, the binary runs, and the gradient values match the inline form
+/// numerically.
+#[test]
+fn build_c_grad_locally_bound_alias_form_lowers() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_local_alias.ch");
+    let out_dir = dir.path().join("grad-local-alias-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] = {\n\
+           g = grad(loss, wrt=theta)\n\
+           g(theta, x)\n\
+         }\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_local_alias.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(")
+            && !source.contains("unsupported builtin")
+            && !source.contains("__unresolved_grad")
+            && !source.contains("__unresolved_vmap"),
+        "generated C must not contain unresolved call stubs or unresolved-callable markers:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_local_alias.c", "grad_local_alias");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_local_alias"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*x), wrt=theta) = x = [3.0, 4.0]
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[3.0, 4.0])"),
+        "locally-bound grad alias must produce the same gradient as the inline form, got:\n{stdout}"
+    );
+}
+
+/// Parity test: `chelis eval` (IR evaluator path) and `chelis build
+/// --target c` + run (C backend path) must agree on the locally-bound `grad`
+/// alias form. Bucket 1 made the IR evaluator accept the alias form; this
+/// guards against the C backend silently regressing relative to the
+/// evaluator after the host-lane β-substitution pass. Output parity is
+/// asserted on the alias form's value matching the inline form's value
+/// — both as printed by the C runtime and as printed by `chelis eval`.
+#[test]
+fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
+    fn build_and_run(out_dir: &Path, source_path: &Path, source: &str, name: &str) -> String {
+        write_file(source_path, source);
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "build",
+                source_path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let status = gcc_link_generated(out_dir, &format!("{name}.c"), name);
+        assert!(status.success(), "gcc link failed with status {status}");
+        let run_output = StdCommand::new(out_dir.join(name))
+            .output()
+            .expect("compiled binary should run");
+        assert!(
+            run_output.status.success(),
+            "compiled binary failed with status {}",
+            run_output.status
+        );
+        String::from_utf8(run_output.stdout).expect("utf-8 stdout")
+    }
+
+    fn eval_to_string(source_path: &Path) -> String {
+        let bytes = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--file", source_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(bytes).expect("utf-8 eval stdout")
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let alias_dir = dir.path().join("alias-build");
+    let inline_dir = dir.path().join("inline-build");
+    let alias_src = dir.path().join("grad_local_alias_parity.ch");
+    let inline_src = dir.path().join("grad_local_inline_parity.ch");
+
+    let alias_program = "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] = {\n\
+           g = grad(loss, wrt=theta)\n\
+           g(theta, x)\n\
+         }\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+    let inline_program = "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+
+    let alias_run_stdout = build_and_run(
+        &alias_dir,
+        &alias_src,
+        alias_program,
+        "grad_local_alias_parity",
+    );
+    let inline_run_stdout = build_and_run(
+        &inline_dir,
+        &inline_src,
+        inline_program,
+        "grad_local_inline_parity",
+    );
+    assert_eq!(
+        alias_run_stdout, inline_run_stdout,
+        "C-backend run output for the locally-bound grad alias form must match the inline form"
+    );
+
+    // chelis eval prints the last top-level value; both programs share the
+    // same final `out` definition so eval output must agree across forms,
+    // and must also agree with the C-backend's printed `out = …` line up
+    // to the prefix.
+    let alias_eval_stdout = eval_to_string(&alias_src);
+    let inline_eval_stdout = eval_to_string(&inline_src);
+    assert_eq!(
+        alias_eval_stdout, inline_eval_stdout,
+        "`chelis eval` output for the locally-bound grad alias form must match the inline form"
+    );
+    let trimmed_eval = alias_eval_stdout.trim_end();
+    assert!(
+        alias_run_stdout.contains(trimmed_eval),
+        "C-backend run output must include the eval-printed gradient value;\n  eval: {trimmed_eval}\n  run:  {alias_run_stdout}"
+    );
+}
+
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
 /// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
 /// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
