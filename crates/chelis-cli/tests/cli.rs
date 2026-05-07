@@ -4445,3 +4445,260 @@ fn target_metal_accepts_gpu_resource_region() {
         .assert()
         .success();
 }
+
+// ----- Bucket 1: `grad` / `vmap` / `realize` in the host runtime -----
+//
+// These cover the closure of "host runtime does not support `grad`" /
+// "...`vmap`" / "...`realize`" — `chelis test` and `chelis eval` now
+// route those forms through `lower_subexpr_program` + the forward DAG
+// evaluator (the same machinery the C backend uses) so the two lanes
+// agree on programs that pass `chelis check`.
+//
+// See `crates/chelis-compiler-api/src/runtime.rs::apply_transform` for
+// the implementation, and `spec/upstream-bugs/grad-eval-host-runtime.md`
+// for the canonical repro / closure reference.
+
+/// Positive: `realize(...)` is identity in the host runtime; `chelis
+/// eval` now produces the inner tensor's value instead of erroring.
+#[test]
+fn eval_realize_is_identity_in_host_runtime() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("realize_identity.ch");
+    write_file(
+        &path,
+        "result = realize(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ));
+}
+
+/// Positive: inline `grad(f)(x)` form. For f(x) = x*x, df/dx = 2x, so at
+/// x=3 the gradient is 6.
+#[test]
+fn eval_grad_inline_application_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_inline.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         result = grad(f)(cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("data=[6.0]"));
+}
+
+/// Positive: locally-bound `g = grad(f); g(x)` form. Closure is captured
+/// at the binding site and applied later; output must match the inline
+/// form above.
+#[test]
+fn eval_grad_locally_bound_then_applied_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_local_bind.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         g = grad(f)\n\
+         result = g(cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("data=[6.0]"));
+}
+
+/// Positive: wrapper-fn-param form. `grad(loss, wrt=theta)(theta, x)`
+/// inside a wrapper def — this is the form Coral / Shoals use. d/d
+/// theta of sum(theta * x) is x = [3.0, 4.0].
+#[test]
+fn eval_grad_wrapper_fn_param_form_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_wrapper.ch");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "tensor(shape=[2], data=[3.0, 4.0])",
+        ));
+}
+
+/// Positive parity probe: the host eval result must agree with the C
+/// backend's compiled binary on the wrapper-fn-param form, to within
+/// 1e-6 elementwise. Same `wrt=theta` program used by the existing
+/// `build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct`
+/// test — we share the source so any divergence between the two lanes
+/// shows up here.
+#[test]
+fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_parity.ch");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    // Host-eval lane.
+    let host_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        host_output.status.success(),
+        "chelis eval failed: stderr={}",
+        String::from_utf8_lossy(&host_output.stderr)
+    );
+    let host_stdout = String::from_utf8(host_output.stdout).expect("utf-8");
+    assert!(
+        host_stdout.contains("data=[3.0, 4.0]"),
+        "host eval did not produce the expected gradient: {host_stdout}"
+    );
+
+    // C-backend lane.
+    let out_dir = dir.path().join("grad-parity-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let status = gcc_link_generated(&out_dir, "grad_parity.c", "grad_parity");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let c_run = StdCommand::new(out_dir.join("grad_parity"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(c_run.status.success(), "compiled binary failed");
+    let c_stdout = String::from_utf8(c_run.stdout).expect("utf-8");
+    assert!(
+        c_stdout.contains("data=[3.0, 4.0]"),
+        "C backend did not produce the expected gradient: {c_stdout}"
+    );
+}
+
+/// Positive: `vmap(f)(xs)` lifts a scalar-tensor function over the
+/// leading axis. f(x) = x * x applied elementwise via vmap to
+/// [1.0, 2.0, 3.0] should yield [1.0, 4.0, 9.0].
+#[test]
+fn eval_vmap_returns_per_element_results() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("vmap_square.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[f32]) -> tensor[f32] = mul(copy(x), copy(x))\n\
+         xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
+         result = vmap(f)(xs)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "result = tensor(shape=[3], data=[1.0, 4.0, 9.0])",
+        ));
+}
+
+/// Negative parity for `realize`: exercising it in the host lane with
+/// no inner expression must produce a clean error rather than a panic.
+/// Synthesized programs with bad shape are caught at type-check; this
+/// test pins that the runtime path doesn't regress to "host runtime
+/// does not support `realize`" once the binding case starts hitting
+/// the new arm.
+#[test]
+fn eval_realize_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("realize_no_unsupported.ch");
+    write_file(&path, "result = realize(to_tensor([cast(1.0, f32)]))\n");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `realize`")
+                .not()
+                .and(predicate::str::contains("tensor(shape=[1], data=[1.0])")),
+        );
+}
+
+/// Negative parity for `grad`: the previously-emitted "host runtime does
+/// not support `grad`" string must no longer appear on a passing program.
+#[test]
+fn eval_grad_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_no_unsupported.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         result = grad(f)(cast(2.0, f32))\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `grad`")
+                .not()
+                .and(predicate::str::contains("data=[4.0]")),
+        );
+}
+
+/// Negative parity for `vmap`: same closure check.
+#[test]
+fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("vmap_no_unsupported.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[f32]) -> tensor[f32] = mul(copy(x), copy(x))\n\
+         xs = to_tensor([cast(2.0, f32), cast(3.0, f32)])\n\
+         result = vmap(f)(xs)\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `vmap`")
+                .not()
+                .and(predicate::str::contains("data=[4.0, 9.0]")),
+        );
+}

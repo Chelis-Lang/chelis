@@ -13,8 +13,9 @@ use chelis_surf::ast::{
 use chelis_types::{CheckedProgram, errors::CheckError};
 
 use crate::runtime::{
-    RuntimeTensorValue, evaluate_host_program_filtered, evaluate_host_program_with_library,
-    lookup_runtime_value_for_root, runtime_value_to_schema,
+    RuntimeTensorValue, evaluate_host_program_filtered,
+    evaluate_host_program_with_library_and_types, lookup_runtime_value_for_root,
+    runtime_value_to_schema,
 };
 use crate::schema::{
     BatchRequest, BatchResult, BatchResultEnvelope, CheckResult, CompileRequest, CompileResult,
@@ -499,6 +500,7 @@ fn compile_new_source_in_context(
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
         exprs: context.library_checked.annotated_exprs().to_vec(),
+        type_env: context.library_checked.type_env().clone(),
         lowered_names: crate::runtime::library_lowered_names(
             context.library_checked.annotated_exprs(),
             context.library_checked.type_env(),
@@ -722,9 +724,10 @@ fn eval_compiled(
     // this carry-over, the runtime errored
     // `unknown runtime name pkg__chelis__std__...`.
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
-        evaluate_host_program_with_library(
+        evaluate_host_program_with_library_and_types(
             &compiled.checked,
             &library.exprs,
+            &library.type_env,
             Some(&library.lowered_names),
             &tensor_values_by_name,
             selected_root_names,
@@ -905,6 +908,12 @@ struct LibraryRuntime {
     /// Library `def` annotated_exprs. Pulled into `top_level_defs`
     /// before the new-code defs so new-code can shadow on collision.
     exprs: Vec<DeepExpr>,
+    /// Library-side type-env. Bucket 1 (`grad`/`vmap`/`realize` host
+    /// runtime support) routes through `lower_subexpr_program`, which
+    /// expects the merged library + new-code Deep type-env so a
+    /// library-name reference inside a `grad` body resolves the same
+    /// way it does in the monolithic compile.
+    type_env: HashMap<String, DeepExpr>,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
