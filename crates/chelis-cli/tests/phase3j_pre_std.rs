@@ -18,14 +18,21 @@
 //!     that touches it builds and runs through the C backend. Numeric
 //!     verification of the attention math itself is still deferred to
 //!     Phase 3j (Nautilus); see §3j-pre Acknowledged Limitations.
-//!   - `Std.Init.Kaiming.kaiming_uniform` under `with seed(...)`: the C
-//!     and HIP backends do **not** plumb the user-provided seed through
-//!     the generated runtime. Rather than silently drop the seed, Batch
-//!     7b makes `chelis build --target c|hip` reject any program that
-//!     contains `with seed(...)` with a hard error. The negative test
-//!     `phase3j_pre_oracle_build_path_repros_kaiming_uniform_seed_rejected`
-//!     pins that contract. The host-runtime path is still numerically
-//!     exercised by `phase3j_pre_oracle_integrated_eval`.
+//!   - `with seed(...)` over `uniform_like` (Bucket-5 closure of Batch
+//!     7b): the C backend now plumbs the user-provided seed through
+//!     the generated runtime. The seed binds at IR-lowering time and
+//!     is baked into `RiscOp::UniformLike { seed }`; the C emitter
+//!     renders it as a compile-time constant in
+//!     `chelis_uniform_sample_f32(seed, index, ...)`, whose
+//!     xorshift-splitmix algorithm matches the IR evaluator. The
+//!     positive tests
+//!     `phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds`
+//!     and `..._distinct_seeds_differ` pin determinism (same seed →
+//!     same bytes) and seed-sensitivity (different seeds → different
+//!     bytes). The C output is f32-rounded; the eval reference in
+//!     `phase3j_pre_oracle_integrated_eval` stays in f64 — the
+//!     trailing-bit drift is intrinsic to the runtime precision, not a
+//!     seed-plumbing bug.
 //!
 //! The eval/import/check guards are also `#[ignore]`d because the full
 //! acceptance oracle exceeds the default inner-loop budget; run the suite
@@ -388,50 +395,92 @@ gelu_out = forward(ys)
     assert_eq!(stdout, expected, "byte-exact compiled stdout mismatch");
 }
 
-/// `Std.Init.Kaiming.kaiming_uniform` under `with seed(...)` is rejected
-/// at `chelis build --target c` time with a hard error. The C backend
-/// does not yet plumb the user-provided seed through the generated
-/// runtime, and Batch 7b chose to fail loudly rather than silently drop
-/// the seed. This test pins that contract: the build CLI exits non-zero
-/// and prints the documented error substring.
+/// Bucket-5 closure (was Batch 7b's `_rejected` negative): a program
+/// that uses `with seed(...)` now builds cleanly through `chelis build
+/// --target c`, gcc-links, runs, and produces deterministic output
+/// that is byte-exact across runs for the same seed.
+///
+/// The seed binds at IR-lowering time and is baked into
+/// `RiscOp::UniformLike { seed }`; the C emitter renders it as a
+/// compile-time constant in `chelis_uniform_sample_f32(seed, index,
+/// ...)`, whose xorshift-splitmix algorithm matches the IR evaluator's
+/// `dropout_sample` (see `chelis_ir::eval`). The C output is f32-rounded
+/// (not byte-equal to the f64 `chelis eval` reference in
+/// `phase3j_pre_oracle_integrated_eval`) — that f32-vs-f64 reduction
+/// difference is intrinsic to the runtime precision, not a seed-plumbing
+/// bug.
+///
+/// The test exercises the direct `uniform_like` builtin under
+/// `with seed(7)` rather than `Std.Init.Kaiming.kaiming_uniform`. The
+/// kaiming wrapper's body uses `to_tensor(map(scalar_fn,
+/// to_list(raw)))`, which the host-lane lowerer turns into a host
+/// function — making `sample` a function-typed binding instead of a
+/// printed tensor value. The narrow seed-plumbing oracle here uses
+/// `uniform_like` directly so the binding stays a tensor and the
+/// compiled stdout assertion is meaningful.
 #[test]
 #[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
-fn phase3j_pre_oracle_build_path_repros_kaiming_uniform_seed_rejected() {
-    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-kaiming");
+fn phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-uniform-seed");
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Init.Kaiming (kaiming_uniform)
-
 template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-sample = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
+sampled = with seed(7) { uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
 "#,
     );
-    let out_dir = app_pkg.join("out");
-    let _ = fs::remove_dir_all(&out_dir);
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "build",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "does not yet plumb `with seed(...)` into the generated runtime",
-        ));
-    // No `out_dir` should have been written.
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
     assert!(
-        !out_dir.join("main.c").exists(),
-        "main.c must not be emitted when `with seed` is rejected"
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
+    );
+    // Determinism: same seed -> same bytes across runs. Captured from
+    // the f32 C runtime. The bytes were generated by running the
+    // compiled binary; they are stable because (seed=7, low=0, high=1,
+    // shape=[4]) fully determines the xorshift-splitmix output via
+    // `chelis_uniform_sample_f32`.
+    let expected = "template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])\n\
+                    sampled = tensor(shape=[4], data=[0.07297039777040482, 0.9662936329841614, 0.7002935409545898, 0.9070014953613281])\n";
+    assert_eq!(
+        stdout, expected,
+        "byte-exact compiled stdout mismatch for seed=7 uniform_like"
+    );
+}
+
+/// Bucket-5 negative-parity sibling for `with seed`: a different seed
+/// must produce a different output, and re-running with the same seed
+/// must reproduce the same output.
+///
+/// This pins the determinism contract: had we silently dropped the
+/// seed (the pre-Bucket-5 wrong-answer that surfaced as
+/// `chelis_uniform_sample_f32(0ULL, ...)` in the emitted C), runs with
+/// seed=7 and seed=42 would have produced identical bytes. The
+/// assertion here would catch that regression.
+#[test]
+fn phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ() {
+    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-seed-differs");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+seven = with seed(7) { uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
+forty_two = with seed(42) { uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
+"#,
+    );
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
+    assert!(
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
+    );
+    // Two seeds -> two distinct outputs. Both byte-exact across runs.
+    let expected = "template = tensor(shape=[4], data=[0.0, 0.0, 0.0, 0.0])\n\
+                    seven = tensor(shape=[4], data=[0.07297039777040482, 0.9662936329841614, 0.7002935409545898, 0.9070014953613281])\n\
+                    forty_two = tensor(shape=[4], data=[0.6537157297134399, 0.7415648698806763, 0.8491760492324829, 0.3743141293525696])\n";
+    assert_eq!(
+        stdout, expected,
+        "byte-exact compiled stdout mismatch for distinct seeds"
     );
 }
 

@@ -1249,6 +1249,27 @@ fn lower_host_expr_kind(
             // omit the seed slot.
             let body = kids.get(1).or_else(|| kids.first());
             if let Some(body) = body {
+                // Bucket-5 closure: when the body is a tensor-typed
+                // expression that contains random ops (e.g.
+                // `uniform_like(...)`), route the *whole* handle-effect
+                // form through `try_lower_tensor_helper_call` so the IR
+                // lowerer's `lower_handle_effect` arm fires and threads
+                // the seed into `RiscOp::UniformLike { seed }`. Lowering
+                // only the body here would silently drop the seed and
+                // emit `chelis_uniform_sample_f32(0ULL, ...)` in the
+                // generated C — the original Batch-7b wrong-answer that
+                // the now-removed rejection gate guarded against.
+                if let Some(tensor_ty) = expr_tensor_type(body, program, scope)
+                    && let Some(tensor_call) = try_lower_tensor_helper_call(
+                        expr,
+                        program,
+                        scope,
+                        tensor_helpers,
+                        tensor_ty,
+                    )
+                {
+                    return tensor_call;
+                }
                 lower_host_expr(body, program, scope, tensor_helpers)
             } else {
                 HostExpr::new(HostExprKind::Unit)

@@ -3130,10 +3130,29 @@ impl LowerCtx {
                 let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
                 let high = self.extract_f64_value(&args[2]).unwrap_or(1.0);
                 let seed = self.random_seed.unwrap_or(0);
+                // When no `type` metadata is attached to the `app` form
+                // (as is common when the host lane drives sub-expression
+                // lowering through `lower_subexpr_program` from a
+                // handle-effect tensor-helper call), the supplied `ty`
+                // is `default_type()` (rank-0 scalar). UniformLike is
+                // shape-preserving over its template input, so prefer
+                // the template's actual tensor type to avoid emitting a
+                // rank-0 alloc that the host emitter then renders as
+                // `(int[]){1}` and a 1-element loop. Bucket-5 closure.
+                let inferred_ty = self
+                    .dag
+                    .get(template)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
+                    inferred_ty
+                } else {
+                    ty.clone()
+                };
                 let node = self.dag.add_node(
                     RiscOp::UniformLike { low, high, seed },
                     vec![template],
-                    ty.clone(),
+                    resolved_ty,
                     self.current_span_id.clone(),
                 );
                 self.attach_reuse_hint(node, app_span, &[template])
@@ -3142,10 +3161,20 @@ impl LowerCtx {
                 let x = self.lower_expr_node(&args[0], "dropout input");
                 let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
                 let seed = self.random_seed.unwrap_or(0);
+                let inferred_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
+                    inferred_ty
+                } else {
+                    ty.clone()
+                };
                 let node = self.dag.add_node(
                     RiscOp::Dropout { rate, seed },
                     vec![x],
-                    ty.clone(),
+                    resolved_ty,
                     self.current_span_id.clone(),
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
