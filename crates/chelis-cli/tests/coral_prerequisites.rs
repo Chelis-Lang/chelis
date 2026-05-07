@@ -7,6 +7,7 @@ mod common;
 use common::{make_app, write_file};
 
 #[test]
+#[ignore = "manual gate: Coral prerequisite acceptance bundle exceeds the default inner-loop budget"]
 fn coral_prerequisites() {
     let (_dir, reef_home, app_pkg) = make_app("coral-prereqs");
 

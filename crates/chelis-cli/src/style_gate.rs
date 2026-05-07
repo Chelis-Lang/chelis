@@ -185,20 +185,16 @@ fn format_outcome(file: &Path, outcome: &GateOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn clean_surf_file_passes() {
-        let mut f = NamedTempFile::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clean.ch");
         // Canonical Surf — empty program is the simplest canonical form.
         let canonical = chelis_surf::format::format_program(&[]);
-        write!(f, "{canonical}").unwrap();
-        let path = f.path().with_extension("ch");
-        std::fs::copy(f.path(), &path).unwrap();
+        std::fs::write(&path, &canonical).unwrap();
         let res = enforce_style_gate(&path, &canonical, false);
         assert!(res.is_ok(), "expected clean canonical pass; got {res:?}");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

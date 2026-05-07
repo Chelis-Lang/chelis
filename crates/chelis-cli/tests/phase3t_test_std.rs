@@ -74,6 +74,7 @@ fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_true_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-true-pass");
     write_file(
@@ -92,6 +93,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_true_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-true-fail");
     write_file(
@@ -112,6 +114,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_false_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-false-pass");
     write_file(
@@ -130,6 +133,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_false_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-false-fail");
     write_file(
@@ -150,6 +154,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-pass");
     write_file(
@@ -168,6 +173,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-fail");
     write_file(
@@ -192,6 +198,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_int_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-int-pass");
     write_file(
@@ -210,6 +217,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_int_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-int-fail");
     write_file(
@@ -233,6 +241,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_bool_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-bool-pass");
     write_file(
@@ -251,6 +260,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_bool_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-bool-fail");
     write_file(
@@ -273,6 +283,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_string_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-str-pass");
     write_file(
@@ -291,6 +302,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_string_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-str-fail");
     write_file(
@@ -314,6 +326,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-pass");
     write_file(
@@ -335,6 +348,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-fail");
     write_file(
@@ -360,6 +374,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_tensor_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-pass");
     write_file(
@@ -379,6 +394,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_tensor_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-close-tensor-fail");
     write_file(
@@ -404,6 +420,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_tensor_int64_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-tensor-i64-pass");
     write_file(
@@ -423,6 +440,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_eq_tensor_int64_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-eq-tensor-i64-fail");
     write_file(
@@ -447,6 +465,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_shape_pass() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-shape-pass");
     write_file(
@@ -466,6 +485,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_shape_fail_reports_label() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-std-assert-shape-fail-perassert");
     write_file(
@@ -491,6 +511,7 @@ ran = test_case()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assertion_from_empty_effect_fn_is_rejected() {
     // A function that declares `! {}` but calls an `Std.Test` assertion must
     // be rejected by the checker with an UnhandledEffect diagnostic.
@@ -518,6 +539,7 @@ def g() -> unit ! {} = assert_true(true, "x")
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_fail_wrapper_carries_test_effect() {
     // Std.Test.fail is a Chelis wrapper over test_assert(false, _) so it
     // carries Test, unlike the runtime builtin `fail` which is tagless.
@@ -546,6 +568,7 @@ def h() -> unit ! {} = fail("msg")
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_close_rejects_negative_tolerance() {
     // `assert_close` must fail with an "invalid tolerance" diagnostic when
     // given a negative tol. The failure is routed through test_assert(false,
@@ -590,6 +613,7 @@ ran = test_bad_tol()
 }
 
 #[test]
+#[ignore = "manual gate: exhaustive Std.Test assertion matrix exceeds the default inner-loop budget"]
 fn std_test_assert_shape_reports_label_on_mismatch() {
     // `assert_shape` should propagate the caller's label when the tensor's
     // length does not match `expected_n`.

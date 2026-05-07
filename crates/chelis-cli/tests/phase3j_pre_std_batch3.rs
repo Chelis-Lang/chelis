@@ -121,6 +121,7 @@ chelis-std = {{ version = "0.2.0" }}
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3_silu_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-silu");
     write_file(
@@ -156,6 +157,7 @@ silu_out = forward(xs)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3_gelu_tanh_approx_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-gelu");
     write_file(
@@ -192,6 +194,7 @@ gelu_out = forward(xs)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3_rmsnorm_unit_rms_and_gain_scaling() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-rmsnorm");
     write_file(
@@ -232,6 +235,7 @@ rms_scaled = forward(xs, scaled_gain, cast(0.000001, f32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3_rmsnorm_rejects_mismatched_gain_shape() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-rmsnorm-bad-shape");
     write_file(

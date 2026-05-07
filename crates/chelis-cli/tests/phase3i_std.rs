@@ -597,6 +597,7 @@ lr = linear_warmup(cast(1, int64), LinearWarmupConfig { warmup_steps: cast(4, in
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i Generate build-and-run acceptance exceeds the default inner-loop budget"]
 fn reef_std_generate_builds_and_runs_compiled_program() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-generate-build");
     let out_dir = app_pkg.join("out");

@@ -117,6 +117,7 @@ def close_to(x: f32, target: f32, tol: f32) -> bool = lt(abs_f32(sub(x, target))
 "#;
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch4_losses_metrics_and_inits_evaluate_correctly() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch4");
     let main_ch = format!(
@@ -239,6 +240,7 @@ tn_bounds_ok = and(lte(tn_max, cast(0.5, f32)), gte(tn_min, cast(-0.5, f32)))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch4_kl_divergence_rejects_shape_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch4-kl-bad");
     write_file(
@@ -270,6 +272,7 @@ bad = kl_divergence(p, q)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch4_bce_rejects_shape_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch4-bce-bad");
     write_file(

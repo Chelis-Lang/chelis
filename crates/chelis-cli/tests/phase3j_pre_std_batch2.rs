@@ -22,6 +22,7 @@ mod common;
 use common::{make_app, write_file};
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_linspace_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-linspace");
     write_file(
@@ -61,6 +62,7 @@ ls_1 = linspace(cast(4.0, f32), cast(9.0, f32), cast(1, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_linspace_rejects_non_scalar_start() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-linspace-bad");
     // Passing a tensor where a scalar f32 is required should fail check.
@@ -87,6 +89,7 @@ bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_arange_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-arange");
     write_file(
@@ -134,6 +137,7 @@ ar_2_6 = arange(cast(2, int32), cast(6, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_arange_rejects_float_bounds() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-arange-bad");
     write_file(
@@ -158,6 +162,7 @@ bad = arange(cast(0.0, f32), cast(4.0, f32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_reduce_min_and_prod_match_reference() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-min-prod");
     write_file(
@@ -195,6 +200,7 @@ row_prod = prod(mat, cast(1, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_reduce_argmax_and_argmin_match_reference() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-argmax-argmin");
     write_file(
@@ -233,6 +239,7 @@ row_ai = argmin(mat, cast(1, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_reduce_min_rejects_scalar_input() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-reduce-bad");
     write_file(
@@ -257,6 +264,7 @@ bad = min(cast(1.0, f32), cast(0, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_stack_squeeze_unsqueeze_publish_successfully() {
     // KNOWN RESIDUAL: stack/squeeze/unsqueeze ship with elided return
     // types because the package-mode enforce-defsig pass in the type

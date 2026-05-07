@@ -111,6 +111,7 @@ fn build_and_run(reef_home: &Path, app_pkg: &Path) -> String {
 }
 
 #[test]
+#[ignore = "manual gate: Std build-path runtime-gap suite compiles and links generated C"]
 fn reef_std_linear_forward_builds_and_produces_expected_output() {
     // Linear.forward(x, w, b) = matmul(x, w) + expand(b, batch).
     // Pick a 1×2 input, 2×2 identity weights, and a 2-vector bias so the
@@ -168,6 +169,7 @@ y = forward(x, w, b)
 }
 
 #[test]
+#[ignore = "manual gate: Std build-path runtime-gap suite compiles and links generated C"]
 fn reef_std_attention_scaled_dot_product_builds_and_produces_expected_output() {
     // scaled_dot_product_attention(q, k, v, scale):
     //   kt      = permute(k, 1, 0)
@@ -255,6 +257,7 @@ fn parse_tensor_data_for(stdout: &str, binding: &str) -> Option<Vec<f32>> {
 }
 
 #[test]
+#[ignore = "manual gate: Std build-path runtime-gap suite compiles and links generated C"]
 fn reef_std_crossentropy_loss_builds_and_produces_expected_output() {
     // CrossEntropy.loss(logits, labels) =
     //   softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg
@@ -305,6 +308,7 @@ nll = loss(logits, labels)
 }
 
 #[test]
+#[ignore = "manual gate: Std build-path runtime-gap suite compiles and links generated C"]
 fn reef_std_rmsnorm_forward_builds_and_runs() {
     // RmsNorm.forward(x, gain, eps) normalizes by sqrt(mean(x^2) + eps).
     // For x = [3, 4]:

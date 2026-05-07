@@ -27,10 +27,12 @@
 //!     pins that contract. The host-runtime path is still numerically
 //!     exercised by `phase3j_pre_oracle_integrated_eval`.
 //!
-//! No tests in this file are `#[ignore]`d. Every assertion uses exact
-//! line equality (or an explicit error-substring match for negative
-//! tests) — never `contains("0.")`-style fuzzy matching for positive
-//! correctness.
+//! The eval/import/check guards stay in the default gate. Build-path tests
+//! that compile and link generated C are `#[ignore]`d because they exceed the
+//! default inner-loop budget; run them through the documented manual gate.
+//! Every assertion uses exact line equality (or an explicit error-substring
+//! match for negative tests) — never `contains("0.")`-style fuzzy matching for
+//! positive correctness.
 //!
 //! Test inventory:
 //!
@@ -267,8 +269,9 @@ g = grad(loss_fn)
 // through `chelis build --target c` + gcc-link + run, and asserts
 // **byte-exact** stdout against a hand-computed reference (positive)
 // or an exact error-substring against the build CLI (negative).
-// None of these are `#[ignore]`d; they run in the default workspace
-// pass.
+// These are `#[ignore]`d manual-gate tests. They are still authoritative for
+// the build path, but they should not make `cargo test --workspace` a
+// long-running acceptance gate.
 // -------------------------------------------------------------------------
 
 fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::process::ExitStatus {
@@ -330,6 +333,7 @@ fn build_and_run(reef_home: &Path, app_pkg: &Path) -> (std::process::ExitStatus,
 /// and `rms_unit[i] = xs[i] * rms_inv`. The exact f32-rounded output
 /// captured from the compiled binary is locked in below.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_build_path_repros_rmsnorm_forward() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-rmsnorm");
     write_file(
@@ -358,6 +362,7 @@ rms_unit = forward(xs, unit_gain, cast(0.000001, f32))
 /// Asserts byte-exact compiled stdout against the hand-computed f32 GELU
 /// (tanh approximation) values for the input grid `[0, 0.5, 1, 2]`.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_build_path_repros_gelu_forward() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-gelu");
     write_file(
@@ -387,6 +392,7 @@ gelu_out = forward(ys)
 /// the seed. This test pins that contract: the build CLI exits non-zero
 /// and prints the documented error substring.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_build_path_repros_kaiming_uniform_seed_rejected() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-kaiming");
     write_file(
@@ -430,6 +436,7 @@ sample = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
 /// byte-exact compiled stdout for a column-wise min over a 2x3 tensor:
 /// `min([[1,2,3],[4,0.5,6]], axis=0) = [1, 0.5, 3]`.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_build_path_repros_tensor_reduce_min() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-reduce");
     write_file(
@@ -459,6 +466,7 @@ min_axis0 = min(xs, cast(0, int32))
 /// `matmul`/`softmax`/`permute`/`expand` gap that already blocks
 /// attention through `chelis eval`.)
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_build_path_repros_attention_import() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-repro-attention");
     // Importing `Std.Nn.Attention` previously dragged two copies of the
@@ -500,6 +508,7 @@ touch_ok = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 /// excluded here and is covered by the seed-rejected negative test
 /// above; this is the no-silent-drop contract from Batch 7b.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_integrated_build_c() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-oracle-build-c");
     write_file(

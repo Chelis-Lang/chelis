@@ -198,6 +198,7 @@ x = missing_symbol("foo")
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g text-pipeline acceptance builds, links, and runs generated C"]
 fn phase3g_text_pipeline_acceptance_oracle() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");

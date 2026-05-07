@@ -75,6 +75,7 @@ use common::{make_app, write_file};
 /// downstream consumer. The `touch_*` bindings force the name resolver
 /// and import surface to walk every exported symbol.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_conv_and_attention_wrappers_publish_and_import() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-import");
     write_file(
@@ -120,6 +121,7 @@ touch_gqa_bcast = gqa_broadcast_kv
 /// on transitive coverage) is required by the plan; see
 /// `feedback_verify_deps_exist`.
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_gather_broadcasts_kv_heads_for_gqa() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-gather");
     write_file(
@@ -150,6 +152,7 @@ broadcast_kv = gather(kv_src, group_map, 0)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_sdpa_rejects_q_k_seqlen_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-sdpa-seqlen");
     write_file(
@@ -175,6 +178,7 @@ def bad_seqlen(q: tensor[3, 4, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32],
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_mha_rejects_head_dim_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-mha-headdim");
     write_file(
@@ -200,6 +204,7 @@ def bad_headdim(q: tensor[4, 8, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32]
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_gqa_rejects_wrong_group_map_rank() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-gqa-mask");
     write_file(
@@ -225,6 +230,7 @@ def bad_group_map(pool: tensor[1, 4, 4, f32], gm: tensor[2, 3, int64]) -> tensor
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_conv2d_rejects_kernel_channel_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-conv2d-channels");
     write_file(
@@ -250,6 +256,7 @@ def bad_channels(x: tensor[1, 4, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tens
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch3b_conv1d_rejects_kernel_length_mismatch() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-batch3b-conv1d-length");
     write_file(

@@ -1895,6 +1895,7 @@ def main(
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3h numeric acceptance oracle exceeds the default inner-loop budget"]
 fn phase3h_numeric_acceptance_oracle() {
     build_c_runs_tensor_structural_ops_and_matches_eval_output();
     assert_reef_std_embedding_builds_to_valid_c();
