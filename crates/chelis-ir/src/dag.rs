@@ -459,7 +459,11 @@ impl Dag {
 pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     let mut occurrences = Vec::new();
     let mut seen_inputs = HashSet::new();
+    let mut named_dims_in_loads: HashSet<String> = HashSet::new();
 
+    // First pass: collect Load occurrences. These are the canonical
+    // sources for symbolic dim values (the C codegen turns each into
+    // `int <dim> = inputs[<slot>]->shape[<axis>]`).
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -469,11 +473,72 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
         }
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if let DimInfo::Named(symbol, None) = dim {
+                named_dims_in_loads.insert(symbol.clone());
                 occurrences.push(SymbolicDimOccurrence {
                     name: symbol.clone(),
                     input_label: name.as_str().to_string(),
                     axis,
                 });
+            }
+        }
+    }
+
+    // Bucket 4c sibling sweep: a polymorphic dim may be referenced by
+    // a non-Load node (e.g. `Const` synthesised by tier2 lowering or
+    // the gradient backward pass) without appearing in any Load's
+    // type. Without an entry in the occurrences list the C codegen
+    // emits `(int[]){ d36 }` against an undeclared `d36`.
+    //
+    // For each unbound name we try to find a Load whose own dims
+    // reference the same symbol (e.g. via op-internal references like
+    // `RiscOp::Reshape::new_shape` or `RiscOp::Expand::size`). If a
+    // matching Load is found we register a synthetic occurrence so
+    // the codegen can declare the dim from that input. If no matching
+    // Load exists, the dim is unrecoverable from inputs alone — that
+    // is a bug in the producing pass and we surface it loudly via
+    // `panic!` rather than silently emitting C that won't compile.
+    for node in dag.nodes() {
+        for dim in &node.output_type.dims {
+            if let DimInfo::Named(symbol, None) = dim
+                && !named_dims_in_loads.contains(symbol)
+            {
+                // Hunt for any Load whose own type contains the same
+                // unbound dim name. We have to widen the search because
+                // a Load with a shape-mismatched annotation wouldn't
+                // necessarily appear in the first pass (its dim could
+                // be `Lit(_)` while the synthesised node carries the
+                // polymorphic name).
+                let mut bound = false;
+                for candidate in dag.nodes() {
+                    let RiscOp::Load { name: load_name } = &candidate.op else {
+                        continue;
+                    };
+                    for (axis, candidate_dim) in candidate.output_type.dims.iter().enumerate() {
+                        if let DimInfo::Named(candidate_sym, _) = candidate_dim
+                            && candidate_sym == symbol
+                        {
+                            occurrences.push(SymbolicDimOccurrence {
+                                name: symbol.clone(),
+                                input_label: load_name.as_str().to_string(),
+                                axis,
+                            });
+                            named_dims_in_loads.insert(symbol.clone());
+                            bound = true;
+                            break;
+                        }
+                    }
+                    if bound {
+                        break;
+                    }
+                }
+                if !bound {
+                    panic!(
+                        "internal compiler error: symbolic dim `{symbol}` is referenced by a \
+                         non-Load node (id {}) but no Load input declares it. The C codegen \
+                         would emit an undeclared identifier; fix the producing IR pass.",
+                        node.id.0
+                    );
+                }
             }
         }
     }
@@ -620,6 +685,51 @@ mod tests {
         dag.add_root(id);
         assert_eq!(dag.roots(), &[id]);
         assert!(dag.is_root(id));
+    }
+
+    #[test]
+    fn symbolic_occurrences_sibling_sweep_picks_up_const_dims() {
+        // Bucket 4c: a `Const` node (or any non-Load node) with a
+        // polymorphic dim must produce a synthetic occurrence so the
+        // C codegen can declare the dim from a Load that carries it.
+        let load_ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let const_ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], load_ty, None);
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], const_ty, None);
+
+        let occurrences = symbolic_occurrences(&dag);
+        // The Load is the canonical source. The sibling-sweep pass must
+        // not duplicate the Load occurrence for the Const (the Const's
+        // dim is already covered).
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].name, "n");
+        assert_eq!(occurrences[0].input_label, "x");
+    }
+
+    #[test]
+    #[should_panic(expected = "internal compiler error: symbolic dim `n` is referenced")]
+    fn symbolic_occurrences_panics_when_dim_has_no_load_source() {
+        // Negative parity for the sibling sweep: if a non-Load node
+        // declares a polymorphic dim that no Load carries, the C
+        // codegen would emit `(int[]){ n }` against an undeclared
+        // identifier. The sweep panics rather than producing
+        // un-compilable C.
+        let const_ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        // Only a Const with a polymorphic dim, no Load. There is no
+        // input slot to pull the dim value from.
+        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], const_ty, None);
+        let _ = symbolic_occurrences(&dag);
     }
 
     #[test]

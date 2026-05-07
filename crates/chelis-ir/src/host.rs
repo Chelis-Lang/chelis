@@ -548,13 +548,46 @@ fn lower_host_program(
         // signature ALSO contains a non-F32/Bool tensor, the DAG-only
         // fallback panics — so in that combination still force the wrapper.
         //
+        // Bucket 4d: a higher-order signature whose non-callable params and
+        // return type are *scalars* (e.g. `(model: f32 -> f32, x: f32) -> f32`)
+        // can never be DAG-lowered (the DAG-only path is tensor-only) and
+        // the host emitter handles `model(x)` cleanly because every value
+        // is a plain C scalar. Force the host wrapper for those signatures
+        // so they actually get a definition emitted -- the previous logic
+        // was silently dropping them, leaving `gcc` to fail with
+        // `implicit declaration of function 'apply'` on the caller side.
+        //
         // Known limitation: when a caller references a callable-param fn by
-        // name and that fn's body doesn't lower cleanly through the host
-        // wrapper, the def gets dropped from emission and the caller will
-        // fail gcc with `implicit declaration`. Tracked as a residual HOF
-        // emission issue (red-team A20.1).
+        // name with a tensor-typed shape (e.g. `(model: tensor[n, f32] ->
+        // f32, ...)`) and the body doesn't lower cleanly through the host
+        // wrapper, the def is still dropped from emission. Tracked as a
+        // residual HOF emission issue (red-team A20.1).
+        let scalar_only_callable_signature = has_callable_params
+            && lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
+                fn ty_is_scalar_or_callable_scalar(ty: &HostType) -> bool {
+                    match ty {
+                        HostType::Tensor(_) => false,
+                        HostType::Fn(params, ret) => {
+                            params.iter().all(ty_is_scalar_or_callable_scalar)
+                                && ty_is_scalar_or_callable_scalar(ret)
+                        }
+                        HostType::Option(inner) | HostType::List(inner) => {
+                            ty_is_scalar_or_callable_scalar(inner)
+                        }
+                        HostType::Tuple(items) => items.iter().all(ty_is_scalar_or_callable_scalar),
+                        HostType::Dict(k, v) => {
+                            ty_is_scalar_or_callable_scalar(k) && ty_is_scalar_or_callable_scalar(v)
+                        }
+                        // Primitive (f32/int32/bool/...), Unit -- scalar OK.
+                        _ => true,
+                    }
+                }
+                params.iter().all(ty_is_scalar_or_callable_scalar)
+                    && ty_is_scalar_or_callable_scalar(&ret)
+            });
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
+                || scalar_only_callable_signature
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
         let skip_for_lowered =
             lowered_names.get(name).copied().unwrap_or(false) && !needs_host_wrapper;
@@ -1056,6 +1089,113 @@ fn lower_host_expr(
     result
 }
 
+/// Bucket 4e helper: rewrite a pipe stage `f` applied to an accumulator
+/// `x` into a Deep expression that downstream host lowering can handle
+/// without falling back to `Builtin { name: "call" }`. Three cases:
+///
+/// - `(var f) x` becomes `(app {} (var f) x)`.
+/// - `(fn (params p) body) x` beta-reduces to `body[p := x]`.
+/// - Other / nested apps become `(app {} stage x)` and let
+///   `lower_app_host_expr` work them out.
+///
+/// The beta-reduction case matters because `xs |> mul(b)` desugars to
+/// `(fn (params __chelis_pipe) (app mul __chelis_pipe b))`. Wrapping it
+/// in an outer `(app (fn ...) x)` would produce a fallback `Builtin {
+/// name: "call" }` because `lower_app_host_expr` reads the function
+/// name from the first child as a `(var ...)` -- a lambda head doesn't
+/// match. Beta-reduction skips the outer app entirely and the existing
+/// `(app mul x b)` form lowers cleanly.
+fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
+    use chelis_deep::Span;
+    use chelis_deep::ast::{Atom, List, MetaMap};
+    let span = Span::new(0, 0);
+    if let Expr::List(stage_list, _) = stage
+        && tag(stage_list) == Some("fn")
+    {
+        let kids = children(stage_list);
+        if let Some(params_expr) = kids.first()
+            && let Some(params_list) = as_list(params_expr)
+            && tag(params_list) == Some("params")
+        {
+            let param_names: Vec<String> = children(params_list)
+                .iter()
+                .filter_map(param_name)
+                .collect();
+            // Single-param lambdas are the only shape the desugarer
+            // produces for pipe stages (`__chelis_pipe`). Multi-param
+            // lambdas in pipe position would be a user error and we
+            // bail to the wrap-in-app path; the resulting fallback
+            // call diagnostic surfaces a clean error from the CLI.
+            if param_names.len() == 1
+                && let Some(body) = kids.get(1)
+            {
+                return substitute_var(body, &param_names[0], &acc);
+            }
+        }
+    }
+    let elements = vec![
+        Expr::Atom(Atom::Symbol("app".to_string()), span),
+        Expr::Map(MetaMap::default(), span),
+        stage.clone(),
+        acc,
+    ];
+    Expr::List(List { elements }, span)
+}
+
+/// Substitute every `(var {} name)` reference in `expr` with
+/// `replacement`. Only walks nodes that the host pipe rewrite produces
+/// from desugaring (vars, apps, lits, fn-bodies); other Deep tags pass
+/// through unchanged on the assumption they don't bind or shadow the
+/// pipe parameter (which the surf desugarer guarantees by using a
+/// fresh `__chelis_pipe` name).
+fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
+    match expr {
+        Expr::List(list, span) => {
+            if tag(list) == Some("var")
+                && children(list).first().and_then(symbol_name) == Some(name)
+            {
+                return replacement.clone();
+            }
+            // `(fn (params x) body)` shadows `name` only if `x == name`.
+            // The desugarer's pipe-param name (`__chelis_pipe`) is
+            // unique per stage so shadowing inside a stage's body is
+            // not expected, but defend against it for correctness.
+            if tag(list) == Some("fn")
+                && let Some(params_expr) = list.elements.get(2)
+                && let Some(params_list) = as_list(params_expr)
+                && tag(params_list) == Some("params")
+                && children(params_list)
+                    .iter()
+                    .filter_map(param_name)
+                    .any(|p| p == name)
+            {
+                return expr.clone();
+            }
+            let mut elements = Vec::with_capacity(list.elements.len());
+            for el in &list.elements {
+                elements.push(substitute_var(el, name, replacement));
+            }
+            Expr::List(chelis_deep::ast::List { elements }, *span)
+        }
+        Expr::MetaExpr(meta, span) => {
+            let inner = substitute_var(&meta.expr, name, replacement);
+            let entries = meta
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), substitute_var(value, name, replacement)))
+                .collect();
+            Expr::MetaExpr(
+                chelis_deep::ast::MetaExpr {
+                    expr: Box::new(inner),
+                    entries,
+                },
+                *span,
+            )
+        }
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+    }
+}
+
 fn lower_host_expr_kind(
     expr: &Expr,
     program: &CheckedProgram,
@@ -1234,6 +1374,29 @@ fn lower_host_expr_kind(
         }
         Expr::List(list, _) if tag(list) == Some("app") => {
             lower_app_host_expr(list, program, scope, tensor_helpers)
+        }
+        Expr::List(list, _) if tag(list) == Some("pipe") => {
+            // Bucket 4e: a pipe expression that survives to host
+            // lowering (top-level value bindings, or pipes whose seed
+            // can't be type-resolved) is rewritten into the equivalent
+            // nested-app form so downstream lowering sees the same
+            // shape used for explicit nested calls. Without this arm
+            // the whole form fell through to
+            // `HostExpr::new(HostExprKind::Unit)`, so a top-level
+            // pipe binding to a user-defined fn materialised as `()`
+            // in generated C even though `chelis check` accepted the
+            // tensor-typed shape. The IR-side `lower_pipe` fix at
+            // `chelis_ir::lower::lower_pipe` already handles the DAG
+            // path; this is the host-lane sibling.
+            let kids = children(list);
+            let Some((seed, stages)) = kids.split_first() else {
+                return HostExpr::new(HostExprKind::Unit);
+            };
+            let mut current = (*seed).clone();
+            for stage in stages {
+                current = beta_reduce_pipe_stage(stage, current);
+            }
+            lower_host_expr(&current, program, scope, tensor_helpers)
         }
         Expr::List(list, _) if tag(list) == Some("handle-effect") => {
             // `with seed(...) { body }` and similar effect handlers are

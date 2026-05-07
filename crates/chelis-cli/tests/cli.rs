@@ -5231,3 +5231,394 @@ fn build_c_with_seed_no_longer_blocks_sibling_build() {
         "with-seed file must build to C now that the gate is lifted"
     );
 }
+
+/// Bucket 4b regression: `chelis check`, `chelis eval --file`, and
+/// `chelis build --target c` (compiled + run) must all agree on
+/// `to_tensor([[...], [...]])` for 2-D nested-list literals.
+///
+/// Previously the typer rejected the form with `to_tensor expects
+/// numeric or bool List elements, got List f32`, so the case never made
+/// it past `chelis check`. The fix extends the typer to recurse through
+/// nested `List<...>` wrappers and reports rank = nesting depth, with
+/// matching support in the host runtime
+/// (`nested_list_to_tensor_data`) and the C runtime
+/// (`chelis_tensor_from_value_list`).
+#[test]
+fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("to_tensor_2d.ch");
+    let out_dir = dir.path().join("to-tensor-2d-out");
+    write_file(
+        &path,
+        "result = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n",
+    );
+
+    // `chelis check` accepts the rank-2 form.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept nested-list to_tensor: {check_stdout}",
+    );
+
+    // `chelis build --target c` lowers and the generated source is
+    // valid C.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Compile + run the generated C and compare its stdout to
+    // `chelis eval --file`. With the runtime support in place, both
+    // paths must print the same shape and data.
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval_text = String::from_utf8(eval_stdout).expect("eval stdout utf8");
+    assert!(
+        eval_text.contains("shape=[2, 2]"),
+        "eval should report rank-2 shape: {eval_text}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "to_tensor_2d.c", "to_tensor_2d");
+    assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("to_tensor_2d"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let run_text = String::from_utf8(run_output.stdout).expect("run stdout utf8");
+    // Eval prints `<tensor>\n`, the compiled binary prints
+    // `<binding-name> = <tensor>\n`. Match the existing
+    // `build_c_runs_top_level_tensor_add_and_matches_eval_output`
+    // convention.
+    assert_eq!(
+        run_text,
+        format!("result = {eval_text}"),
+        "compiled C binary stdout must equal eval stdout for nested-list to_tensor",
+    );
+}
+
+/// Bucket 4a regression: `chelis check` and `chelis build --target c`
+/// must agree on the shape of `expand(b: tensor[1, f32], 0, count)`.
+///
+/// The typer is canonical and accepts `[count, 1]` (INSERT semantics) for
+/// the linreg-style bias broadcast. The IR evaluator agrees (it consults
+/// the IR node's output type). Previously the host runtime
+/// (`tensor_expand_host` in `chelis-compiler-api`) silently picked the
+/// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
+/// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
+/// typer accepted — the divergence reproduced from the
+/// `examples/linreg.ch` shape (`expand(b, 0, 64)` over a rank-1 bias).
+#[test]
+fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("linreg_expand_bias.ch");
+    let out_dir = dir.path().join("linreg-expand-bias-out");
+    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // rank-2 [4, 1] output. This is the exact shape pattern the
+    // `examples/linreg.ch` predict/loss helpers rely on
+    // (`expand(b, 0, 64)` where `b: tensor[1, f32]`).
+    write_file(
+        &path,
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4)\n\
+         result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
+    );
+
+    // `chelis check` must accept the rank-2 annotation as canonical.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept the rank-2 expand annotation as canonical: {check_stdout}",
+    );
+
+    // `chelis build --target c` must lower without error.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("linreg_expand_bias.c")).expect("generated c");
+    // Output ndim=2 and a [4, 1] shape literal must appear in the
+    // generated allocation; previously the runtime divergence caused
+    // the C emit to render the wrong rank.
+    assert!(
+        generated.contains("(int[]){ 4, 1 }"),
+        "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
+    );
+
+    // `chelis test`/`chelis eval` must produce the same shape as the
+    // typer (rank-2 [4, 1] with all entries equal to the singleton
+    // value). The host-runtime evaluator path is exercised by the
+    // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
+    // in `chelis-compiler-api`; this CLI test pins the typer + C emit
+    // legs of the agreement.
+    let status = gcc_compile_generated(&out_dir, "linreg_expand_bias.c");
+    assert!(
+        status.success(),
+        "gcc compile of generated C must succeed; status {status}",
+    );
+}
+
+/// Bucket 4c regression: top-level tensor bindings whose result type
+/// carries a polymorphic dim (e.g. `tensor[n, f32]`) must declare every
+/// referenced dim in the generated C. Previously a fresh dim variable
+/// (`d36`-style autogenerated name) could leak into a
+/// `chelis_alloc_view(1, (int[]){ d36 }, ...)` call without a
+/// corresponding `int d36 = inputs[k]->shape[axis];` declaration, so
+/// the generated C failed to compile with `error: 'd36' undeclared`.
+///
+/// The fix in `chelis_ir::dag::symbolic_occurrences` now sibling-sweeps
+/// every node's output type and ensures every `Named(_, None)` dim
+/// appears in the symbolic-occurrences list. If a non-Load node
+/// references a dim that no Load carries, the IR sweep panics loudly
+/// rather than emitting un-compilable C.
+#[test]
+fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("poly_top_dim.ch");
+    let out_dir = dir.path().join("poly-top-dim-out");
+    write_file(
+        &path,
+        "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
+         g: tensor[n, f32] = grad(quadratic, wrt=(theta))(to_tensor([1.0, 2.0, 3.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("poly_top_dim.c")).expect("generated c");
+    // Every dim that appears in a `(int[]){ <name>` literal must also
+    // appear as an `int <name> = inputs[...]->shape[<axis>];`
+    // declaration. Walk both sets and assert containment.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in source.lines() {
+        if let Some(after) = line.split("(int[]){ ").nth(1) {
+            let name: String = after
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty() && !name.chars().all(|ch| ch.is_ascii_digit()) {
+                used.insert(name);
+            }
+        }
+    }
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in source.lines() {
+        if let Some(idx) = line.find("int ")
+            && let Some(rest) = line.get(idx + 4..)
+            && rest.contains(" = inputs[")
+        {
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty() {
+                declared.insert(name);
+            }
+        }
+    }
+    for name in &used {
+        assert!(
+            declared.contains(name),
+            "dim `{name}` used in `(int[]){{ {name} }}` but never declared as \
+             `int {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
+             leakage. Generated source:\n{source}",
+        );
+    }
+
+    // The generated C must link with gcc.
+    let status = gcc_link_generated(&out_dir, "poly_top_dim.c", "poly_top_dim");
+    assert!(
+        status.success(),
+        "gcc link failed with status {status}; the polymorphic-dim sweep \
+         left an undeclared identifier in the C source.",
+    );
+}
+
+/// Bucket 4d regression: a higher-order def whose non-callable params
+/// and return type are scalar `f32` (e.g. `(model: f32 -> f32, x: f32)
+/// -> f32` referencing `model(x)`) must emit its host wrapper
+/// definition in the generated C. Previously the predicate at
+/// `chelis_ir::host::lower_host_program` blocked the wrapper for any
+/// fn with callable params, and the DAG-only path can't represent
+/// scalar fn params -- so the def was silently dropped, leaving `gcc`
+/// to fail with `implicit declaration of function 'apply'`. The same
+/// shape with `tensor[n, f32]` had been working because the
+/// non-callable params were tensors and a different code path emitted
+/// a tensor-helper wrapper.
+#[test]
+fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_fn_param.ch");
+    let out_dir = dir.path().join("scalar-fn-param-out");
+    write_file(
+        &path,
+        "def apply(model: f32 -> f32, x: f32) -> f32 = model(x)\n\
+         def square(y: f32) -> f32 = mul(y, y)\n\
+         result = apply(square, cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("scalar_fn_param.c")).expect("generated c");
+    // The wrapper definition must be emitted, not just the prototype.
+    assert!(
+        source.contains("static inline double apply(double (*model)(double), double x) {"),
+        "expected `apply` wrapper definition in the C source; only a forward \
+         declaration would leave gcc with `implicit declaration`. Source:\n{source}",
+    );
+    // Parity with the tensor case: the same shape with `tensor[n, f32]`
+    // already emits the wrapper. Make sure both shapes succeed in this
+    // test by also linking + running the binary.
+    let status = gcc_link_generated(&out_dir, "scalar_fn_param.c", "scalar_fn_param");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("scalar_fn_param"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `square(3) = 9`. The host emit prints `result = 9` (no decimal
+    // point for whole values).
+    assert_eq!(
+        stdout.trim_end(),
+        "result = 9",
+        "compiled binary stdout for `apply(square, 3.0)` must equal `9`; got: {stdout:?}",
+    );
+}
+
+/// Bucket 4e regression: a tensor-valued pipe expression (`xs |> step
+/// |> step` for a user-defined `step`, or `softmax(...) |> log |>
+/// mul(labels) |> sum(...) |> neg |> mean(...)` from `examples/mnist.ch`)
+/// must lower in the C lane to the same value as the equivalent
+/// nested-call form. Previously a top-level binding to a pipe whose
+/// stages included user-defined fns produced unit-typed C output
+/// (`out = ()`) because `lower_host_expr_kind` had no `pipe` arm and
+/// fell through to `HostExpr::new(HostExprKind::Unit)`. The fix adds a
+/// host-side pipe handler that beta-reduces lambda stages and rewrites
+/// var stages into nested-app form, plus an IR-side `lower_pipe`
+/// fallthrough fix so unknown vars are routed through
+/// `resolve_callable_expr` rather than silently no-op'ing.
+#[test]
+fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_user_unary.ch");
+    let out_dir = dir.path().join("pipe-user-unary-out");
+    write_file(
+        &path,
+        "def step(x: tensor[3, f32]) -> tensor[3, f32] = mul(copy(x), x)\n\
+         out = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]) |> step |> step\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("pipe_user_unary.c")).expect("generated c");
+    // The pipe must NOT degrade to a unit-typed binding. Before the
+    // fix the generated C contained `int out = __binding_0_value;`
+    // and `printf("()")`. After: `chelis_tensor* out = ...` and a
+    // `chelis_print_tensor_stdout(out)` call.
+    assert!(
+        !source.contains("int out = __binding_0_value;") && !source.contains(r#"printf("()");"#),
+        "pipe must not produce a unit-typed top-level binding; source:\n{source}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "pipe_user_unary.c", "pipe_user_unary");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("pipe_user_unary"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `step([1, 2, 3]) = [1, 4, 9]`, `step([1, 4, 9]) = [1, 16, 81]`.
+    assert_eq!(
+        stdout.trim_end(),
+        "out = tensor(shape=[3], data=[1.0, 16.0, 81.0])",
+        "compiled binary stdout for `xs |> step |> step` must match the \
+         nested-call form's value; got: {stdout:?}",
+    );
+}

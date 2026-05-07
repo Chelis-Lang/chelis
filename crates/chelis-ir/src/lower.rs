@@ -3929,7 +3929,50 @@ impl LowerCtx {
         }
         let mut current = self.lower_expr(&elems[2]);
         for func_expr in &elems[3..] {
-            if let Expr::List(func_list, _) = func_expr
+            // Bucket 4e: a unary `(var {} fname)` stage where `fname` is
+            // a known elementwise/tensor builtin can lower directly via
+            // tier2 (no lambda intermediary). For *unknown* var names
+            // (user-defined fns, library re-exports, etc.) we fall
+            // through to `resolve_callable_expr` below, so the stage is
+            // treated as a plain function reference and gets the same
+            // unary-application semantics as `f(current)`.
+            //
+            // The previous implementation hit `_ => current` and then
+            // `continue`, which silently dropped the user-defined fn
+            // (the accumulator was returned unchanged). Top-level
+            // bindings then materialised as `()`/Unit in generated C.
+            let unary_builtin_name = if let Expr::List(func_list, _) = func_expr
+                && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
+                && tag == "var"
+                && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
+            {
+                Some(fname.as_str())
+            } else {
+                None
+            };
+            let is_known_unary_builtin = matches!(
+                unary_builtin_name,
+                Some(
+                    "neg"
+                        | "exp"
+                        | "log"
+                        | "sin"
+                        | "sqrt"
+                        | "cos"
+                        | "tan"
+                        | "atan"
+                        | "abs"
+                        | "floor"
+                        | "ceil"
+                        | "relu"
+                        | "sigmoid"
+                        | "tanh"
+                        | "silu"
+                        | "gelu"
+                )
+            );
+            if is_known_unary_builtin
+                && let Expr::List(func_list, _) = func_expr
                 && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
                 && tag == "var"
                 && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
@@ -4037,7 +4080,14 @@ impl LowerCtx {
                         &ty,
                         self.current_span_id.as_deref(),
                     )),
-                    _ => current,
+                    // `is_known_unary_builtin` guarantees this branch is
+                    // never hit, but keep it as an explicit fallthrough
+                    // marker so any future name added to the predicate
+                    // without a corresponding match arm fails loudly.
+                    _ => unreachable!(
+                        "pipe stage `{fname}` was classified as a known \
+                         unary builtin but has no lowering arm"
+                    ),
                 };
                 continue;
             }

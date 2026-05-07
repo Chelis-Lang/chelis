@@ -1563,9 +1563,14 @@ impl<'a> EvalContext<'a> {
             }
             "to_tensor" => {
                 let values = expect_list_arg(args, 0)?;
-                let (precision, data) = list_to_tensor_data(&values)?;
+                // Bucket 4b: support nested numeric/bool lists. The outer
+                // list contributes the leading dim; if its elements are
+                // themselves uniformly-shaped numeric/bool lists, those
+                // contribute additional inner dims (and so on
+                // recursively).
+                let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![data.len()], data),
+                    value: IrTensorValue::from_vec(shape, data),
                     precision,
                 }))
             }
@@ -2711,6 +2716,69 @@ fn dict_lookup<'a>(
         .map(|(_, value)| value)
 }
 
+/// Bucket 4b: recursively flatten a nested numeric/bool list into a
+/// rank-N tensor. Every nesting level contributes one outer dimension;
+/// the innermost level must be uniformly numeric or bool. All sibling
+/// sub-lists at the same level must have matching length and matching
+/// precision.
+///
+/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
+/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
+/// behaviour for compatibility).
+fn nested_list_to_tensor_data(
+    outer: &[RuntimeValue],
+) -> Result<(Prim, Vec<usize>, Vec<f64>), String> {
+    if outer.is_empty() {
+        return Ok((Prim::F32, vec![0], Vec::new()));
+    }
+
+    // Decide whether this is a leaf level (numeric/bool elements) or a
+    // recursive level (List elements) based on the first element. The
+    // homogeneity check below catches the mixed case.
+    let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
+
+    if !first_is_list {
+        // Leaf level — same code path as the original list_to_tensor.
+        let (precision, data) = list_to_tensor_data(outer)?;
+        return Ok((precision, vec![data.len()], data));
+    }
+
+    let mut precision: Option<Prim> = None;
+    let mut inner_shape: Option<Vec<usize>> = None;
+    let mut data = Vec::new();
+    for (idx, value) in outer.iter().enumerate() {
+        let RuntimeValue::List(inner) = value else {
+            return Err(format!(
+                "to_tensor expects homogeneous nested lists; element {idx} is not a List"
+            ));
+        };
+        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
+        match &precision {
+            None => precision = Some(sub_precision),
+            Some(p) if *p == sub_precision => {}
+            Some(p) => {
+                return Err(format!(
+                    "to_tensor requires homogeneous numeric or bool elements; expected {p:?}, got {sub_precision:?} at element {idx}"
+                ));
+            }
+        }
+        match &inner_shape {
+            None => inner_shape = Some(sub_shape),
+            Some(s) if *s == sub_shape => {}
+            Some(s) => {
+                return Err(format!(
+                    "to_tensor requires uniform inner shape; expected {s:?}, got {sub_shape:?} at element {idx}"
+                ));
+            }
+        }
+        data.extend(sub_data);
+    }
+
+    let mut shape = vec![outer.len()];
+    shape.extend(inner_shape.unwrap_or_default());
+    Ok((precision.unwrap_or(Prim::F32), shape, data))
+}
+
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
     let mut precision = None;
     let mut data = Vec::with_capacity(values.len());
@@ -3083,12 +3151,25 @@ fn tensor_matmul_host(
     })
 }
 
-/// Replicate a tensor along a new axis. Matches the IR's `expand` semantics
-/// when the output rank is `input_rank + 1`: `expand(b, axis, count)` produces
-/// a tensor of shape `[..., count, ...]` (with `count` inserted at `axis`)
-/// where every "slice" along the new axis is a copy of `b`. Also handles the
-/// same-rank variant where the input axis has size 1 and is replicated to
-/// `count`.
+/// Replicate a tensor along a new axis.
+///
+/// Per the typer (`chelis-types::infer::check_expand_signature`),
+/// `expand(b, axis, count)` is canonically an INSERT operation: it
+/// produces a tensor of shape `[..., count, ...]` with `count` inserted
+/// at position `axis`, where every "slice" along the new axis is a copy
+/// of `b`. The output rank is always `input_rank + 1`.
+///
+/// The typer also accepts a same-rank "replace-singleton" interpretation
+/// when the user explicitly annotates the result as same-rank, but the
+/// host runtime has no access to user annotations, so it always picks
+/// the canonical INSERT branch — which is the typer's first-preference
+/// branch at infer.rs:7188 and the only branch synthesized by IR
+/// lowering in `tier2::lower_softmax`/`lower_layer_norm`/`lower_matmul`.
+/// Closes Bucket 4a: previously this function silently picked the
+/// same-rank REPLICATE-singleton branch whenever `in_shape[axis] == 1`,
+/// producing shape `[count]` for `expand([1], 0, count)` while the typer
+/// accepted the `[count, 1]` annotation, leaving `chelis test`/`chelis
+/// eval` disagreeing with `chelis check` on `examples/linreg.ch`.
 fn tensor_expand_host(
     tensor: &RuntimeTensorValue,
     axis: usize,
@@ -3102,39 +3183,19 @@ fn tensor_expand_host(
         ));
     }
 
-    // Determine the output shape and the index-mapping mode.
-    //
-    // Mode A (insert): if `axis == in_rank` OR the existing axis at `axis`
-    // is not 1, we INSERT a new axis of size `count` at position `axis`.
-    // Mode B (replicate-singleton): if `axis < in_rank` and the existing
-    // axis at `axis` is 1, we REPLACE that axis with size `count`.
-    let (out_shape, same_rank) = if axis < in_rank && in_shape[axis] == 1 {
-        let mut out = in_shape.clone();
-        out[axis] = count;
-        (out, true)
-    } else {
-        let mut out = Vec::with_capacity(in_rank + 1);
-        out.extend_from_slice(&in_shape[..axis]);
-        out.push(count);
-        out.extend_from_slice(&in_shape[axis..]);
-        (out, false)
-    };
+    // INSERT: create a new axis of size `count` at position `axis`.
+    let mut out_shape = Vec::with_capacity(in_rank + 1);
+    out_shape.extend_from_slice(&in_shape[..axis]);
+    out_shape.push(count);
+    out_shape.extend_from_slice(&in_shape[axis..]);
 
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_indices = linear_to_indices(out_linear, &out_shape);
-        let in_indices: Vec<usize> = if same_rank {
-            // Replicate singleton: input axis stays 0; other axes pass through.
-            let mut idx = out_indices.clone();
-            idx[axis] = 0;
-            idx
-        } else {
-            // Insert: drop the inserted axis to recover the input index.
-            let mut idx = out_indices;
-            idx.remove(axis);
-            idx
-        };
+        // Drop the inserted axis to recover the input index.
+        let mut in_indices = out_indices;
+        in_indices.remove(axis);
         let in_linear = indices_to_linear(&in_indices, &in_shape);
         *slot = tensor.value.data[in_linear];
     }
@@ -4614,6 +4675,31 @@ y = expand(b, cast(1, int32), cast(2, int32))
     }
 
     #[test]
+    fn host_runtime_expand_singleton_input_inserts_not_replicates() {
+        // Bucket 4a regression: `expand(b: tensor[1, f32], 0, count)` must
+        // produce shape `[count, 1]` (INSERT semantics), matching the
+        // typer's first-preference branch in
+        // `chelis-types::infer::check_expand_signature`. Previously the
+        // host runtime detected `in_shape[axis] == 1` and silently
+        // replicated the singleton in-place, producing `[count]` and
+        // diverging from `chelis check` on `examples/linreg.ch`.
+        let checked = checked_surf(
+            r#"
+b = to_tensor([cast(7.0, f32)])
+y = expand(b, cast(0, int32), cast(4, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("expand([1], 0, 4) should evaluate under host runtime");
+        assert_eq!(
+            first_tensor_shape(&outcome, "y"),
+            vec![4, 1],
+            "INSERT semantics: rank-1 [1] expand at axis 0 with count 4 must produce rank-2 [4, 1]",
+        );
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![7.0, 7.0, 7.0, 7.0]);
+    }
+
+    #[test]
     fn host_runtime_expand_negative_count_errors() {
         let checked = checked_surf(
             r#"
@@ -4626,6 +4712,62 @@ y = expand(b, cast(0, int32), cast(0, int32))
         assert!(
             err.contains("expand") && err.contains("count"),
             "expected expand count diagnostic, got: {err}"
+        );
+    }
+
+    // ----- to_tensor nested-list (Bucket 4b) -----
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_2d_float_literal() {
+        // Bucket 4b: previously rejected with
+        // "to_tensor expects numeric or bool List elements, got List f32".
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of [[1,2],[3,4]] must evaluate to a rank-2 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_3d_float_literal() {
+        // 2x2x2 cube — exercises 3-deep recursion in
+        // `nested_list_to_tensor_data`.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([
+  [[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]],
+  [[cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32)]]
+])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of 2x2x2 nested list must evaluate to a rank-3 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2, 2]);
+        assert_eq!(
+            first_tensor_data(&outcome, "y"),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
+        // Negative parity for 4b: ragged inner-list shapes must error
+        // out at the host runtime, not silently produce a malformed
+        // tensor.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("ragged nested list must fail to_tensor");
+        assert!(
+            err.contains("uniform inner shape"),
+            "expected ragged-shape diagnostic, got: {err}"
         );
     }
 
