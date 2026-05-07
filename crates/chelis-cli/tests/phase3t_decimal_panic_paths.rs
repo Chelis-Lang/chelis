@@ -31,7 +31,8 @@ use common::{make_app, write_file};
 
 fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&str]) {
     let mut cmd = Command::cargo_bin("chelis").expect("binary");
-    cmd.env("CHELIS_REEF_HOME", reef_home)
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args([
             "eval",

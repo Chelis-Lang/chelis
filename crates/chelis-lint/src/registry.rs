@@ -15,5 +15,9 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(rules::type_suffix_policy::TypeSuffixPolicy),
         Box::new(rules::prefix_namespace::PrefixNamespace),
         Box::new(rules::deep_user_symbol_charset::DeepUserSymbolCharset),
+        Box::new(rules::surf_type_pascal_case::SurfTypePascalCase),
+        Box::new(rules::surf_value_snake_case::SurfValueSnakeCase),
+        Box::new(rules::surf_test_name_prefix::SurfTestNamePrefix),
+        Box::new(rules::surf_def_arrow_form::SurfDefArrowForm),
     ]
 }

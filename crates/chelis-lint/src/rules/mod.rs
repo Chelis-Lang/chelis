@@ -12,4 +12,8 @@ pub mod no_shell_scripts;
 pub mod phase_identifier_case;
 pub mod prefix_namespace;
 pub mod snapshot_filename_pattern;
+pub mod surf_def_arrow_form;
+pub mod surf_test_name_prefix;
+pub mod surf_type_pascal_case;
+pub mod surf_value_snake_case;
 pub mod type_suffix_policy;

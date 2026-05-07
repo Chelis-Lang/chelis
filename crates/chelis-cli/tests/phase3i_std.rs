@@ -106,6 +106,7 @@ bad_decimal = match try_decimal("x.y") with {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -115,6 +116,7 @@ bad_decimal = match try_decimal("x.y") with {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -239,6 +241,7 @@ lamb_params = lamb_pair.0
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -248,6 +251,7 @@ lamb_params = lamb_pair.0
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -290,6 +294,7 @@ bad_pair = adamw_step(params, grads, adamw_init_like(params), AdamWConfig(0.1, 0
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -335,6 +340,7 @@ sampled_b = with seed(7) { generate_with(toy_model, context, cfg) }
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -344,6 +350,7 @@ sampled_b = with seed(7) { generate_with(toy_model, context, cfg) }
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -389,6 +396,7 @@ first = index(flat_rows, cast(0, int64))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -398,6 +406,7 @@ first = index(flat_rows, cast(0, int64))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -427,6 +436,7 @@ cfg = GenerateConfig(cast(2, int64), 1.0, cast(2, int64), 0.95)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -469,6 +479,7 @@ out = generate_with(toy_model, context, cfg)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -482,6 +493,7 @@ out = generate_with(toy_model, context, cfg)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -533,6 +545,7 @@ lr = linear_warmup(cast(1, int64), LinearWarmupConfig { warmup_steps: cast(4, in
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -548,6 +561,7 @@ lr = linear_warmup(cast(1, int64), LinearWarmupConfig { warmup_steps: cast(4, in
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -610,6 +624,7 @@ greedy = generate(toy_model, context, cast(1, int64))
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -625,6 +640,7 @@ greedy = generate(toy_model, context, cast(1, int64))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([

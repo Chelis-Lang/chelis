@@ -109,6 +109,7 @@ init_w = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -119,6 +120,7 @@ init_w = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -198,6 +200,7 @@ touch_gqa_bcast = gqa_broadcast_kv
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -244,6 +247,7 @@ g = grad(loss_fn)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -293,6 +297,7 @@ fn build_and_run(reef_home: &Path, app_pkg: &Path) -> (std::process::ExitStatus,
     let _ = fs::remove_dir_all(&out_dir);
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args([
@@ -398,6 +403,7 @@ sample = with seed(7) { kaiming_uniform(template, cast(4.0, f32)) }
     let _ = fs::remove_dir_all(&out_dir);
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([

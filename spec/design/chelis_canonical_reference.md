@@ -262,6 +262,8 @@ chelis tide lsp
 chelis cove
 chelis fmt app.ch
 chelis fmt app.dp --check
+chelis lint                              # naming/style rules per spec/01-nomenclature.md
+chelis lint --check                      # exit non-zero on any violation (CI mode)
 chelis reef init demo --module-prefix Demo
 chelis reef build
 chelis reef publish
@@ -287,6 +289,21 @@ chelis fuzz src/ --json               # machine-readable output for CI integrati
 This is the intended stable surface for project-level documentation.
 `chelis deep` defaults to canonical pretty Deep; `--flat` is the explicit flat-output
 escape hatch.
+
+### 6.1 Style gate
+
+`chelis build`, `chelis check`, `chelis validate`, and
+`chelis eval --file` invoke `chelis fmt --check` plus `chelis lint --check`
+on the input file before the front-end pipeline runs. Style failures
+fail the command and emit one diagnostic per issue on stderr. The
+flag `--allow-style-violations` bypasses the gate (with a stderr
+warning) for emergency builds; the env var
+`CHELIS_STYLE_GATE_DISABLE=1` does the same process-wide and is
+reserved for the integration-test corpus. Production CI must use
+neither.
+
+User-facing CLI documentation lives at `docs/book/src/cli.md`; the
+gate's behavior contract is locked in `crates/chelis-cli/tests/style_gate.rs`.
 
 ## 6a. Surf Style
 

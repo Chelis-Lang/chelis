@@ -342,6 +342,7 @@ fn oracle_autofetch_happy_path() {
     // Empty registry. Build must auto-fetch nautilus before failing.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -372,6 +373,7 @@ fn oracle_no_auto_fetch_opt_out_blocks_fetch() {
 
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9")
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -413,6 +415,7 @@ fn oracle_no_auto_fetch_opt_out_blocks_fetch() {
 fn oracle_help_lists_no_auto_fetch_flag() {
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "build", "--help"])
         .assert()
         .success()
@@ -438,6 +441,7 @@ fn oracle_autofetch_network_failure_no_half_install() {
 
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -495,6 +499,7 @@ fn oracle_lock_file_engaged_during_autofetch() {
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -527,6 +532,7 @@ fn oracle_error_wording_shape_regex() {
 
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("GITHUB_TOKEN", "x")
         .env("PATH", "")
@@ -571,6 +577,7 @@ fn oracle_autofetch_event_observable() {
 
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -606,6 +613,7 @@ fn phaseA_item8_auth_missing_during_autofetch_names_env_fix() {
     // we never get past auth resolution.
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9")
         .env_remove("GITHUB_TOKEN")
@@ -656,6 +664,7 @@ fn phaseA_item8_429_during_autofetch_names_retry_after() {
 
     let assertion = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -703,6 +712,7 @@ fn phaseA_item8_stale_lock_file_does_not_block_acquisition() {
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -742,6 +752,7 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
     let h_a = std::thread::spawn(move || {
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home_a)
             .env("CHELIS_REEF_GITHUB_BASE_API", api_a)
             .env("GITHUB_TOKEN", "unit-test-token")
@@ -754,6 +765,7 @@ fn phaseA_item8_two_concurrent_builds_serialize() {
     let h_b = std::thread::spawn(move || {
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home_b)
             .env("CHELIS_REEF_GITHUB_BASE_API", api_b)
             .env("GITHUB_TOKEN", "unit-test-token")
@@ -808,6 +820,7 @@ fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
     let h_yes = std::thread::spawn(move || {
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home_y)
             .env("CHELIS_REEF_GITHUB_BASE_API", api_y)
             .env("GITHUB_TOKEN", "unit-test-token")
@@ -827,6 +840,7 @@ fn phaseA_item8_concurrent_one_no_auto_fetch_does_not_deadlock() {
         // exit-status-agnostic: both threads return.
         let _ = Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home_n)
             .env("CHELIS_REEF_GITHUB_BASE_API", api_n)
             .env("GITHUB_TOKEN", "unit-test-token")
@@ -946,6 +960,7 @@ remote_origin = "github://other-org/nautilus@v0.2.0"
     // verbatim. Item 9 wired this exact contract.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -1023,6 +1038,7 @@ fn phaseA_item8_real_github_manual_gate() {
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .env("GITHUB_TOKEN", token)
         .current_dir(&app)

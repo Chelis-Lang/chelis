@@ -67,6 +67,7 @@ fn chelis_std_self_test_corpus_passes_under_chelis_test() {
 
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "tests/"])

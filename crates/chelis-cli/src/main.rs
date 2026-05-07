@@ -1,5 +1,7 @@
 //! Chelis compiler CLI.
 
+mod style_gate;
+
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
@@ -162,15 +164,35 @@ enum Command {
         check: bool,
     },
     /// Evaluate an expression or file
+    ///
+    /// `chelis eval --file FILE` runs the formatter and lint gates on FILE
+    /// before the eval pipeline. `chelis eval EXPR` is a one-line snippet
+    /// path with no on-disk source; the gate does not apply.
     Eval {
         /// File to evaluate
         #[arg(long)]
         file: Option<PathBuf>,
         /// Inline expression
         expr: Option<String>,
+        /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
+        /// Emergency use only; CI must not pass this flag.
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_style_violations: bool,
     },
     /// Run front-end checks and report fitness-oriented diagnostics
-    Check { file: PathBuf },
+    ///
+    /// Before the type/effect/linearity passes, `check` enforces the same
+    /// style gate `build` does — `chelis fmt --check` on the file plus
+    /// every `chelis lint` rule that applies to the file's surface — so
+    /// non-canonical or style-violating source is rejected up front.
+    /// Pass `--allow-style-violations` to bypass the gate (CI must not).
+    Check {
+        file: PathBuf,
+        /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
+        /// Emergency use only; CI must not pass this flag.
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_style_violations: bool,
+    },
     /// Validate syntax against executable grammar tooling
     #[command(group(
         ArgGroup::new("mode")
@@ -185,6 +207,10 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue, group = "mode")]
         desugar: bool,
         file: PathBuf,
+        /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
+        /// Emergency use only; CI must not pass this flag.
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_style_violations: bool,
     },
     /// Compile to C (default) or HIP GPU code
     ///
@@ -195,6 +221,12 @@ enum Command {
     /// `--no-deep` flag — to force a `.dp` file through Surf, rename it
     /// or pipe through `chelis surf` first. Conflict resolution rules
     /// are documented in `spec/design/chelis_span_survival.md` §2.5.
+    ///
+    /// Before the front-end pipeline runs, `build` enforces the style
+    /// gate: `chelis fmt --check` on the file plus every `chelis lint`
+    /// rule that applies to the file's surface. Style violations fail
+    /// the build by default; pass `--allow-style-violations` to bypass
+    /// (CI must not).
     Build {
         file: PathBuf,
         #[arg(long, short)]
@@ -206,6 +238,10 @@ enum Command {
         /// override for non-`.dp` inputs that happen to be Deep source.
         #[arg(long, action = ArgAction::SetTrue)]
         deep: bool,
+        /// Bypass `chelis fmt --check` and `chelis lint --check` gates.
+        /// Emergency use only; CI must not pass this flag.
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_style_violations: bool,
     },
     /// Interactive REPL, HTTP API, and MCP server
     Tide {
@@ -417,20 +453,35 @@ fn main() {
             inplace,
             check,
         }) => cmd_fmt(&file, inplace, check),
-        Some(Command::Eval { file, expr }) => cmd_eval(file.as_deref(), expr.as_deref()),
-        Some(Command::Check { file }) => cmd_check(&file),
+        Some(Command::Eval {
+            file,
+            expr,
+            allow_style_violations,
+        }) => cmd_eval(file.as_deref(), expr.as_deref(), allow_style_violations),
+        Some(Command::Check {
+            file,
+            allow_style_violations,
+        }) => cmd_check(&file, allow_style_violations),
         Some(Command::Validate {
             surf,
             deep,
             desugar,
             file,
-        }) => cmd_validate(&file, surf, deep, desugar),
+            allow_style_violations,
+        }) => cmd_validate(&file, surf, deep, desugar, allow_style_violations),
         Some(Command::Build {
             file,
             output,
             target,
             deep,
-        }) => cmd_build_dispatch(&file, output.as_deref(), &target, deep),
+            allow_style_violations,
+        }) => cmd_build_dispatch(
+            &file,
+            output.as_deref(),
+            &target,
+            deep,
+            allow_style_violations,
+        ),
         Some(Command::Reef { command }) => cmd_reef(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
@@ -574,7 +625,17 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
 fn cmd_eval(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
+    allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The style gate runs only on the `--file` form (a real on-disk
+    // source). The `--expr` form is a synthetic one-line snippet
+    // wrapped as `__eval_result = <expr>` and never lands on disk, so
+    // there's nothing canonical to compare against.
+    if let Some(path) = file
+        && let Ok(source) = fs::read_to_string(path)
+    {
+        style_gate::enforce_style_gate(path, &source, allow_style_violations)?;
+    }
     // Phase H, cmd_eval slice: when the user is evaluating a `--file` whose
     // reef package is detectable (either the file lives inside a package or
     // the current working directory does, matching the existing dispatch
@@ -748,7 +809,10 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     }
 }
 
-fn cmd_check(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_check(file: &Path, allow_style_violations: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(source) = fs::read_to_string(file) {
+        style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
+    }
     let (decls, _) = load_check_build_decls(file)?;
     let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let mut report = chelis_types::check_phase0e_fitness(&deep_exprs);
@@ -937,6 +1001,7 @@ fn cmd_build_dispatch(
     output: Option<&std::path::Path>,
     target: &str,
     deep_flag: bool,
+    allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extension_is_dp = file
         .extension()
@@ -968,9 +1033,9 @@ fn cmd_build_dispatch(
                 );
             }
         }
-        cmd_build_deep(file, output, target)
+        cmd_build_deep(file, output, target, allow_style_violations)
     } else {
-        cmd_build(file, output, target)
+        cmd_build(file, output, target, allow_style_violations)
     }
 }
 
@@ -978,7 +1043,11 @@ fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
     target: &str,
+    allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(source) = fs::read_to_string(file) {
+        style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
+    }
     let (decls, entry_decls) = load_check_build_decls(file)?;
     reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
@@ -1205,8 +1274,10 @@ fn cmd_build_deep(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
     target: &str,
+    allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
+    style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let deep_exprs = chelis_deep::parser::parse_str_strict(&source)
         .map_err(|err| format!("Deep parse error: {err}"))?;
 
@@ -3055,8 +3126,10 @@ fn cmd_validate(
     surf: bool,
     deep: bool,
     desugar: bool,
+    allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
+    style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let mode = if surf {
         "surf"
     } else if deep {
@@ -4017,12 +4090,13 @@ fn cmd_lint(
             return Err(format!("no rule with id '{id}'").into());
         }
     }
-    // The exception list is currently empty — the rule-internal
-    // allowlists (e.g., module_pascal_components::KNOWN_SINGLE_WORDS)
-    // cover the common cases. As the lint surfaces new closer-read
-    // candidates and the orchestrator records §-cross-refs for
-    // legitimate exceptions, entries land here.
-    let exceptions: Vec<chelis_lint::Exception> = Vec::new();
+    // The exception list is sourced from `style_gate::exceptions()` so
+    // the standalone `chelis lint` subcommand and the build-time style
+    // gate filter against one shared registry. Rule-internal allowlists
+    // (e.g., `module_pascal_components::KNOWN_SINGLE_WORDS`) cover the
+    // common naming carve-outs; path-glob entries with §-cross-refs go
+    // here.
+    let exceptions: Vec<chelis_lint::Exception> = style_gate::exceptions();
     let mut total = 0usize;
     for target in &targets {
         let raw_violations = chelis_lint::lint(target, &rules)?;

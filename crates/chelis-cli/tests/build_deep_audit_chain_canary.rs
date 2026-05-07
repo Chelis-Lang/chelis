@@ -49,6 +49,7 @@ fn s6_oracle_audit_chain_resolves_span_to_latex_text() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -196,6 +197,7 @@ fn s6_backward_compat_span_free_dp_emits_no_span_comments_on_host_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             dp_path.to_str().unwrap(),

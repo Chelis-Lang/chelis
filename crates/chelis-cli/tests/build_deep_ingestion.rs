@@ -50,6 +50,7 @@ fn build_dp_extension_auto_detects_deep_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -84,6 +85,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -96,6 +98,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
         .success();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -146,6 +149,7 @@ fn build_ch_with_deep_flag_routes_through_deep_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             dp_with_ch_extension.to_str().unwrap(),
@@ -189,6 +193,7 @@ fn build_ch_without_deep_flag_takes_the_surf_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -233,6 +238,7 @@ fn build_span_free_deep_matches_surf_shape() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             dp_path.to_str().unwrap(),
@@ -268,6 +274,7 @@ fn build_deep_emitted_c_compiles_via_gcc() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -316,6 +323,7 @@ fn build_deep_hip_target_emits_spans_in_cpp_and_kernel_strings() {
     let out = dir.path().join("audit.cpp");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),
@@ -348,6 +356,7 @@ fn build_deep_audit_chain_is_recoverable_from_emitted_c() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             wrapped_dp().to_str().unwrap(),

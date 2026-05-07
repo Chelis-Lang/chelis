@@ -12,6 +12,7 @@ fn write_file(path: &Path, contents: &str) {
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
         .assert()
         .success()
@@ -25,6 +26,7 @@ fn run_json_check(path: &Path) -> Value {
 fn eval_distinguishes_rank_zero_tensors_from_host_scalars() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "scalar_to_tensor(cast(3, int64))"])
         .assert()
         .success()

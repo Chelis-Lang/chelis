@@ -65,6 +65,7 @@ fn reef_install_from_monorepo_populates_registry_and_unblocks_check() {
     // Run the install.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "reef",
@@ -160,6 +161,7 @@ ran = test_case()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app)
         .args(["check", app.join("src/main.ch").to_str().unwrap()])
@@ -178,6 +180,7 @@ fn reef_install_from_monorepo_no_args_installs_every_package() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "reef",
@@ -206,6 +209,7 @@ fn reef_install_from_monorepo_unknown_package_errors_cleanly() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "reef",
@@ -234,6 +238,7 @@ fn reef_install_without_source_emits_usage_error() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "install"])
         .assert()
@@ -245,6 +250,7 @@ fn reef_install_without_source_emits_usage_error() {
 fn reef_install_help_lists_subcommand() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "--help"])
         .assert()
         .success()
@@ -252,6 +258,7 @@ fn reef_install_help_lists_subcommand() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "install", "--help"])
         .assert()
         .success()
@@ -280,6 +287,7 @@ fn reef_install_respects_chelis_reef_home_isolation() {
     let monorepo = monorepo_root();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "reef",

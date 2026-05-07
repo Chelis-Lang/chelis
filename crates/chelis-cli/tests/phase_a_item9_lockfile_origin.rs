@@ -488,6 +488,7 @@ fn oracle_install_from_github_populates_field() {
     seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.2.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
         .args(["reef", "build", pkg_root.to_str().unwrap()])
         .assert()
@@ -508,6 +509,7 @@ fn oracle_install_from_monorepo_leaves_field_none() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
         .args([
             "reef",
@@ -547,6 +549,7 @@ fn oracle_dev_a_to_dev_b_byte_identical() {
     seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.2.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_a_registry)
         .args(["reef", "build", pkg_root.to_str().unwrap()])
         .assert()
@@ -564,6 +567,7 @@ fn oracle_dev_a_to_dev_b_byte_identical() {
     // chdir.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_b_registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -611,6 +615,7 @@ fn oracle_hash_mismatch_on_refetch() {
     seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.2.0", "Downstream");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_a_registry)
         .args(["reef", "build", pkg_root.to_str().unwrap()])
         .assert()
@@ -661,6 +666,7 @@ fn oracle_hash_mismatch_on_refetch() {
     let dev_b_registry = dir.path().join("dev-b-mismatch-home");
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_b_registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", bad_harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -718,6 +724,7 @@ kind = "local_registry"
     let dev_b_registry = dir.path().join("dev-b-no-origin-home");
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_b_registry)
         .args([
             "reef",
@@ -745,6 +752,7 @@ kind = "local_registry"
 fn oracle_mutex_with_other_flags() {
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -762,6 +770,7 @@ fn oracle_mutex_with_other_flags() {
 
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -1045,6 +1054,7 @@ fn phaseA_item9_cli_rejects_lockfile_with_monorepo() {
     let _g = file_lock();
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -1100,6 +1110,7 @@ fn phaseA_item9_real_github_manual_gate() {
     seed_downstream_package_for_dep(&pkg_root, "nautilus", "0.6.1", "Real");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_a_registry)
         .args(["reef", "build", pkg_root.to_str().unwrap()])
         .assert()
@@ -1108,6 +1119,7 @@ fn phaseA_item9_real_github_manual_gate() {
     // Step 3: re-install on dev B from the lockfile alone.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &dev_b_registry)
         .args([
             "reef",

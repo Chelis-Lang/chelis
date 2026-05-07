@@ -560,11 +560,13 @@ pub fn init_package(
     };
     write_manifest(&root.join("reef.toml"), &manifest)?;
     let main_module = format!("{module_prefix}.Main");
+    // Canonical Surf form: no blank line between `module` and the first
+    // decl, no trailing newline. The scaffold must satisfy
+    // `chelis fmt --check` so the immediately-subsequent `chelis check`
+    // and `chelis build` style gates pass.
     fs::write(
         root.join("src/main.ch"),
-        format!(
-            "module {main_module}\n\ndef main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"
-        ),
+        format!("module {main_module}\ndef main(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n"),
     )?;
     Ok(())
 }
