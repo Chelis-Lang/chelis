@@ -4445,3 +4445,237 @@ fn target_metal_accepts_gpu_resource_region() {
         .assert()
         .success();
 }
+
+// ----- Bucket-5 closure: `with seed(...)` plumbing through C backend ------
+//
+// Pre-Bucket-5, `chelis build --target c|hip` rejected any program that
+// contained `with seed(...)` anywhere in the deeply-walked AST with a hard
+// error (`does not yet plumb `with seed(...)` into the generated runtime`).
+// That gate was project-wide: a `with seed` block in *any* compiled file
+// would block `chelis build` of every sibling file too.
+//
+// The closure plumbs the seed at IR-lowering time into
+// `RiscOp::UniformLike { seed }` and removes the rejection gate. The
+// xorshift-splitmix algorithm in `chelis_uniform_sample_f32` (C runtime)
+// matches the IR evaluator's `dropout_sample` (see `chelis_ir::eval`),
+// giving deterministic-on-seed output that agrees with `chelis eval` to
+// f32 precision. The four tests below pin:
+//
+//   1. `with seed(...)` builds, runs, and produces deterministic output.
+//   2. Same seed → same bytes across runs (determinism).
+//   3. Different seeds → different bytes (seed-sensitivity, the
+//      no-silent-drop contract).
+//   4. A sibling program in a workspace where another file uses `with
+//      seed(...)` is no longer blocked. (The `with seed` form lives
+//      inside a single file under `chelis build`, so this collapses to
+//      "the rejection gate is gone": building a sibling file that does
+//      not use `with seed` succeeds even though the workspace has files
+//      that do.)
+
+fn write_seeded_uniform(path: &Path, low_seed: u64) {
+    let contents = format!(
+        r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+sampled = with seed({low_seed}) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
+"#
+    );
+    write_file(path, &contents);
+}
+
+#[test]
+fn build_c_with_seed_uniform_like_succeeds() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    let out_dir = dir.path().join("out");
+    write_seeded_uniform(&src, 7);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("does not yet plumb").not());
+
+    // Generated C must use the seed, not zero. (Pre-Bucket-5, the gate
+    // would have blocked the build entirely; if anyone ever lifts the
+    // gate without plumbing the seed, the emitted seed argument would
+    // be `0ULL` and this assertion would catch the wrong-answer.)
+    let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
+    assert!(
+        c_src.contains("chelis_uniform_sample_f32(7ULL"),
+        "expected seed=7 baked into chelis_uniform_sample_f32 call; got:\n{c_src}"
+    );
+    assert!(
+        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
+        "seed=0 must not appear in generated C when source seed is 7"
+    );
+}
+
+#[test]
+fn build_c_with_seed_is_deterministic_across_runs() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    let out_dir = dir.path().join("out");
+    write_seeded_uniform(&src, 7);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let gcc_status = StdCommand::new("gcc")
+        .args([
+            "-O2",
+            "-fopenmp",
+            out_dir.join("seeded.c").to_str().unwrap(),
+            "-Lchelis_runtime",
+            "-L",
+            out_dir.to_str().unwrap(),
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-fopenmp",
+            "-o",
+            out_dir.join("seeded").to_str().unwrap(),
+        ])
+        .status()
+        .expect("gcc must be available");
+    assert!(gcc_status.success(), "gcc compile of generated C failed");
+
+    let run = || {
+        let output = StdCommand::new(out_dir.join("seeded"))
+            .output()
+            .expect("compiled binary must run");
+        assert!(output.status.success(), "seeded binary exited non-zero");
+        String::from_utf8(output.stdout).expect("utf-8 stdout")
+    };
+    let first = run();
+    let second = run();
+    let third = run();
+    assert_eq!(
+        first, second,
+        "with seed(...) determinism violated: run 1 vs run 2 differ"
+    );
+    assert_eq!(
+        second, third,
+        "with seed(...) determinism violated: run 2 vs run 3 differ"
+    );
+
+    // Negative parity: a different seed produces different bytes. This
+    // is the no-silent-drop contract: if the seed plumbing regresses to
+    // hard-coded 0, this assertion fails.
+    let other_src = dir.path().join("seeded_other.ch");
+    let other_out = dir.path().join("out_other");
+    write_seeded_uniform(&other_src, 42);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            other_src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            other_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let other_gcc = StdCommand::new("gcc")
+        .args([
+            "-O2",
+            "-fopenmp",
+            other_out.join("seeded_other.c").to_str().unwrap(),
+            "-L",
+            other_out.to_str().unwrap(),
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-fopenmp",
+            "-o",
+            other_out.join("seeded_other").to_str().unwrap(),
+        ])
+        .status()
+        .expect("gcc must be available");
+    assert!(other_gcc.success(), "gcc compile of seed=42 binary failed");
+    let other_stdout = StdCommand::new(other_out.join("seeded_other"))
+        .output()
+        .expect("compiled binary must run")
+        .stdout;
+    let other = String::from_utf8(other_stdout).expect("utf-8 stdout");
+    assert_ne!(
+        first, other,
+        "with seed(7) and with seed(42) must produce different bytes"
+    );
+}
+
+#[test]
+fn build_c_with_seed_no_longer_blocks_sibling_build() {
+    // Pre-Bucket-5, `decls_contain_with_seed` walked the AST of the
+    // build target and aborted with the project-wide gate. Today, a
+    // sibling `.ch` file that does NOT use `with seed(...)` builds
+    // cleanly even when a sibling file in the same directory does. This
+    // is trivially true post-fix (the sibling is a separate
+    // compilation), but the test pins that the gate cannot be
+    // re-introduced without breaking it.
+    let dir = tempdir().expect("tempdir");
+    let with_seed_path = dir.path().join("uses_seed.ch");
+    let plain_path = dir.path().join("plain_sibling.ch");
+    write_seeded_uniform(&with_seed_path, 7);
+    write_file(
+        &plain_path,
+        "xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n",
+    );
+
+    let out_dir = dir.path().join("out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            plain_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("does not yet plumb").not());
+    assert!(
+        out_dir.join("plain_sibling.c").exists(),
+        "plain sibling without `with seed` must build to C"
+    );
+
+    // And the seed-using file builds standalone too, of course.
+    let seed_out = dir.path().join("seed-out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            with_seed_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            seed_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        seed_out.join("uses_seed.c").exists(),
+        "with-seed file must build to C now that the gate is lifted"
+    );
+}
