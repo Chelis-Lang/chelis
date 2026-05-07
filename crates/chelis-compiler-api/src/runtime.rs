@@ -1318,9 +1318,14 @@ impl<'a> EvalContext<'a> {
             }
             "to_tensor" => {
                 let values = expect_list_arg(args, 0)?;
-                let (precision, data) = list_to_tensor_data(&values)?;
+                // Bucket 4b: support nested numeric/bool lists. The outer
+                // list contributes the leading dim; if its elements are
+                // themselves uniformly-shaped numeric/bool lists, those
+                // contribute additional inner dims (and so on
+                // recursively).
+                let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![data.len()], data),
+                    value: IrTensorValue::from_vec(shape, data),
                     precision,
                 }))
             }
@@ -2340,6 +2345,69 @@ fn dict_lookup<'a>(
     dict.iter()
         .find(|(existing_key, _)| runtime_value_eq(existing_key, key))
         .map(|(_, value)| value)
+}
+
+/// Bucket 4b: recursively flatten a nested numeric/bool list into a
+/// rank-N tensor. Every nesting level contributes one outer dimension;
+/// the innermost level must be uniformly numeric or bool. All sibling
+/// sub-lists at the same level must have matching length and matching
+/// precision.
+///
+/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
+/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
+/// behaviour for compatibility).
+fn nested_list_to_tensor_data(
+    outer: &[RuntimeValue],
+) -> Result<(Prim, Vec<usize>, Vec<f64>), String> {
+    if outer.is_empty() {
+        return Ok((Prim::F32, vec![0], Vec::new()));
+    }
+
+    // Decide whether this is a leaf level (numeric/bool elements) or a
+    // recursive level (List elements) based on the first element. The
+    // homogeneity check below catches the mixed case.
+    let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
+
+    if !first_is_list {
+        // Leaf level — same code path as the original list_to_tensor.
+        let (precision, data) = list_to_tensor_data(outer)?;
+        return Ok((precision, vec![data.len()], data));
+    }
+
+    let mut precision: Option<Prim> = None;
+    let mut inner_shape: Option<Vec<usize>> = None;
+    let mut data = Vec::new();
+    for (idx, value) in outer.iter().enumerate() {
+        let RuntimeValue::List(inner) = value else {
+            return Err(format!(
+                "to_tensor expects homogeneous nested lists; element {idx} is not a List"
+            ));
+        };
+        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
+        match &precision {
+            None => precision = Some(sub_precision),
+            Some(p) if *p == sub_precision => {}
+            Some(p) => {
+                return Err(format!(
+                    "to_tensor requires homogeneous numeric or bool elements; expected {p:?}, got {sub_precision:?} at element {idx}"
+                ));
+            }
+        }
+        match &inner_shape {
+            None => inner_shape = Some(sub_shape),
+            Some(s) if *s == sub_shape => {}
+            Some(s) => {
+                return Err(format!(
+                    "to_tensor requires uniform inner shape; expected {s:?}, got {sub_shape:?} at element {idx}"
+                ));
+            }
+        }
+        data.extend(sub_data);
+    }
+
+    let mut shape = vec![outer.len()];
+    shape.extend(inner_shape.unwrap_or_default());
+    Ok((precision.unwrap_or(Prim::F32), shape, data))
 }
 
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
@@ -4031,6 +4099,62 @@ y = expand(b, cast(0, int32), cast(0, int32))
         assert!(
             err.contains("expand") && err.contains("count"),
             "expected expand count diagnostic, got: {err}"
+        );
+    }
+
+    // ----- to_tensor nested-list (Bucket 4b) -----
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_2d_float_literal() {
+        // Bucket 4b: previously rejected with
+        // "to_tensor expects numeric or bool List elements, got List f32".
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of [[1,2],[3,4]] must evaluate to a rank-2 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_3d_float_literal() {
+        // 2x2x2 cube — exercises 3-deep recursion in
+        // `nested_list_to_tensor_data`.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([
+  [[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]],
+  [[cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32)]]
+])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of 2x2x2 nested list must evaluate to a rank-3 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2, 2]);
+        assert_eq!(
+            first_tensor_data(&outcome, "y"),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
+        // Negative parity for 4b: ragged inner-list shapes must error
+        // out at the host runtime, not silently produce a malformed
+        // tensor.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("ragged nested list must fail to_tensor");
+        assert!(
+            err.contains("uniform inner shape"),
+            "expected ragged-shape diagnostic, got: {err}"
         );
     }
 

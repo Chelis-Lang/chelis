@@ -1478,34 +1478,137 @@ pub unsafe extern "C" fn chelis_dict_entries(dict: *const chelis_dict) -> *mut c
     Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
 }
 
+/// Walk a nested chelis_list and return its rectangular shape +
+/// dtype, or fail loudly if the structure is ragged or non-numeric.
+/// Bucket 4b: enables `to_tensor([[1.0, 2.0], [3.0, 4.0]])` etc.
+///
+/// Returns `(shape, dtype)`. `shape` has one entry per nesting level.
+unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, c_int) {
+    let mut shape: Vec<c_int> = Vec::new();
+    let mut current = list;
+    let mut leaf_dtype = CHELIS_F32;
+
+    loop {
+        if current.is_null() {
+            shape.push(0);
+            break;
+        }
+        let len = (*current).items.len() as c_int;
+        shape.push(len);
+        if len == 0 {
+            // Empty inner list — treat as leaf-of-zero with default
+            // f32 dtype, matching the rank-1 empty-list behavior.
+            break;
+        }
+        let first = &(*current).items[0];
+        match first.tag {
+            chelis_value_tag::CHELIS_VALUE_INT64 => {
+                leaf_dtype = CHELIS_I32;
+                break;
+            }
+            chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
+                leaf_dtype = CHELIS_F32;
+                break;
+            }
+            chelis_value_tag::CHELIS_VALUE_BOOL => {
+                leaf_dtype = CHELIS_BOOL;
+                break;
+            }
+            chelis_value_tag::CHELIS_VALUE_LIST => {
+                // Descend into the first sub-list to compute the next
+                // dimension; the recursive flatten step validates that
+                // all siblings at this level have a matching shape.
+                current = first.as_.list as *const chelis_list;
+            }
+            _ => runtime_fail!("to_tensor expects numeric, bool, or nested-list elements"),
+        }
+    }
+
+    (shape, leaf_dtype)
+}
+
+/// Recursively flatten the values into the contiguous buffer `out`
+/// starting at offset `*flat_idx`. Validates uniform shape against
+/// the precomputed `shape[depth..]`.
+unsafe fn chelis_flatten_nested_list(
+    list: *const chelis_list,
+    shape: &[c_int],
+    depth: usize,
+    leaf_dtype: c_int,
+    out: *mut f32,
+    flat_idx: &mut isize,
+) {
+    if list.is_null() {
+        // Length-0 leaf: nothing to copy. Caller's bookkeeping
+        // already accounted for `shape[depth] == 0`.
+        return;
+    }
+    let items = &(*list).items;
+    let expected_len = if depth < shape.len() {
+        shape[depth] as usize
+    } else {
+        0
+    };
+    if items.len() != expected_len {
+        runtime_fail!("to_tensor requires uniform inner-list length");
+    }
+    if depth + 1 == shape.len() {
+        // Leaf level: write scalars.
+        for item in items {
+            let value: f32 = match (leaf_dtype, item.tag) {
+                (CHELIS_I32, chelis_value_tag::CHELIS_VALUE_INT64) => item.as_.i64_ as f32,
+                (CHELIS_F32, chelis_value_tag::CHELIS_VALUE_FLOAT64) => item.as_.f64_ as f32,
+                (CHELIS_BOOL, chelis_value_tag::CHELIS_VALUE_BOOL) => {
+                    if item.as_.boolean {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                _ => runtime_fail!(
+                    "to_tensor leaf element type does not match the deduced tensor dtype"
+                ),
+            };
+            *out.offset(*flat_idx) = value;
+            *flat_idx += 1;
+        }
+    } else {
+        // Inner level: descend.
+        for item in items {
+            if item.tag != chelis_value_tag::CHELIS_VALUE_LIST {
+                runtime_fail!("to_tensor expects nested-list elements at this depth");
+            }
+            chelis_flatten_nested_list(
+                item.as_.list as *const chelis_list,
+                shape,
+                depth + 1,
+                leaf_dtype,
+                out,
+                flat_idx,
+            );
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_from_value_list(
     list: *const chelis_list,
 ) -> *mut chelis_tensor {
-    let len = chelis_list_len(list) as c_int;
-    let shape = [len];
     // The C backend stores raw f32 floats into `out->data` regardless of
     // the incoming list tag, so the allocation must match that byte layout.
     // Previously this returned a CHELIS_F64-dtyped tensor that was written
     // as f32, corrupting every subsequent reader (most visibly as `-nan`
     // or `inf` from `Std.Nn.Gelu.forward` / `Std.Nn.RmsNorm.forward`).
-    let dtype = if !list.is_null()
-        && !(*list).items.is_empty()
-        && (*list).items[0].tag == chelis_value_tag::CHELIS_VALUE_INT64
-    {
-        CHELIS_I32
-    } else {
-        CHELIS_F32
-    };
-    let out = chelis_alloc(1, shape.as_ptr(), dtype);
-    if !list.is_null() {
-        for (i, item) in (*list).items.iter().enumerate() {
-            *(*out).data.add(i) = match item.tag {
-                chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as f32,
-                chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as f32,
-                _ => runtime_fail!("to_tensor expects numeric list elements"),
-            };
-        }
+    //
+    // Bucket 4b: also walk nested-list inputs to support
+    // `to_tensor([[1.0, 2.0], [3.0, 4.0]])` and higher-rank
+    // homogeneous nested literals.
+    let (shape, dtype) = chelis_nested_list_shape(list);
+    let ndim = shape.len() as c_int;
+    let out = chelis_alloc(ndim, shape.as_ptr(), dtype);
+    if !list.is_null() && shape.iter().all(|&d| d > 0) {
+        let mut flat_idx: isize = 0;
+        chelis_flatten_nested_list(list, &shape, 0, dtype, (*out).data, &mut flat_idx);
     }
     out
 }

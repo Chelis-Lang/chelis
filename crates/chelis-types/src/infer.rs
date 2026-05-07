@@ -6089,38 +6089,55 @@ fn infer_app(
                     }
                     "to_tensor" => {
                         if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
-                                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                                    match &args[0] {
-                                        Type::Prim(precision)
-                                            if precision.is_numeric()
-                                                || matches!(precision, Prim::Bool) =>
-                                        {
-                                            return Type::Tensor(vec![Dim::Wildcard], *precision);
-                                        }
-                                        Type::Var(_) | Type::Error => return result_ty,
-                                        other => {
-                                            errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "to_tensor expects numeric or bool List elements, got {other}"
-                                                    ),
+                            // Bucket 4b: support arbitrarily-nested numeric/bool
+                            // lists. Each enclosing `List` adds one wildcard
+                            // outer dimension, and the innermost element type
+                            // must be a numeric or bool primitive.
+                            let resolved = subst.apply(first_arg);
+                            if matches!(resolved, Type::Var(_) | Type::Error) {
+                                return result_ty;
+                            }
+                            match peel_to_tensor_argument(&resolved) {
+                                ToTensorPeel::Ok { rank, precision } => {
+                                    if rank == 0 {
+                                        // Defensive: a bare scalar should never
+                                        // hit this branch (the typer requires
+                                        // a `List` head), but guard anyway.
+                                        errors.push(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_tensor expects List input, got {resolved}"
                                                 ),
-                                                vec![],
-                                            ));
-                                            return Type::Error;
-                                        }
+                                            ),
+                                            vec![],
+                                        ));
+                                        return Type::Error;
                                     }
+                                    let dims = vec![Dim::Wildcard; rank];
+                                    return Type::Tensor(dims, precision);
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
-                                other => {
+                                ToTensorPeel::Pending => return result_ty,
+                                ToTensorPeel::BadInner(inner) => {
                                     errors.push(CheckError::new(
                                         CheckErrorKind::TypeMismatch,
                                         with_macro_provenance(
                                             &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_tensor expects List input, got {other}"),
+                                            format!(
+                                                "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
+                                            ),
+                                        ),
+                                        vec![],
+                                    ));
+                                    return Type::Error;
+                                }
+                                ToTensorPeel::NotList => {
+                                    errors.push(CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("to_tensor expects List input, got {resolved}"),
                                         ),
                                         vec![],
                                     ));
@@ -7245,6 +7262,52 @@ fn check_expand_signature(
         return Type::Error;
     }
     subst.apply(&canonical)
+}
+
+/// Result of peeling nested `List<...>` wrappers from a `to_tensor`
+/// argument. Bucket 4b: previously the typer only accepted a single
+/// `List<numeric|bool>` and rejected `List<List<f32>>` outright; now
+/// we walk down through arbitrarily many `List` heads, count the rank,
+/// and require the innermost element to be a numeric or bool prim.
+enum ToTensorPeel<'a> {
+    /// Successfully peeled `rank` `List` layers down to a `Prim`.
+    Ok { rank: usize, precision: Prim },
+    /// Some inner type is still a `Var(_)` or `Error`; the typer should
+    /// defer to the explicit result type rather than emit a diagnostic.
+    Pending,
+    /// Reached a non-`List`, non-prim leaf — the innermost element is
+    /// not numeric or bool, so emit a typed diagnostic.
+    BadInner(&'a Type),
+    /// The argument is not a `List` at all.
+    NotList,
+}
+
+fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
+    let mut current = ty;
+    let mut rank = 0;
+    loop {
+        match current {
+            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                rank += 1;
+                current = &args[0];
+            }
+            Type::Prim(precision) if precision.is_numeric() || matches!(precision, Prim::Bool) => {
+                return ToTensorPeel::Ok {
+                    rank,
+                    precision: *precision,
+                };
+            }
+            Type::Var(_) | Type::Error => {
+                return ToTensorPeel::Pending;
+            }
+            other => {
+                if rank == 0 {
+                    return ToTensorPeel::NotList;
+                }
+                return ToTensorPeel::BadInner(other);
+            }
+        }
+    }
 }
 
 fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
