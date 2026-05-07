@@ -4,7 +4,7 @@
 Runs the headline `chelis test`/`chelis eval`/`chelis check` benchmarks
 against the real Coral checkout (and chelis-std self-test corpus) using a
 provided chelis binary. Captures wall-clock numbers and emits a markdown
-table to docs/perf_baseline.md.
+table for the active performance summary or an archived baseline note.
 
 Usage:
     python3 scripts/bench_phase_j.py \\

@@ -1,6 +1,7 @@
 # Chelis Span Survival: End-to-End Audit Chain
 
-**Status:** active design — implementation phased S0–S5 plus S6 host-side emission (see "Phasing").
+**Status:** current shipped audit contract. S0-S6 are preserved below as the historical
+implementation plan and named-oracle record; the active contract is in §2.
 **Owners:** chelis-core (this repo). Octant ships span-attributed Deep upstream.
 **Companion specs:** `spec/03-deep-syntax.md` §1.1.1 (the `span` key + `span_*` namespace + synthesized markers); `spec/design/chelis_trust_stack.md` (audit story).
 
@@ -8,13 +9,12 @@
 
 ## 1. Purpose
 
-Octant emits span-attributed Deep with a sidecar `.spans.json` mapping each
-span ID to a LaTeX byte range. Octant's tests confirm spans are correct in
-the *emitted* Deep. The audit chain (LaTeX byte range → Deep node → IR node
-→ backend output line) currently breaks somewhere between Deep ingestion and
-backend emission inside chelis. This document specifies the contract that
-closes that chain so a runtime trace or generated C source line can be
-traced back to the original external-source byte range.
+Octant emits span-attributed Deep with a sidecar `.spans.json` mapping each span ID to
+a LaTeX byte range. Octant's tests confirm spans are correct in the *emitted* Deep.
+Chelis preserves that audit chain (LaTeX byte range → Deep node → IR node / HostExpr
+→ backend output line) so a runtime trace or generated C source line can be traced back
+to the original external-source byte range. This document specifies the shipped
+contract and preserves the phased implementation record that established it.
 
 External-source agnosticism: the span ID is a string. Octant happens to use
 LaTeX-derived dot-paths (`n_001`, `expr.5.lhs`); other producers may use

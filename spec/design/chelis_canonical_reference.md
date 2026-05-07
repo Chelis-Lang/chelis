@@ -20,11 +20,16 @@ and not a Python replacement.
 It targets model authoring, training, deployment, and program synthesis for AI
 workloads.
 
-**Current status:** Phase 0 is complete.
-Phases 0a-0i are complete.
-Phases 1a-1f are implemented.
-Phase 1 remains in progress at the project level because the phase-level red-team
-checkpoint is still the completion bar.
+**Current status:** Phase 0 is complete. Phase 1 and Phase 2 have shipped their
+planned compiler surfaces. Phase 3 is the active language-completeness and shell
+ecosystem phase: the compiler/runtime foundations through `3j` Nautilus are shipped,
+while Coral (`3k`), Shoals (`3l`), Octant Part A/B (`3n`/`3o`), native Chelis testing
+(`3t`), and the final SKILL.md v2 refresh (`3f`) remain active work.
+
+Phase completion claims still follow the repository completion bar: a phase is not
+closed by crate-local green alone. The authoritative oracle must be named, current
+docs must match shipped behavior, and the required fresh-context red-team checkpoint
+must run before a phase is declared complete.
 
 ---
 
@@ -344,20 +349,20 @@ Planned public-style target for Phase 3:
 - algebraic-effect boundary handling for `Random` and `Resource(Device)`
 - `with seed(...)` for seeded stochastic regions and `with device(...)` for resource regions
 
-### Deferred to later Phase 2 work
+### Phase 2 shipped after the initial 2a subset
 
-- broader effect inference/checking beyond the shipped `Random` / `Resource(Device)` subset
+- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
 - `Diff` as a fully specified effect surface (it remains a compiler capability today)
 - `Accum` as user-visible effect surface (it remains internal-only today)
 - linear types for tensors with borrowing rules and explicit `copy`
 - lightweight uniqueness / alias tracking before any full heavy ownership-and-lifetimes model
 - macro expansion before all LLM-facing operations, with provenance in metadata
-- algebraic-effect, linearity, macro, and `vmap` tooling that remains planned in Phase 2
+- algebraic-effect, linearity, macro, and `vmap` tooling
 
-### Planned remaining Phase 3 work
+### Phase 3 shipped foundations and remaining shell work
 
-Phase 3 is now the language-completeness phase rather than the research-extension
-phase. The remaining practical language work is:
+Phase 3 is the language-completeness phase rather than the research-extension phase.
+The practical compiler/runtime foundations that now ship are:
 
 - first-class scalar `Int` / `Float` / `Bool` values outside tensors
 - first-class immutable `String` values with practical non-tensor operations
@@ -370,6 +375,9 @@ phase. The remaining practical language work is:
 - data-loading and tokenization support that removes the mandatory Python
   preprocessing step
 - standard-library host modules such as `Std.Time` and `Std.Decimal`
+
+The remaining active Phase 3 work is shell ecosystem and test-surface work: Coral,
+Shoals, Octant Part A/B, Chelis-native testing, and the final SKILL.md v2 refresh.
 
 ### Deferred to Phase 5+
 
@@ -390,10 +398,10 @@ operations.
 High-level operations such as `matmul`, `softmax`, and `relu` are library-facing names
 that lower into primitive compositions during compilation.
 
-The remaining core-language expansion planned for Phase `3h` adds the practical tensor
-surface real model code expects: `einsum`, `concat` / `split`, `gather` / `scatter`,
-`where`, `cumsum`, `sort`, `diagonal` / `trace`, and `clamp`. `Std.Nn.Embedding`
-remains the explicit public shell/library surface over `gather`.
+Phase `3h` added the practical tensor surface real model code expects: `einsum`,
+`concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`, `diagonal` /
+`trace`, and `clamp`. `Std.Nn.Embedding` remains the explicit public shell/library
+surface over `gather`.
 
 Core transforms remain first-class:
 
@@ -751,11 +759,18 @@ tools shipped.
 
 Use the docs in this order:
 
-1. this file for project-level truth
-2. `README.md` for repository orientation
-3. `docs/book/` for developer-facing usage docs
-4. numbered `spec/*.md` files for language semantics
-5. `spec/design/chelis_project_plan.md` for phased execution
+1. `spec/design/chelis_canonical_reference.md` for project-level truth, current
+   status, naming, ecosystem boundaries, and cross-doc alignment
+2. numbered specs `spec/00-12*.md` for active language, CLI, serialization, backend,
+   and roadmap contracts
+3. `spec/design/chelis_project_plan.md` and active phase plans such as
+   `spec/design/chelis_phase3_plan.md` for phased execution and explicit acceptance
+   oracles
+4. focused active design docs under `spec/design/` for current implementation
+   contracts not yet folded into numbered specs
+5. `README.md` and `docs/book/` for repository orientation and developer-facing usage
+   docs; they should follow the hierarchy above, not redefine it
 
 Historical design notes belong under `spec/design/archive/` and must be treated as
-rationale, not current guidance.
+rationale, not current guidance. If an active doc and an archived note disagree, update
+or cross-reference the active doc rather than adding a third explanation.

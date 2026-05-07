@@ -1,358 +1,146 @@
-# chelis-std SKILL.md
-
-Use this file to prompt a frontier model to write Chelis that passes the compiler in
-this repository today.
-This is not the language spec.
-It is a compact teaching document optimized for compiler-in-the-loop generation.
-
-If the task is to work on this repository rather than generate Chelis source, use
-`AGENTS.md` plus the shared local skills in `agent-skills/` instead. This file is for
-language generation, not repo governance.
-
-## 1. What Chelis Is
-
-Chelis is a functional language for AI and tensor programs.
-It has two syntaxes:
-Surf (`.ch`) is the human-facing syntax, and Deep (`.dp`) is the canonical
-s-expression syntax.
-The compiler works on Deep internally.
-If you want the highest success rate, generate Deep first.
-Chelis programs are mostly tensor pipelines with explicit dimensions and explicit
-precision.
-The compiler returns a fitness score in `[0, 1]` plus structured errors.
-For this repository snapshot, target the subset that passes the current parser and
-type checker, not the broader planned surface from later phases.
-
-## 2. Deep Syntax
-
-Deep is the primary generation target.
-Every real Deep node has the form `(tag {} children...)`.
-The metadata map is always present, even when empty.
-
-### 2a. Node Structure
-
-Canonical shape:
-
-```chelis-deep-fragment
-(tag {} child1 child2 ...)
-```
-
-Increasing-complexity examples:
-
-```chelis-deep-fragment
-(lit {type: (t-prim {} f32)} 3.14)
-(var {} x)
-(app {} (var {} add) (var {} x) (var {} y))
-(def {}
-  f
-  (fn {}
-    (params {} x y)
-    (app {} (var {} add) (var {} x) (var {} y))))
-(module {}
-  demo.core
-  (export {} f)
-  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))
-  (def {}
-    f
-    (fn {}
-      (params {} (x {type: (t-prim {} f32)}))
-      (var {} x))))
-```
-
-Rules that matter most:
-
-- Every tagged node includes `{}` as element two.
-- Function calls use `app`.
-- Names use `var`.
-- Literals use `lit` with a `type` metadata entry.
-- Function parameters live inside `(params {} ...)`.
-- `let` bindings live inside `(bind {} name expr ...)`.
-- `chelis-surf` and `chelis-deep` fences in this file are complete programs and are
-  compiler-validated in CI.
-- `chelis-surf-fragment` and `chelis-deep-fragment` fences are partial teaching snippets
-  and are intentionally not validated as standalone programs.
-
-### 2b. Complete Tag Vocabulary
-
-Arity is the number of children after the metadata map.
-Examples are illustrative; only complete `chelis-deep` blocks later in this file are
-validated automatically.
-
-#### Module
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `module` | 2+ | module name, declarations | `(module {} demo.core (def {} x ...))` |
-| `import` | 2 | path, imported names list | `(import {} foo.bar (x y))` |
-| `import-all` | 1 | path | `(import-all {} foo.bar)` |
-| `export` | 1+ | exported names | `(export {} f g)` |
-
-#### Declarations
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `def` | 2 | name, expression | `(def {} x (lit {type: (t-prim {} int32)} 1))` |
-| `defsig` | 2 | name, type | `(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))` |
-| `deftype` | 3+ | name, type params list, variants | `(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))` |
-| `typealias` | 3 | name, type params list, aliased type | `(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))` |
-| `variant` | 1+ | ctor name, fields or positional members | `(variant {} Adam (field {} lr (t-tensor {} (t-prim {} f32))))` |
-| `field` | 2 | field name, field type | `(field {} lr (t-tensor {} (t-prim {} f32)))` |
-| `defdim` | 1 | dimension name | `(defdim {} batch)` |
-
-#### Expressions
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `fn` | 2 | params node, body | `(fn {} (params {} x) (var {} x))` |
-| `app` | 1+ | function, arguments | `(app {} (var {} add) (var {} x) (var {} y))` |
-| `let` | 2 | bind node, body | `(let {} (bind {} y (var {} x)) (var {} y))` |
-| `match` | 2+ | scrutinee, arms | `(match {} (var {} opt) (arm {} (pat-wild {}) () (var {} x)))` |
-| `arm` | 3 | pattern, guard or `()`, body | `(arm {} (pat-var {} x) () (var {} x))` |
-| `if` | 3 | cond, then, else | `(if {} c t e)` |
-| `var` | 1 | name | `(var {} x)` |
-| `lit` | 1 | literal value | `(lit {type: (t-prim {} int32)} 0)` |
-| `record` | 2+ | type/ctor name, kv pairs | `(record {} Adam (kv {} lr (var {} lr)))` |
-| `access` | 2 | record expr, field | `(access {} (var {} opt) lr)` |
-| `pipe` | 2+ | seed expr, stages | `(pipe {} (var {} x) (var {} relu))` |
-| `block` | 1+ | sequenced expressions | `(block {} (var {} x) (var {} y))` |
-| `tuple` | 2+ | tuple elements | `(tuple {} (var {} a) (var {} b))` |
-| `tuple-get` | 2 | tuple expr, index | `(tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))` |
-| `record-update` | 2+ | base expr, kv pairs | `(record-update {} r (kv {} x v))` |
-| `par` | 1+ | parallel expressions | `(par {} a b)` |
-
-#### Patterns
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `pat-var` | 1 | bound name | `(pat-var {} x)` |
-| `pat-lit` | 1 | literal value | `(pat-lit {} 0)` |
-| `pat-ctor` | 1+ | ctor name, nested patterns | `(pat-ctor {} Some (pat-var {} x))` |
-| `pat-tuple` | 2+ | tuple patterns | `(pat-tuple {} (pat-var {} a) (pat-var {} b))` |
-| `pat-record` | 2+ | type/ctor name, kv pattern pairs | `(pat-record {} Adam (kv {} lr (pat-var {} lr)))` |
-| `pat-wild` | 0 | none | `(pat-wild {})` |
-| `pat-as` | 2 | bound name, nested pattern | `(pat-as {} whole (pat-ctor {} Some (pat-wild {})))` |
-
-#### Types
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `t-prim` | 1 | primitive name | `(t-prim {} f32)` |
-| `t-fn` | 2+ | argument types, return type | `(t-fn {} (t-prim {} f32) (t-prim {} f32))` |
-| `t-tensor` | 1+ | dimensions, precision | `(t-tensor {} (d-name {} n) (t-prim {} f32))` |
-| `t-adt` | 1+ | ADT name, type args | `(t-adt {} Option (t-prim {} f32))` |
-| `t-var` | 1 | type variable | `(t-var {} a)` |
-| `t-unit` | 0 | none | `(t-unit {})` |
-| `t-tuple` | 2+ | tuple member types | `(t-tuple {} (t-prim {} f32) (t-prim {} f32))` |
-
-#### Dimensions
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `d-name` | 1 | named dimension | `(d-name {} batch)` |
-| `d-var` | 1 | polymorphic dimension variable | `(d-var {} a)` |
-| `d-lit` | 1 | literal dimension size | `(d-lit {} 512)` |
-
-#### Transforms
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `grad` | 1 | expression | `(grad {} (var {} f))` |
-| `vmap` | 2 | expression, dimension | `(vmap {} (var {} f) (d-name {} batch))` |
-| `jit` | 1 | expression | `(jit {} (var {} f))` |
-| `realize` | 1 | expression | `(realize {} (var {} x))` |
-| `cast` | 2 | expression, target type | `(cast {} (var {} x) (t-prim {} bf16))` |
-| `copy` | 1 | expression | `(copy {} (var {} x))` |
-
-#### Metaprogramming
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `quote` | 1 | quoted expr | `(quote {} (var {} x))` |
-| `unquote` | 1 | expr to splice as value | `(unquote {} (var {} x))` |
-| `splice` | 1 | expr producing list of nodes | `(splice {} xs)` |
-
-#### Helpers
-
-| Tag | Arity | Children | Example |
-|---|---:|---|---|
-| `params` | 0+ | bare names or typed helper pairs | `(params {} x (y {type: (t-prim {} f32)}))` |
-| `bind` | even | `name expr` pairs | `(bind {} x (var {} y) z (var {} x))` |
-| `kv` | 2 | key, value | `(kv {} lr (var {} lr))` |
-
-This vocabulary is complete and closed. User-defined macros do not add new tags — macros
-expand to combinations of these 59 tags before any LLM interaction.
-
-### 2c. Built-in Scope
-
-The safest rule is: only use names listed here.
-If a name is not listed here, assume it does not exist.
-
-Notation:
-
-- `tensor[p]` means a rank-0 tensor scalar such as `tensor[f32]`
-- `tensor[D, p]` means a tensor with one or more named dimensions followed by precision
-- `bool-tensor[D]` means `tensor[D, bool]`
-- reductions currently require an explicit integer axis argument
-
-#### Stable in the current checker
-
-| Name | Shape | Use |
-|---|---|---|
-| `add`, `mul`, `sub`, `div`, `max_elem`, `min_elem` | `(tensor[D, p], tensor[D, p]) -> tensor[D, p]` | elementwise binary ops |
-| `neg`, `exp`, `log`, `sin`, `sqrt`, `relu`, `sigmoid` | `tensor[D, p] -> tensor[D, p]` | elementwise unary ops |
-| `cmplt`, `eq`, `neq`, `gt`, `lte`, `gte` | `(tensor[D, p], tensor[D, p]) -> bool-tensor[D]` | comparisons |
-| `and`, `or` | `(bool-tensor[D], bool-tensor[D]) -> bool-tensor[D]` | logical binary ops |
-| `not` | `bool-tensor[D] -> bool-tensor[D]` | logical unary op |
-| `sum`, `mean`, `max_reduce`, `softmax` | `(tensor[D, p], int32) -> tensor[D, p]` | reductions; always pass an axis |
-
-#### Present but shape rules are still moving
-
-These names exist in the environment, but do not build your first attempts around them
-unless you are prepared to iterate with compiler feedback:
-
-- `matmul`
-- `layer_norm`
-- `conv2d`
-- `normalize`
-- `reshape`
-- `permute`
-- `expand`
-- `pad`
-- `shrink`
-- `stride`
-
-#### Do not invent these yet
-
-These appear in the broader roadmap or spec language, but this repository snapshot does
-not make them reliable teaching targets for the skill:
-
-- `dot`
-- `linear`
-- `cross_entropy`
-- `embedding`
-- `mha`
-- `tensor_const`
-
-### 2d. Canonical Form Rules
-
-For Deep, always emit canonical form:
-
-- every node is `(tag {} ...)`
-- metadata map is always present
-- use `app`, `var`, and `lit` explicitly
-- record `kv` pairs are alphabetized by key
-- `params` and `bind` use helper form, not `var`
-- use the canonical printer style: two-space indentation in nested forms, no alternate
-  parenthesization
-- if you have Surf and need Deep, prefer Surf parse + desugar + canonical print rather
-  than writing Deep freehand
-
-## 3. Surf Syntax
-
-Surf is the readable syntax.
-It is sugar over Deep.
-If you are unsure, write Deep instead.
-
-### Keywords
-
-Current Surf keywords:
-
-```text
-def sig type dim match with fn module import export if then else
-grad vmap jit cast realize copy par true false
-```
-
-### Surf Style
-
-Prefer idiomatic Surf when you are generating `.ch` source for humans:
-
-- use `def ... -> T = ...` for typed function definitions
-- put input types on parameters, not on top-level load-style bindings
-- use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
-- do not annotate intermediate expressions when the checker can infer them
-- use block bindings such as `x = expr` for sequential Surf code
-- prefer pipe-first composition for linear flows, including first-argument insertion
-  stages such as `|> add(expand(b, 0, batch))`
-- break long or many-stage pipes after `=` and before every `|>` so the data flow stays
-  visually scannable
-- keep meaningful intermediate names like `logits`, `probs`, and `loss`
-- combine short tensor operations when the composition is clearer than one-binding-per-op
-
-### Operator Precedence
-
-From lowest to highest:
-
-1. `|>`
-2. `||`
-3. `&&`
-4. `==` `!=`
-5. `<` `>` `<=` `>=`
-6. `+` `-`
-7. `*` `/` `%`
-8. unary `-` `!`
-9. function application
-10. field access `.`
-
-### Key Constructs
-
-| Surf | Deep |
-|---|---|
-| `def f(x: T) -> U = body` | `defsig` + `def` with typed `params` |
-| `{ x = e; body }` | same `let` shape after block desugaring |
-| `match x with { | P => b }` | `(match {} x' (arm {} P' () b'))` |
-| `fn (x) -> body` | `(fn {} (params {} x) body')` |
-| `type Option[a] = | Some(a) | None` | `(deftype {} Option (a) ...)` |
-| `type Weights = tensor[n, f32]` | `(typealias {} Weights () ...)` |
-| `dim batch` | `(defdim {} batch)` |
-| `x |> f |> add(y)` | `(pipe {} x' f' (fn {} (params {} v) (app {} add' v' y')))` |
-| `x : T` | metadata annotation on the desugared Deep node |
-
-### Current-Snapshot Surf Advice
-
-- Use named dimensions such as `n`, `batch`, `hidden`.
-- Do not rely on integer literal dimensions in Surf type positions yet.
-- All reduction-style calls currently need an explicit axis: `sum(x, 0)`, `softmax(x, 0)`.
-- Tensor math expects tensors, not bare `f32`.
-  For scalar arithmetic that passes today, use rank-0 tensors such as `tensor[f32]`.
-- Tensor helpers ship in nested modules such as `Std.Tensor.Construct`,
-  `Std.Tensor.Reduce`, and `Std.Tensor.Mask`.
-
-## 4. Type System Rules
-
-What the compiler will check in practice:
-
-- Tensor types are `tensor[dim1, dim2, ..., precision]`.
-  Precision is always last.
-- `tensor[f32]` is a rank-0 tensor scalar and is the safest scalar-like numeric type in
-  the current checker.
-- Named dimensions are nominal.
-  `tensor[batch, f32]` and `tensor[seq, f32]` do not unify just because they might have
-  the same runtime size.
-- No implicit broadcasting.
-  If two tensor shapes differ, the compiler treats that as an error.
-- No implicit precision promotion.
-  `tensor[n, f32]` and `tensor[n, bf16]` do not mix silently.
-  Use `cast`.
-- Function types are written `A -> B -> C` in Surf and `(t-fn {} A' B' C')` in Deep.
-- ADTs require exhaustive pattern matches.
-- Type aliases are transparent.
-- Reductions currently require an explicit integer axis argument.
-
-## 5. Common Patterns
-
-The validated examples in this section are the core few-shot material.
-Every `chelis-surf` and `chelis-deep` block below is checked automatically in the repo
-test suite.
-
-### 5.1 Rank-0 Tensor Square
-
-Surf:
+---
+name: chelis-std
+description: Use when writing downstream Chelis Surf or Deep programs, validating Chelis examples, or authoring Reef shell packages that depend on the bundled chelis-std runtime. Not for modifying the Chelis compiler repository itself.
+---
+
+# Chelis Downstream Skill
+
+Use this skill to write Chelis that works with the current compiler snapshot and to help
+shell authors prepare Reef packages. Keep context small: load deeper specs only when the
+task needs exact grammar, type, CLI, or package semantics.
+
+If the user is modifying Chelis itself, stop using this file as the authority. Use the
+repository `AGENTS.md` plus the shared local skills in `agent-skills/`.
+
+## Setup and Discovery
+
+- Ensure `chelis --help` works. From a checkout: `cargo build -p chelis-cli` and put
+  `target/debug` on `PATH`.
+- Use Surf (`.ch`) for human-facing code. Use Deep (`.dp`) for canonical machine output.
+- Inspect current CLI commands with `chelis --help` and subcommand help, especially
+  `chelis fmt --help`, `chelis check --help`, and `chelis reef --help`.
+- Read `docs/book/src/` first for onboarding. Load numbered specs only for details:
+  `spec/02-surf-syntax.md`, `spec/03-deep-syntax.md`,
+  `spec/04-type-system.md`, `spec/05-risc-primitives.md`, and `spec/09-tide.md`.
+
+## Successful Language Subset
+
+Prefer this subset before trying broader planned language features:
+
+- Function definitions: `def f(x: tensor[n, f32]) -> tensor[n, f32] = ...`
+- Blocks with local bindings: `{ y = relu(x); softmax(y, 0) }`
+- Tensor types with explicit dimensions and precision: `tensor[f32]`,
+  `tensor[n, f32]`, `tensor[batch, hidden, f32]`
+- Elementwise ops: `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `relu`,
+  `sigmoid`
+- Comparisons/logical ops: `cmplt`, `eq`, `neq`, `gt`, `lte`, `gte`, `and`, `or`, `not`
+- Reductions with explicit integer axes: `sum(x, 0)`, `mean(x, 0)`,
+  `max_reduce(x, 0)`, `softmax(x, 0)`
+- Structural/tensor helpers are available but more shape-sensitive: `matmul`, `reshape`,
+  `permute`, `expand`, `pad`, `copy`, `cast`
+
+Rules to preserve:
+
+- No implicit broadcasting. Shapes must match unless an explicit helper changes them.
+- No implicit precision promotion. Use `cast` when changing precision.
+- Named dimensions are nominal: `batch` and `seq` do not unify by size.
+- Integer literals default to `int32`; float literals default to `f32`.
+- Reduction-style calls need an explicit axis argument.
+
+## Style Rules for Generated Surf
+
+- Prefer `def ... -> T = ...`.
+- Put types on function parameters and returns; avoid unnecessary intermediate
+  ascriptions.
+- Use snake_case for functions and values, PascalCase for types and module segments.
+- Use symbolic names for runtime-varying dimensions (`batch`, `seq`, `hidden`) and
+  concrete dimensions for fixed architecture sizes.
+- Run the formatter instead of hand-tuning whitespace.
+
+## Minimal Examples
 
 ```chelis-surf
 def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
 ```
 
-Deep:
+```chelis-surf
+def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
+  softmax(relu(x), 0)
+```
+
+```chelis-surf
+def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
+  add(x, y)
+```
+
+```chelis-surf
+def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
+  {
+    y = add(x, x)
+    relu(y)
+  }
+```
+
+```chelis-surf
+def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
+  logits = x |> relu |> add(labels)
+  loss =
+    softmax(logits, 0)
+    |> log
+    |> mul(labels)
+    |> sum(0)
+  loss
+}
+```
+
+```chelis-surf
+def logistic_step(x: tensor[n, f32]) -> tensor[n, f32] =
+  sigmoid(x)
+```
+
+```chelis-surf
+def clamp_low(x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
+  max_elem(x, low)
+```
+
+```chelis-surf
+def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
+```
+
+```chelis-surf
+type Weights = tensor[n, f32]
+
+def keep(w: Weights) -> Weights = w
+```
+
+```chelis-surf
+type Activation =
+  | Relu
+  | Sigmoid
+
+def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
+  match act with {
+    | Relu => relu(x)
+    | Sigmoid => sigmoid(x)
+  }
+```
+
+```chelis-surf
+type Optimizer =
+  | Sgd { lr: tensor[f32] }
+  | Adam { lr: tensor[f32], beta1: tensor[f32], beta2: tensor[f32], eps: tensor[f32] }
+
+def learning_rate(opt: Optimizer) -> tensor[f32] =
+  match opt with {
+    | Sgd { lr } => lr
+    | Adam { lr, beta1, beta2, eps } => lr
+  }
+```
+
+## Canonical Deep Examples
+
+Generate Deep only when a tool needs the canonical AST. Every node includes its metadata
+map, calls use `app`, references use `var`, and literals carry a type.
 
 ```chelis-deep
 (defsig {} square (t-fn {} (t-tensor {} (t-prim {} f32)) (t-tensor {} (t-prim {} f32))))
@@ -363,16 +151,6 @@ Deep:
     (params {} (x {type: (t-tensor {} (t-prim {} f32))}))
     (app {} (var {} mul) (var {} x) (var {} x))))
 ```
-
-### 5.2 Vector Addition
-
-Surf:
-
-```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
-```
-
-Deep:
 
 ```chelis-deep
 (defsig {}
@@ -391,20 +169,6 @@ Deep:
     (app {} (var {} add) (var {} x) (var {} y))))
 ```
 
-### 5.3 Block Binding Pipeline
-
-Surf:
-
-```chelis-surf
-def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
-  {
-    y = add(x, x)
-    relu(y)
-  }
-```
-
-Deep:
-
 ```chelis-deep
 (defsig {}
   twice_then_relu
@@ -420,17 +184,6 @@ Deep:
       (bind {} y (app {} (var {} add) (var {} x) (var {} x)))
       (app {} (var {} relu) (var {} y)))))
 ```
-
-### 5.4 ReLU Then Softmax With Explicit Axis
-
-Surf:
-
-```chelis-surf
-def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
-  softmax(relu(x), 0)
-```
-
-Deep:
 
 ```chelis-deep
 (defsig {}
@@ -448,24 +201,6 @@ Deep:
       (app {} (var {} relu) (var {} x))
       (lit {type: (t-prim {} int32)} 0))))
 ```
-
-### 5.5 Pipe Composition
-
-Surf:
-
-```chelis-surf
-def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
-  logits = x |> relu |> add(labels)
-  loss =
-    softmax(logits, 0)
-    |> log
-    |> mul(labels)
-    |> sum(0)
-  loss
-}
-```
-
-Deep:
 
 ```chelis-deep
 (defsig {}
@@ -497,17 +232,6 @@ Deep:
       (var {} loss))))
 ```
 
-### 5.6 Sigmoid Step
-
-Surf:
-
-```chelis-surf
-def logistic_step(x: tensor[n, f32]) -> tensor[n, f32] =
-  sigmoid(x)
-```
-
-Deep:
-
 ```chelis-deep
 (defsig {}
   logistic_step
@@ -521,16 +245,6 @@ Deep:
     (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
     (app {} (var {} sigmoid) (var {} x))))
 ```
-
-### 5.7 Elementwise Clamp
-
-Surf:
-
-```chelis-surf
-def clamp_low(x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] = max_elem(x, low)
-```
-
-Deep:
 
 ```chelis-deep
 (defsig {}
@@ -549,16 +263,6 @@ Deep:
     (app {} (var {} max_elem) (var {} x) (var {} low))))
 ```
 
-### 5.8 Dimension-Polymorphic Identity
-
-Surf:
-
-```chelis-surf
-def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
-```
-
-Deep:
-
 ```chelis-deep
 (defsig {}
   identity
@@ -573,18 +277,6 @@ Deep:
     (var {} x)))
 ```
 
-### 5.9 Transparent Type Alias
-
-Surf:
-
-```chelis-surf
-type Weights = tensor[n, f32]
-
-def keep(w: Weights) -> Weights = w
-```
-
-Deep:
-
 ```chelis-deep
 (typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))
 
@@ -596,74 +288,6 @@ Deep:
     (params {} (w {type: (t-adt {} Weights)}))
     (var {} w)))
 ```
-
-### 5.10 ADT + Pattern Match
-
-Surf:
-
-```chelis-surf
-type Optimizer =
-  | Sgd { lr: tensor[f32] }
-  | Adam { lr: tensor[f32], beta1: tensor[f32], beta2: tensor[f32], eps: tensor[f32] }
-
-def learning_rate(opt: Optimizer) -> tensor[f32] =
-  match opt with {
-    | Sgd { lr } => lr
-    | Adam { lr, beta1, beta2, eps } => lr
-  }
-```
-
-Deep:
-
-```chelis-deep
-(deftype {}
-  Optimizer
-  ()
-  (variant {} Sgd (field {} lr (t-tensor {} (t-prim {} f32))))
-  (variant {}
-    Adam
-    (field {} beta1 (t-tensor {} (t-prim {} f32)))
-    (field {} beta2 (t-tensor {} (t-prim {} f32)))
-    (field {} eps (t-tensor {} (t-prim {} f32)))
-    (field {} lr (t-tensor {} (t-prim {} f32)))))
-
-(defsig {} learning_rate (t-fn {} (t-adt {} Optimizer) (t-tensor {} (t-prim {} f32))))
-
-(def {}
-  learning_rate
-  (fn {}
-    (params {} (opt {type: (t-adt {} Optimizer)}))
-    (match {}
-      (var {} opt)
-      (arm {} (pat-record {} Sgd (kv {} lr (pat-var {} lr))) () (var {} lr))
-      (arm {}
-        (pat-record {}
-          Adam
-          (kv {} beta1 (pat-var {} beta1))
-          (kv {} beta2 (pat-var {} beta2))
-          (kv {} eps (pat-var {} eps))
-          (kv {} lr (pat-var {} lr)))
-        ()
-        (var {} lr)))))
-```
-
-### 5.11 ADT-Driven Activation Choice
-
-Surf:
-
-```chelis-surf
-type Activation =
-  | Relu
-  | Sigmoid
-
-def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
-  match act with {
-    | Relu => relu(x)
-    | Sigmoid => sigmoid(x)
-  }
-```
-
-Deep:
 
 ```chelis-deep
 (deftype {} Activation () (variant {} Relu) (variant {} Sigmoid))
@@ -687,244 +311,65 @@ Deep:
       (arm {} (pat-ctor {} Sigmoid) () (app {} (var {} sigmoid) (var {} x))))))
 ```
 
-### 5.12 Tensor Column ADT Pattern
+## Validation Commands
 
-Surf:
+For a single file:
 
-```chelis-surf-fragment
-type Column =
-  | FloatCol(tensor[n, f32])
-  | IntCol(tensor[n, int64])
-
-def get_float(col: Column) -> tensor[n, f32] =
-  match col with {
-    | FloatCol(values) => values
-    | IntCol(_) => fail("expected FloatCol")
-  }
+```sh
+chelis fmt --inplace app.ch
+chelis lint --check app.ch
+chelis check app.ch
+chelis deep app.ch > app.dp
+chelis surf app.dp
 ```
 
-This is the preferred current snapshot pattern for typed dataframe-like columns.
-It compiles today and is the intended Coral column representation.
+For build artifacts:
 
-Related mask/index helper:
-
-```chelis-surf-fragment
-import Std.Tensor.Mask (where_indices)
-
-ids = where_indices(mask)
+```sh
+chelis build app.ch --target c --output out/
 ```
 
-`where_indices` is host-lane (`to_list`/`enumerate`/`filter`/`map`/`to_tensor`), not a
-new tensor primitive. It works for non-empty matches today. An all-false mask still
-hits the current empty-`to_tensor([])` residual.
+`chelis build`, `chelis check`, `chelis validate`, and `chelis eval --file` run the
+style gate before semantic work. Do not use `--allow-style-violations` in package or CI
+flows.
 
-### 5.13 Current Limit: Do Not Use MLP or MNIST as Your First Prompt
+## Reef Context
 
-The spec and roadmap include `matmul`, multi-layer networks, and MNIST-scale examples.
-The current teaching file intentionally does not validate those yet because the
-repository snapshot still has moving parts around shape rules and broader frontend
-ergonomics.
-Start with the validated patterns above, then grow from compiler feedback.
+- `chelis-std` is the bundled runtime. It ships inside the compiler and is not installed
+  with `chelis reef install`.
+- Shell packages such as `nautilus`, `coral`, `shoals`, and `octant` are Reef
+  dependencies and can be installed or bootstrapped.
+- `reef.toml` pins the compiler exactly and declares a module prefix:
 
-## 6. Common Mistakes and Fixes
+```toml
+[package]
+name = "demo"
+version = "0.1.0"
+compiler = "=0.6.1"
+module_prefix = "Demo"
 
-- Writing Deep as `(mul x y)` instead of `(app {} (var {} mul) (var {} x) (var {} y))`.
-  Fix: every call uses `app`; every referenced name uses `var`.
-- Omitting `{}`.
-  Fix: every tagged node needs a metadata map, even when empty.
-- Using bare `f32` with tensor built-ins.
-  Fix: use `tensor[f32]` for scalar-like numeric values that must pass today.
-- Forgetting the axis on reductions.
-  Fix: write `sum(x, 0)`, `mean(x, 0)`, `softmax(x, 0)`.
-- Mixing dimension names.
-  Fix: `add(x, y)` needs matching nominal dims, not just matching intent.
-- Mixing precisions.
-  Fix: insert `cast`.
-- Inventing functions such as `dot`, `tensor_const`, or `cross_entropy`.
-  Fix: stay inside the built-in scope listed in this file.
-- Reaching for `normalize` because it appears in older examples.
-  Fix: treat it as unstable implementation surface until the spec and lowering agree on
-  its semantics.
-- Writing malformed Deep params.
-  Fix: use `(params {} x)` or `(params {} (x {type: ...}))`, never `(params {} (var {} x))`.
-- Writing Surf types with literal numeric dimensions.
-  Fix: use named dims in Surf for now; reserve `d-lit` for Deep only.
-
-## 7. Compiler Feedback Interpretation
-
-- `fitness = 1.0` and no errors means the program passed the current checker.
-- A high fitness score with remaining errors is still a failing program.
-  Treat `errors.is_empty()` as the real pass condition.
-- `UnboundVariable` means you used a name outside the built-in scope or local bindings.
-- `DimensionMismatch` means the dimension names do not unify.
-- `PrecisionMismatch` means you mixed precisions without `cast`.
-- `ArityMismatch` usually means the current built-in expects a different number of
-  arguments.
-  For current reduction-style built-ins, the missing argument is often the axis.
-- Parse errors in Deep almost always mean one of:
-  missing `{}`, missing `app`, missing `var`, or malformed helper nodes such as
-  `params` / `bind`.
-
-### Manual Verification Protocol
-
-Use this file in a fresh LLM conversation with no extra Chelis context.
-Ask for programs in Surf first and Deep second.
-For this repository snapshot, prefer prompts based on the validated examples above:
-
-1. write a rank-0 tensor square
-2. write vector addition over `tensor[n, f32]`
-3. write `relu` followed by `softmax(..., 0)`
-4. write a sigmoid transform over `tensor[n, f32]`
-5. write a dimension-polymorphic identity function
-6. write a type alias plus a passthrough function
-7. write an optimizer ADT and extract the learning rate
-8. write an activation ADT and branch between `relu` and `sigmoid`
-9. rewrite one of those programs in canonical Deep
-10. repair a broken Deep snippet after compiler feedback
-
-Success criterion for the current skill:
-
-- more than half of these prompts should reach `fitness >= 0.9`
-- and end with zero checker errors
-- within five repair iterations
-
-## 8. `Std.Test` — Chelis-Native Test Assertions
-
-`Std.Test` provides the assertion surface for Chelis-native tests. Every
-exported function has the effect row `! { Test }`, so any function that
-transitively calls one picks up Test in its inferred effects.
-
-**What enforcement actually buys you:** any function that declares an
-explicit effect row (e.g. `! {}` or `! { IO }`) is type-checked against its
-inferred effects. Calling a Test-carrying function from a `! {}`-declared
-function is a type error. An unannotated `def f() = assert_true(...)` is
-NOT rejected on its own — the effect still propagates through `f`, and
-the mismatch surfaces at the first downstream caller that declares an
-effect row. In practice, pin production entry points with explicit effect
-rows (`! {}`, `! { IO }`, `! { IO, Random }`) so the Test effect has a
-boundary to fail against; don't rely on unannotated defs to enforce the
-separation by themselves.
-
-Import what you need:
-
-```chelis-surf-fragment
-import Std.Test (
-  assert_true,
-  assert_false,
-  assert_eq,
-  assert_eq_int,
-  assert_eq_bool,
-  assert_eq_string,
-  assert_close,
-  assert_close_tensor,
-  assert_shape,
-  fail
-)
+[dependencies]
+nautilus = { version = "0.5.0" }
 ```
 
-A test function must declare `! { Test }`. Test discovery (3t.4) looks for
-nullary `def test_*()` functions, so use that naming convention:
+- Package source lives under `src/`; module names should match the prefix and path.
+- `CHELIS_REEF_HOME` defaults to `~/.chelis/reef`.
+- Remote shell fetches require `GITHUB_TOKEN` or a working `gh auth token` during the
+  pre-launch private-repo period.
 
-```chelis-surf-fragment
-def test_adds() -> unit ! { Test } = assert_eq(add(1.0, 1.0), 2.0, "add-1+1")
+Common Reef loop:
+
+```sh
+chelis reef init demo --module-prefix Demo --output demo
+cd demo
+chelis reef build
 ```
 
-### API Summary
+## Where to Load More Detail
 
-| Function | Signature |
-|---|---|
-| `assert_true` | `(bool, string) -> unit ! { Test }` |
-| `assert_false` | `(bool, string) -> unit ! { Test }` |
-| `assert_eq` | `(f32, f32, string) -> unit ! { Test }` |
-| `assert_eq_int` | `(int64, int64, string) -> unit ! { Test }` |
-| `assert_eq_bool` | `(bool, bool, string) -> unit ! { Test }` |
-| `assert_eq_string` | `(string, string, string) -> unit ! { Test }` |
-| `assert_close` | `(f32, f32, f32, string) -> unit ! { Test }` |
-| `assert_close_tensor` | `(tensor[n, f32], tensor[n, f32], f32, string) -> unit ! { Test }` |
-| `assert_shape` | `(tensor[n, f32], int64, string) -> unit ! { Test }` |
-| `fail` | `(string) -> unit ! { Test }` |
-
-`assert_close` is strict: it fails when `|actual - expected| > tol`. Passing
-`tol == 0` requires exact equality. Negative or NaN `tol` produces an
-`"assert_close (<label>): invalid tolerance <t>"` failure. NaN in `actual` or
-`expected` is never close.
-
-`assert_close_tensor` is the tensor-shaped counterpart with identical
-semantics, reporting the first mismatching index in its failure message.
-
-`assert_shape` brands its own failures as
-`"assert_shape (<label>): expected <n>, got <m>"`. It does not leak the
-internal `test_assert_eq_int` prefix — grep for `assert_shape` in a run log
-and every shape mismatch from this assertion is accounted for.
-
-`Std.Test.fail` is a Chelis wrapper around `test_assert(false, msg)` so it
-carries `Test`. The tagless runtime builtin `fail` (used by non-test code) is
-intentionally not re-exported here — use `Std.Test.fail` from tests so the
-checker can enforce that the Test effect is declared on the calling function.
-
-### Worked Examples
-
-```chelis-surf-fragment
-def test_true_flag() -> unit ! { Test } = assert_true(true, "flag-true")
-```
-
-```chelis-surf-fragment
-def test_false_flag() -> unit ! { Test } = assert_false(false, "flag-false")
-```
-
-```chelis-surf-fragment
-def test_f32_eq() -> unit ! { Test } = assert_eq(1.5, 1.5, "scalar-eq")
-```
-
-```chelis-surf-fragment
-def test_int_eq() -> unit ! { Test } =
-  assert_eq_int(cast(3, int64), cast(3, int64), "int-eq")
-```
-
-```chelis-surf-fragment
-def test_bool_eq() -> unit ! { Test } = assert_eq_bool(true, true, "bool-eq")
-```
-
-```chelis-surf-fragment
-def test_string_eq() -> unit ! { Test } =
-  assert_eq_string("hi", "hi", "str-eq")
-```
-
-```chelis-surf-fragment
-def test_close_scalar() -> unit ! { Test } =
-  assert_close(1.0, 1.01, 0.05, "close-scalar")
-```
-
-```chelis-surf-fragment
-def test_close_tensor() -> unit ! { Test } =
-  assert_close_tensor(
-    to_tensor([1.0, 2.0]),
-    to_tensor([1.0, 2.0]),
-    0.001,
-    "close-tensor"
-  )
-```
-
-```chelis-surf-fragment
-def test_tensor_shape() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3")
-```
-
-```chelis-surf-fragment
-def test_unreachable() -> unit ! { Test } = fail("reached unreachable branch")
-```
-
-### Common Mistakes
-
-- Forgetting `! { Test }` on the test function signature. `chelis check` will
-  not reject an unannotated test body on its own, but the Test effect
-  propagates to callers; declare the effect row to make the contract visible
-  and to get `UnhandledEffect` diagnostics at any `! {}`-declared boundary.
-- Calling the tagless runtime `fail` from a test — allowed, but you lose the
-  Test-effect signal. Prefer `Std.Test.fail` in test code.
-- Passing a negative tolerance to `assert_close` — that surfaces as an
-  explicit runtime failure with `"invalid tolerance"` in the message, not a
-  silent skip.
-- Chaining several assertions without block-binding them. In a block body the
-  intermediate assertions must be `_ = assert_*(...)` with `;` separators
-  (Surf block syntax), and only the final expression is the tail.
+- Onboarding and examples: `docs/book/src/README.md`, `docs/book/src/examples.md`
+- CLI and style gate: `docs/book/src/cli.md`
+- Reef package workflow: `docs/book/src/reef.md`
+- Executable examples: `examples/*.ch`
+- Runtime package layout: `packages/chelis-std/reef.toml` and `packages/chelis-std/src/`
+- Authoritative syntax/types: numbered specs under `spec/`

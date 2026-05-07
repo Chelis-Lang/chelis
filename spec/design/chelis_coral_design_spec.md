@@ -426,7 +426,10 @@ Three binary builds mirroring Nautilus:
 2. **Tensor binary** — tests all tensor-column operations (filter via gather, sort via argsort, GroupBy via scatter, Window via cumsum). Links against `libchelis_runtime.a`.
 3. **IO binary** — tests CSV/JSON read/write with actual files. Links against `libchelis_runtime.a`.
 
-**Acceptance oracle:** `cargo test -p chelis-cli phase3k_coral_oracle -- --exact` in the main repo's cross-repo CI.
+**Acceptance oracle:** the current in-repo prerequisite gate is
+`cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture`. A
+future Coral-owned downstream oracle should replace this when the full shell surface
+lands.
 
 ---
 
@@ -687,8 +690,11 @@ python tests/run_skill_checks.py    # SKILL.md validation
 chelis reef build                    # package builds
 chelis check src/*.ch               # all modules score 1.0
 
-# Cross-repo (in chelis main repo CI)
-cargo test -p chelis-cli phase3k_coral_oracle -- --exact
+# Current in-repo prerequisite gate
+cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture
+
+# Future downstream Coral-owned gate, once the full shell surface lands
+# (command TBD in the Coral repo/CI)
 ```
 
 ---

@@ -1,6 +1,9 @@
 # First Program
 
-Start with a small Surf function and let the compiler show you the canonical Deep form.
+Start with a small Surf function, format it, check it, then ask the compiler to show the
+canonical Deep form.
+
+Create `app.ch`:
 
 ## Surf
 
@@ -8,6 +11,18 @@ Start with a small Surf function and let the compiler show you the canonical Dee
 def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
   softmax(relu(x), 0)
 ```
+
+Then run:
+
+```sh
+chelis fmt --inplace app.ch
+chelis check app.ch
+chelis deep app.ch > app.dp
+chelis surf app.dp
+```
+
+`check`, `deep`, and `surf` are useful together: Surf stays readable for humans, while
+Deep is the stable machine form that shell tooling can inspect.
 
 ## Deep
 
@@ -46,4 +61,10 @@ Convert Deep back to Surf:
 
 ```sh
 chelis surf app.dp
+```
+
+Build source artifacts without invoking a native compiler:
+
+```sh
+chelis build app.ch --target c --output out/
 ```

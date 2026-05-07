@@ -232,7 +232,7 @@ pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeE
 /// [`build_type_env_from_library`] followed by
 /// `check_phase0e_with_context(empty, library)` — both paths separately
 /// run a full HM inference + annotation pass over the same library
-/// exprs. Per `docs/perf_baseline_investigation.md`, the unified path
+/// exprs. Per `docs/archive/perf/perf_baseline_investigation.md`, the unified path
 /// saves ~16s of duplicated inference + annotation on Coral.
 ///
 /// Behavior contract:

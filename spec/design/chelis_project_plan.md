@@ -509,7 +509,7 @@ Shipped.
   inputs
 - make the tokenizer/data-loader path a first-class Phase 3 deliverable, not a Python
   sidecar
-- acceptance oracle: `cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --nocapture`
+- acceptance oracle: `cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture`
 
 ### 3i: Standard Library Expansion
 
@@ -530,7 +530,7 @@ Standard library modules for real model training and inference:
 - **`Std.Schedule`:** Learning rate scheduling — cosine annealing with warmup, linear
   warmup, step decay. Pure `(step, config)` functions using record configs rather than
   positional constructor calls.
-- acceptance oracle: `cargo test -p chelis-cli --test phase3i_std -- --nocapture`
+- acceptance oracle: `cargo test -p chelis-cli --test phase3i_std -- --ignored --nocapture`
 
 ### 3j-pre: Release Infrastructure + Std Surface Expansion
 

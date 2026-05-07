@@ -39,6 +39,10 @@ module_prefix = "Demo"
 nautilus = { version = "0.5.0" }
 ```
 
+Package source normally lives under `src/`. Module declarations should line up with the
+manifest `module_prefix`; for example, `src/nn/linear.ch` in the manifest above would
+declare a module under `Demo.Nn.Linear`.
+
 The `compiler =` pin is exact (no version ranges in this round) and
 implicitly declares the chelis-std runtime version: a project that
 pins `compiler = "=0.5.0"` automatically gets chelis-std at the
@@ -166,7 +170,7 @@ chelis reef build
 ## Environment Variables
 
 - `CHELIS_REEF_HOME` — local registry root. Default is
-  `~/.cache/chelis/reef`.
+  `~/.chelis/reef`.
 - `GITHUB_TOKEN` — required for any remote fetch
   (`--from-github`, `--bootstrap`, auto-fetch during build). Falls
   back to `gh auth token` if unset.

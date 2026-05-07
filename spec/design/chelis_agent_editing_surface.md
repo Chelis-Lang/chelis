@@ -168,7 +168,7 @@ empirical results:
 - No doc claims category-defining novelty for the structural-editing
   approach. The substrate-vs-model framing is correct internally but
   remains overclaim until empirical evidence backs it.
-- Skill files (`CLAUDE.md`, `.cursorrules`, `agent-skills/`) and Tide MCP
+- Skill files (`AGENTS.md` / `CLAUDE.md`, `.cursorrules`, `agent-skills/`) and Tide MCP
   tool docs are NOT updated to mention structural tools — those updates
   land when tools ship, not before.
 - The full toolset (Items 3+) is named for design completeness, not
