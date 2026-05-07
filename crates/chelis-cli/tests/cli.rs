@@ -4704,3 +4704,69 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
          left an undeclared identifier in the C source.",
     );
 }
+
+/// Bucket 4d regression: a higher-order def whose non-callable params
+/// and return type are scalar `f32` (e.g. `(model: f32 -> f32, x: f32)
+/// -> f32` referencing `model(x)`) must emit its host wrapper
+/// definition in the generated C. Previously the predicate at
+/// `chelis_ir::host::lower_host_program` blocked the wrapper for any
+/// fn with callable params, and the DAG-only path can't represent
+/// scalar fn params -- so the def was silently dropped, leaving `gcc`
+/// to fail with `implicit declaration of function 'apply'`. The same
+/// shape with `tensor[n, f32]` had been working because the
+/// non-callable params were tensors and a different code path emitted
+/// a tensor-helper wrapper.
+#[test]
+fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_fn_param.ch");
+    let out_dir = dir.path().join("scalar-fn-param-out");
+    write_file(
+        &path,
+        "def apply(model: f32 -> f32, x: f32) -> f32 = model(x)\n\
+         def square(y: f32) -> f32 = mul(y, y)\n\
+         result = apply(square, cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("scalar_fn_param.c")).expect("generated c");
+    // The wrapper definition must be emitted, not just the prototype.
+    assert!(
+        source.contains("static inline double apply(double (*model)(double), double x) {"),
+        "expected `apply` wrapper definition in the C source; only a forward \
+         declaration would leave gcc with `implicit declaration`. Source:\n{source}",
+    );
+    // Parity with the tensor case: the same shape with `tensor[n, f32]`
+    // already emits the wrapper. Make sure both shapes succeed in this
+    // test by also linking + running the binary.
+    let status = gcc_link_generated(&out_dir, "scalar_fn_param.c", "scalar_fn_param");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("scalar_fn_param"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `square(3) = 9`. The host emit prints `result = 9` (no decimal
+    // point for whole values).
+    assert_eq!(
+        stdout.trim_end(),
+        "result = 9",
+        "compiled binary stdout for `apply(square, 3.0)` must equal `9`; got: {stdout:?}",
+    );
+}
