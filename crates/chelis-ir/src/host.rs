@@ -1093,10 +1093,10 @@ fn lower_host_expr(
 /// `x` into a Deep expression that downstream host lowering can handle
 /// without falling back to `Builtin { name: "call" }`. Three cases:
 ///
-/// - `(var f) x`            -> `(app {} (var f) x)`
-/// - `(fn (params p) body) x` -> beta-reduce to `body[p := x]`
-/// - other / nested apps    -> `(app {} stage x)` and let
-///                              `lower_app_host_expr` work it out.
+/// - `(var f) x` becomes `(app {} (var f) x)`.
+/// - `(fn (params p) body) x` beta-reduces to `body[p := x]`.
+/// - Other / nested apps become `(app {} stage x)` and let
+///   `lower_app_host_expr` work them out.
 ///
 /// The beta-reduction case matters because `xs |> mul(b)` desugars to
 /// `(fn (params __chelis_pipe) (app mul __chelis_pipe b))`. Wrapping it
