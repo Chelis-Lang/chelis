@@ -771,6 +771,9 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "ceil"
                         | "relu"
                         | "sigmoid"
+                        | "tanh"
+                        | "silu"
+                        | "gelu"
                         | "cmplt"
                         | "gt"
                         | "gte"
@@ -3192,6 +3195,51 @@ impl LowerCtx {
                 let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
+            // Bucket 3: `tanh`, `silu`, `gelu` route through new tier2
+            // decompositions so the RISC DAG path stays self-contained.
+            // Mirrors the relu/sigmoid pattern above.
+            "tanh" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "tanh input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_tanh(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "silu" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "silu input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_silu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "gelu" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "gelu input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_gelu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
             "div" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "div lhs");
                 let b = self.lower_expr_node(&args[1], "div rhs");
@@ -3937,6 +3985,24 @@ impl LowerCtx {
                         self.current_span_id.as_deref(),
                     )),
                     "sigmoid" => LoweredValue::Node(tier2::lower_sigmoid(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "tanh" => LoweredValue::Node(tier2::lower_tanh(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "silu" => LoweredValue::Node(tier2::lower_silu(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "gelu" => LoweredValue::Node(tier2::lower_gelu(
                         &mut self.dag,
                         current_node,
                         &ty,
