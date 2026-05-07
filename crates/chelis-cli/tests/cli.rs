@@ -4770,3 +4770,69 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
         "compiled binary stdout for `apply(square, 3.0)` must equal `9`; got: {stdout:?}",
     );
 }
+
+/// Bucket 4e regression: a tensor-valued pipe expression (`xs |> step
+/// |> step` for a user-defined `step`, or `softmax(...) |> log |>
+/// mul(labels) |> sum(...) |> neg |> mean(...)` from `examples/mnist.ch`)
+/// must lower in the C lane to the same value as the equivalent
+/// nested-call form. Previously a top-level binding to a pipe whose
+/// stages included user-defined fns produced unit-typed C output
+/// (`out = ()`) because `lower_host_expr_kind` had no `pipe` arm and
+/// fell through to `HostExpr::new(HostExprKind::Unit)`. The fix adds a
+/// host-side pipe handler that beta-reduces lambda stages and rewrites
+/// var stages into nested-app form, plus an IR-side `lower_pipe`
+/// fallthrough fix so unknown vars are routed through
+/// `resolve_callable_expr` rather than silently no-op'ing.
+#[test]
+fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_user_unary.ch");
+    let out_dir = dir.path().join("pipe-user-unary-out");
+    write_file(
+        &path,
+        "def step(x: tensor[3, f32]) -> tensor[3, f32] = mul(copy(x), x)\n\
+         out = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]) |> step |> step\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("pipe_user_unary.c")).expect("generated c");
+    // The pipe must NOT degrade to a unit-typed binding. Before the
+    // fix the generated C contained `int out = __binding_0_value;`
+    // and `printf("()")`. After: `chelis_tensor* out = ...` and a
+    // `chelis_print_tensor_stdout(out)` call.
+    assert!(
+        !source.contains("int out = __binding_0_value;") && !source.contains(r#"printf("()");"#),
+        "pipe must not produce a unit-typed top-level binding; source:\n{source}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "pipe_user_unary.c", "pipe_user_unary");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("pipe_user_unary"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `step([1, 2, 3]) = [1, 4, 9]`, `step([1, 4, 9]) = [1, 16, 81]`.
+    assert_eq!(
+        stdout.trim_end(),
+        "out = tensor(shape=[3], data=[1.0, 16.0, 81.0])",
+        "compiled binary stdout for `xs |> step |> step` must match the \
+         nested-call form's value; got: {stdout:?}",
+    );
+}
