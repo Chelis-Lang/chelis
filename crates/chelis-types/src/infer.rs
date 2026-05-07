@@ -3959,6 +3959,9 @@ fn infer_app(
         "sqrt",
         "relu",
         "sigmoid",
+        "tanh",
+        "silu",
+        "gelu",
         "matmul",
         "layer_norm",
         "max_elem",
@@ -3998,7 +4001,8 @@ fn infer_app(
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
-                        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" => {
+                        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
+                        | "gelu" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }

@@ -2005,6 +2005,53 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_softmax_host(&tensor, axis).map(RuntimeValue::Tensor)
             }
+            // Activation primitives (Bucket 3).
+            //
+            // Each activation must produce values byte-identical (to documented
+            // float tolerance) to the C backend's `chelis_host_*_f32` helpers
+            // emitted from `crates/chelis-backend-c/src/host_emit.rs`. Those
+            // helpers run all math through `float` (single precision); we
+            // therefore route every transcendental through `f32` here too —
+            // widening only happens at the very end when we re-store as
+            // `f64`-shaped tensor data. The closures themselves accept and
+            // return `f64` so `tensor_float_unop_f32` can cast at the
+            // boundary, which means `(x as f32).exp() as f64` and never
+            // `f64::exp(x)`.
+            "relu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_relu_f32,
+                )))
+            }
+            "sigmoid" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_sigmoid_f32,
+                )))
+            }
+            "tanh" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_tanh_f32,
+                )))
+            }
+            "silu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_silu_f32,
+                )))
+            }
+            "gelu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_gelu_f32,
+                )))
+            }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -2291,6 +2338,83 @@ fn tensor_numeric_unop(
         ),
         precision: tensor.precision,
     }))
+}
+
+/// Tensor-elementwise unary that runs through `f32` precision so the
+/// host-runtime activation primitives stay byte-identical (to f32 ulp
+/// tolerance) with the C backend's `chelis_host_*_f32` helpers, which
+/// always go through `float` in `crates/chelis-backend-c/src/host_emit.rs`.
+///
+/// The closure receives an `f64` (cast down from `f32`) and returns an
+/// `f64` (cast down from the float result of its body). The wrapper
+/// itself takes care of the cast-down-cast-back at the boundary; the
+/// caller need only ensure every internal transcendental is invoked
+/// against an `f32` value (via `as f32` followed by libm `f32::*`).
+fn tensor_float_unop_f32(
+    tensor: &RuntimeTensorValue,
+    op: impl Fn(f32) -> f32,
+) -> RuntimeTensorValue {
+    RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            tensor.value.shape.clone(),
+            tensor
+                .value
+                .data
+                .iter()
+                .map(|value| op(*value as f32) as f64)
+                .collect(),
+        ),
+        precision: tensor.precision,
+    }
+}
+
+/// `relu(x) = max(0, x)`. Exact in any precision; we still take `f32`
+/// here so the host-lane and C-lane storage shapes line up.
+fn activation_relu_f32(x: f32) -> f32 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+/// `sigmoid(x) = 1 / (1 + exp(-x))`. Mirrors `chelis_host_sigmoid_f32`
+/// in `crates/chelis-backend-c/src/host_emit.rs:137` exactly — single
+/// `expf` of `-x`, no f64 widening.
+fn activation_sigmoid_f32(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// `tanh(x)` via `f32::tanh`. Matches the C backend's `tanhf` helper.
+fn activation_tanh_f32(x: f32) -> f32 {
+    x.tanh()
+}
+
+/// `silu(x) = x * sigmoid(x)` (a.k.a. swish). Composed from
+/// `activation_sigmoid_f32` so the f32-rounding profile is identical
+/// to the C-backend helper — i.e., the C side computes
+/// `x * chelis_host_sigmoid_f32(x)` and we mirror it 1:1.
+fn activation_silu_f32(x: f32) -> f32 {
+    x * activation_sigmoid_f32(x)
+}
+
+/// `gelu(x)` via the tanh approximation, matching `Std.Nn.Gelu`'s
+/// `gelu_scalar` (`packages/chelis-std/src/nn/gelu.ch`):
+///
+///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+///
+/// We use the tanh-approx (not the erf-exact form) because the
+/// C-backend host helper composes the same way and the Std layer is
+/// the canonical reference. If/when a `Erf` RISC op is added the
+/// exact form can replace this and both lanes must move together.
+fn activation_gelu_f32(x: f32) -> f32 {
+    // The literal is the f64 value that `Std.Nn.Gelu` and the C-backend
+    // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
+    // explicit cast keeps the f32 round-trip identical to those lanes.
+    // `clippy::excessive_precision` complains about the trailing digits
+    // being beyond f32 representability — that's intentional (we want
+    // the same source-level constant the other lanes use).
+    #[allow(clippy::excessive_precision)]
+    const C: f32 = 0.7978845608028654_f32; // sqrt(2/pi)
+    const K: f32 = 0.044715_f32;
+    let inner = C * (x + K * x * x * x);
+    0.5 * x * (1.0 + inner.tanh())
 }
 
 fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
