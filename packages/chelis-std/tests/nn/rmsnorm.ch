@@ -37,7 +37,6 @@ def test_unit_gain_matches_closed_form_on_one_two_three_four() -> unit ! { Test 
   x = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
   unit_gain = to_tensor([cast(1.0, f32), cast(1.0, f32), cast(1.0, f32), cast(1.0, f32)])
   out = forward(x, unit_gain, cast(0.0, f32))
-  -- mean(x^2) = (1 + 4 + 9 + 16) / 4 = 7.5; expected[i] = x[i] / sqrt(7.5).
   inv_rms = div(cast(1.0, f32), sqrt(cast(7.5, f32)))
   expected = to_tensor([mul(cast(1.0, f32), inv_rms), mul(cast(2.0, f32), inv_rms), mul(cast(3.0, f32), inv_rms), mul(cast(4.0, f32), inv_rms)])
   assert_close_tensor(out, expected, cast(0.000001, f32), "forward([1,2,3,4], unit_gain, 0) == [1,2,3,4] / sqrt(7.5)")

@@ -279,11 +279,37 @@ must include the runtime header explicitly.
   against a corpus, not only single happy-path examples.
 - For machine-facing CLI output, test both shape and semantic invariants.
 
+## Style Gate
+
+`chelis build`, `chelis check`, `chelis validate`, and
+`chelis eval --file` invoke `chelis fmt --check` and the full
+`chelis lint` rule set on the input file before the front-end
+pipeline runs. Style failures block the build by default and emit a
+one-issue-per-line diagnostic to stderr.
+
+- Authoritative source of truth: `spec/01-nomenclature.md` (the rule
+  spec) and `crates/chelis-lint/src/rules/` (the executable
+  enforcement). The canonical formatter is `chelis_surf::format` for
+  `.ch` and `chelis_deep::printer` for `.dp`.
+- Override flag: `--allow-style-violations` bypasses the gate with a
+  stderr warning. Use only for emergency local builds and one-off
+  migrations. CI must not pass it.
+- Test override env var: `CHELIS_STYLE_GATE_DISABLE=1` disables the
+  gate process-wide. Reserved for the integration-test corpus that
+  synthesizes ad-hoc Surf to exercise type/effect/linearity behavior;
+  do not set it in production CI or in user-facing scripts.
+
+When writing new code or fixtures, run `chelis fmt --inplace <file>`
+and `chelis lint --check` before pushing. The gate replaces the older
+manual checklist of "remember to run fmt"; if the gate is green and
+`cargo test --workspace` passes, the change is ready.
+
 ## Surf Style Guide
 
 When writing or rewriting Surf in this repository:
 
-- prefer `def ... -> T = ...` over `def ... : T = ...`
+- prefer `def ... -> T = ...` over `def ... : T = ...` (enforced by the
+  `surf-def-arrow-form` lint rule, §3.5)
 - put types on function parameters, not on load-style top-level bindings
 - use symbolic dimensions such as `batch` and `seq` for runtime-varying axes
 - keep fixed architecture dimensions concrete
@@ -291,6 +317,10 @@ When writing or rewriting Surf in this repository:
 - keep meaningful intermediates like `h1`, `logits`, `probs`, and `loss`
 - combine short tensor operations when the composed expression is clearer than over-decomposed single-op bindings
 - treat decompiler-generated verbose load chains and checker-inserted ascriptions as debug output, not example style
+- type identifiers are PascalCase (`surf-type-pascal-case`, §3.1)
+- function/value identifiers are snake_case (`surf-value-snake-case`, §3.2)
+- functions carrying the `Test` effect are named `test_*` or `example_*`
+  (`surf-test-name-prefix`, §10.1)
 
 ## Chelis-Specific Rules
 

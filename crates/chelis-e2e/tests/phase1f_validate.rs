@@ -75,6 +75,7 @@ fn extract_code_blocks(markdown: &str) -> Vec<CodeBlock> {
 
 fn run_validate(mode: &str, path: &Path) -> Output {
     Command::new(chelis_bin())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", mode, path.to_str().unwrap()])
         .output()
         .expect("run chelis validate")
@@ -82,6 +83,7 @@ fn run_validate(mode: &str, path: &Path) -> Output {
 
 fn render_deep(path: &Path) -> Vec<u8> {
     Command::new(chelis_bin())
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", path.to_str().unwrap()])
         .assert()
         .success()

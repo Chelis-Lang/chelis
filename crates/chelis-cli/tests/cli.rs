@@ -256,6 +256,7 @@ fn write_symbolic_hidden_layer_norm_program(path: &Path) {
 fn run_json_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
         .assert()
         .success()
@@ -314,6 +315,7 @@ fn fmt_check_accepts_canonical_executable_examples() {
     for path in executable_examples() {
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["fmt", path.to_str().unwrap(), "--check"])
             .assert()
             .success();
@@ -325,6 +327,7 @@ fn fmt_check_accepts_canonical_illustrative_examples() {
     for path in illustrative_examples() {
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["fmt", path.to_str().unwrap(), "--check"])
             .assert()
             .success();
@@ -336,6 +339,7 @@ fn fmt_check_accepts_canonical_stdlib_sources() {
     for path in stdlib_sources() {
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["fmt", path.to_str().unwrap(), "--check"])
             .assert()
             .success();
@@ -350,6 +354,7 @@ fn eval_rejects_unbound_runtime_names() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -368,6 +373,7 @@ fn eval_prints_labeled_tuple_components() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
@@ -383,6 +389,7 @@ fn eval_prints_labeled_tuple_components() {
 fn eval_supports_host_scalars_and_strings() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             r#"if 3 > 2 then string_concat("ok-", to_string(string_len("hé"))) else "bad""#,
@@ -396,6 +403,7 @@ fn eval_supports_host_scalars_and_strings() {
 fn eval_supports_integer_mod_and_bitwise_helpers() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             r#"bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))"#,
@@ -409,6 +417,7 @@ fn eval_supports_integer_mod_and_bitwise_helpers() {
 fn eval_surfaces_debug_transcript() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", r#"debug("trace")"#])
         .assert()
         .success()
@@ -477,6 +486,7 @@ bad = scan(fn (acc: string, x: int64) -> string_concat(acc, to_string(x)), cast(
 fn phase3c_scalar_string_acceptance_oracle() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             "--file",
@@ -491,6 +501,7 @@ fn phase3c_scalar_string_acceptance_oracle() {
 fn eval_supports_lists_and_tensor_bridge() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             "--file",
@@ -509,6 +520,7 @@ fn eval_supports_lists_and_tensor_bridge() {
 fn eval_supports_dicts_and_iteration_collections() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             "--file",
@@ -536,6 +548,7 @@ fn eval_supports_dicts_and_iteration_collections() {
 fn eval_supports_map_filter_fold_collections() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             "--file",
@@ -556,6 +569,7 @@ fn eval_supports_map_filter_fold_collections() {
 fn eval_supports_phase3h_tensor_structural_ops() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "eval",
             "--file",
@@ -579,6 +593,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -592,6 +607,7 @@ fn build_c_runs_list_foundation_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -621,6 +637,7 @@ fn build_c_runs_dict_foundation_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -634,6 +651,7 @@ fn build_c_runs_dict_foundation_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -660,6 +678,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -673,6 +692,7 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -702,6 +722,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -715,6 +736,7 @@ fn build_c_runs_tensor_structural_ops_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -749,6 +771,7 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -762,6 +785,7 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
@@ -798,6 +822,7 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -883,6 +908,7 @@ fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -932,6 +958,7 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1009,6 +1036,7 @@ fn build_c_multidef_tensor_entry_renames_source_main_for_driver_compatibility() 
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1153,6 +1181,7 @@ fn build_c_nested_float_builtins_do_not_emit_int_temps() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1197,6 +1226,7 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1238,6 +1268,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1295,6 +1326,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1341,6 +1373,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1391,6 +1424,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1448,6 +1482,7 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1501,6 +1536,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1551,6 +1587,7 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1589,6 +1626,7 @@ fn build_c_tensor_fold_callback_with_if_stays_on_host_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1631,6 +1669,7 @@ fn build_c_tensor_fold_let_binding_with_if_stays_on_host_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1670,6 +1709,7 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1743,6 +1783,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1779,6 +1820,7 @@ fn assert_reef_std_embedding_builds_to_valid_c() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -1817,6 +1859,7 @@ def main(
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -1825,6 +1868,7 @@ def main(
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
@@ -1888,6 +1932,7 @@ def softplus(x: tensor[4, f32]) -> tensor[4, f32] = exp(x)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -2028,6 +2073,7 @@ def apply(
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2115,6 +2161,7 @@ fn build_hip_accepts_dict_foundation_host_program() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2140,6 +2187,7 @@ fn build_hip_accepts_iter_foundation_host_program() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2168,6 +2216,7 @@ fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2181,6 +2230,7 @@ fn build_c_runs_scalar_string_foundation_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -2214,6 +2264,7 @@ fn phase3m_rust_runtime_acceptance_oracle() {
 
     let build = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2243,6 +2294,7 @@ fn phase3m_rust_runtime_acceptance_oracle() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -2280,6 +2332,7 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -2323,6 +2376,7 @@ result = match sample with {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -2336,6 +2390,7 @@ result = match sample with {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
@@ -2366,6 +2421,7 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2379,6 +2435,7 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -2413,6 +2470,7 @@ fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_RUNTIME_DIR", &bad_runtime_dir)
         .args([
             "build",
@@ -2435,6 +2493,7 @@ fn build_honors_chelis_runtime_dir_override() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
@@ -2461,6 +2520,7 @@ fn phase3m_rust_runtime_hip_manual_gate() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -2482,6 +2542,7 @@ fn phase3m_rust_runtime_hip_manual_gate() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", source.to_str().unwrap()])
         .assert()
         .success()
@@ -2515,6 +2576,7 @@ fn fmt_inplace_preserves_mnist_executability() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--inplace"])
         .assert()
         .success();
@@ -2532,12 +2594,14 @@ fn fmt_inplace_preserves_pipeline_parseability() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--inplace"])
         .assert()
         .success();
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", path.to_str().unwrap()])
         .assert()
         .success();
@@ -2559,12 +2623,14 @@ fn fmt_inplace_preserves_illustrative_example_parseability() {
 
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["fmt", path.to_str().unwrap(), "--inplace"])
             .assert()
             .success();
 
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["deep", path.to_str().unwrap()])
             .assert()
             .success();
@@ -2577,6 +2643,7 @@ fn fmt_check_succeeds_for_canonical_deep() {
     let path = dir.path().join("program.dp");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", hello_tensor_example().to_str().unwrap()])
         .assert()
         .success()
@@ -2587,6 +2654,7 @@ fn fmt_check_succeeds_for_canonical_deep() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--check"])
         .assert()
         .success();
@@ -2600,12 +2668,14 @@ fn fmt_check_succeeds_for_canonical_surf() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--inplace"])
         .assert()
         .success();
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--check"])
         .assert()
         .success();
@@ -2622,6 +2692,7 @@ fn fmt_check_accepts_trailing_newline_terminated_canonical_surf() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--check"])
         .assert()
         .success();
@@ -2638,6 +2709,7 @@ fn fmt_check_fails_for_noncanonical_deep() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--check"])
         .assert()
         .failure()
@@ -2652,6 +2724,7 @@ fn fmt_rejects_check_and_inplace_together() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--check", "--inplace"])
         .assert()
         .failure()
@@ -2668,6 +2741,7 @@ fn surf_default_collapses_load_program_into_typed_def() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .success()
@@ -2686,6 +2760,7 @@ fn surf_verbose_preserves_debug_style_annotations() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["surf", path.to_str().unwrap(), "--verbose"])
         .assert()
         .success()
@@ -2706,6 +2781,7 @@ fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .success()
@@ -2724,6 +2800,7 @@ fn phase3e_pipe_first_acceptance_oracle() {
 
     let deep = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", surf_path.to_str().unwrap()])
         .assert()
         .success()
@@ -2734,6 +2811,7 @@ fn phase3e_pipe_first_acceptance_oracle() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["surf", deep_path.to_str().unwrap()])
         .assert()
         .success()
@@ -2755,6 +2833,7 @@ fn deep_annotate_emits_type_metadata_on_fn() {
     // Default (no --annotate) should leave fn meta empty.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", surf_path.to_str().unwrap()])
         .assert()
         .success()
@@ -2763,6 +2842,7 @@ fn deep_annotate_emits_type_metadata_on_fn() {
     // --annotate should thread the inferred type onto the fn node.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", "--annotate", surf_path.to_str().unwrap()])
         .assert()
         .success()
@@ -2779,6 +2859,7 @@ fn reef_init_scaffolds_valid_package() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "init",
@@ -2796,6 +2877,7 @@ fn reef_init_scaffolds_valid_package() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success();
@@ -2809,6 +2891,7 @@ fn reef_build_emits_shell_and_archive() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
@@ -2831,6 +2914,7 @@ fn phase3a_reef_std_acceptance_oracle() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -2872,6 +2956,7 @@ def main(
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -2880,6 +2965,7 @@ def main(
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
@@ -2911,6 +2997,7 @@ fn reef_check_accepts_sig_only_shell_imports() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -2946,6 +3033,7 @@ def main(path: string) -> string =
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -3012,6 +3100,7 @@ def main(x: f32) -> f32 = shared(x)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success()
@@ -3052,6 +3141,7 @@ def hidden(x: f32) -> f32 = x
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", dep_pkg.to_str().unwrap()])
         .assert()
@@ -3109,6 +3199,7 @@ def main(x: f32) -> f32 = hidden(x)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -3136,6 +3227,7 @@ fn build_creates_missing_output_directory() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             mnist_example().to_str().unwrap(),
@@ -3163,6 +3255,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3191,6 +3284,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3207,6 +3301,7 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3243,6 +3338,7 @@ fn build_hip_accepts_symbolic_softmax() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3273,6 +3369,7 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3302,6 +3399,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3329,6 +3427,7 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "hip"])
         .assert()
         .failure()
@@ -3351,6 +3450,7 @@ fn build_hip_rejects_pad_lowering_without_panic() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "hip"])
         .assert()
         .failure()
@@ -3364,6 +3464,7 @@ fn build_hip_creates_missing_output_directory_and_reports_runtime_path() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             mnist_example().to_str().unwrap(),
@@ -3394,6 +3495,7 @@ fn build_hip_mnist_emits_fused_kernels_and_launches() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             mnist_example().to_str().unwrap(),
@@ -3429,6 +3531,7 @@ fn build_hip_multidef_tensor_entry_uses_single_entry_abi() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -3466,6 +3569,7 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             source.to_str().unwrap(),
@@ -3614,6 +3718,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", path.to_str().unwrap()])
         .assert()
         .success()
@@ -3641,6 +3746,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap(), "--inplace"])
         .assert()
         .success();
@@ -3665,6 +3771,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--desugar", path.to_str().unwrap()])
         .assert()
         .success()
@@ -3682,6 +3789,7 @@ fn surf_rejects_internal_macro_tags_in_deep_input() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -3699,6 +3807,7 @@ fn fmt_rejects_internal_macro_tags_in_deep_input() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["fmt", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -3713,6 +3822,7 @@ fn build_rejects_gpu_device_region_for_c_target() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "c"])
         .assert()
         .failure()
@@ -3723,6 +3833,7 @@ fn build_rejects_gpu_device_region_for_c_target() {
 fn tide_quit_exits_cleanly() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .arg("tide")
         .write_stdin(":quit\n")
         .assert()
@@ -3734,6 +3845,7 @@ fn tide_quit_exits_cleanly() {
 fn tide_serve_help_is_available() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["tide", "serve", "--help"])
         .assert()
         .success()
@@ -3745,6 +3857,7 @@ fn tide_serve_help_is_available() {
 fn tide_mcp_help_is_available() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["tide", "mcp", "--help"])
         .assert()
         .success()
@@ -3755,6 +3868,7 @@ fn tide_mcp_help_is_available() {
 fn tide_lsp_help_is_available() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["tide", "lsp", "--help"])
         .assert()
         .success()
@@ -3765,6 +3879,7 @@ fn tide_lsp_help_is_available() {
 fn tide_lsp_stdio_flag_is_accepted_and_exits_on_eof() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["tide", "lsp", "--stdio"])
         .assert()
         .success();
@@ -3774,6 +3889,7 @@ fn tide_lsp_stdio_flag_is_accepted_and_exits_on_eof() {
 fn cove_help_is_available() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["cove", "--help"])
         .assert()
         .success()
@@ -3785,6 +3901,7 @@ fn cove_help_is_available() {
 fn cove_reports_missing_file_before_terminal_error() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["cove", "--file", "/definitely/missing/chelis-file.ch"])
         .assert()
         .failure()
@@ -3795,6 +3912,7 @@ fn cove_reports_missing_file_before_terminal_error() {
 fn cove_requires_interactive_terminal_for_valid_launch() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["cove", "--file", hello_tensor_example().to_str().unwrap()])
         .assert()
         .failure()
@@ -3838,6 +3956,7 @@ fn vscode_grammars_exist_and_parse_as_json() {
 fn validate_requires_exactly_one_mode() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", hello_tensor_example().to_str().unwrap()])
         .assert()
         .failure()
@@ -3850,6 +3969,7 @@ fn validate_requires_exactly_one_mode() {
 fn validate_surf_accepts_executable_example() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "validate",
             "--surf",
@@ -3864,6 +3984,7 @@ fn validate_surf_accepts_executable_example() {
 fn validate_desugar_accepts_executable_example() {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "validate",
             "--desugar",
@@ -3881,6 +4002,7 @@ fn validate_deep_accepts_canonical_deep_output() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", hello_tensor_example().to_str().unwrap()])
         .assert()
         .success()
@@ -3891,6 +4013,7 @@ fn validate_deep_accepts_canonical_deep_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", deep_path.to_str().unwrap()])
         .assert()
         .success()
@@ -3904,6 +4027,7 @@ fn validate_deep_accepts_flat_canonical_output() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
         .assert()
         .success()
@@ -3914,6 +4038,7 @@ fn validate_deep_accepts_flat_canonical_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", deep_path.to_str().unwrap()])
         .assert()
         .success()
@@ -3924,6 +4049,7 @@ fn validate_deep_accepts_flat_canonical_output() {
 fn deep_defaults_to_pretty_output_and_flat_flag_preserves_flat_per_form_rendering() {
     let pretty = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", hello_tensor_example().to_str().unwrap()])
         .assert()
         .success()
@@ -3938,6 +4064,7 @@ fn deep_defaults_to_pretty_output_and_flat_flag_preserves_flat_per_form_renderin
 
     let flat = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", "--flat", hello_tensor_example().to_str().unwrap()])
         .assert()
         .success()
@@ -3959,6 +4086,7 @@ fn deep_flat_keeps_top_level_forms_separated() {
 
     let flat = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", "--flat", surf_path.to_str().unwrap()])
         .assert()
         .success()
@@ -3988,6 +4116,7 @@ fn validate_deep_accepts_dotted_module_deep_output() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["deep", surf_path.to_str().unwrap()])
         .assert()
         .success()
@@ -3998,6 +4127,7 @@ fn validate_deep_accepts_dotted_module_deep_output() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", deep_path.to_str().unwrap()])
         .assert()
         .success()
@@ -4012,6 +4142,7 @@ fn validate_surf_rejects_malformed_operator_chain() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--surf", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -4029,6 +4160,7 @@ fn validate_surf_accepts_semicolon_block_and_axis_identifier() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--surf", path.to_str().unwrap()])
         .assert()
         .success()
@@ -4043,6 +4175,7 @@ fn validate_desugar_accepts_dotted_module_paths() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--desugar", path.to_str().unwrap()])
         .assert()
         .success()
@@ -4057,6 +4190,7 @@ fn validate_deep_rejects_unknown_tag() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -4071,6 +4205,7 @@ fn validate_deep_rejects_invalid_effects_children() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -4087,6 +4222,7 @@ fn validate_deep_rejects_invalid_resource_arity() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
@@ -4100,6 +4236,7 @@ fn reef_book_workflow_commands_are_valid() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "init",
@@ -4114,6 +4251,7 @@ fn reef_book_workflow_commands_are_valid() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
@@ -4140,6 +4278,7 @@ fn target_metal_emits_mm_header_and_runtime_artifacts() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             src.to_str().unwrap(),
@@ -4191,6 +4330,7 @@ fn target_metal_unknown_target_message_lists_metal() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "vulkan"])
         .assert()
         .failure()
@@ -4213,6 +4353,7 @@ fn target_metal_rejects_pad() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
@@ -4235,6 +4376,7 @@ fn target_metal_rejects_shrink() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
@@ -4251,6 +4393,7 @@ fn target_metal_rejects_f64_precision() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
@@ -4267,6 +4410,7 @@ fn target_metal_rejects_cpu_resource_region() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["build", path.to_str().unwrap(), "--target", "metal"])
         .assert()
         .failure()
@@ -4287,6 +4431,7 @@ fn target_metal_accepts_gpu_resource_region() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),

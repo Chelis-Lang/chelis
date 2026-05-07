@@ -238,6 +238,7 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
         .expect("run chelis eval");
@@ -270,6 +271,7 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
         .expect("run chelis eval");
@@ -307,6 +309,7 @@ fn cmd_eval_reef_package_loose_snippet_via_cwd_matches_baseline() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&root)
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()

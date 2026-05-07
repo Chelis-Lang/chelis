@@ -71,6 +71,7 @@ fn stage_fixture(scratch_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     copy_dir_recursive(&package_std(), &std_staging);
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_staging.to_str().unwrap()])
         .assert()
@@ -85,6 +86,7 @@ fn pseudo_nautilus_chelis_test_all_green() {
     let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-green");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "tests/"])
@@ -109,6 +111,7 @@ fn pseudo_nautilus_chelis_test_json_all_pass() {
     let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-json");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "--json", "tests/"])
@@ -157,6 +160,7 @@ fn pseudo_nautilus_chelis_test_filter_picks_single_test() {
     let (_dir, pkg, reef_home) = stage_fixture("pseudo-nautilus-filter");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&pkg)
         .args(["test", "--filter", "erf_symmetry", "tests/"])

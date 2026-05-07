@@ -440,6 +440,7 @@ fn oracle_happy_path_via_lib_and_cli() {
     let cli_registry = dir.path().join("cli-reef-home");
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &cli_registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -483,6 +484,7 @@ fn oracle_byte_equality_with_from_monorepo() {
     // assert_cmd spawns a child process.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &mono_reg)
         .args([
             "reef",
@@ -1250,6 +1252,7 @@ fn phaseA_item6_cli_rejects_both_sources_set() {
     // arg-parse time, before any work runs.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -1270,6 +1273,7 @@ fn phaseA_item6_cli_rejects_positional_packages_with_from_github() {
     // surface a clear error rather than silently discard them.
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("GITHUB_TOKEN", "x")
         .env("PATH", "")
         .env("CHELIS_REEF_GITHUB_BASE_API", "http://localhost:9")
@@ -1290,6 +1294,7 @@ fn phaseA_item6_help_lists_from_github_flag() {
     let _g = file_lock();
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "install", "--help"])
         .assert()
         .success()
@@ -1338,6 +1343,7 @@ fn phaseA_real_github_manual_gate() {
     let expected_stdout = format!("Installed nautilus {MANUAL_GATE_NAUTILUS_VERSION}");
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
         .env("GITHUB_TOKEN", token)
         .args(["reef", "install", "--from-github", spec.as_str()])

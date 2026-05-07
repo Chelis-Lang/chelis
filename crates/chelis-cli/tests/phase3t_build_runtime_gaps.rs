@@ -80,6 +80,7 @@ fn build_and_run(reef_home: &Path, app_pkg: &Path) -> String {
     let out_dir = app_pkg.join("out");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args([

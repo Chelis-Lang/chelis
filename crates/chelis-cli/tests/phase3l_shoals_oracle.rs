@@ -101,6 +101,7 @@ fn phase3l_shoals_oracle() {
     // 1. `chelis check src/pricing.ch` returns score 1.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&shoals)
         .args(["check", "src/pricing.ch"])
         .assert()
@@ -145,6 +146,7 @@ mc_seed42_b = with seed(42) {
     // of wall-clock headroom on slower CI.
     let eval_assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&shoals)
         .args(["eval", "--file", driver_path.to_str().unwrap()])
         .timeout(std::time::Duration::from_secs(300))

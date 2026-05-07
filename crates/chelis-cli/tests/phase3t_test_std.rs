@@ -29,6 +29,7 @@ use common::{make_app, write_file};
 fn assert_check_clean(reef_home: &Path, app_pkg: &Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -41,6 +42,7 @@ fn assert_check_clean(reef_home: &Path, app_pkg: &Path) {
 fn assert_eval_succeeds(reef_home: &Path, app_pkg: &Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args([
@@ -56,7 +58,8 @@ fn assert_eval_succeeds(reef_home: &Path, app_pkg: &Path) {
 /// substring in `stderr_contains` appears on stderr.
 fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&str]) {
     let mut cmd = Command::cargo_bin("chelis").expect("binary");
-    cmd.env("CHELIS_REEF_HOME", reef_home)
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(app_pkg)
         .args([
             "eval",
@@ -504,6 +507,7 @@ def g() -> unit ! {} = assert_true(true, "x")
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -531,6 +535,7 @@ def h() -> unit ! {} = fail("msg")
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -560,6 +565,7 @@ ran = test_bad_tol()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -569,6 +575,7 @@ ran = test_bad_tol()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -601,6 +608,7 @@ ran = test_shape_bad()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -610,6 +618,7 @@ ran = test_shape_bad()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([

@@ -90,6 +90,7 @@ pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
     copy_dir_recursive(&package_std(), &std_pkg);
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -124,6 +125,7 @@ chelis-std = {{ version = "0.2.0" }}
     .expect("write warm main.ch");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&warm_app)
         .args(["check", warm_app.join("src/main.ch").to_str().unwrap()])

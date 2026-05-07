@@ -132,6 +132,7 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         // Crash only the worker whose --rel-display contains "crash.ch".
@@ -220,6 +221,7 @@ def test_ok() -> unit = test_assert(true, "should still run")
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         // Only one of the two — must NOT abort. Use a substring that
         // would otherwise match (so the failure is the gate's behavior,
@@ -279,6 +281,7 @@ def test_ok() -> unit = test_assert(true, "sibling still runs")
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         // Use a generous timeout so we are clearly catching a crash, not a
         // timeout-induced FAIL.
@@ -367,6 +370,7 @@ this is not valid chelis syntax at all !!
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .args(["test", "--filter", "test_foo", "tests/"])
         .output()
@@ -445,6 +449,7 @@ this is not valid chelis syntax at all !!
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .args(["test", "tests/"])
         .output()
@@ -489,6 +494,7 @@ def test_three() -> unit = test_assert(true, "third never runs because worker ab
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_ABORT_AFTER_TEST", "test_two")

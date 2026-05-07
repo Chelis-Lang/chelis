@@ -73,6 +73,7 @@ fn worker_decodes_compiled_context_from_env_var_and_runs_tests() {
 
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .args(["test", "tests/"])
         .assert()
@@ -106,6 +107,7 @@ fn worker_without_env_var_falls_back_to_reef_graph_path() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         // Explicitly clear the env var so this test is bulletproof
         // against test-runner inheritance.
@@ -153,6 +155,7 @@ fn worker_errors_when_compiled_context_path_is_missing() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env(
             "CHELIS_TEST_COMPILED_CONTEXT",
@@ -205,6 +208,7 @@ fn worker_errors_when_compiled_context_bytes_are_corrupt() {
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env("CHELIS_TEST_COMPILED_CONTEXT", &bad_path)
         .args([
@@ -260,6 +264,7 @@ fn parent_removes_compiled_context_tempfile_on_normal_exit() {
 
     let _ = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env("CHELIS_TEST_COMPILED_CONTEXT_TMPDIR", private_tmpdir.path())
         .args(["test", "tests/"])

@@ -100,6 +100,7 @@ touch_gqa_bcast = gqa_broadcast_kv
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -133,6 +134,7 @@ broadcast_kv = gather(kv_src, group_map, 0)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -162,6 +164,7 @@ def bad_seqlen(q: tensor[3, 4, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32],
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -186,6 +189,7 @@ def bad_headdim(q: tensor[4, 8, f32], k: tensor[4, 4, f32], v: tensor[4, 4, f32]
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -210,6 +214,7 @@ def bad_group_map(pool: tensor[1, 4, 4, f32], gm: tensor[2, 3, int64]) -> tensor
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -234,6 +239,7 @@ def bad_channels(x: tensor[1, 4, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tens
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -258,6 +264,7 @@ def bad_kernel_len(x: tensor[1, 4, 1, 16, f32], k: tensor[8, 4, 1, 5, f32]) -> t
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])

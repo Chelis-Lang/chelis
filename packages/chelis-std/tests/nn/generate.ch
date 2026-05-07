@@ -1,9 +1,11 @@
 module Std.Tests.Nn.Generate
 import Std.Nn.Generate (KVCache, generate)
 import Std.Test (assert_eq_int)
-def keep_cache[p](cache: Option[KVCache[p]]) -> KVCache[p] = match cache with {
-  | Some(value) => value
-  | None => KVCache([])
+def keep_cache[p](cache: Option[KVCache[p]]) -> KVCache[p] = {
+  match cache with {
+    | Some(value) => value
+    | None => KVCache([])
+  }
 }
 def model_always_token_0[batch, seq](input_ids: tensor[batch, seq, int64], cache: Option[KVCache[tensor[kv, f32]]]) = {
   logits = (pad_sequences_to([[cast(10.0, f32), cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]], cast(4, int64), cast(0.0, f32)) : tensor[1, 4, f32])

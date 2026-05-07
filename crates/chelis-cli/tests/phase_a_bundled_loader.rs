@@ -143,6 +143,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -176,6 +177,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -216,6 +218,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -228,6 +231,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -252,6 +256,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -265,6 +270,7 @@ fn phaseA_bundled_chelis_std_loader_property_oracle() {
 
         Command::cargo_bin("chelis")
             .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env("CHELIS_REEF_HOME", &reef_home)
             .args(["reef", "build", pkg_root.to_str().unwrap()])
             .assert()
@@ -287,6 +293,7 @@ fn phaseA_item1_negative_parity_explicit_version_mismatch() {
 
     let assert_out = Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "build", pkg_root.to_str().unwrap()])
         .assert()

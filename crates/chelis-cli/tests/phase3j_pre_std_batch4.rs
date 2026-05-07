@@ -74,6 +74,7 @@ fn make_app(dir_name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -190,6 +191,7 @@ tn_bounds_ok = and(lte(tn_max, cast(0.5, f32)), gte(tn_min, cast(-0.5, f32)))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -199,6 +201,7 @@ tn_bounds_ok = and(lte(tn_max, cast(0.5, f32)), gte(tn_min, cast(-0.5, f32)))
 
     let output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -254,6 +257,7 @@ bad = kl_divergence(p, q)
     );
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -282,6 +286,7 @@ bad = bce_with_logits(z, y)
     );
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([

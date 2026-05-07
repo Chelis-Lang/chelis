@@ -97,6 +97,7 @@ def rms_scale[n](x: tensor[n, f32], eps: f32) -> f32 = {
     fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -135,6 +136,7 @@ silu_out = forward(xs)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -169,6 +171,7 @@ gelu_out = forward(xs)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -207,6 +210,7 @@ rms_scaled = forward(xs, scaled_gain, cast(0.000001, f32))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -250,6 +254,7 @@ rms_out = forward(xs, wrong_gain, cast(0.000001, f32))
     // silent zero.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([

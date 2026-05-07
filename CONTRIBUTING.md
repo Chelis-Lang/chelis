@@ -48,3 +48,26 @@ hand-maintained copies.
 - Update tests with behavior changes.
 - Update the owning doc when a public language or compiler behavior changes.
 - Do not revert unrelated work already present in the repo.
+
+## Style Gate (every build, every PR)
+
+`chelis build`, `chelis check`, `chelis validate`, and
+`chelis eval --file` enforce `chelis fmt --check` and `chelis lint --check`
+on the input file before the front-end pipeline runs. Style failures
+block the build by default. Before opening a PR:
+
+1. Run `chelis fmt --inplace path/to/file.ch` (or `.dp`) on every file
+   you touched, or rely on your editor formatter.
+2. Run `chelis lint --check` to surface naming/style issues.
+3. Re-run `chelis check` and `chelis build` on the affected entry point.
+
+The escape hatch `--allow-style-violations` exists for local emergency
+builds and migrations. CI must not pass it. The
+`CHELIS_STYLE_GATE_DISABLE=1` environment variable bypasses the gate
+entirely; it is reserved for the integration-test corpus and is not
+appropriate for production builds.
+
+The style guide that the gate enforces lives in
+`spec/01-nomenclature.md`. The lint rules that codify it live under
+`crates/chelis-lint/src/rules/`. The user-facing CLI documentation
+lives at `docs/book/src/cli.md`.

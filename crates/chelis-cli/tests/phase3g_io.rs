@@ -103,6 +103,7 @@ fn reef_std_io_module_checks_and_builds() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -131,6 +132,7 @@ size_view = print(size)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -139,6 +141,7 @@ size_view = print(size)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",
@@ -166,6 +169,7 @@ fn reef_std_io_module_rejects_missing_export() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -184,6 +188,7 @@ x = missing_symbol("foo")
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -204,6 +209,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -211,6 +217,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
@@ -220,6 +227,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -235,6 +243,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args([
@@ -276,6 +285,7 @@ fn reef_std_json_module_fails_loudly_on_malformed_input() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -298,6 +308,7 @@ view = print(cfg)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "eval",
@@ -323,6 +334,7 @@ fn reef_std_json_try_module_reports_none_on_malformed_input() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -348,6 +360,7 @@ view = print(ok)
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "eval",
@@ -378,6 +391,7 @@ fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -400,6 +414,7 @@ view = print(rows)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "eval",
@@ -425,6 +440,7 @@ fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -450,6 +466,7 @@ view = print(ok)
 
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "eval",
@@ -478,6 +495,7 @@ fn reef_std_parquet_module_resolves_and_type_checks() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -496,6 +514,7 @@ def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -514,6 +533,7 @@ fn reef_std_parquet_module_rejects_missing_export() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -532,6 +552,7 @@ x = nonexistent_parquet_fn("foo")
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -551,6 +572,7 @@ fn reef_std_parquet_write_resolves_and_type_checks() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -572,6 +594,7 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -591,6 +614,7 @@ fn reef_std_parquet_module_builds_cleanly() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
@@ -613,6 +637,7 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
@@ -621,6 +646,7 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .args([
             "build",

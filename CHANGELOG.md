@@ -6,6 +6,34 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — style gate on `chelis build` / `chelis check` / `chelis validate` / `chelis eval --file`
+
+The four CLI ingestion paths now enforce `chelis fmt --check` and the
+full `chelis lint` rule set on the user-supplied source file before
+the front-end pipeline runs. Non-canonical formatting and any lint
+violation fail the command with a one-line-per-issue diagnostic and
+an actionable hint (`run \`chelis fmt --inplace <file>\` to fix`).
+
+The new `--allow-style-violations` flag bypasses the gate with a
+stderr warning. CI must not pass it; it exists for emergency builds
+and one-off migrations. The opaque environment variable
+`CHELIS_STYLE_GATE_DISABLE=1` does the same and is reserved for
+integration-test harnesses that synthesize ad-hoc Surf to exercise
+type/effect/linearity behavior independently of style.
+
+`chelis eval EXPR` (the inline-expression form) is unchanged — the
+expression has no on-disk source to check.
+
+### Added — four new lint rules to reflect §3 and §10.1 of the style guide
+
+- `surf-type-pascal-case` (§3.1): `type Name` declarations must be PascalCase.
+- `surf-value-snake-case` (§3.2): `def name` declarations must be snake_case (no leading underscores, no uppercase letters).
+- `surf-test-name-prefix` (§10.1): functions carrying the `Test` effect must be named `test_*` or `example_*`.
+- `surf-def-arrow-form` (§3.5, new spec section): `def name(params) -> T = expr` is the canonical signature form; the `def name(params) : T = expr` colon variant is flagged.
+
+The total `chelis lint` rule set is now 13. `spec/01-nomenclature.md`
+gains a new §3.5 documenting the def-arrow-form preference.
+
 ## [0.6.1] — 2026-05-06
 
 Bootstrap-list patch. Updates DEFAULT_BOOTSTRAP_LIST in

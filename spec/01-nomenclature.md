@@ -266,6 +266,27 @@ Surf's lexer.
 Examples: `seq`, `vocab`, `classes`, `batch`, `out_dim`, `hidden`,
 `features`, `n`, `b`, `m`, `k`, `p`.
 
+### 3.5 Function definition return-type syntax
+
+**Rule:** When a `def` carries an explicit return type, write it with the
+arrow form `def name(params) -> T = expr`. Do not use the colon form
+`def name(params) : T = expr`.
+
+```chelis
+def softmax(x: Tensor[batch, vocab, f32]) -> Tensor[batch, vocab, f32] =
+  exp(x) / sum(exp(x), dim = vocab)
+
+def loss(p: f32, q: f32) -> f32 = -(p * log(q))
+```
+
+Both forms parse, but the arrow is the canonical surface choice
+ecosystem-wide: it visually pairs with parameter `:` annotations without
+overloading the colon for two unrelated jobs (parameter binding vs.
+function-result type), and it matches the Surf Style Guide bullet in
+`AGENTS.md` / `CLAUDE.md`. The lint rule `surf-def-arrow-form` enforces
+this; `chelis fmt` rewrites colon-form decls to arrow-form on next
+canonicalization.
+
 ---
 
 ## 4. Identifier conventions: Rust
@@ -836,21 +857,36 @@ The two alternatives considered:
 
 The `chelis lint` tool reads source files and reports violations of
 the settled conventions in §§2–10 with `file:line` references, plus
-the Deep user-symbol rule from §1.5 / §11.1. The lint runs as a CI
-gate on every repo. Violations are blocking unless explicitly waived
-in the style guide (e.g., the mdBook exception in §8.5).
+the Deep user-symbol rule from §1.5 / §11.1 and the def-arrow-form
+rule from §3.5. The lint runs both as a standalone CI gate AND as an
+implicit per-build gate: `chelis build`, `chelis check`,
+`chelis validate`, and `chelis eval --file` invoke `chelis fmt --check`
+plus the relevant `chelis lint` rules on the input file before
+running the front-end pipeline. Violations are blocking unless
+explicitly waived in the style guide (e.g., the mdBook exception in
+§8.5).
 
 The lint is the persistent artifact: it prevents drift after a
 cleanup pass. Without the lint, fixing today's outliers does not
-prevent tomorrow's. CI invokes it via:
+prevent tomorrow's. CI invokes it directly via:
 
 ```
-cargo run -p chelis-lint --
+chelis lint --check
 ```
 
 A successful run reports zero violations across every file in the
 repo. A failing run lists the violations, each with the rule
 reference and the file:line of the offending identifier or filename.
+
+The build-time gate uses two escape hatches, neither of which CI may
+use:
+
+- `--allow-style-violations` — per-command opt-out emitted to stderr
+  as a bypass warning. Reserved for emergency local builds and
+  one-off migrations.
+- `CHELIS_STYLE_GATE_DISABLE=1` — process-wide opt-out. Reserved for
+  the integration-test corpus (tests that synthesize ad-hoc Surf to
+  exercise type/effect/linearity behavior independently of style).
 
 Exception entries inside the lint must carry a rule-id cross-reference
 to a section of this document, not free-form prose. The schema:

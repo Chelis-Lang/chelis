@@ -139,6 +139,7 @@ fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     // Cold: first run pays the full compile and writes the cache.
     let cold = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
@@ -163,6 +164,7 @@ fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     // Warm: second run must hit the cache and produce identical stdout.
     let warm = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
@@ -211,6 +213,7 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
     // Cold #1.
     let cold1 = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
@@ -228,6 +231,7 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
     // Cold #2: same eval, but the underlying library changed → new hash → new cache file.
     let cold2 = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .args(["eval", "--file", entry_path.to_str().unwrap()])
         .output()
@@ -283,6 +287,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     // Cold: full compile and save.
     let cold = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .current_dir(&root)
         .args(["test", "tests/"])
@@ -305,6 +310,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     // Warm: cache hit must NOT create a new cache file.
     let warm = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", reef_home.path())
         .current_dir(&root)
         .args(["test", "tests/"])

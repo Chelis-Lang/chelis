@@ -46,6 +46,7 @@ bench = answer()
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&app_pkg)
         .args(["eval", "--file", external.to_str().unwrap()])
         .assert()

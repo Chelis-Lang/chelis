@@ -814,6 +814,7 @@ fn oracle_cli_surface_dispatches_to_install_bootstrap() {
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
         .env("CHELIS_REEF_GITHUB_BASE_API", harness.uri())
         .env("GITHUB_TOKEN", "unit-test-token")
@@ -839,6 +840,7 @@ fn oracle_cli_surface_dispatches_to_install_bootstrap() {
 fn oracle_cli_mutex_with_from_github_and_from_monorepo() {
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -852,6 +854,7 @@ fn oracle_cli_mutex_with_from_github_and_from_monorepo() {
 
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "reef",
             "install",
@@ -1212,6 +1215,7 @@ fn phaseA_item7_help_lists_bootstrap_flag() {
     let _g = file_lock();
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["reef", "install", "--help"])
         .assert()
         .success()
@@ -1247,6 +1251,7 @@ fn phaseA_item7_real_bootstrap_manual_gate() {
     let registry = dir.path().join("reef-home");
     Command::cargo_bin("chelis")
         .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &registry)
         .env("GITHUB_TOKEN", token)
         .args(["reef", "install", "--bootstrap"])
