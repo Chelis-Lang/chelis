@@ -4445,3 +4445,83 @@ fn target_metal_accepts_gpu_resource_region() {
         .assert()
         .success();
 }
+
+/// Bucket 4a regression: `chelis check` and `chelis build --target c`
+/// must agree on the shape of `expand(b: tensor[1, f32], 0, count)`.
+///
+/// The typer is canonical and accepts `[count, 1]` (INSERT semantics) for
+/// the linreg-style bias broadcast. The IR evaluator agrees (it consults
+/// the IR node's output type). Previously the host runtime
+/// (`tensor_expand_host` in `chelis-compiler-api`) silently picked the
+/// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
+/// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
+/// typer accepted — the divergence reproduced from the
+/// `examples/linreg.ch` shape (`expand(b, 0, 64)` over a rank-1 bias).
+#[test]
+fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("linreg_expand_bias.ch");
+    let out_dir = dir.path().join("linreg-expand-bias-out");
+    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // rank-2 [4, 1] output. This is the exact shape pattern the
+    // `examples/linreg.ch` predict/loss helpers rely on
+    // (`expand(b, 0, 64)` where `b: tensor[1, f32]`).
+    write_file(
+        &path,
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4)\n\
+         result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
+    );
+
+    // `chelis check` must accept the rank-2 annotation as canonical.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept the rank-2 expand annotation as canonical: {check_stdout}",
+    );
+
+    // `chelis build --target c` must lower without error.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("linreg_expand_bias.c")).expect("generated c");
+    // Output ndim=2 and a [4, 1] shape literal must appear in the
+    // generated allocation; previously the runtime divergence caused
+    // the C emit to render the wrong rank.
+    assert!(
+        generated.contains("(int[]){ 4, 1 }"),
+        "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
+    );
+
+    // `chelis test`/`chelis eval` must produce the same shape as the
+    // typer (rank-2 [4, 1] with all entries equal to the singleton
+    // value). The host-runtime evaluator path is exercised by the
+    // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
+    // in `chelis-compiler-api`; this CLI test pins the typer + C emit
+    // legs of the agreement.
+    let status = gcc_compile_generated(&out_dir, "linreg_expand_bias.c");
+    assert!(
+        status.success(),
+        "gcc compile of generated C must succeed; status {status}",
+    );
+}
