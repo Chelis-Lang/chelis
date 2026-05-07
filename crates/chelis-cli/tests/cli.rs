@@ -4446,6 +4446,99 @@ fn target_metal_accepts_gpu_resource_region() {
         .success();
 }
 
+/// Bucket 4b regression: `chelis check`, `chelis eval --file`, and
+/// `chelis build --target c` (compiled + run) must all agree on
+/// `to_tensor([[...], [...]])` for 2-D nested-list literals.
+///
+/// Previously the typer rejected the form with `to_tensor expects
+/// numeric or bool List elements, got List f32`, so the case never made
+/// it past `chelis check`. The fix extends the typer to recurse through
+/// nested `List<...>` wrappers and reports rank = nesting depth, with
+/// matching support in the host runtime
+/// (`nested_list_to_tensor_data`) and the C runtime
+/// (`chelis_tensor_from_value_list`).
+#[test]
+fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("to_tensor_2d.ch");
+    let out_dir = dir.path().join("to-tensor-2d-out");
+    write_file(
+        &path,
+        "result = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n",
+    );
+
+    // `chelis check` accepts the rank-2 form.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept nested-list to_tensor: {check_stdout}",
+    );
+
+    // `chelis build --target c` lowers and the generated source is
+    // valid C.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Compile + run the generated C and compare its stdout to
+    // `chelis eval --file`. With the runtime support in place, both
+    // paths must print the same shape and data.
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval_text = String::from_utf8(eval_stdout).expect("eval stdout utf8");
+    assert!(
+        eval_text.contains("shape=[2, 2]"),
+        "eval should report rank-2 shape: {eval_text}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "to_tensor_2d.c", "to_tensor_2d");
+    assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("to_tensor_2d"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let run_text = String::from_utf8(run_output.stdout).expect("run stdout utf8");
+    // Eval prints `<tensor>\n`, the compiled binary prints
+    // `<binding-name> = <tensor>\n`. Match the existing
+    // `build_c_runs_top_level_tensor_add_and_matches_eval_output`
+    // convention.
+    assert_eq!(
+        run_text,
+        format!("result = {eval_text}"),
+        "compiled C binary stdout must equal eval stdout for nested-list to_tensor",
+    );
+}
+
 /// Bucket 4a regression: `chelis check` and `chelis build --target c`
 /// must agree on the shape of `expand(b: tensor[1, f32], 0, count)`.
 ///
