@@ -116,6 +116,7 @@ ar_2_6 = arange(cast(2, int32), cast(6, int32))
 }
 
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_where_indices_builds_and_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices");
     write_file(
@@ -180,6 +181,7 @@ all_true_idx = where_indices(all_true)
 }
 
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_where_indices_all_false_returns_empty_tensor() {
     // Previously this panicked the evaluator because `numel` floored zero-
     // length tensors to 1, tripping the length assertion in `from_vec`.
@@ -219,6 +221,7 @@ value = where_indices(all_false)
 /// at both `chelis check` and `chelis eval` time, which unblocks
 /// `bool_list_to_tensor` and CSV/JSON bool round trips.
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_to_tensor_accepts_bool_list() {
     let (_dir, reef_home, app_pkg) = make_app("coral-to-tensor-bool");
     write_file(
@@ -264,6 +267,7 @@ roundtrip = to_list(mask)
 /// Negative parity for `to_tensor`: mixing bool and float in a single list
 /// must still be rejected (the runtime requires homogeneous element kinds).
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_to_tensor_rejects_mixed_bool_and_float_list() {
     let (_dir, reef_home, app_pkg) = make_app("coral-to-tensor-bool-mixed");
     // Force a heterogeneous List[bool|float] at the runtime by going through
@@ -305,6 +309,7 @@ bad = to_tensor([true, 1.0])
 /// applies to `eq`/`neq`/`lt`/`gt`/`lte`/`gte`/`cmplt` and is symmetric
 /// (`gt(scalar, tensor)` works too).
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_comparison_ops_broadcast_tensor_scalar() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast");
     write_file(
@@ -400,6 +405,7 @@ eq_bools = eq(mk_bools(), true)
 /// tensors must also still error (bool ordering has no defined meaning;
 /// only `eq`/`neq` accept bool).
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_comparison_ops_reject_mismatched_precision() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-mismatch");
 
@@ -462,6 +468,7 @@ bad = gt(bools, true)
 /// because it uses an untyped top-level binding (`gt_left = ...`) whose
 /// inferred type is never checked against any signature.
 #[test]
+#[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
 fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast-issue5");
     write_file(

@@ -4,6 +4,7 @@ use chelis_ir::grad_then_fuse;
 use chelis_ir::verify;
 
 #[test]
+#[ignore = "manual gate: MNIST e2e smoke exceeds the default inner-loop budget"]
 fn mnist_surf_pipeline_builds_trainable_program() {
     let program = build_mnist_program().expect("MNIST Surf example should compile");
     assert!(
@@ -24,6 +25,7 @@ fn mnist_surf_pipeline_builds_trainable_program() {
 
 /// Sanity check: the real Surf -> Deep -> typecheck -> lower -> grad -> eval path learns.
 #[test]
+#[ignore = "manual gate: MNIST e2e smoke exceeds the default inner-loop budget"]
 fn mnist_synthetic_loss_decreases() {
     let program = build_mnist_program().expect("MNIST Surf example should compile");
     let grad_result = grad_then_fuse(

@@ -1,6 +1,6 @@
 # Chelis Phase Oracles
 
-`CLAUDE.md` requires that **every phase name one authoritative completion oracle**
+`AGENTS.md` / `CLAUDE.md` requires that **every phase name one authoritative completion oracle**
 ("a single command, a named suite, or a documented manual runner"). This file is the
 canonical index of those oracles. If a phase row is missing, that phase has not yet
 identified a completion oracle and should be treated as a gap, not an implicit pass.
@@ -24,14 +24,14 @@ Status legend:
 | 0e | `cargo test -p chelis-ir` (RISC DAG construction) | `spec/design/chelis_project_plan.md` §0e | default gate |
 | 0f | `cargo test -p chelis-backend-c` (C codegen + numerics) | `spec/design/chelis_project_plan.md` §0f | default gate |
 | 0g | `cargo test -p chelis-ir --test grad` (reverse-mode AD on DAG) | `spec/design/chelis_project_plan.md` §0g | default gate |
-| 0h | `cargo run --release -p chelis-e2e --bin train_mnist -- --epochs 5 --min-acc 0.90` (final test acc 0.9272 on the checked-in path) | `spec/design/chelis_project_plan.md` §0h | manual gate (long-running release runner; default `cargo test --workspace` does **not** run this milestone) |
+| 0h | `cargo run --release -p chelis-e2e --bin train_mnist -- --epochs 5 --min-acc 0.90` (final test acc 0.9272 on the checked-in path); supporting MNIST e2e tests are listed in `docs/manual_gates.md` | `spec/design/chelis_project_plan.md` §0h | manual gate (long-running release runner and MNIST e2e tests; default `cargo test --workspace` does **not** run this milestone) |
 | 0i | `cargo test -p chelis-cli` (Tide v0.1: `tide`, `deep`, `surf`, `fmt`, `eval`) | `spec/design/chelis_project_plan.md` §0i | default gate |
 
 ## Phase 1
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| 1a | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1a_kernel_codegen.md` §Acceptance Oracle | manual gate (HIP hardware) |
+| 1a | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1a_kernel_codegen.md` §Acceptance Oracle | manual gate (HIP hardware; locally runnable per [`local_hip_environment.md`](local_hip_environment.md)) |
 | 1b | `cargo test --workspace` (plus rerun the 1a HIP manual oracle) | `spec/design/phase1b_fusion.md` §Acceptance Oracle | default gate (with HIP rerun as supplement) |
 | 1c | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1c_memory_planning.md` §Acceptance Oracle | manual gate (HIP hardware) |
 | 1d | `cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/phase1d_flattening.md` §Acceptance Oracle | manual gate (HIP hardware) |
@@ -63,31 +63,31 @@ Status legend:
 | 3d | Corpus oracle: `examples/list_foundation.ch`, `examples/dict_foundation.ch`, `examples/iter_foundation.ch` survive `chelis fmt`/`check`/`eval`/`build --target c` and compiled output matches eval. Exercised through `cargo test --workspace` example-corpus tests | `spec/design/chelis_phase3_plan.md` §3d Acceptance Oracle | default gate |
 | 3e | `cargo test -p chelis-cli --test cli phase3e_pipe_first_acceptance_oracle` | `spec/design/chelis_project_plan.md` §3e | default gate |
 | 3f | `skill_suite.rs` validation of every SKILL.md example against the current compiler, plus eval lift on target base models | `spec/design/chelis_phase3_plan.md` §3f Acceptance Oracle | aspirational (post-rest-of-Phase-3) |
-| 3g | `cargo test -p chelis-cli --test phase3g_io phase3g_text_pipeline_acceptance_oracle -- --ignored --exact --nocapture` | `spec/design/chelis_phase3_plan.md` §3g Acceptance Oracle | manual gate (build/link/run text pipeline) |
+| 3g | `cargo test -p chelis-cli --test phase3g_io -- --ignored --nocapture` | `spec/design/chelis_phase3_plan.md` §3g Acceptance Oracle | manual gate (Std.Io/Csv/Json/Parquet checks plus build/link/run text pipeline) |
 | 3h | `cargo test -p chelis-cli --test cli phase3h_numeric_acceptance_oracle -- --ignored --exact --nocapture` | `spec/design/chelis_project_plan.md` §3h | manual gate (numeric build/link oracle) |
-| 3i | `cargo test -p chelis-cli --test phase3i_std` plus `cargo test -p chelis-cli --test phase3i_std reef_std_generate_builds_and_runs_compiled_program -- --ignored --exact --nocapture` | `spec/design/chelis_phase3_plan.md` §3i Acceptance Oracle | default gate for lightweight std checks + manual gate for Generate build/run |
+| 3i | `cargo test -p chelis-cli --test phase3i_std -- --ignored --nocapture` | `spec/design/chelis_phase3_plan.md` §3i Acceptance Oracle | manual gate (Std.Time/Decimal/Schedule/Optim/Generate package acceptance) |
 | 3j-pre | `cargo test -p chelis-cli --test phase3j_pre_std` plus ignored Phase 3j-pre batch/build-path suites in `docs/manual_gates.md` | `spec/design/chelis_project_plan.md` §3j-pre + `phase3j_pre_release.md` | default gate for eval/import/check guards + manual gate for heavyweight build/batch acceptance |
 | 3j | Downstream Nautilus `main` CI green producing the published `v0.1.0` release (commit `20c5553`); the placeholder `phase3j_nautilus_oracle` was retired | `spec/design/chelis_phase3_plan.md` §3j Acceptance Oracle | manual gate (cross-repo CI) |
-| 3k | `cargo test -p chelis-cli phase3k_coral_oracle -- --exact` | `spec/design/chelis_phase3_plan.md` §3k Acceptance Oracle | aspirational (named, not yet implemented) |
+| 3k | `cargo test -p chelis-cli --test coral_prerequisites -- --ignored --nocapture`; named downstream oracle `phase3k_coral_oracle` remains aspirational | `spec/design/chelis_phase3_plan.md` §3k Acceptance Oracle | manual gate (Coral prerequisite/regression acceptance) + aspirational downstream oracle |
 | 3l | `cargo test -p chelis-cli phase3l_shoals_oracle -- --exact` | `spec/design/chelis_phase3_plan.md` §3l Acceptance Oracle | aspirational (named, not yet implemented) |
 | 3m | `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture` | `spec/design/phase3m_rust_runtime_rewrite.md` §Acceptance Oracle | default gate (HIP variant `phase3m_rust_runtime_hip_manual_gate` is `#[ignore]`d) |
 | 3n | `cargo test -p chelis-cli phase3n_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §1.5 Acceptance oracle | aspirational (named, not yet implemented) |
 | 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
-| 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `phase3t_test_smoke.rs` covers the default smoke path; exhaustive Std.Test, build-path, and pseudo-Nautilus suites are manual gates) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + manual gates (exhaustive/std/pseudo suites) + aspirational (downstream test migration) |
+| 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `phase3t_test_smoke.rs` covers the default smoke path; exhaustive Std.Test, decimal failure-path, build-path, and pseudo-Nautilus suites are manual gates) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + manual gates (exhaustive/std/pseudo suites) + aspirational (downstream test migration) |
 
 ## Phase A (Reef Distribution Unblock)
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| A · Item 6 (`--from-github`) | `cargo test -p chelis-cli --test phase_a_item6_from_github phase_a_item6_from_github_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 6 | default gate |
-| A · Item 7 (`--bootstrap`) | `cargo test -p chelis-cli --test phase_a_item7_bootstrap phase_a_item7_bootstrap_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 | default gate |
-| A · Item 8 (auto-fetch during build) | `cargo test -p chelis-cli --test phase_a_item8_autofetch_build phase_a_item8_autofetch_build_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 8 | default gate |
-| A · Item 9 (lockfile remote-origin) | `cargo test -p chelis-cli --test phase_a_item9_lockfile_origin phase_a_item9_lockfile_origin_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 9 | default gate |
-| A · Bundled chelis-std loader | `cargo test -p chelis-cli --test phase_a_bundled_loader phase_a_bundled_chelis_std_loader_property_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 (bundling) + `spec/design/chelis_canonical_reference.md` §5.4 | default gate |
-| A · Real-network end-to-end (Item 6) | `cargo test -p chelis-cli phase_a_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 6 | manual gate (real GitHub + `GITHUB_TOKEN`) |
-| A · Real-network end-to-end (Item 7) | `cargo test -p chelis-cli phase_a_item7_real_bootstrap_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 7 | manual gate (real GitHub + `GITHUB_TOKEN`) |
-| A · Real-network end-to-end (Item 8) | `cargo test -p chelis-cli phase_a_item8_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 8 | manual gate (real GitHub + `GITHUB_TOKEN`) |
-| A · Real-network end-to-end (Item 9) | `cargo test -p chelis-cli phase_a_item9_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 9 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Item 6 (`--from-github`) | `cargo test -p chelis-cli --test phase_a_item6_from_github phaseA_item6_from_github_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 6 | default gate |
+| A · Item 7 (`--bootstrap`) | `cargo test -p chelis-cli --test phase_a_item7_bootstrap phaseA_item7_bootstrap_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 | default gate |
+| A · Item 8 (auto-fetch during build) | `cargo test -p chelis-cli --test phase_a_item8_autofetch_build phaseA_item8_autofetch_build_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 8 | default gate |
+| A · Item 9 (lockfile remote-origin) | `cargo test -p chelis-cli --test phase_a_item9_lockfile_origin phaseA_item9_lockfile_origin_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 9 | default gate |
+| A · Bundled chelis-std loader | `cargo test -p chelis-cli --test phase_a_bundled_loader phaseA_bundled_chelis_std_loader_property_oracle -- --exact` | `spec/design/reef_distribution.md` §Item 7 (bundling) + `spec/design/chelis_canonical_reference.md` §5.4 | default gate |
+| A · Real-network end-to-end (Item 6) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item6_from_github phaseA_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 6 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 7) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item7_bootstrap phaseA_item7_real_bootstrap_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 7 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 8) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item8_autofetch_build phaseA_item8_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 8 | manual gate (real GitHub + `GITHUB_TOKEN`) |
+| A · Real-network end-to-end (Item 9) | `GITHUB_TOKEN=$(gh auth token) cargo test -p chelis-cli --test phase_a_item9_lockfile_origin phaseA_item9_real_github_manual_gate -- --ignored --exact` | `spec/design/reef_distribution.md` §Item 9 | manual gate (real GitHub + `GITHUB_TOKEN`) |
 
 ## Phase M (Metal Backend)
 
@@ -105,7 +105,8 @@ Status legend:
 ## Also See
 
 - [`manual_gates.md`](manual_gates.md) — every `#[ignore]`'d test with its manual command and prerequisite
-- [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory
+- [`/AGENTS.md`](../AGENTS.md) / [`/CLAUDE.md`](../CLAUDE.md) — the agent contract that makes this index mandatory
+- [`local_hip_environment.md`](local_hip_environment.md) — local ROCm/HIP runbook for HIP manual gates
 - [`spec/design/chelis_project_plan.md`](../spec/design/chelis_project_plan.md) — top-level phase ledger
 - [`spec/design/chelis_phase3_plan.md`](../spec/design/chelis_phase3_plan.md) — detailed Phase 3 implementation plan
 - [`spec/design/chelis_metal_backend_plan.md`](../spec/design/chelis_metal_backend_plan.md) — Phase M Metal backend

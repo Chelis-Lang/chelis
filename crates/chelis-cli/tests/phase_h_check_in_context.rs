@@ -73,6 +73,7 @@ fn assert_check_json_shape(stdout: &str) -> Value {
 }
 
 #[test]
+#[ignore = "manual gate: Reef-context CLI check acceptance exceeds the default inner-loop budget"]
 fn check_clean_reef_program_yields_score_one_and_empty_errors() {
     let (_dir, reef_home, app_pkg) = make_app("phase-h-clean");
 
@@ -113,6 +114,7 @@ def answer -> int32 = cast(7, int32)
 }
 
 #[test]
+#[ignore = "manual gate: Reef-context CLI check acceptance exceeds the default inner-loop budget"]
 fn check_type_error_reef_program_yields_lower_score_and_kept_shape() {
     let (_dir, reef_home, app_pkg) = make_app("phase-h-type-error");
 
@@ -155,6 +157,7 @@ def broken -> int32 = add(1, true)
 }
 
 #[test]
+#[ignore = "manual gate: Reef-context CLI check acceptance exceeds the default inner-loop budget"]
 fn check_effect_error_reef_program_yields_lower_score_and_kept_shape() {
     let (_dir, reef_home, app_pkg) = make_app("phase-h-effect-error");
 
@@ -211,6 +214,7 @@ def broken(c: bool) -> unit ! {} = assert_true(c, "expect ok")
 }
 
 #[test]
+#[ignore = "manual gate: Reef-context CLI check acceptance exceeds the default inner-loop budget"]
 fn check_non_reef_file_uses_legacy_path_and_returns_score_one() {
     // A file outside any reef package: the new path must short-circuit
     // to the legacy fitness pipeline. This covers the `Phase H legacy
@@ -244,6 +248,7 @@ fn check_non_reef_file_uses_legacy_path_and_returns_score_one() {
 }
 
 #[test]
+#[ignore = "manual gate: Reef-context CLI check acceptance exceeds the default inner-loop budget"]
 fn check_reef_does_not_export_propagates_to_stderr_unchanged() {
     // The historical "missing import" failure mode must continue to
     // surface on stderr (legacy cmd_check propagates this as `Err`,

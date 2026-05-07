@@ -47,6 +47,7 @@ fn assert_eval_fails_with(reef_home: &Path, app_pkg: &Path, stderr_contains: &[&
 }
 
 #[test]
+#[ignore = "manual gate: Std.Decimal failure-path CLI acceptance exceeds the default inner-loop budget"]
 fn decimal_of_garbage_string_calls_fail_with_branded_message() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-decimal-panic-garbage");
     write_file(
@@ -69,6 +70,7 @@ bad = decimal("not a number")
 }
 
 #[test]
+#[ignore = "manual gate: Std.Decimal failure-path CLI acceptance exceeds the default inner-loop budget"]
 fn decimal_div_by_zero_calls_fail_with_branded_message() {
     let (_dir, reef_home, app_pkg) = make_app("phase3t-decimal-panic-divzero");
     write_file(

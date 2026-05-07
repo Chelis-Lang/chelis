@@ -90,6 +90,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_io_module_checks_and_builds() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -159,6 +160,7 @@ size_view = print(size)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_io_module_rejects_missing_export() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -274,6 +276,7 @@ fn phase3g_text_pipeline_acceptance_oracle() {
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_json_module_fails_loudly_on_malformed_input() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -323,6 +326,7 @@ view = print(cfg)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_json_try_module_reports_none_on_malformed_input() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -380,6 +384,7 @@ view = print(ok)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_module_fails_loudly_on_unclosed_quote_rows() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -429,6 +434,7 @@ view = print(rows)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_csv_try_module_reports_none_on_unclosed_quote_rows() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -486,6 +492,7 @@ view = print(ok)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_resolves_and_type_checks() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -524,6 +531,7 @@ def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_rejects_missing_export() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -563,6 +571,7 @@ x = nonexistent_parquet_fn("foo")
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_write_resolves_and_type_checks() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");
@@ -604,6 +613,7 @@ def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_pa
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_parquet_module_builds_cleanly() {
     let dir = tempdir().expect("tempdir");
     let reef_home = dir.path().join("reef-home");

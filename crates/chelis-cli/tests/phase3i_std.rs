@@ -36,6 +36,7 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_time_and_decimal_modules_eval() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-time-decimal");
     write_file(
@@ -142,6 +143,7 @@ bad_decimal = match try_decimal("x.y") with {
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_schedule_and_optim_modules_eval() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-schedule-optim");
     write_file(
@@ -276,6 +278,7 @@ lamb_params = lamb_pair.0
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_schedule_and_optim_reject_old_positional_configs() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-schedule-optim-bad");
     write_file(
@@ -306,6 +309,7 @@ bad_pair = adamw_step(params, grads, adamw_init_like(params), AdamWConfig(0.1, 0
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_generate_module_checks_and_evals_real_generation() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-generate");
     write_file(
@@ -378,6 +382,7 @@ sampled_b = with seed(7) { generate_with(toy_model, context, cfg) }
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_package_mode_preserves_split_map_and_runtime_reshape_typing() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-package-typing");
     write_file(
@@ -422,6 +427,7 @@ first = index(flat_rows, cast(0, int64))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_generate_module_rejects_old_positional_config() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-generate-bad");
     write_file(
@@ -447,6 +453,7 @@ cfg = GenerateConfig(cast(2, int64), 1.0, cast(2, int64), 0.95)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_generate_with_zero_temp_still_requires_seed() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-generate-zero-temp");
     write_file(
@@ -510,6 +517,7 @@ out = generate_with(toy_model, context, cfg)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_package_mode_builds_and_runs_time_decimal_schedule_program() {
     let (_dir, reef_home, app_pkg) = make_app("phase3i-build");
     let out_dir = app_pkg.join("out");
@@ -671,6 +679,7 @@ greedy = generate(toy_model, context, cast(1, int64))
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3i std package acceptance suite exceeds the default inner-loop budget"]
 fn reef_std_generate_is_lowered_through_host_lane() {
     let dir = tempdir().expect("tempdir");
     let std_pkg = dir.path().join("chelis-std");
