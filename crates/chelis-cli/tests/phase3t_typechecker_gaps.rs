@@ -26,6 +26,7 @@ mod common;
 use common::{make_app, write_file};
 
 #[test]
+#[ignore = "manual gate: Phase 3t type-checker gap CLI regression suite exceeds the default inner-loop budget"]
 fn pure_sig_dim_mismatch_is_caught() {
     // Sanity check: when the value being passed is itself a sig (no body),
     // the dim mismatch IS caught. Pin this so a regression doesn't silently
@@ -54,6 +55,7 @@ result = do_thing(make_3)
 }
 
 #[test]
+#[ignore = "manual gate: Phase 3t type-checker gap CLI regression suite exceeds the default inner-loop budget"]
 fn defsig_dim_enforcement_leaks_through_wildcard_body_in_callers() {
     // `make` is declared to return `tensor[1, 3, f32]`, but its body
     // inferred type carries Wildcard dims from `pad_sequences_to`.

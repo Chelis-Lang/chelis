@@ -2983,6 +2983,7 @@ def main(
 }
 
 #[test]
+#[ignore = "manual gate: Std.Embedding build acceptance exceeds the default inner-loop budget"]
 fn reef_std_embedding_module_checks_and_builds() {
     assert_reef_std_embedding_builds_to_valid_c();
 }

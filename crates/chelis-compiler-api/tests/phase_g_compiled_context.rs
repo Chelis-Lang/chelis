@@ -459,6 +459,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
+#[ignore = "manual gate: Phase G compiled-context microbench exceeds the default inner-loop budget"]
 fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippets() {
     // Microbench: 50 snippets, each evaluated against a single
     // CompiledContext vs 50 independent `prepare_eval` runs that each

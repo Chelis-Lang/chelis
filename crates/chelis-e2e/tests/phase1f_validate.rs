@@ -24,6 +24,11 @@ fn repo_root() -> PathBuf {
 fn chelis_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
+        let debug_bin = repo_root().join("target/debug/chelis");
+        if debug_bin.exists() {
+            return debug_bin;
+        }
+
         let status = StdCommand::new("cargo")
             .args(["build", "-p", "chelis-cli"])
             .current_dir(repo_root())
