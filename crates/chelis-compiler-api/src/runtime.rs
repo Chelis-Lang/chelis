@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 
+use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::top_level_lowering_map;
+use chelis_ir::lower::{lower_subexpr_program, top_level_lowering_map};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
@@ -12,6 +14,24 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 pub(crate) struct RuntimeTensorValue {
     pub(crate) value: IrTensorValue,
     pub(crate) precision: Prim,
+}
+
+/// Kind of transform captured by [`RuntimeValue::Transform`].
+///
+/// Bucket 1 closure: the host runtime needs to honor `grad`, `vmap`, and
+/// `realize` so `chelis test`/`chelis eval` agree with the C backend on
+/// programs that pass `chelis check`. `realize` is identity in the host
+/// lane; `Grad` and `Vmap` capture the inner `(grad/vmap ...)` Deep form
+/// and resolve at application time by routing through
+/// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
+/// evaluator — the same machinery the C backend uses.
+#[derive(Debug, Clone)]
+pub(crate) enum TransformKind {
+    /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
+    Grad,
+    /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
+    /// the explicit axis from the trailing literal).
+    Vmap,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +54,18 @@ pub(crate) enum RuntimeValue {
         params: Vec<String>,
         body: Expr,
         env: HashMap<String, RuntimeValue>,
+    },
+    /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
+    /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
+    /// Deep form so we can re-emit it as the callee in a synthesized
+    /// `(app ...)` expression at apply time. `captured_env` snapshots the
+    /// host-runtime bindings active when the transform was constructed so
+    /// references to local closures (e.g. `target = fn (...) -> ...; grad(target)`)
+    /// still resolve once the synthesized DAG is lowered.
+    Transform {
+        kind: TransformKind,
+        transform_expr: Expr,
+        captured_env: HashMap<String, RuntimeValue>,
     },
     Unit,
 }
@@ -95,6 +127,29 @@ pub(crate) fn evaluate_host_program_with_library(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_with_library_and_types(
+        program,
+        library_exprs,
+        &HashMap::new(),
+        library_lowered_names,
+        tensor_bindings,
+        selected_roots,
+    )
+}
+
+/// Variant of [`evaluate_host_program_with_library`] that also takes the
+/// library's Deep type-env. Bucket 1 (`grad`/`vmap`/`realize` in the host
+/// runtime) needs the merged type-env so the IR
+/// `lower_subexpr_program` call resolves library-name free vars in the
+/// inner fn body the same way the C backend does.
+pub(crate) fn evaluate_host_program_with_library_and_types(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
     // Lowered classification: start with library's (if provided), then
     // overlay the new-code program's. New-code wins on shadow.
     let new_lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
@@ -138,9 +193,20 @@ pub(crate) fn evaluate_host_program_with_library(
         /* register_runtime_order = */ true,
     );
 
+    // Compose the runtime's type-env from library + new-code program type
+    // envs. New code wins on shadow, mirroring `compose_type_env` semantics.
+    // We need this for grad/vmap/realize routing through
+    // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
+    // resolves free names against `full_type_env`.
+    let mut type_env: HashMap<String, Expr> = library_type_env.clone();
+    for (name, ty_expr) in program.type_env() {
+        type_env.insert(name.clone(), ty_expr.clone());
+    }
+
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         top_level_defs,
+        type_env,
         adt_fields,
         tensor_bindings,
         transcript: Vec::new(),
@@ -284,6 +350,12 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::Closure { .. } => ExecutionValue::String {
             value: "<closure>".to_string(),
         },
+        RuntimeValue::Transform { kind, .. } => ExecutionValue::String {
+            value: match kind {
+                TransformKind::Grad => "<grad>".to_string(),
+                TransformKind::Vmap => "<vmap>".to_string(),
+            },
+        },
         RuntimeValue::Unit => ExecutionValue::Unit,
     })
 }
@@ -313,6 +385,12 @@ pub(crate) fn lookup_runtime_value_for_root(
 struct EvalContext<'a> {
     bindings: HashMap<String, RuntimeValue>,
     top_level_defs: HashMap<String, Expr>,
+    /// Combined library + new-code Deep type-env. Threaded into
+    /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
+    /// hits a `grad` / `vmap` form so the lowerer can resolve free names
+    /// the same way the C backend does. Empty when no library context is
+    /// present (e.g. unit tests that don't need transform support).
+    type_env: HashMap<String, Expr>,
     adt_fields: HashMap<String, Vec<String>>,
     tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
     transcript: Vec<String>,
@@ -413,6 +491,37 @@ impl<'a> EvalContext<'a> {
             Some("fn") => self.eval_fn(list),
             Some("pipe") => self.eval_pipe(list),
             Some("cast") => self.eval_cast(list),
+            Some("realize") => {
+                // Bucket 1: `realize` is identity in the host runtime,
+                // matching the C-backend `lower_realize` pass-through
+                // (`crates/chelis-ir/src/host.rs::lower_host_expr`).
+                self.eval_expr(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| "realize missing value".to_string())?,
+                )
+            }
+            Some("grad") => {
+                // Bucket 1: capture the `(grad ...)` form so it can be
+                // applied later. The application path
+                // (`apply_resolved_callable` for a `Transform`) routes
+                // through `lower_subexpr_program` + the forward DAG
+                // evaluator — the same machinery that `chelis build
+                // --target c` uses.
+                Ok(RuntimeValue::Transform {
+                    kind: TransformKind::Grad,
+                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    captured_env: self.bindings.clone(),
+                })
+            }
+            Some("vmap") => {
+                // Bucket 1: same pattern as `grad` above, capture-and-apply.
+                Ok(RuntimeValue::Transform {
+                    kind: TransformKind::Vmap,
+                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    captured_env: self.bindings.clone(),
+                })
+            }
             Some("handle-effect") => {
                 let kids = children(list);
                 let effect = get_meta(list)
@@ -656,26 +765,8 @@ impl<'a> EvalContext<'a> {
             return self.eval_builtin(name, &args);
         }
 
-        match self.eval_expr(func)? {
-            RuntimeValue::Closure { params, body, env } => {
-                if params.len() != args.len() {
-                    return Err(format!(
-                        "closure expected {} args, got {}",
-                        params.len(),
-                        args.len()
-                    ));
-                }
-                let saved = self.bindings.clone();
-                self.bindings = env;
-                for (param, arg) in params.into_iter().zip(args) {
-                    self.bindings.insert(param, arg);
-                }
-                let value = self.eval_expr(&body);
-                self.bindings = saved;
-                value
-            }
-            other => Err(format!("cannot apply non-callable value {other:?}")),
-        }
+        let callable = self.eval_expr(func)?;
+        self.apply_resolved_callable(callable, args)
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -799,8 +890,8 @@ impl<'a> EvalContext<'a> {
             return self.eval_builtin(name, &args);
         }
         match self.eval_expr(stage)? {
-            RuntimeValue::Closure { params, body, env } => {
-                self.apply_resolved_callable(RuntimeValue::Closure { params, body, env }, args)
+            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
+                self.apply_resolved_callable(value, args)
             }
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
@@ -829,7 +920,161 @@ impl<'a> EvalContext<'a> {
                 self.bindings = saved;
                 value
             }
+            RuntimeValue::Transform {
+                kind,
+                transform_expr,
+                captured_env,
+            } => self.apply_transform(kind, &transform_expr, captured_env, args),
             other => Err(format!("value is not callable: {other:?}")),
+        }
+    }
+
+    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
+    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
+    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
+    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
+    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
+    /// implements grad and vmap (it's what the C backend uses); we just
+    /// reuse it instead of writing a parallel reverse-mode evaluator
+    /// inside the host-runtime tree.
+    fn apply_transform(
+        &mut self,
+        kind: TransformKind,
+        transform_expr: &Expr,
+        captured_env: HashMap<String, RuntimeValue>,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        // Allocate placeholder names for the call's actual arguments. We
+        // synthesize `(var {type: ...} __chelis_xform_arg_K)` inside the
+        // app form and feed the corresponding tensor values via the
+        // load callback when forward-evaluating the lowered DAG.
+        let mut placeholder_names: Vec<String> = Vec::with_capacity(args.len());
+        let mut placeholder_types: Vec<TensorType> = Vec::with_capacity(args.len());
+        let mut placeholder_tensors: HashMap<String, IrTensorValue> =
+            HashMap::with_capacity(args.len());
+
+        // Best-effort fn-expr lookup so we can read the inner
+        // function's parameter type metadata. The transform_expr is the
+        // captured `(grad ... fn-expr ...)` or `(vmap ... fn-expr
+        // axis-lit)` form; the fn-expr is the first child.
+        let fn_expr = match transform_expr {
+            Expr::List(list, _) => children(list).first(),
+            _ => None,
+        };
+
+        for (index, value) in args.iter().enumerate() {
+            let placeholder = format!("__chelis_xform_arg_{index}");
+            let (tensor_value, tensor_type) = runtime_value_to_dag_input(value, fn_expr, index)?;
+            placeholder_tensors.insert(placeholder.clone(), tensor_value);
+            placeholder_names.push(placeholder);
+            placeholder_types.push(tensor_type);
+        }
+
+        // Synthesize `(app {} <transform-expr> (var __chelis_xform_arg_0) ...)`.
+        let span = Span::new(0, 0);
+        let mut app_elements: Vec<Expr> = Vec::with_capacity(2 + placeholder_names.len());
+        app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
+        app_elements.push(Expr::Map(MetaMap::default(), span));
+        app_elements.push(transform_expr.clone());
+        for (placeholder, ty) in placeholder_names.iter().zip(placeholder_types.iter()) {
+            app_elements.push(make_var_with_type(placeholder, ty, span));
+        }
+        let app_expr = Expr::List(
+            List {
+                elements: app_elements,
+            },
+            span,
+        );
+
+        let scoped_types: HashMap<String, TensorType> = placeholder_names
+            .iter()
+            .cloned()
+            .zip(placeholder_types.iter().cloned())
+            .collect();
+
+        // Build a fresh `program_defs` that includes both top-level
+        // defs from the host runtime AND any captured local closures
+        // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
+        // resolves `target` when the inner DAG lowering reaches it).
+        let mut program_defs = self.top_level_defs.clone();
+        for (name, value) in captured_env.iter() {
+            if let RuntimeValue::Closure { params, body, .. } = value {
+                program_defs
+                    .entry(name.clone())
+                    .or_insert_with(|| synth_fn_expr(params, body));
+            }
+        }
+
+        // Lower under suppress so any unrepresentable form panics
+        // quietly and we surface a clean error string.
+        let lower_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chelis_ir::lower::with_suppress_unrepresentable_panic(|| {
+                lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs)
+            })
+        }));
+        let dag = match lower_result {
+            Ok(dag) => dag,
+            Err(_) => {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                return Err(format!(
+                    "host runtime could not lower `{kind_label}(...)` for evaluation: \
+                     the inner fn body uses a construct the IR DAG does not support"
+                ));
+            }
+        };
+
+        // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
+        // by looking up placeholder names in our staged inputs (or
+        // tensor_bindings as a fallback for any external tensor refs
+        // captured by the inner fn body).
+        let tensor_bindings = self.tensor_bindings;
+        let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
+        if roots.is_empty() {
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            return Err(format!(
+                "host runtime: `{kind_label}(...)` lowering produced no roots"
+            ));
+        }
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+            placeholder_tensors
+                .get(name)
+                .cloned()
+                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+        })
+        .map_err(|err| {
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            format!("host runtime `{kind_label}` evaluation failed: {err}")
+        })?;
+
+        // Pack roots back into a RuntimeValue.
+        let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let tensor = values
+                .get(root)
+                .cloned()
+                .ok_or_else(|| format!("host runtime: missing root {} in eval output", root.0))?;
+            let precision = dag
+                .get(*root)
+                .map(|node| node.output_type.precision)
+                .unwrap_or(Prim::F32);
+            packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: tensor,
+                precision,
+            }));
+        }
+        if packed.len() == 1 {
+            Ok(packed.pop().expect("checked length"))
+        } else {
+            Ok(RuntimeValue::Tuple(packed))
         }
     }
 
@@ -3457,6 +3702,10 @@ fn render_value(value: &RuntimeValue) -> String {
         ),
         RuntimeValue::MappedFile(bytes) => format!("<mapped-file:{}>", bytes.len()),
         RuntimeValue::Closure { .. } => "<closure>".to_string(),
+        RuntimeValue::Transform { kind, .. } => match kind {
+            TransformKind::Grad => "<grad>".to_string(),
+            TransformKind::Vmap => "<vmap>".to_string(),
+        },
         RuntimeValue::Unit => "()".to_string(),
     }
 }
@@ -3494,6 +3743,246 @@ fn uniform_like_value(
         value: IrTensorValue::from_vec(template.value.shape.clone(), data),
         precision: template.precision,
     }
+}
+
+/// Bucket 1 helper: convert a host-runtime argument into a
+/// `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar args
+/// (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
+/// pulled from the inner fn's parameter type metadata when available, or
+/// from the runtime value as a fallback.
+fn runtime_value_to_dag_input(
+    value: &RuntimeValue,
+    fn_expr: Option<&Expr>,
+    index: usize,
+) -> Result<(IrTensorValue, TensorType), String> {
+    match value {
+        RuntimeValue::Tensor(tensor) => {
+            let dims = tensor
+                .value
+                .shape
+                .iter()
+                .map(|&size| DimInfo::Lit(size))
+                .collect::<Vec<_>>();
+            let ty = TensorType {
+                dims,
+                precision: tensor.precision,
+            };
+            Ok((tensor.value.clone(), ty))
+        }
+        RuntimeValue::Float(value) => {
+            let precision = fn_expr
+                .and_then(|e| param_precision_at(e, index))
+                .unwrap_or(Prim::F32);
+            Ok((
+                IrTensorValue::scalar(*value),
+                TensorType {
+                    dims: vec![],
+                    precision,
+                },
+            ))
+        }
+        RuntimeValue::Int(value) => {
+            let precision = fn_expr
+                .and_then(|e| param_precision_at(e, index))
+                .unwrap_or(Prim::Int32);
+            Ok((
+                IrTensorValue::scalar(*value as f64),
+                TensorType {
+                    dims: vec![],
+                    precision,
+                },
+            ))
+        }
+        RuntimeValue::Bool(value) => Ok((
+            IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+        )),
+        other => Err(format!(
+            "grad/vmap argument {index} must be a tensor or scalar, got {other:?}"
+        )),
+    }
+}
+
+/// Best-effort lookup of `(fn ...)` param[index]'s primitive precision
+/// from its `type` metadata.
+fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
+    let Expr::List(list, _) = fn_expr else {
+        return None;
+    };
+    if tag(list) != Some("fn") {
+        return None;
+    }
+    let params = children(list).first()?;
+    let Expr::List(params_list, _) = params else {
+        return None;
+    };
+    let param = children(params_list).get(index)?;
+    let ty_expr = match param {
+        Expr::List(param_list, _) => match param_list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            _ => None,
+        },
+        Expr::MetaExpr(meta, _) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }?;
+    extract_prim_from_type_expr(ty_expr)
+}
+
+fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    match tag(list) {
+        Some("t-prim") => children(list)
+            .first()
+            .and_then(symbol_name)
+            .and_then(prim_from_name),
+        Some("t-tensor") => children(list).last().and_then(extract_prim_from_type_expr),
+        _ => None,
+    }
+}
+
+fn prim_from_name(name: &str) -> Option<Prim> {
+    Some(match name {
+        "f32" => Prim::F32,
+        "f64" => Prim::F64,
+        "f16" => Prim::F16,
+        "bf16" => Prim::Bf16,
+        "f8e4m3" => Prim::F8e4m3,
+        "int8" => Prim::Int8,
+        "int32" => Prim::Int32,
+        "int64" => Prim::Int64,
+        "bool" => Prim::Bool,
+        "string" => Prim::String,
+        _ => return None,
+    })
+}
+
+/// Build a `(var {type: <encoded ty>} name)` Deep expression from a
+/// `TensorType`. Used when synthesizing the placeholder argument refs
+/// inside the host runtime's grad/vmap wrapper app.
+fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
+    let prim_name = match ty.precision {
+        Prim::F32 => "f32",
+        Prim::F64 => "f64",
+        Prim::F16 => "f16",
+        Prim::Bf16 => "bf16",
+        Prim::F8e4m3 => "f8e4m3",
+        Prim::Int8 => "int8",
+        Prim::Int32 => "int32",
+        Prim::Int64 => "int64",
+        Prim::Bool => "bool",
+        Prim::String => "string",
+    };
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+            ],
+        },
+        span,
+    );
+    let ty_expr = if ty.dims.is_empty() {
+        prim_node
+    } else {
+        let mut tensor_elems = vec![
+            Expr::Atom(Atom::Symbol("t-tensor".to_string()), span),
+            Expr::Map(MetaMap::default(), span),
+        ];
+        for dim in &ty.dims {
+            tensor_elems.push(dim_to_expr(dim, span));
+        }
+        tensor_elems.push(prim_node);
+        Expr::List(
+            List {
+                elements: tensor_elems,
+            },
+            span,
+        )
+    };
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), ty_expr));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Symbol(name.to_string()), span),
+            ],
+        },
+        span,
+    )
+}
+
+fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
+    match dim {
+        DimInfo::Lit(value) => Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("d-lit".to_string()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::Atom(Atom::Int(*value as i64), span),
+                ],
+            },
+            span,
+        ),
+        DimInfo::Named(name, _) => Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("d-name".to_string()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::Atom(Atom::Symbol(name.clone()), span),
+                ],
+            },
+            span,
+        ),
+    }
+}
+
+/// Synthesize a `(fn {} (params {} <p>...) <body>)` Deep expression
+/// from a host-runtime closure's params + body. Used when injecting
+/// captured local closures into the IR `program_defs` table.
+fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
+    let span = body.span();
+    let param_exprs = params
+        .iter()
+        .map(|name| Expr::Atom(Atom::Symbol(name.clone()), span))
+        .collect::<Vec<_>>();
+    let mut params_elements = vec![
+        Expr::Atom(Atom::Symbol("params".to_string()), span),
+        Expr::Map(MetaMap::default(), span),
+    ];
+    params_elements.extend(param_exprs);
+    let params_list = Expr::List(
+        List {
+            elements: params_elements,
+        },
+        span,
+    );
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("fn".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                params_list,
+                body.clone(),
+            ],
+        },
+        span,
+    )
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
