@@ -79,6 +79,9 @@ impl CEmitter {
         e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
         e.line("    return low + (high - low) * (float)unit;");
         e.line("}");
+        e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_SEED");
+        e.line("#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)");
+        e.line("#endif");
         e.line("");
 
         let linkage = if options.static_entry { "static " } else { "" };
@@ -620,14 +623,14 @@ impl CEmitter {
             .map(|dim| Self::emit_dim_expr(&DimExpr::from(dim)))
             .collect();
         if dims.is_empty() {
-            "(int[]){1}".to_string()
+            "NULL".to_string()
         } else {
             format!("(int[]){{ {} }}", dims.join(", "))
         }
     }
 
     fn ndim(ty: &TensorType) -> usize {
-        if ty.dims.is_empty() { 1 } else { ty.dims.len() }
+        ty.dims.len()
     }
 
     fn known_dim_size(dim: &DimInfo) -> Option<usize> {
@@ -1113,11 +1116,14 @@ impl CEmitter {
         self.line(&format!(
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
+        self.line(&format!(
+            "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
+        ));
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "t{id}->data[i] = chelis_uniform_sample_f32({seed}ULL, (uint64_t)i, {:.8}f, {:.8}f);",
+            "t{id}->data[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {:.8}f, {:.8}f);",
             low as f32, high as f32
         ));
         self.indent -= 1;
@@ -2723,7 +2729,7 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn");
-        assert!(c.contains("chelis_alloc(1, (int[]){1}, CHELIS_BOOL);"));
+        assert!(c.contains("chelis_alloc(0, NULL, CHELIS_BOOL);"));
     }
 
     #[test]

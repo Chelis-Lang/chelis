@@ -548,7 +548,7 @@ Prerequisite gate for both `nautilus` and `coral`. Not itself a shell.
   - `Std.Loss`: `KLDivergence`, `BCEWithLogits`, `accuracy`, `perplexity`
   - `Std.Init`: `kaiming_uniform`, `kaiming_normal`, `xavier_uniform`, `xavier_normal`,
     `trunc_normal`
-- acceptance oracle: `cargo test -p chelis-cli phase3j_pre_std_oracle -- --exact`
+- acceptance oracle: `cargo test -p chelis-cli --test phase3j_pre_std -- --ignored --nocapture`
 
 ### 3j: Nautilus — Numerical Methods, Statistics, and Optimization
 

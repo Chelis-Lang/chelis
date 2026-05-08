@@ -219,12 +219,27 @@ static inline void chelis_hipblas_sgemm_row_major(
 static inline hipModule_t chelis_compile_kernel(const char *source, const char *name) {
     hiprtcProgram prog;
     CHELIS_HIPRTC_CHECK(hiprtcCreateProgram(&prog, source, name, 0, NULL, NULL));
+    int device = 0;
+    hipDeviceProp_t props;
+    int wavefront_size = 64;
+    CHELIS_HIP_CHECK(hipGetDevice(&device));
+    CHELIS_HIP_CHECK(hipGetDeviceProperties(&props, device));
+    if (props.warpSize > 0) {
+        wavefront_size = props.warpSize;
+    }
+    char wavefront_opt[64];
+    snprintf(
+        wavefront_opt,
+        sizeof(wavefront_opt),
+        "-D__AMDGCN_WAVEFRONT_SIZE=%d",
+        wavefront_size
+    );
 #ifndef NDEBUG
-    const char *compile_opts[] = { "-DCHELIS_DEBUG_BOUNDS=1" };
+    const char *compile_opts[] = { "-DCHELIS_DEBUG_BOUNDS=1", wavefront_opt };
 #else
-    const char *compile_opts[] = { "-DCHELIS_DEBUG_BOUNDS=0" };
+    const char *compile_opts[] = { "-DCHELIS_DEBUG_BOUNDS=0", wavefront_opt };
 #endif
-    hiprtcResult compile_result = hiprtcCompileProgram(prog, 1, compile_opts);
+    hiprtcResult compile_result = hiprtcCompileProgram(prog, 2, compile_opts);
     if (compile_result != HIPRTC_SUCCESS) {
         size_t log_size;
         hiprtcGetProgramLogSize(prog, &log_size);

@@ -164,6 +164,16 @@ fn gcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.status().expect("gcc should run")
 }
 
+fn gcc_compile_generated_object(out_dir: &Path, source: &str) -> std::process::ExitStatus {
+    let toolchain = cpu_toolchain_for_sources(out_dir, &[source]);
+    let mut cmd = StdCommand::new(&toolchain.compiler);
+    cmd.current_dir(out_dir);
+    cmd.arg("-O2");
+    cmd.args(&toolchain.compile_flags);
+    cmd.args(["-I.", "-c", source]);
+    cmd.status().expect("gcc should run")
+}
+
 fn gcc_link_sources(out_dir: &Path, sources: &[&str], binary: &str) -> std::process::ExitStatus {
     let toolchain = cpu_toolchain_for_sources(out_dir, sources);
     let mut cmd = StdCommand::new(&toolchain.compiler);
@@ -1391,9 +1401,8 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         "expected a host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
-        source.contains("__tensor_arg1_")
-            && source.contains("chelis_alloc(1, (int[]){1}, CHELIS_F32)"),
-        "expected host scalar dependencies to be boxed as rank-1 tensor helper inputs:\n{source}"
+        source.contains("__tensor_arg1_") && source.contains("chelis_alloc(0, NULL, CHELIS_F32)"),
+        "expected host scalar dependencies to be boxed as rank-0 tensor helper inputs:\n{source}"
     );
     assert!(
         !source.contains("= lt;"),
@@ -5183,12 +5192,13 @@ fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
 // That gate was project-wide: a `with seed` block in *any* compiled file
 // would block `chelis build` of every sibling file too.
 //
-// The closure plumbs the seed at IR-lowering time into
-// `RiscOp::UniformLike { seed }` and removes the rejection gate. The
-// xorshift-splitmix algorithm in `chelis_uniform_sample_f32` (C runtime)
-// matches the IR evaluator's `dropout_sample` (see `chelis_ir::eval`),
-// giving deterministic-on-seed output that agrees with `chelis eval` to
-// f32 precision. The four tests below pin:
+// The closure removes the rejection gate and preserves the handled seed
+// either as a direct DAG seed or as generated C host RNG state when the
+// random op lives behind a host-function call. The xorshift-splitmix
+// algorithm in `chelis_uniform_sample_f32` (C runtime) matches the IR
+// evaluator's `dropout_sample` (see `chelis_ir::eval`), giving
+// deterministic-on-seed output that agrees with `chelis eval` to f32
+// precision. The four tests below pin:
 //
 //   1. `with seed(...)` builds, runs, and produces deterministic output.
 //   2. Same seed → same bytes across runs (determinism).
@@ -5231,18 +5241,22 @@ fn build_c_with_seed_uniform_like_succeeds() {
         .success()
         .stderr(predicate::str::contains("does not yet plumb").not());
 
-    // Generated C must use the seed, not zero. (Pre-Bucket-5, the gate
-    // would have blocked the build entirely; if anyone ever lifts the
-    // gate without plumbing the seed, the emitted seed argument would
-    // be `0ULL` and this assertion would catch the wrong-answer.)
+    // Generated C must route the source seed into the random op. The
+    // host path may bake `0ULL` into a reusable helper, but the sampler
+    // must receive the active handler seed through the effective-seed
+    // wrapper, not a direct literal zero.
     let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
     assert!(
-        c_src.contains("chelis_uniform_sample_f32(7ULL"),
-        "expected seed=7 baked into chelis_uniform_sample_f32 call; got:\n{c_src}"
+        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL"),
+        "expected generated C to route host random ops through the effective seed wrapper; got:\n{c_src}"
+    );
+    assert!(
+        c_src.contains("chelis_rng_current.active = 1"),
+        "expected generated C to activate the with-seed handler scope; got:\n{c_src}"
     );
     assert!(
         !c_src.contains("chelis_uniform_sample_f32(0ULL"),
-        "seed=0 must not appear in generated C when source seed is 7"
+        "sampler must not receive literal seed=0 directly when source seed is 7"
     );
 }
 
@@ -5373,6 +5387,119 @@ fn build_c_with_seed_no_longer_blocks_sibling_build() {
     assert!(
         seed_out.join("uses_seed.c").exists(),
         "with-seed file must build to C now that the gate is lifted"
+    );
+}
+
+#[test]
+fn cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("cross_function_seed_local.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &src,
+        r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =
+  uniform_like(copy(t), 0.0, 1.0)
+seven = with seed(7) { sample(copy(template)) }
+forty_two = with seed(42) { sample(copy(template)) }
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let c_src =
+        fs::read_to_string(out_dir.join("cross_function_seed_local.c")).expect("read generated C");
+    assert!(
+        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
+        "cross-function seeded random must not bake seed=0 into generated C:\n{c_src}"
+    );
+
+    let status = gcc_link_generated(
+        &out_dir,
+        "cross_function_seed_local.c",
+        "cross_function_seed_local",
+    );
+    assert!(status.success(), "gcc compile/link of generated C failed");
+    let run = StdCommand::new(out_dir.join("cross_function_seed_local"))
+        .output()
+        .expect("compiled binary must run");
+    assert!(run.status.success(), "compiled binary exited non-zero");
+    let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
+    let seven = stdout
+        .lines()
+        .find(|line| line.starts_with("seven = "))
+        .expect("seven output line");
+    let forty_two = stdout
+        .lines()
+        .find(|line| line.starts_with("forty_two = "))
+        .expect("forty_two output line");
+    assert_ne!(
+        seven, forty_two,
+        "different with-seed handlers around a wrapper call must produce distinct samples"
+    );
+}
+
+#[test]
+fn build_c_mnist_loss_tail_tensor_pipeline_compiles_object() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("mnist_loss_tail.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &src,
+        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = {
+  softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
+}
+logits = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(0.5, f32), cast(1.5, f32), cast(2.5, f32)]])
+labels = to_tensor([[cast(0.0, f32), cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(0.0, f32), cast(0.0, f32)]])
+loss_value = loss_tail(logits, labels)
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let c_src = fs::read_to_string(out_dir.join("mnist_loss_tail.c")).expect("read generated C");
+    assert!(
+        !c_src.contains("/* unsupported builtin sum */")
+            && !c_src.contains("/* unsupported builtin mean */")
+            && !c_src.contains("-(__arg0_")
+            && !c_src.contains("void* __arg0_"),
+        "MNIST loss tail must stay on tensor-helper codegen, got:\n{c_src}"
+    );
+    let status = gcc_compile_generated_object(&out_dir, "mnist_loss_tail.c");
+    assert!(status.success(), "gcc object compile of generated C failed");
+    let status = gcc_link_generated(&out_dir, "mnist_loss_tail.c", "mnist_loss_tail");
+    assert!(status.success(), "gcc link of generated C failed");
+    let run = StdCommand::new(out_dir.join("mnist_loss_tail"))
+        .output()
+        .expect("compiled binary must run");
+    assert!(run.status.success(), "compiled binary exited non-zero");
+    let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("loss_value = tensor(shape=[], data=["),
+        "MNIST loss tail tensor[f32] result must print as rank-0 shape=[], got:\n{stdout}"
     );
 }
 

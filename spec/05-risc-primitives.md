@@ -107,7 +107,9 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `const` | `(value, shape...) → tensor[shape, p]` | Create a tensor filled with a constant value. Precision inferred from value or annotation. |
 | `load` | `(source, shape...) → tensor[shape, p]` | Load tensor data from external source (file, memory). |
 
-`const` and `load` are the only two ways to create tensors. All other tensors are derived from computation on existing tensors.
+`const` and `load` are the pure tensor constructors. Effectful tensor constructors such
+as seeded random generation are tracked separately below. All other tensors are derived
+from computation on existing tensors.
 
 `const` is not differentiable (it produces a constant — gradient is zero). `load` is not differentiable.
 
@@ -116,6 +118,7 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | Name | Signature | Semantics | AD / effect note |
 |---|---|---|---|
 | `dropout` | `(tensor[D, f32], f32) → tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
+| `uniform_like` | `(tensor[D, f32], f32, f32) → tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
 
 Operational note: the evaluator and lowering path implement seeded `dropout`, but
 `chelis build` does not yet codegen it for the `c` or `hip` backend targets.

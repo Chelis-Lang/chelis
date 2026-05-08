@@ -309,6 +309,11 @@ pub enum HostExprKind {
         list: Box<HostExpr>,
         ty: HostType,
     },
+    WithSeed {
+        seed: Box<HostExpr>,
+        body: Box<HostExpr>,
+        ty: HostType,
+    },
     TensorCall {
         helper: usize,
         args: Vec<HostExpr>,
@@ -795,6 +800,9 @@ fn host_body_has_fallback_call(expr: &HostExpr) -> bool {
                     .is_some_and(|d| host_body_has_fallback_call(d))
         }
         HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(host_body_has_fallback_call),
+        HostExprKind::WithSeed { seed, body, .. } => {
+            host_body_has_fallback_call(seed) || host_body_has_fallback_call(body)
+        }
         _ => false,
     }
 }
@@ -1414,38 +1422,35 @@ fn lower_host_expr_kind(
         }
         Expr::List(list, _) if tag(list) == Some("handle-effect") => {
             // `with seed(...) { body }` and similar effect handlers are
-            // pure-result from the host emitter's perspective — the seed
-            // flows into random-op lowering at DAG-build time and the
-            // visible value is just `body`. Without this arm, the whole
-            // form fell through to `HostExpr::new(HostExprKind::Unit)`, which is why
-            // `kaiming_uniform` showed up as `()` in compiled output.
+            // pure-result from the host emitter's perspective. Random
+            // handlers still need a host-lane seed scope so calls into
+            // separately emitted stdlib/helper functions see the active seed.
             let kids = children(list);
-            // children(list) skips tag and metadata map, so for
-            // `(handle-effect {effect: random, ...} seed body)` kids[0] is
-            // the seed expression and kids[1] is the body. Some forms may
-            // omit the seed slot.
+            let effect = list
+                .elements
+                .get(1)
+                .and_then(|expr| match expr {
+                    Expr::Map(meta, _) => meta
+                        .entries
+                        .iter()
+                        .find(|(key, _)| key == "effect")
+                        .and_then(|(_, value)| symbol_name(value)),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let body = kids.get(1).or_else(|| kids.first());
             if let Some(body) = body {
-                // Bucket-5 closure: when the body is a tensor-typed
-                // expression that contains random ops (e.g.
-                // `uniform_like(...)`), route the *whole* handle-effect
-                // form through `try_lower_tensor_helper_call` so the IR
-                // lowerer's `lower_handle_effect` arm fires and threads
-                // the seed into `RiscOp::UniformLike { seed }`. Lowering
-                // only the body here would silently drop the seed and
-                // emit `chelis_uniform_sample_f32(0ULL, ...)` in the
-                // generated C — the original Batch-7b wrong-answer that
-                // the now-removed rejection gate guarded against.
-                if let Some(tensor_ty) = expr_tensor_type(body, program, scope)
-                    && let Some(tensor_call) = try_lower_tensor_helper_call(
-                        expr,
-                        program,
-                        scope,
-                        tensor_helpers,
-                        tensor_ty,
-                    )
+                if effect == "random"
+                    && let Some(seed_expr) = kids.first()
                 {
-                    return tensor_call;
+                    let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers);
+                    let body = lower_host_expr(body, program, scope, tensor_helpers);
+                    let ty = host_expr_type(&body);
+                    return HostExpr::new(HostExprKind::WithSeed {
+                        seed: Box::new(seed),
+                        body: Box::new(body),
+                        ty,
+                    });
                 }
                 lower_host_expr(body, program, scope, tensor_helpers)
             } else {
@@ -1806,6 +1811,10 @@ fn collect_named_callback_signatures(
                 collect_named_callback_signatures(arg, out);
             }
         }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            collect_named_callback_signatures(seed, out);
+            collect_named_callback_signatures(body, out);
+        }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -1964,6 +1973,10 @@ fn infer_callable_param_types_in_expr(
             for arg in args {
                 infer_callable_param_types_in_expr(arg, unknown, out);
             }
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            infer_callable_param_types_in_expr(seed, unknown, out);
+            infer_callable_param_types_in_expr(body, unknown, out);
         }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
@@ -2260,6 +2273,17 @@ fn refine_host_expr_types(
         HostExprKind::TensorCall { args, .. } => {
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
+            }
+        }
+        HostExprKind::WithSeed { seed, body, ty } => {
+            changed |= refine_host_expr_types(seed, scope, signatures);
+            changed |= refine_host_expr_types(body, scope, signatures);
+            if *ty == HostType::Unknown {
+                let inferred = host_expr_type(body);
+                if inferred != HostType::Unknown {
+                    *ty = inferred;
+                    changed = true;
+                }
             }
         }
         HostExprKind::Int(_)
@@ -4081,6 +4105,16 @@ fn infer_app_expr_host_type(
             .collect::<Option<Vec<_>>>()?;
         return infer_einsum_tensor_type(equation, &tensors).map(HostType::Tensor);
     }
+    if matches!(name, "sum" | "mean")
+        && let (Some(input), Some(axis_expr)) = (kids.get(1), kids.get(2))
+        && let HostType::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let Some(axis) = expr_int_literal(axis_expr)
+    {
+        return Some(HostType::Tensor(reduce_axis_tensor_type(
+            &tensor_ty,
+            axis as usize,
+        )));
+    }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
@@ -4146,6 +4180,28 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
         .map(|tensor| tensor.precision)
         .unwrap_or(chelis_types::types::Prim::F32);
     Some(TensorType { dims, precision })
+}
+
+fn expr_int_literal(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Atom(Atom::Int(value), _) => Some(*value),
+        Expr::MetaExpr(meta, _) => expr_int_literal(&meta.expr),
+        Expr::List(list, _) if tag(list) == Some("lit") => {
+            children(list).first().and_then(expr_int_literal)
+        }
+        _ => None,
+    }
+}
+
+fn reduce_axis_tensor_type(tensor_ty: &TensorType, axis: usize) -> TensorType {
+    let mut dims = tensor_ty.dims.clone();
+    if axis < dims.len() {
+        dims.remove(axis);
+    }
+    TensorType {
+        dims,
+        precision: tensor_ty.precision,
+    }
 }
 
 fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -4375,6 +4431,7 @@ fn host_expr_type(expr: &HostExpr) -> HostType {
         | HostExprKind::Scan { ty, .. }
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
+        | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. } => ty.clone(),
         HostExprKind::Unit => HostType::Unit,
     }
@@ -4476,6 +4533,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostType) -> HostExpr {
         HostExprKind::FlatMap { callback, list, .. } => {
             HostExprKind::FlatMap { callback, list, ty }
         }
+        HostExprKind::WithSeed { seed, body, .. } => HostExprKind::WithSeed { seed, body, ty },
         HostExprKind::TensorCall { helper, args, .. } => {
             HostExprKind::TensorCall { helper, args, ty }
         }
@@ -4524,7 +4582,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
     match name {
         "add" | "sub" | "mul" | "div" | "neg" | "exp" | "log" | "sin" | "sqrt" | "relu"
         | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem" | "min_elem" | "copy"
-        | "uniform_like" | "dropout" => {
+        | "uniform_like" | "dropout" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostType::Tensor(tensor_ty))
             } else if arg_tys.iter().any(|ty| matches!(ty, HostType::Float64)) {
@@ -4533,6 +4591,10 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
                 Some(HostType::Int64)
             }
         }
+        "sum" | "mean" => match arg_tys.first() {
+            Some(HostType::Tensor(tensor_ty)) => Some(HostType::Tensor(tensor_ty.clone())),
+            _ => Some(HostType::Unknown),
+        },
         "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "string_len" | "rank" | "shape"
         | "numel" => Some(HostType::Int64),
         "cmplt" => match arg_tys.first() {

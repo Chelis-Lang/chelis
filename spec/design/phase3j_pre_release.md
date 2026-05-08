@@ -16,13 +16,20 @@ The `v0.1.x` line is the shipped Phase 3j-pre compiler surface:
 
 - `chelis` CLI (`chelis-cli`) with `fmt`, `check`, `eval`, `build`, `deep`,
   `surf`, and `tide` subcommands as documented in the Phase 0–3j-pre specs.
-- Deep AST + Surf surface through Phase 3j-pre Batch 5b.
+- Deep AST + Surf surface through Phase 3j-pre Batch 7b and the
+  compiler-vs-interpreter closure follow-ups.
 - Expanded `Std.Nn` surface: RMSNorm, GELU, SiLU, Linear, Conv1d/2d wrappers,
   and `Std.Nn.Attention` (SDPA / grouped-query attention importable surface).
 - Expanded `Std.Loss` and `Std.Init` surface (Kaiming init, etc.).
 - Reductions: `sum`, `mean`, `max`, `min`, `prod`, `argmax`, `argmin` in IR
   and C backend.
 - C backend host-lane pure-tensor wrapper lowering (Batch 5b fix).
+- C backend `with seed(...)` preservation for direct `uniform_like` and
+  generated host/stdlib calls such as Kaiming and `normal_like`; nested random
+  helpers draw from generated handler-scoped RNG state instead of seed `0`.
+- MNIST loss-tail tensor-helper routing for `softmax |> log |> mul |> sum |>
+  neg |> mean`, including true rank-0 `tensor[f32]` C output shape;
+  `parity_mnist_library_only` is active again.
 
 Known acknowledged limitations are tracked in
 `spec/design/chelis_phase3_plan.md` §3j-pre Acceptance Oracle (Batch 5

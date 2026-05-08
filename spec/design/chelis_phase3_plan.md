@@ -956,17 +956,18 @@ tag push. Release history:
         program that touches it through the C backend. The numeric
         attention math itself is still deferred (see below).
     - **Closed in Bucket 5** (closure of Batch 7b's deferral): the
-      C and HIP backends now plumb `with seed(...)` through the
-      generated runtime. The seed binds at IR-lowering time
-      (`chelis_ir::lower::lower_handle_effect`) and is baked into
-      `RiscOp::UniformLike { seed }` as a compile-time constant; the C
-      emitter renders it as the literal first argument to
-      `chelis_uniform_sample_f32(seed, index, low, high)`, whose
-      xorshift-splitmix algorithm matches the IR evaluator's
-      `dropout_sample` (see `chelis_ir::eval`). The HIP backend reuses
-      the same `chelis_uniform_sample_f32` device helper so the
-      closure holds for `--target hip` too. The pre-Bucket-5
-      project-wide rejection gate at
+      C backend now preserves `with seed(...)` through direct
+      `uniform_like` calls and through generated host functions. Direct
+      DAG-lowered `uniform_like` still binds the seed at IR-lowering
+      time (`chelis_ir::lower::lower_handle_effect`) and bakes it into
+      `RiscOp::UniformLike { seed }`, which the C and HIP emitters pass
+      as the first argument to `chelis_uniform_sample_f32(seed, index,
+      low, high)`. The C host fallback path also represents
+      `with seed(...)` explicitly and emits a generated
+      `chelis_rng_current` handler scope; nested stdlib/user functions
+      such as `kaiming_uniform` and `normal_like` draw random values
+      from that active handler instead of silently using baked seed `0`.
+      The pre-Bucket-5 project-wide rejection gate at
       `crates/chelis-cli/src/main.rs::reject_with_seed_for_build_target`
       is removed; the function survives as a no-op forward-compat
       hook. The Bucket-5 oracle tests in
@@ -975,12 +976,13 @@ tag push. Release history:
       runs end-to-end through `chelis build --target c` + gcc + run,
       (2) the same seed produces identical bytes across runs
       (determinism), (3) different seeds produce different bytes
-      (no silent drop), and (4) a sibling file that does not use
-      `with seed` is no longer blocked. The C runtime reduces in f32
-      so its byte-exact output differs from the f64 `chelis eval`
-      reference in `phase3j_pre_oracle_integrated_eval` in trailing
-      bits; that drift is intrinsic to f32 vs f64 reduction precision,
-      not a seed-plumbing bug.
+      (no silent drop), (4) a sibling file that does not use
+      `with seed` is no longer blocked, and (5) cross-function stdlib
+      random initializers use the enclosing handler seed. The C runtime
+      reduces in f32 so its byte-exact output differs from the f64
+      `chelis eval` reference in `phase3j_pre_oracle_integrated_eval`
+      in trailing bits; that drift is intrinsic to f32 vs f64 reduction
+      precision, not a seed-plumbing bug.
     - **Still deferred to Phase 3j (Nautilus):**
       - Numeric verification of `Std.Nn.Attention.scaled_dot_product_attention`,
         `multi_head_attention`, `grouped_query_attention`, and

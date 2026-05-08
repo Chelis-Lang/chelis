@@ -1,6 +1,6 @@
 # Compiler-vs-Interpreter Discrepancy Closure (v0.6.1)
 
-**Status:** mostly closed (1 deferred, 2 partial-closure escalations)
+**Status:** mostly closed (1 deferred)
 **Filed:** 2026-05-07
 **Owning phase:** Closure campaign (cross-phase)
 
@@ -35,8 +35,8 @@ catalog item.
 | 4c | Polymorphic dim leakage (`d36` undeclared) | **CLOSED** | 6b91d7b | `chelis_ir::dag::tests::symbolic_occurrences_sibling_sweep_picks_up_const_dims`, `chelis_ir::dag::tests::symbolic_occurrences_panics_when_dim_has_no_load_source`, `cli::build_c_polymorphic_top_level_tensor_dims_are_declared` |
 | 4d | HOF f32 wrappers fail in C codegen | **CLOSED** | bf5313a | `cli::build_c_higher_order_scalar_fn_param_emits_wrapper` |
 | 4e | Pipe operator drops shape on tensor activation chains | **CLOSED** | 5bdb85f, 08a7c44 | `cli::build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call` |
-| 5 | `with seed(...)` rejected by C backend (project-wide blocker) | **CLOSED (direct case)** | d22d4a0 | `cli::build_c_with_seed_uniform_like_succeeds`, `cli::build_c_with_seed_is_deterministic_across_runs`, `cli::build_c_with_seed_no_longer_blocks_sibling_build`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ` |
-| 5 | `with seed(...)` over function calls (`with seed { kaiming_uniform(...) }` where stdlib calls `uniform_like`) | **PARTIAL CLOSURE — escalated** | n/a | Cross-function seed plumbing requires C calling-convention refactor (thread RNG state through function args). Direct case works; cross-function case not blocked at compile but uses seed=0 internally |
+| 5 | `with seed(...)` rejected by C backend (project-wide blocker) | **CLOSED** | d22d4a0 + follow-up fix | `cli::build_c_with_seed_uniform_like_succeeds`, `cli::build_c_with_seed_is_deterministic_across_runs`, `cli::build_c_with_seed_no_longer_blocks_sibling_build`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds`, `phase3j_pre_oracle_build_path_repros_uniform_like_seed_distinct_seeds_differ` |
+| 5 | `with seed(...)` over function calls (`with seed { kaiming_uniform(...) }` where stdlib calls `uniform_like`) | **CLOSED (C host path)** | follow-up fix | `cli::cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend`, `phase3j_pre_std::cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed`, `phase3j_pre_std::cross_function_seed_stdlib_normal_like_advances_rng_per_random_op` |
 | 6a | `cast(t, bf16)` rejected | **DEFERRED** | n/a | bf16 end-to-end is genuine multi-day cross-backend work (types + IR evaluator + C/HIP/Metal codegen + spec + examples). Not attempted in this campaign |
 | 6b | `chelis check` is single-file only | **CLOSED** | d2cb0ed | `cli::check_directory_walks_ch_files_and_aggregates_json`, `cli::check_empty_directory_emits_empty_files_array`, `cli::check_single_file_keeps_legacy_report_shape` |
 | 6c | `chelis test` requires repo-root cwd | **CLOSED** | d2cb0ed | `phase3t_test_smoke::chelis_test_resolves_reef_root_from_target_file_path`, `phase3t_test_smoke::chelis_test_errors_clearly_when_no_reef_anywhere` |
@@ -48,12 +48,18 @@ executable corpus in `examples/` and asserts that `chelis check` /
 `chelis eval` / `chelis build --target c` + binary all agree on output
 to `1e-6` relative tolerance for tensor outputs (byte-equal otherwise).
 
-Result on landing: 13 active tests pass, 2 ignored:
+Result on landing: 13 active tests passed, 2 were ignored:
 - `parity_transformer_block_library_only` — environmental (`cblas.h`
   missing)
 - `parity_mnist_library_only` — caught a real C-backend codegen bug:
   emits `-(__arg0_*)` on a non-numeric arg in `loss`. **Closure
   follow-up filed; not part of the original catalog.**
+
+Follow-up result: `parity_mnist_library_only` is active again. The C
+host type inference and tensor-helper routing now keep `softmax |> log
+|> mul |> sum |> neg |> mean` on tensor values, so generated `mnist.c`
+does not emit unsupported `sum`/`mean` comments or unary minus on a
+non-numeric temporary.
 
 ## Out-of-scope items (per catalog)
 
@@ -66,11 +72,15 @@ Result on landing: 13 active tests pass, 2 ignored:
 
 1. **Bucket 6a — bf16 end-to-end.** Multi-day cross-backend
    implementation. Not attempted; tracked as separate work.
-2. **Bucket 5 — cross-function seed plumbing.** Architectural escalation:
-   thread RNG state through C calling convention or move to per-handler
-   instance state.
-3. **MNIST C codegen bug** (parity-harness finding). Diagnose root cause
-   in C-backend `lower_*` for `loss`-shape expressions.
+2. **Bucket 5 — cross-function seed plumbing.** Closed for the C host
+   path by moving random-handler state into the generated host runtime.
+   A `with seed(...)` scope now activates per-handler RNG state, and
+   nested stdlib/user functions that call `uniform_like` draw from that
+   active handler instead of falling back to baked seed `0`.
+3. **MNIST C codegen bug** (parity-harness finding). Closed by keeping
+   tensor reductions and `neg` in the tensor-helper path for the MNIST
+   loss tail and preserving the `tensor[f32]` rank-0 result shape in
+   generated C; `parity_mnist_library_only` is no longer ignored.
 
 ## Campaign mechanics
 

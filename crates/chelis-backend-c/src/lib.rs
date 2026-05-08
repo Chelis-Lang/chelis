@@ -855,11 +855,7 @@ int main() {{
     }
 
     fn c_shape(shape: &[usize]) -> (usize, Vec<usize>) {
-        if shape.is_empty() {
-            (1, vec![1])
-        } else {
-            (shape.len(), shape.to_vec())
-        }
+        (shape.len(), shape.to_vec())
     }
 
     fn compile_and_run_input_cases(
@@ -903,11 +899,16 @@ int main() {{
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
+                let shape_arg = if ndim == 0 {
+                    "NULL".to_string()
+                } else {
+                    lines.push(format!(
+                        "int shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
+                    ));
+                    format!("shape_{case_idx}_{slot}")
+                };
                 lines.push(format!(
-                    "int shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
-                ));
-                lines.push(format!(
-                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, shape_{case_idx}_{slot}, CHELIS_F32);"
+                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_F32);"
                 ));
                 for (i, value) in input.data.iter().enumerate() {
                     lines.push(format!(
