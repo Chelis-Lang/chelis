@@ -1,0 +1,3 @@
+# Temporary GitHub Linguist overrides until Chelis is eligible for native Linguist support.
+*.ch linguist-language=Haskell
+*.dp linguist-language=Clojure
