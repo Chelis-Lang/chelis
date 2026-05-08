@@ -75,6 +75,12 @@ Status legend:
 | 3o | `cargo test -p chelis-cli phase3o_octant_oracle -- --exact` | `spec/design/phase3n_octant.md` §2.5 Acceptance oracle | aspirational (named, not yet implemented) |
 | 3t | `chelis test tests/` exits 0 on the migrated Nautilus and Coral test suites; `parity/run_parity.py` continues to pass for the scipy/pandas comparison subset (in-repo: `phase3t_test_smoke.rs` covers the default smoke path; exhaustive Std.Test, decimal failure-path, build-path, and pseudo-Nautilus suites are manual gates) | `spec/design/chelis_phase3_plan.md` §3t Acceptance Oracle + `chelis_native_testing_plan.md` | default gate (smoke) + manual gates (exhaustive/std/pseudo suites) + aspirational (downstream test migration) |
 
+## Cross-Phase Closure Campaigns
+
+| Campaign | Oracle command | Owning spec doc | Status |
+|---|---|---|---|
+| Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test phase3j_pre_std cross_function_seed_stdlib -- --nocapture` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
+
 ## Phase A (Reef Distribution Unblock)
 
 | Phase | Oracle command | Owning spec doc | Status |

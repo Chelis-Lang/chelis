@@ -122,6 +122,11 @@ fn host_entry_source<'a>(source: &'a str, func_name: &str) -> &'a str {
         .unwrap_or(source)
 }
 
+fn hip_runtime_header() -> String {
+    fs::read_to_string(hip_runtime_src_dir().join("chelis_hip_runtime.h"))
+        .expect("read HIP runtime header")
+}
+
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
@@ -130,6 +135,28 @@ fn dag_add_consts() -> Dag {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     dag
+}
+
+#[test]
+fn s1_runtime_passes_wavefront_size_macro_to_hiprtc() {
+    let header = hip_runtime_header();
+
+    assert!(
+        header.contains("hipGetDeviceProperties(&props, device)"),
+        "runtime must discover the active device before compiling HIPRTC kernels"
+    );
+    assert!(
+        header.contains("\"-D__AMDGCN_WAVEFRONT_SIZE=%d\""),
+        "HIPRTC compile flags must define the wavefront-size macro used by HIP headers"
+    );
+    assert!(
+        header.contains("props.warpSize"),
+        "wavefront-size macro should be derived from the active device warp size"
+    );
+    assert!(
+        header.contains("hiprtcCompileProgram(prog, 2, compile_opts)"),
+        "HIPRTC invocation must pass both debug-bounds and wavefront-size options"
+    );
 }
 
 /// Build a DAG with a Load input

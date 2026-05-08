@@ -146,6 +146,9 @@ resumable computations - complexity that is hard for both humans and LLMs.
 - unhandled top-level `Random` is a check error with repair guidance
 - seeded `dropout` is implemented in lowering/eval/AD, but not yet in emitted C/HIP
   codegen
+- later Phase 3j-pre closure adds C host preservation for `with seed(...)` across
+  direct `uniform_like` and nested stdlib/user calls; seeded `dropout` codegen remains
+  deferred
 
 **What this plan does NOT yet claim as shipped:**
 - full row-polymorphic higher-order effect inference

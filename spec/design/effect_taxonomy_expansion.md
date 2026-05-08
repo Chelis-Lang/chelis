@@ -26,8 +26,9 @@ The shipped `Effect` enum in `crates/chelis-types/src/types.rs:144-154` has
 exactly five variants:
 
 - `Random` — operations whose result depends on a random source. Today this
-  fires on `dropout` and any operation reachable through it without a
-  surrounding `with seed(...)` handler.
+  fires on `dropout`, `uniform_like`, and stdlib random helpers reachable
+  through those operations unless covered by a surrounding `with seed(...)`
+  handler.
 - `Accum` — internal design hook for backward-pass accumulation. Not yet
   user-facing as a checked effect; reserved.
 - `Io` — host-side print and debug. Narrow today; covers stdout/stderr-style

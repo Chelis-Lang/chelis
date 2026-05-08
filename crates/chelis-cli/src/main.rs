@@ -1004,19 +1004,12 @@ fn cmd_check_one(
     Ok(json)
 }
 
-/// Bucket-5 closure: `with seed(...)` is now plumbed through the C and
-/// HIP backends. The seed binds at IR-lowering time
-/// (`chelis_ir::lower::lower_handle_effect`) and is baked into
-/// `RiscOp::UniformLike { seed }` / `RiscOp::Dropout { seed }` as a
-/// compile-time constant. The C emitter takes that constant and emits
-/// `chelis_uniform_sample_f32(seed, index, low, high)`, whose
-/// xorshift-splitmix algorithm matches the IR evaluator's
-/// `dropout_sample` (see `chelis_ir::eval`); the HIP backend reuses
-/// the same `chelis_uniform_sample_f32` device helper. So a program
-/// that contains `with seed(N) { uniform_like(...) }` lowered through
-/// either backend produces deterministic-on-seed output that agrees
-/// with `chelis eval` to f32 precision (eval reduces in f64; the
-/// emitted C/HIP runtime reduces in f32).
+/// Bucket-5 closure: `with seed(...)` no longer blocks `chelis build`.
+/// Direct `uniform_like` DAG lowering can bake the handled seed into
+/// `RiscOp::UniformLike { seed }`; generated C host code also preserves
+/// nested handler scopes with runtime RNG state so stdlib/user helpers
+/// that call `uniform_like` draw from the active seed. Seeded dropout
+/// backend codegen remains outside this hook's shipped coverage.
 ///
 /// This function is retained as a forward-compatibility hook for
 /// future user-defined effect handlers that the backends genuinely

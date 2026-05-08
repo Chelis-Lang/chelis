@@ -438,18 +438,7 @@ fn parity_linreg_library_only() {
     drive_parity(&examples_root().join("linreg.ch"), false);
 }
 
-// REAL CODEGEN BUG surfaced by the parity harness: as of the closure
-// campaign merge, `mnist.ch`'s C codegen emits an invalid expression of the
-// form `-(__arg0_13)` where `__arg0_13` is not a numeric scalar, which gcc
-// rejects with `error: wrong type argument to unary minus`. This is a C
-// backend defect (not a BLAS / environmental issue: the source does not
-// contain `cblas_sgemm()`), and parity can't be evaluated until codegen is
-// fixed.
-//
-// Ignored, with the bug documented in the comment, so this test reactivates
-// once the codegen bug is fixed (just remove `#[ignore]`).
 #[test]
-#[ignore = "C-backend codegen bug: emits `-(__arg0_*)` on a non-numeric arg in `loss` (closure campaign followup)"]
 fn parity_mnist_library_only() {
     drive_parity(&examples_root().join("mnist.ch"), false);
 }

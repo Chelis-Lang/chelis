@@ -512,9 +512,14 @@ Current shipped inference/checking behavior:
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- `dropout(x, rate)` is the concrete shipped `Random` source
+- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are the
+  concrete shipped `Random` sources; stdlib random helpers such as
+  `normal_like` and Kaiming/Xavier initializers inherit that effect through
+  calls
 - `print(x)` and `debug(x)` are the concrete shipped `IO` sources
-- `with seed(seed) { ... }` handles `Random`
+- `with seed(seed) { ... }` handles `Random` across direct operations and calls made
+  inside the handled region; the C host backend preserves this with generated
+  handler-scoped RNG state for nested stdlib/user functions
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
 - declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but

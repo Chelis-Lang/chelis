@@ -31,6 +31,9 @@ Current design points:
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
 - ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
+- preserve `with seed(...)` for generated host code with a handler-scoped RNG state;
+  direct DAG random operations use their baked seed, while host fallback functions can
+  draw from the active handler when stdlib/user calls contain nested `uniform_like`
 - tuple-returning host exports use the stable runtime tuple ABI:
   generated headers surface `chelis_tuple*`, drivers construct tuples with
   `chelis_tuple_from_values(...)`, and typed extraction goes through the

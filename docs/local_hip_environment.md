@@ -72,6 +72,39 @@ undeclared identifier '__AMDGCN_WAVEFRONT_SIZE'
    `~/.local/lib/python3.12/site-packages/_rocm_sdk_core/lib/` so linking finds them. If
    the wheel is upgraded these symlinks must be recreated.
 
+3. hipBLAS / rocBLAS wheel-library compatibility.
+
+   HIP gates that exercise hipBLAS require a single coherent ROCm stack at compile
+   time and runtime. Mixed stacks, such as compiling against one ROCm install's headers
+   while linking another install's hipBLAS, are unsupported.
+
+   This workstation's wheel library package is `_rocm_sdk_libraries_gfx1151`; its
+   rocBLAS Tensile data lives under:
+
+   ```text
+   /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib/rocblas/library/gfx1151
+   ```
+
+   `rocminfo` reports the device as `gfx1100`, but the wheel stack used here expects the
+   gfx1151 library lane. For hipBLAS gates, run with:
+
+   ```text
+   HSA_OVERRIDE_GFX_VERSION=11.5.1
+   LD_LIBRARY_PATH=/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/lib:/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib
+   HIPCC_COMPILE_FLAGS_APPEND=-isystem /home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_core/include -L/home/jeff/.local/lib/python3.12/site-packages/_rocm_sdk_libraries_gfx1151/lib
+   ```
+
+   The `_rocm_sdk_libraries_gfx1151` wheel ships `libhipblas.so.3`; the local wheel
+   library directory has a user-space `libhipblas.so -> libhipblas.so.3` symlink so
+   `hipcc -lhipblas` resolves to the wheel library when the `-L` path above is present.
+   If the wheel is upgraded this symlink must be recreated.
+
+   Chelis does not add custom library-search environment variables or silently fall back
+   when hipBLAS is unavailable. Use standard ROCm and platform mechanisms
+   (`HSA_OVERRIDE_GFX_VERSION`, `LD_LIBRARY_PATH`, `HIPCC_COMPILE_FLAGS_APPEND`,
+   `ldconfig`, or a package-manager ROCm install) to make the intended libraries and
+   ISA lane visible.
+
 Removing the system `rocm-hip-devel` package would also work but requires sudo; the
 env-var route was chosen because it is purely user-space, survives system updates, and
 only affects `hipcc` invocations.

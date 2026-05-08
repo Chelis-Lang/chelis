@@ -128,6 +128,24 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
     out.push("    return low + (high - low) * (float)unit;".to_string());
     out.push("}".to_string());
+    out.push(
+        "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
+            .to_string(),
+    );
+    out.push("static chelis_rng_state chelis_rng_current = {0ULL, 0ULL, 0};".to_string());
+    out.push(
+        "static inline uint64_t chelis_effective_uniform_seed(uint64_t baked_seed) {".to_string(),
+    );
+    out.push("    if (!chelis_rng_current.active) {".to_string());
+    out.push("        return baked_seed;".to_string());
+    out.push("    }".to_string());
+    out.push("    uint64_t counter = chelis_rng_current.counter++;".to_string());
+    out.push("    return chelis_rng_current.seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("}".to_string());
+    out.push(
+        "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(seed)"
+            .to_string(),
+    );
 }
 
 fn append_tensor_math_helpers(out: &mut Vec<String>) {
@@ -736,6 +754,26 @@ impl HostEmitter {
             }
             HostExprKind::FlatMap { callback, list, ty } => {
                 self.assign_flat_map(target, callback, list, ty);
+            }
+            HostExprKind::WithSeed { seed, body, ty } => {
+                let seed_var = self.next_temp("seed");
+                self.emit_expr_to_var(seed, &seed_var, &HostType::Int64);
+                let saved_var = self.next_temp("rng_saved");
+                self.lines.push(format!(
+                    "{}chelis_rng_state {saved_var} = chelis_rng_current;",
+                    self.indent
+                ));
+                self.lines.push(format!(
+                    "{}chelis_rng_current.seed = (uint64_t){seed_var};",
+                    self.indent
+                ));
+                self.lines
+                    .push(format!("{}chelis_rng_current.counter = 0ULL;", self.indent));
+                self.lines
+                    .push(format!("{}chelis_rng_current.active = 1;", self.indent));
+                self.assign_expr(target, body, ty);
+                self.lines
+                    .push(format!("{}chelis_rng_current = {saved_var};", self.indent));
             }
             HostExprKind::TensorCall { helper, args, ty } => {
                 self.assign_tensor_call(target, *helper, args, ty);
@@ -1555,9 +1593,8 @@ impl HostEmitter {
                     let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
                     self.lines
                         .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
-                    // Scalar inputs to tensor helpers must be rank-1 shape-[1] tensors
-                    // (DAG helper ABI always expects ndim >= 1; rank-0 triggers the
-                    // ndim check guard and causes an abort at runtime).
+                    // Scalar inputs to tensor helpers use true rank-0 tensors so
+                    // tensor[f32] keeps shape=[] across generated host/DAG calls.
                     let (dtype, store) = match inferred_ty {
                         HostType::Int64 => (
                             "CHELIS_I64",
@@ -1573,7 +1610,7 @@ impl HostEmitter {
                         ),
                     };
                     self.lines.push(format!(
-                        "{}{tensor_name} = chelis_alloc(1, (int[]){{1}}, {dtype});",
+                        "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
                         self.indent
                     ));
                     self.lines.push(format!("{}{store}", self.indent));
@@ -2503,6 +2540,7 @@ fn host_type(expr: &HostExpr) -> HostType {
         | HostExprKind::Scan { ty, .. }
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
+        | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. } => ty.clone(),
         HostExprKind::Unit => HostType::Unit,
     }

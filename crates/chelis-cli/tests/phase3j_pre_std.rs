@@ -1,4 +1,4 @@
-//! Phase 3j-pre acceptance oracle (Batches 5, 5b, 7b).
+//! Phase 3j-pre acceptance oracle (Batches 5, 5b, 7b, and closure follow-ups).
 //!
 //! Current shipped state (Batch 7b):
 //!
@@ -18,18 +18,19 @@
 //!     that touches it builds and runs through the C backend. Numeric
 //!     verification of the attention math itself is still deferred to
 //!     Phase 3j (Nautilus); see §3j-pre Acknowledged Limitations.
-//!   - `with seed(...)` over `uniform_like` (Bucket-5 closure of Batch
-//!     7b): the C backend now plumbs the user-provided seed through
-//!     the generated runtime. The seed binds at IR-lowering time and
-//!     is baked into `RiscOp::UniformLike { seed }`; the C emitter
-//!     renders it as a compile-time constant in
-//!     `chelis_uniform_sample_f32(seed, index, ...)`, whose
-//!     xorshift-splitmix algorithm matches the IR evaluator. The
-//!     positive tests
+//!   - `with seed(...)` over direct `uniform_like` and stdlib random
+//!     helpers (Bucket-5 closure of Batch 7b): the C backend now
+//!     plumbs the user-provided seed through the generated runtime.
+//!     Direct DAG lowering can bake the seed into `RiscOp::UniformLike
+//!     { seed }`; generated host functions preserve nested handler
+//!     scopes through `HostExprKind::WithSeed` and `chelis_rng_current`.
+//!     The positive tests
 //!     `phase3j_pre_oracle_build_path_repros_uniform_like_seed_succeeds`
-//!     and `..._distinct_seeds_differ` pin determinism (same seed →
-//!     same bytes) and seed-sensitivity (different seeds → different
-//!     bytes). The C output is f32-rounded; the eval reference in
+//!     and `..._distinct_seeds_differ` pin direct determinism (same seed
+//!     -> same bytes) and seed-sensitivity (different seeds -> different
+//!     bytes). `cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed`
+//!     and `cross_function_seed_stdlib_normal_like_advances_rng_per_random_op`
+//!     pin the stdlib wrapper path. The C output is f32-rounded; the eval reference in
 //!     `phase3j_pre_oracle_integrated_eval` stays in f64 — the
 //!     trailing-bit drift is intrinsic to the runtime precision, not a
 //!     seed-plumbing bug.
@@ -64,12 +65,10 @@
 //!      `chelis build --target c` + gcc-link + run, asserting
 //!      byte-exact stdout against a hand-computed reference covering
 //!      RMSNorm and GELU.
-//!   4. `phase3j_pre_oracle_build_path_repros_*` (`#[ignore]`d) —
-//!      one minimal reproduction per broken build path. Each is
-//!      expected to start passing once the underlying C backend bug
-//!      is fixed; the assertion shape is "publish + build + gcc-link +
-//!      run + non-empty stdout" and they are gated behind `--ignored`
-//!      so they do not gate default CI.
+//!   6. `phase3j_pre_oracle_build_path_repros_*` (`#[ignore]`d) —
+//!      manual-gate build-path acceptance cases. They are expected to
+//!      pass; they remain behind `--ignored` because the suite exceeds
+//!      the default inner-loop budget.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -400,15 +399,16 @@ gelu_out = forward(ys)
 /// --target c`, gcc-links, runs, and produces deterministic output
 /// that is byte-exact across runs for the same seed.
 ///
-/// The seed binds at IR-lowering time and is baked into
-/// `RiscOp::UniformLike { seed }`; the C emitter renders it as a
-/// compile-time constant in `chelis_uniform_sample_f32(seed, index,
-/// ...)`, whose xorshift-splitmix algorithm matches the IR evaluator's
-/// `dropout_sample` (see `chelis_ir::eval`). The C output is f32-rounded
-/// (not byte-equal to the f64 `chelis eval` reference in
-/// `phase3j_pre_oracle_integrated_eval`) — that f32-vs-f64 reduction
-/// difference is intrinsic to the runtime precision, not a seed-plumbing
-/// bug.
+/// Direct DAG-lowered random ops can carry the seed as
+/// `RiscOp::UniformLike { seed }`; generated host-function paths use
+/// the explicit `HostExprKind::WithSeed` scope and generated C RNG
+/// state. Both paths route the active seed into
+/// `chelis_uniform_sample_f32`, whose xorshift-splitmix algorithm
+/// matches the IR evaluator's `dropout_sample` (see `chelis_ir::eval`).
+/// The C output is f32-rounded (not byte-equal to the f64 `chelis eval`
+/// reference in `phase3j_pre_oracle_integrated_eval`) — that
+/// f32-vs-f64 reduction difference is intrinsic to the runtime
+/// precision, not a seed-plumbing bug.
 ///
 /// The test exercises the direct `uniform_like` builtin under
 /// `with seed(7)` rather than `Std.Init.Kaiming.kaiming_uniform`. The
@@ -484,6 +484,99 @@ forty_two = with seed(42) { uniform_like(copy(template), cast(0.0, f32), cast(1.
     );
 }
 
+#[test]
+fn cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed() {
+    let (_dir, reef_home, app_pkg) = make_app("cross-function-seed-stdlib-kaiming");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Init.Kaiming (kaiming_uniform)
+
+template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+seven = with seed(7) { kaiming_uniform(copy(template), cast(4.0, f32)) }
+seven_again = with seed(7) { kaiming_uniform(copy(template), cast(4.0, f32)) }
+forty_two = with seed(42) { kaiming_uniform(copy(template), cast(4.0, f32)) }
+"#,
+    );
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
+    assert!(
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
+    );
+    let c_src = fs::read_to_string(app_pkg.join("out/main.c")).expect("read generated C");
+    assert!(
+        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
+        "stdlib wrapper call must not pass literal seed=0 directly to random sampler:\n{c_src}"
+    );
+    let seven = stdout
+        .lines()
+        .find(|line| line.starts_with("seven = "))
+        .expect("seven output line");
+    let seven_again = stdout
+        .lines()
+        .find(|line| line.starts_with("seven_again = "))
+        .expect("seven_again output line");
+    let forty_two = stdout
+        .lines()
+        .find(|line| line.starts_with("forty_two = "))
+        .expect("forty_two output line");
+    assert_eq!(
+        seven.replace("seven = ", ""),
+        seven_again.replace("seven_again = ", ""),
+        "same seed through stdlib wrapper must be deterministic"
+    );
+    assert_ne!(
+        seven.replace("seven = ", ""),
+        forty_two.replace("forty_two = ", ""),
+        "different seeds through stdlib wrapper must produce distinct samples"
+    );
+}
+
+#[test]
+fn cross_function_seed_stdlib_normal_like_advances_rng_per_random_op() {
+    let (_dir, reef_home, app_pkg) = make_app("cross-function-seed-stdlib-normal");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Init.Random (normal_like)
+
+template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+first = with seed(9) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
+first_again = with seed(9) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
+other = with seed(10) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
+"#,
+    );
+    let (status, stdout, stderr) = build_and_run(&reef_home, &app_pkg);
+    assert!(
+        status.success(),
+        "compiled binary failed: stdout={stdout}\nstderr={stderr}"
+    );
+    let first = stdout
+        .lines()
+        .find(|line| line.starts_with("first = "))
+        .expect("first output line");
+    let first_again = stdout
+        .lines()
+        .find(|line| line.starts_with("first_again = "))
+        .expect("first_again output line");
+    let other = stdout
+        .lines()
+        .find(|line| line.starts_with("other = "))
+        .expect("other output line");
+    assert_eq!(
+        first.replace("first = ", ""),
+        first_again.replace("first_again = ", ""),
+        "normal_like must be deterministic under the same seed"
+    );
+    assert_ne!(
+        first.replace("first = ", ""),
+        other.replace("other = ", ""),
+        "normal_like must advance/use RNG state through its inner uniform_like calls"
+    );
+}
+
 /// `Std.Tensor.Reduce.min` through `chelis build --target c`. Asserts
 /// byte-exact compiled stdout for a column-wise min over a 2x3 tensor:
 /// `min([[1,2,3],[4,0.5,6]], axis=0) = [1, 0.5, 3]`.
@@ -556,9 +649,10 @@ touch_ok = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 /// `chelis build --target c`, gcc-links with `gcc_link_generated`,
 /// runs the binary, and asserts **byte-exact** stdout against a
 /// hand-computed f64 reference covering RMSNorm and GELU through their
-/// scalar host helpers. Kaiming under `with seed(...)` is intentionally
-/// excluded here and is covered by the seed-rejected negative test
-/// above; this is the no-silent-drop contract from Batch 7b.
+/// scalar host helpers. Kaiming under `with seed(...)` is covered by
+/// `cross_function_seed_stdlib_kaiming_uniform_uses_handler_seed`; this
+/// integrated oracle stays focused on the deterministic non-random
+/// build path.
 #[test]
 #[ignore = "manual gate: Phase 3j-pre build-path acceptance compiles and links generated C"]
 fn phase3j_pre_oracle_integrated_build_c() {
