@@ -809,7 +809,10 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     }
 }
 
-fn cmd_check(target: &Path, allow_style_violations: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_check(
+    target: &Path,
+    allow_style_violations: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Bucket 6b: when given a directory, walk it and run the per-file
     // check on every `.ch` file found. We use the same dot-prefix and
     // `target/` skip rules as `discover_test_files`, so editor tempfiles
@@ -897,7 +900,10 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn cmd_check_one(file: &Path, allow_style_violations: bool) -> Result<String, Box<dyn std::error::Error>> {
+fn cmd_check_one(
+    file: &Path,
+    allow_style_violations: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     }
