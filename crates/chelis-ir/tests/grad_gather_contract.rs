@@ -1,0 +1,154 @@
+//! Contract test for AD through the §3.5 gather→one-hot lowering.
+//!
+//! Spec/05-risc-primitives.md §3.5 says `gather(x, idx, axis)` decomposes via
+//! `reshape + expand + mul + sum`. The framework's promise that "AD is correct
+//! by construction" depends on that decomposition being differentiable through
+//! the existing RISC adjoints — duplicate indices in the index tensor must
+//! produce duplicate forward contributions which the backward pass through
+//! `Sum`→`Expand` automatically scatter-adds. No hand-written backward.
+//!
+//! This test builds the post-§3.5 RISC DAG by hand for a 3-token / 2-vocab
+//! gather where every token routes to vocab=0 (the MoE / embedding stress
+//! case), and verifies that `grad_dag_checked` accumulates the duplicate-row
+//! gradients correctly. It is the durable defense against the "library author
+//! wrote a naive backward and silently dropped 99/100 of the batch" bug class
+//! that motivated the linearity feature in the first place.
+//!
+//! The test is independent of whether `gather` ever becomes a RiscOp variant.
+//! Today gather is a host-only Tier 2 builtin (no `RiscOp::Gather`,
+//! see `crates/chelis-ir/src/host.rs:4640`), so a
+//! Surf program containing `gather` cannot reach `grad_dag_checked` at all —
+//! it takes the host runtime path before the IR is built. If a future commit
+//! either (a) wires the §3.5 lowering or (b) adds a hand-rolled `RiscOp::Gather`
+//! adjoint, this test must continue to pass — failing here means duplicate-
+//! index gradients are being silently dropped.
+//!
+//! Implementation note on `Expand`: Chelis's `RiscOp::Expand` adjoint
+//! (`grad.rs`) wires only the rank-increasing form (insert a new axis), not
+//! the in-place size-1 → larger form. The §3.5 lowering as written in spec
+//! reads as size-1 broadcast, but the rank-increasing form is equivalent for
+//! AD purposes and is what's currently differentiable, so this test uses it.
+
+use std::collections::HashMap;
+
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::eval::{TensorValue, eval_tensor_with};
+use chelis_ir::grad::grad_dag_checked;
+use chelis_types::types::Prim;
+
+fn t(dims: Vec<usize>) -> TensorType {
+    TensorType {
+        dims: dims.into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    }
+}
+
+#[test]
+fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
+    let mut dag = Dag::new();
+
+    // table: [vocab=2, dim=2] — the input we differentiate against.
+    let table = dag.add_node(
+        RiscOp::Load {
+            name: "table".into(),
+        },
+        vec![],
+        t(vec![2, 2]),
+        None,
+    );
+
+    // one_hot encoding of indices=[0, 0, 0]: build via Const+Pad.
+    //   start: [n=3, 1] of 1.0
+    let oh_col = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], t(vec![3, 1]), None);
+    //   pad axis=1 by (0, 1) with fill 0 → [n=3, vocab=2] = [[1,0],[1,0],[1,0]]
+    let one_hot = dag.add_node(
+        RiscOp::Pad {
+            padding: vec![(0, 0), (0, 1)],
+            fill: 0.0,
+        },
+        vec![oh_col],
+        t(vec![3, 2]),
+        None,
+    );
+
+    // Insert new axis at position 2 with size dim=2 → [n=3, vocab=2, dim=2].
+    let oh_exp = dag.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: DimExpr::Concrete(2),
+        },
+        vec![one_hot],
+        t(vec![3, 2, 2]),
+        None,
+    );
+
+    // Insert new axis at position 0 with size n=3 → [n=3, vocab=2, dim=2].
+    let table_exp = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: DimExpr::Concrete(3),
+        },
+        vec![table],
+        t(vec![3, 2, 2]),
+        None,
+    );
+
+    // Mul + sum-over-vocab → [n=3, dim=2] (this IS the gather output).
+    let product = dag.add_node(RiscOp::Mul, vec![oh_exp, table_exp], t(vec![3, 2, 2]), None);
+    let gathered = dag.add_node(RiscOp::Sum { axis: 1 }, vec![product], t(vec![3, 2]), None);
+
+    // Collapse to scalar via two sum reductions to drive a scalar output.
+    let s1 = dag.add_node(RiscOp::Sum { axis: 0 }, vec![gathered], t(vec![2]), None);
+    let s2 = dag.add_node(
+        RiscOp::Sum { axis: 0 },
+        vec![s1],
+        TensorType::scalar_f32(),
+        None,
+    );
+
+    // Sanity: forward dag should be structurally valid.
+    let fwd_errs = chelis_ir::verify::verify(&dag);
+    assert!(
+        fwd_errs.is_empty(),
+        "forward dag verification errors: {fwd_errs:?}"
+    );
+
+    // Forward sanity check: sum over the gather of [[1,0],[1,0],[1,0]] @ table
+    // is 3*(table[0,0] + table[0,1]) = 3*(1+2) = 9.
+    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    inputs.insert(
+        "table".to_string(),
+        TensorValue {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            shape: vec![2, 2],
+        },
+    );
+    let fwd_vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("forward eval");
+    let fwd_out = &fwd_vals[&s2];
+    assert!(
+        (fwd_out.data[0] - 9.0).abs() < 1e-6,
+        "forward sanity: expected 3*(1+2)=9.0, got {}",
+        fwd_out.data[0]
+    );
+
+    // Backward: differentiate the scalar w.r.t. table.
+    let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad must succeed");
+    let grad_node = grad.grad_nodes[&table];
+    let bwd_vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let dtable = &bwd_vals[&grad_node];
+
+    // Expected: every token contributed +1 to dout/dtable[0,*]. Three tokens
+    // routed to vocab=0, so the gradient at table[0,*] is 3 and at table[1,*]
+    // is 0. If a future commit introduces a hand-rolled Gather adjoint that
+    // forgets the duplicate-index accumulation, this assertion will reject it.
+    assert_eq!(dtable.shape, vec![2, 2]);
+    let expected = [3.0, 3.0, 0.0, 0.0];
+    for (i, want) in expected.iter().enumerate() {
+        assert!(
+            (dtable.data[i] - want).abs() < 1e-6,
+            "duplicate-index grad table[{i}]: expected {want}, got {} \
+             (silent-drop bug? see crate-level docs)",
+            dtable.data[i]
+        );
+    }
+}
