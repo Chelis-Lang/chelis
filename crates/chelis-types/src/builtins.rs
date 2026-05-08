@@ -47,6 +47,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "not",
     "relu",
     "sigmoid",
+    "tanh",
+    "silu",
+    "gelu",
     "softmax",
     "normalize",
     "mean",
@@ -482,6 +485,14 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     tensor_unop("relu", &mut env, &mut vg);
     tensor_unop("sigmoid", &mut env, &mut vg);
+    // Bucket 3 activation parity: `tanh`, `silu`, `gelu` are pointwise
+    // tensor unops with the same `∀D,p. tensor[D,p] → tensor[D,p]`
+    // signature shape as `relu`/`sigmoid`. Their host-runtime and
+    // C-backend lowerings live in `chelis-compiler-api/src/runtime.rs`
+    // and `chelis-backend-c/src/host_emit.rs` respectively.
+    tensor_unop("tanh", &mut env, &mut vg);
+    tensor_unop("silu", &mut env, &mut vg);
+    tensor_unop("gelu", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
     tensor_unop("normalize", &mut env, &mut vg);
     tensor_reduce_to_out("mean", &mut env, &mut vg);

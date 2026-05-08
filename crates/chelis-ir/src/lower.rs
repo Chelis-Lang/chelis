@@ -771,6 +771,9 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "ceil"
                         | "relu"
                         | "sigmoid"
+                        | "tanh"
+                        | "silu"
+                        | "gelu"
                         | "cmplt"
                         | "gt"
                         | "gte"
@@ -3127,10 +3130,29 @@ impl LowerCtx {
                 let low = self.extract_f64_value(&args[1]).unwrap_or(0.0);
                 let high = self.extract_f64_value(&args[2]).unwrap_or(1.0);
                 let seed = self.random_seed.unwrap_or(0);
+                // When no `type` metadata is attached to the `app` form
+                // (as is common when the host lane drives sub-expression
+                // lowering through `lower_subexpr_program` from a
+                // handle-effect tensor-helper call), the supplied `ty`
+                // is `default_type()` (rank-0 scalar). UniformLike is
+                // shape-preserving over its template input, so prefer
+                // the template's actual tensor type to avoid emitting a
+                // rank-0 alloc that the host emitter then renders as
+                // `(int[]){1}` and a 1-element loop. Bucket-5 closure.
+                let inferred_ty = self
+                    .dag
+                    .get(template)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
+                    inferred_ty
+                } else {
+                    ty.clone()
+                };
                 let node = self.dag.add_node(
                     RiscOp::UniformLike { low, high, seed },
                     vec![template],
-                    ty.clone(),
+                    resolved_ty,
                     self.current_span_id.clone(),
                 );
                 self.attach_reuse_hint(node, app_span, &[template])
@@ -3139,10 +3161,20 @@ impl LowerCtx {
                 let x = self.lower_expr_node(&args[0], "dropout input");
                 let rate = self.extract_f64_value(&args[1]).unwrap_or(0.0);
                 let seed = self.random_seed.unwrap_or(0);
+                let inferred_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
+                    inferred_ty
+                } else {
+                    ty.clone()
+                };
                 let node = self.dag.add_node(
                     RiscOp::Dropout { rate, seed },
                     vec![x],
-                    ty.clone(),
+                    resolved_ty,
                     self.current_span_id.clone(),
                 );
                 self.attach_reuse_hint(node, app_span, &[x])
@@ -3190,6 +3222,51 @@ impl LowerCtx {
                 };
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            // Bucket 3: `tanh`, `silu`, `gelu` route through new tier2
+            // decompositions so the RISC DAG path stays self-contained.
+            // Mirrors the relu/sigmoid pattern above.
+            "tanh" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "tanh input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_tanh(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "silu" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "silu input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_silu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                self.attach_reuse_hint(node, app_span, &[x])
+            }
+            "gelu" if args.len() == 1 => {
+                let x = self.lower_expr_node(&args[0], "gelu input");
+                let out_ty = if *ty == Self::default_type() {
+                    self.dag
+                        .get(x)
+                        .map(|node| node.output_type.clone())
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                };
+                let parent_span = self.current_span_id.clone();
+                let node = tier2::lower_gelu(&mut self.dag, x, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "div" if args.len() == 2 => {
@@ -3852,7 +3929,50 @@ impl LowerCtx {
         }
         let mut current = self.lower_expr(&elems[2]);
         for func_expr in &elems[3..] {
-            if let Expr::List(func_list, _) = func_expr
+            // Bucket 4e: a unary `(var {} fname)` stage where `fname` is
+            // a known elementwise/tensor builtin can lower directly via
+            // tier2 (no lambda intermediary). For *unknown* var names
+            // (user-defined fns, library re-exports, etc.) we fall
+            // through to `resolve_callable_expr` below, so the stage is
+            // treated as a plain function reference and gets the same
+            // unary-application semantics as `f(current)`.
+            //
+            // The previous implementation hit `_ => current` and then
+            // `continue`, which silently dropped the user-defined fn
+            // (the accumulator was returned unchanged). Top-level
+            // bindings then materialised as `()`/Unit in generated C.
+            let unary_builtin_name = if let Expr::List(func_list, _) = func_expr
+                && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
+                && tag == "var"
+                && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
+            {
+                Some(fname.as_str())
+            } else {
+                None
+            };
+            let is_known_unary_builtin = matches!(
+                unary_builtin_name,
+                Some(
+                    "neg"
+                        | "exp"
+                        | "log"
+                        | "sin"
+                        | "sqrt"
+                        | "cos"
+                        | "tan"
+                        | "atan"
+                        | "abs"
+                        | "floor"
+                        | "ceil"
+                        | "relu"
+                        | "sigmoid"
+                        | "tanh"
+                        | "silu"
+                        | "gelu"
+                )
+            );
+            if is_known_unary_builtin
+                && let Expr::List(func_list, _) = func_expr
                 && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
                 && tag == "var"
                 && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
@@ -3942,7 +4062,32 @@ impl LowerCtx {
                         &ty,
                         self.current_span_id.as_deref(),
                     )),
-                    _ => current,
+                    "tanh" => LoweredValue::Node(tier2::lower_tanh(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "silu" => LoweredValue::Node(tier2::lower_silu(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    "gelu" => LoweredValue::Node(tier2::lower_gelu(
+                        &mut self.dag,
+                        current_node,
+                        &ty,
+                        self.current_span_id.as_deref(),
+                    )),
+                    // `is_known_unary_builtin` guarantees this branch is
+                    // never hit, but keep it as an explicit fallthrough
+                    // marker so any future name added to the predicate
+                    // without a corresponding match arm fails loudly.
+                    _ => unreachable!(
+                        "pipe stage `{fname}` was classified as a known \
+                         unary builtin but has no lowering arm"
+                    ),
                 };
                 continue;
             }

@@ -1519,6 +1519,176 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
     );
 }
 
+/// Locally-bound `grad` alias form: `let g = grad(f, wrt=…); g(x)` must
+/// lower in the C backend the same way the inline form `grad(f)(x)` already
+/// does. The host backend recognizes `grad`/`vmap`/`vmap-grad` only in
+/// direct callee position of an `app` node — without explicit β-substitution
+/// of the alias the binding lowers to an `__unresolved_grad` builtin and
+/// `host_program_unresolved_call_sites` rejects the program pre-codegen.
+/// Verifies: build exits 0, the generated C contains no unresolved `call(…)`
+/// stubs, the binary runs, and the gradient values match the inline form
+/// numerically.
+#[test]
+fn build_c_grad_locally_bound_alias_form_lowers() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_local_alias.ch");
+    let out_dir = dir.path().join("grad-local-alias-build-out");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] = {\n\
+           g = grad(loss, wrt=theta)\n\
+           g(theta, x)\n\
+         }\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("grad_local_alias.c")).expect("generated c");
+    assert!(
+        !source.contains("__result = call(")
+            && !source.contains("unsupported builtin")
+            && !source.contains("__unresolved_grad")
+            && !source.contains("__unresolved_vmap"),
+        "generated C must not contain unresolved call stubs or unresolved-callable markers:\n{source}"
+    );
+
+    let status = gcc_link_generated(&out_dir, "grad_local_alias.c", "grad_local_alias");
+    assert!(status.success(), "gcc link failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("grad_local_alias"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // grad(sum(theta*x), wrt=theta) = x = [3.0, 4.0]
+    assert!(
+        stdout.contains("out = tensor(shape=[2], data=[3.0, 4.0])"),
+        "locally-bound grad alias must produce the same gradient as the inline form, got:\n{stdout}"
+    );
+}
+
+/// Parity test: `chelis eval` (IR evaluator path) and `chelis build
+/// --target c` + run (C backend path) must agree on the locally-bound `grad`
+/// alias form. Bucket 1 made the IR evaluator accept the alias form; this
+/// guards against the C backend silently regressing relative to the
+/// evaluator after the host-lane β-substitution pass. Output parity is
+/// asserted on the alias form's value matching the inline form's value
+/// — both as printed by the C runtime and as printed by `chelis eval`.
+#[test]
+fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
+    fn build_and_run(out_dir: &Path, source_path: &Path, source: &str, name: &str) -> String {
+        write_file(source_path, source);
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                source_path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        let status = gcc_link_generated(out_dir, &format!("{name}.c"), name);
+        assert!(status.success(), "gcc link failed with status {status}");
+        let run_output = StdCommand::new(out_dir.join(name))
+            .output()
+            .expect("compiled binary should run");
+        assert!(
+            run_output.status.success(),
+            "compiled binary failed with status {}",
+            run_output.status
+        );
+        String::from_utf8(run_output.stdout).expect("utf-8 stdout")
+    }
+
+    fn eval_to_string(source_path: &Path) -> String {
+        let bytes = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file", source_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(bytes).expect("utf-8 eval stdout")
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let alias_dir = dir.path().join("alias-build");
+    let inline_dir = dir.path().join("inline-build");
+    let alias_src = dir.path().join("grad_local_alias_parity.ch");
+    let inline_src = dir.path().join("grad_local_inline_parity.ch");
+
+    let alias_program = "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] = {\n\
+           g = grad(loss, wrt=theta)\n\
+           g(theta, x)\n\
+         }\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+    let inline_program = "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n";
+
+    let alias_run_stdout = build_and_run(
+        &alias_dir,
+        &alias_src,
+        alias_program,
+        "grad_local_alias_parity",
+    );
+    let inline_run_stdout = build_and_run(
+        &inline_dir,
+        &inline_src,
+        inline_program,
+        "grad_local_inline_parity",
+    );
+    assert_eq!(
+        alias_run_stdout, inline_run_stdout,
+        "C-backend run output for the locally-bound grad alias form must match the inline form"
+    );
+
+    // chelis eval prints the last top-level value; both programs share the
+    // same final `out` definition so eval output must agree across forms,
+    // and must also agree with the C-backend's printed `out = …` line up
+    // to the prefix.
+    let alias_eval_stdout = eval_to_string(&alias_src);
+    let inline_eval_stdout = eval_to_string(&inline_src);
+    assert_eq!(
+        alias_eval_stdout, inline_eval_stdout,
+        "`chelis eval` output for the locally-bound grad alias form must match the inline form"
+    );
+    let trimmed_eval = alias_eval_stdout.trim_end();
+    assert!(
+        alias_run_stdout.contains(trimmed_eval),
+        "C-backend run output must include the eval-printed gradient value;\n  eval: {trimmed_eval}\n  run:  {alias_run_stdout}"
+    );
+}
+
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
 /// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
 /// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
@@ -4419,6 +4589,199 @@ fn target_metal_rejects_cpu_resource_region() {
         .stderr(predicate::str::contains("cannot satisfy resource region"));
 }
 
+// =============================================================================
+// Bucket 3: activation primitive parity (relu, sigmoid, tanh, silu, gelu).
+//
+// These tests close the IR-evaluator/C-backend gap surfaced as
+// `unsupported builtin \`relu\` in host runtime` (and siblings). For each
+// activation we run a small program through both `chelis eval` (the
+// in-process IR evaluator dispatched in `chelis-compiler-api/src/runtime.rs`)
+// and `chelis build --target c` (whose generated code uses the
+// `chelis_host_*_f32` helpers in `chelis-backend-c/src/host_emit.rs`).
+//
+// Verification strategy: each program embeds `test_assert_close_tensor`
+// against an offline-computed expected tensor with `1e-4` tolerance.
+// Both lanes succeed (exit 0, no panic) iff their numerics agree to that
+// tolerance. The C lane also runs the compiled binary to exercise the
+// host-emit f32 helper end-to-end.
+// =============================================================================
+
+/// Run a Bucket 3 activation program through both lanes:
+///   1. `chelis eval --file <path>` (IR evaluator, runtime.rs)
+///   2. `chelis build --target c --output <out_dir>` followed by gcc + run
+///
+/// Returns the eval stdout and run stdout for any caller that wants to
+/// do additional shape comparison. The function asserts each step
+/// succeeds; failures bubble up with the lane name in the panic.
+fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, source_body);
+
+    // `chelis check` must pass cleanly.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"score\": 1"));
+
+    // IR-evaluator lane.
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    // C-backend lane: build, compile, run.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source_file = format!("{name}.c");
+    let status = gcc_link_generated(&out_dir, &source_file, name);
+    assert!(
+        status.success(),
+        "{name}: gcc compile/link failed with status {status}"
+    );
+    let run_output = StdCommand::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "{name}: compiled binary failed with status {} stderr:\n{}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    (eval_stdout, run_output.stdout)
+}
+
+#[test]
+fn bucket3_relu_runs_in_eval_and_c_lanes() {
+    // relu(x) = max(0, x). Exact in any precision.
+    run_activation_parity(
+        "bucket3_relu",
+        r#"
+def relu_apply(x: tensor[5, f32]) -> tensor[5, f32] = relu(x)
+
+input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(0.0, f32), cast(3.5, f32), cast(-0.5, f32)])
+actual = relu_apply(input)
+expected = to_tensor([cast(1.0, f32), cast(0.0, f32), cast(0.0, f32), cast(3.5, f32), cast(0.0, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.000001, "relu pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_relu_eval_negative_rejects_unequal_input() {
+    // Negative test: a deliberately-wrong expected tensor should make
+    // `chelis eval` fail, locking the test_assert_close_tensor invariant.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bucket3_relu_neg.ch");
+    write_file(
+        &path,
+        r#"
+def relu_apply(x: tensor[3, f32]) -> tensor[3, f32] = relu(x)
+
+input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32)])
+actual = relu_apply(input)
+wrong = to_tensor([cast(1.0, f32), cast(99.0, f32), cast(3.0, f32)])
+ok = test_assert_close_tensor(actual, wrong, 0.000001, "relu wrong")
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn bucket3_sigmoid_runs_in_eval_and_c_lanes() {
+    // sigmoid(0) = 0.5; sigmoid(1) ≈ 0.73105858; sigmoid(-1) ≈ 0.26894142.
+    // Both lanes go through `expf`-precision math (host-runtime mirrors
+    // chelis_host_sigmoid_f32 byte-for-byte modulo 1e-6 ulp).
+    run_activation_parity(
+        "bucket3_sigmoid",
+        r#"
+def sig_apply(x: tensor[3, f32]) -> tensor[3, f32] = sigmoid(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = sig_apply(input)
+expected = to_tensor([cast(0.5, f32), cast(0.7310586, f32), cast(0.26894143, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "sigmoid pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_tanh_runs_in_eval_and_c_lanes() {
+    // tanh(0) = 0; tanh(1) ≈ 0.76159418; tanh(-1) ≈ -0.76159418.
+    run_activation_parity(
+        "bucket3_tanh",
+        r#"
+def tanh_apply(x: tensor[3, f32]) -> tensor[3, f32] = tanh(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = tanh_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.76159418, f32), cast(-0.76159418, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "tanh pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_silu_runs_in_eval_and_c_lanes() {
+    // silu(x) = x * sigmoid(x).
+    // silu(0) = 0; silu(1) ≈ 0.73105858; silu(-1) ≈ -0.26894142.
+    run_activation_parity(
+        "bucket3_silu",
+        r#"
+def silu_apply(x: tensor[3, f32]) -> tensor[3, f32] = silu(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = silu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.7310586, f32), cast(-0.26894143, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "silu pointwise")
+"#,
+    );
+}
+
+#[test]
+fn bucket3_gelu_tanh_approx_runs_in_eval_and_c_lanes() {
+    // gelu(0) = 0; gelu(1) ≈ 0.84119; gelu(-1) ≈ -0.15881.
+    // Tanh approximation matches `Std.Nn.Gelu.gelu_scalar` byte-for-byte.
+    run_activation_parity(
+        "bucket3_gelu",
+        r#"
+def gelu_apply(x: tensor[3, f32]) -> tensor[3, f32] = gelu(x)
+
+input = to_tensor([cast(0.0, f32), cast(1.0, f32), cast(-1.0, f32)])
+actual = gelu_apply(input)
+expected = to_tensor([cast(0.0, f32), cast(0.84119, f32), cast(-0.15881, f32)])
+ok = test_assert_close_tensor(actual, expected, 0.0001, "gelu pointwise (tanh-approx)")
+"#,
+    );
+}
+
 #[test]
 fn target_metal_accepts_gpu_resource_region() {
     let dir = tempdir().expect("tempdir");
@@ -4444,4 +4807,963 @@ fn target_metal_accepts_gpu_resource_region() {
         ])
         .assert()
         .success();
+}
+
+/// Bucket 6b: `chelis check <dir>` walks the directory tree, runs the
+/// per-file fitness pass, and emits one aggregated JSON record so callers
+/// (CI, IDEs) can lint a corpus without scripting a fan-out themselves.
+#[test]
+fn check_directory_walks_ch_files_and_aggregates_json() {
+    let dir = tempdir().expect("tempdir");
+    write_file(&dir.path().join("a.ch"), "def main() -> int32 = 0\n");
+    fs::create_dir_all(dir.path().join("nested")).expect("mkdir nested");
+    write_file(
+        &dir.path().join("nested").join("b.ch"),
+        "def main() -> int32 = 1\n",
+    );
+    // dot-prefixed file should be skipped by the walker
+    write_file(
+        &dir.path().join(".scratch.ch"),
+        "garbage that would fail to parse\n",
+    );
+    // non-.ch files are skipped
+    write_file(&dir.path().join("README.md"), "# not chelis\n");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value =
+        serde_json::from_str(&stdout).expect("check directory output must be valid JSON");
+    let files = parsed
+        .get("files")
+        .and_then(|v| v.as_array())
+        .expect("files array must exist");
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with("a.ch")),
+        "expected a.ch in {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("b.ch")),
+        "expected nested/b.ch in {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains(".scratch.ch")),
+        "dot-prefixed file should be skipped: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.ends_with("README.md")),
+        "non-.ch files must be skipped: {names:?}"
+    );
+}
+
+/// Bucket 6b: empty directory is a legitimate state (fresh project,
+/// every file filtered) — must not error.
+#[test]
+fn check_empty_directory_emits_empty_files_array() {
+    let dir = tempdir().expect("tempdir");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"files\":[]"),
+        "expected empty files array, got: {stdout}"
+    );
+}
+
+/// Bucket 6b regression: single-file `chelis check` continues to emit
+/// the legacy single-report JSON shape so existing tooling does not break.
+#[test]
+fn check_single_file_keeps_legacy_report_shape() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("solo.ch");
+    write_file(&path, "def main() -> int32 = 0\n");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout).expect("single-file check must remain JSON");
+    assert!(
+        parsed.get("score").is_some(),
+        "single-file shape must keep `score` at top level: {stdout}"
+    );
+    assert!(
+        parsed.get("files").is_none(),
+        "single-file shape must NOT introduce `files` aggregator: {stdout}"
+    );
+}
+
+// ----- Bucket 1: `grad` / `vmap` / `realize` in the host runtime -----
+//
+// These cover the closure of "host runtime does not support `grad`" /
+// "...`vmap`" / "...`realize`" — `chelis test` and `chelis eval` now
+// route those forms through `lower_subexpr_program` + the forward DAG
+// evaluator (the same machinery the C backend uses) so the two lanes
+// agree on programs that pass `chelis check`.
+//
+// See `crates/chelis-compiler-api/src/runtime.rs::apply_transform` for
+// the implementation, and `spec/upstream-bugs/grad-eval-host-runtime.md`
+// for the canonical repro / closure reference.
+
+/// Positive: `realize(...)` is identity in the host runtime; `chelis
+/// eval` now produces the inner tensor's value instead of erroring.
+#[test]
+fn eval_realize_is_identity_in_host_runtime() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("realize_identity.ch");
+    write_file(
+        &path,
+        "result = realize(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+        ));
+}
+
+/// Positive: inline `grad(f)(x)` form. For f(x) = x*x, df/dx = 2x, so at
+/// x=3 the gradient is 6.
+#[test]
+fn eval_grad_inline_application_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_inline.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         result = grad(f)(cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("data=[6.0]"));
+}
+
+/// Positive: locally-bound `g = grad(f); g(x)` form. Closure is captured
+/// at the binding site and applied later; output must match the inline
+/// form above.
+#[test]
+fn eval_grad_locally_bound_then_applied_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_local_bind.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         g = grad(f)\n\
+         result = g(cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("data=[6.0]"));
+}
+
+/// Positive: wrapper-fn-param form. `grad(loss, wrt=theta)(theta, x)`
+/// inside a wrapper def — this is the form Coral / Shoals use. d/d
+/// theta of sum(theta * x) is x = [3.0, 4.0].
+#[test]
+fn eval_grad_wrapper_fn_param_form_returns_correct_gradient() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_wrapper.ch");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "tensor(shape=[2], data=[3.0, 4.0])",
+        ));
+}
+
+/// Positive parity probe: the host eval result must agree with the C
+/// backend's compiled binary on the wrapper-fn-param form, to within
+/// 1e-6 elementwise. Same `wrt=theta` program used by the existing
+/// `build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct`
+/// test — we share the source so any divergence between the two lanes
+/// shows up here.
+#[test]
+fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_parity.ch");
+    write_file(
+        &path,
+        "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
+           sum(mul(theta, x), 0)\n\
+         def compute_grad(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[2, f32] =\n\
+           grad(loss, wrt=theta)(theta, x)\n\
+         out = compute_grad(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+    );
+
+    // Host-eval lane.
+    let host_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    assert!(
+        host_output.status.success(),
+        "chelis eval failed: stderr={}",
+        String::from_utf8_lossy(&host_output.stderr)
+    );
+    let host_stdout = String::from_utf8(host_output.stdout).expect("utf-8");
+    assert!(
+        host_stdout.contains("data=[3.0, 4.0]"),
+        "host eval did not produce the expected gradient: {host_stdout}"
+    );
+
+    // C-backend lane.
+    let out_dir = dir.path().join("grad-parity-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let status = gcc_link_generated(&out_dir, "grad_parity.c", "grad_parity");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let c_run = StdCommand::new(out_dir.join("grad_parity"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(c_run.status.success(), "compiled binary failed");
+    let c_stdout = String::from_utf8(c_run.stdout).expect("utf-8");
+    assert!(
+        c_stdout.contains("data=[3.0, 4.0]"),
+        "C backend did not produce the expected gradient: {c_stdout}"
+    );
+}
+
+/// Positive: `vmap(f)(xs)` lifts a scalar-tensor function over the
+/// leading axis. f(x) = x * x applied elementwise via vmap to
+/// [1.0, 2.0, 3.0] should yield [1.0, 4.0, 9.0].
+#[test]
+fn eval_vmap_returns_per_element_results() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("vmap_square.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[f32]) -> tensor[f32] = mul(copy(x), copy(x))\n\
+         xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
+         result = vmap(f)(xs)\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "result = tensor(shape=[3], data=[1.0, 4.0, 9.0])",
+        ));
+}
+
+/// Negative parity for `realize`: exercising it in the host lane with
+/// no inner expression must produce a clean error rather than a panic.
+/// Synthesized programs with bad shape are caught at type-check; this
+/// test pins that the runtime path doesn't regress to "host runtime
+/// does not support `realize`" once the binding case starts hitting
+/// the new arm.
+#[test]
+fn eval_realize_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("realize_no_unsupported.ch");
+    write_file(&path, "result = realize(to_tensor([cast(1.0, f32)]))\n");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `realize`")
+                .not()
+                .and(predicate::str::contains("tensor(shape=[1], data=[1.0])")),
+        );
+}
+
+/// Negative parity for `grad`: the previously-emitted "host runtime does
+/// not support `grad`" string must no longer appear on a passing program.
+#[test]
+fn eval_grad_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_no_unsupported.ch");
+    write_file(
+        &path,
+        "def f(x: f32) -> f32 = mul(x, x)\n\
+         result = grad(f)(cast(2.0, f32))\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `grad`")
+                .not()
+                .and(predicate::str::contains("data=[4.0]")),
+        );
+}
+
+/// Negative parity for `vmap`: same closure check.
+#[test]
+fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("vmap_no_unsupported.ch");
+    write_file(
+        &path,
+        "def f(x: tensor[f32]) -> tensor[f32] = mul(copy(x), copy(x))\n\
+         xs = to_tensor([cast(2.0, f32), cast(3.0, f32)])\n\
+         result = vmap(f)(xs)\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("host runtime does not support `vmap`")
+                .not()
+                .and(predicate::str::contains("data=[4.0, 9.0]")),
+        );
+}
+
+// ----- Bucket-5 closure: `with seed(...)` plumbing through C backend ------
+//
+// Pre-Bucket-5, `chelis build --target c|hip` rejected any program that
+// contained `with seed(...)` anywhere in the deeply-walked AST with a hard
+// error (`does not yet plumb `with seed(...)` into the generated runtime`).
+// That gate was project-wide: a `with seed` block in *any* compiled file
+// would block `chelis build` of every sibling file too.
+//
+// The closure plumbs the seed at IR-lowering time into
+// `RiscOp::UniformLike { seed }` and removes the rejection gate. The
+// xorshift-splitmix algorithm in `chelis_uniform_sample_f32` (C runtime)
+// matches the IR evaluator's `dropout_sample` (see `chelis_ir::eval`),
+// giving deterministic-on-seed output that agrees with `chelis eval` to
+// f32 precision. The four tests below pin:
+//
+//   1. `with seed(...)` builds, runs, and produces deterministic output.
+//   2. Same seed → same bytes across runs (determinism).
+//   3. Different seeds → different bytes (seed-sensitivity, the
+//      no-silent-drop contract).
+//   4. A sibling program in a workspace where another file uses `with
+//      seed(...)` is no longer blocked. (The `with seed` form lives
+//      inside a single file under `chelis build`, so this collapses to
+//      "the rejection gate is gone": building a sibling file that does
+//      not use `with seed` succeeds even though the workspace has files
+//      that do.)
+
+fn write_seeded_uniform(path: &Path, low_seed: u64) {
+    let contents = format!(
+        r#"template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
+sampled = with seed({low_seed}) {{ uniform_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }}
+"#
+    );
+    write_file(path, &contents);
+}
+
+#[test]
+fn build_c_with_seed_uniform_like_succeeds() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    let out_dir = dir.path().join("out");
+    write_seeded_uniform(&src, 7);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("does not yet plumb").not());
+
+    // Generated C must use the seed, not zero. (Pre-Bucket-5, the gate
+    // would have blocked the build entirely; if anyone ever lifts the
+    // gate without plumbing the seed, the emitted seed argument would
+    // be `0ULL` and this assertion would catch the wrong-answer.)
+    let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
+    assert!(
+        c_src.contains("chelis_uniform_sample_f32(7ULL"),
+        "expected seed=7 baked into chelis_uniform_sample_f32 call; got:\n{c_src}"
+    );
+    assert!(
+        !c_src.contains("chelis_uniform_sample_f32(0ULL"),
+        "seed=0 must not appear in generated C when source seed is 7"
+    );
+}
+
+#[test]
+fn build_c_with_seed_is_deterministic_across_runs() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("seeded.ch");
+    let out_dir = dir.path().join("out");
+    write_seeded_uniform(&src, 7);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let gcc_status = gcc_link_generated(&out_dir, "seeded.c", "seeded");
+    assert!(gcc_status.success(), "gcc compile of generated C failed");
+
+    let run = || {
+        let output = StdCommand::new(out_dir.join("seeded"))
+            .output()
+            .expect("compiled binary must run");
+        assert!(output.status.success(), "seeded binary exited non-zero");
+        String::from_utf8(output.stdout).expect("utf-8 stdout")
+    };
+    let first = run();
+    let second = run();
+    let third = run();
+    assert_eq!(
+        first, second,
+        "with seed(...) determinism violated: run 1 vs run 2 differ"
+    );
+    assert_eq!(
+        second, third,
+        "with seed(...) determinism violated: run 2 vs run 3 differ"
+    );
+
+    // Negative parity: a different seed produces different bytes. This
+    // is the no-silent-drop contract: if the seed plumbing regresses to
+    // hard-coded 0, this assertion fails.
+    let other_src = dir.path().join("seeded_other.ch");
+    let other_out = dir.path().join("out_other");
+    write_seeded_uniform(&other_src, 42);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            other_src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            other_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let other_gcc = gcc_link_generated(&other_out, "seeded_other.c", "seeded_other");
+    assert!(other_gcc.success(), "gcc compile of seed=42 binary failed");
+    let other_stdout = StdCommand::new(other_out.join("seeded_other"))
+        .output()
+        .expect("compiled binary must run")
+        .stdout;
+    let other = String::from_utf8(other_stdout).expect("utf-8 stdout");
+    assert_ne!(
+        first, other,
+        "with seed(7) and with seed(42) must produce different bytes"
+    );
+}
+
+#[test]
+fn build_c_with_seed_no_longer_blocks_sibling_build() {
+    // Pre-Bucket-5, `decls_contain_with_seed` walked the AST of the
+    // build target and aborted with the project-wide gate. Today, a
+    // sibling `.ch` file that does NOT use `with seed(...)` builds
+    // cleanly even when a sibling file in the same directory does. This
+    // is trivially true post-fix (the sibling is a separate
+    // compilation), but the test pins that the gate cannot be
+    // re-introduced without breaking it.
+    let dir = tempdir().expect("tempdir");
+    let with_seed_path = dir.path().join("uses_seed.ch");
+    let plain_path = dir.path().join("plain_sibling.ch");
+    write_seeded_uniform(&with_seed_path, 7);
+    write_file(
+        &plain_path,
+        "xs = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n",
+    );
+
+    let out_dir = dir.path().join("out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            plain_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("does not yet plumb").not());
+    assert!(
+        out_dir.join("plain_sibling.c").exists(),
+        "plain sibling without `with seed` must build to C"
+    );
+
+    // And the seed-using file builds standalone too, of course.
+    let seed_out = dir.path().join("seed-out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            with_seed_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            seed_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        seed_out.join("uses_seed.c").exists(),
+        "with-seed file must build to C now that the gate is lifted"
+    );
+}
+
+/// Bucket 4b regression: `chelis check`, `chelis eval --file`, and
+/// `chelis build --target c` (compiled + run) must all agree on
+/// `to_tensor([[...], [...]])` for 2-D nested-list literals.
+///
+/// Previously the typer rejected the form with `to_tensor expects
+/// numeric or bool List elements, got List f32`, so the case never made
+/// it past `chelis check`. The fix extends the typer to recurse through
+/// nested `List<...>` wrappers and reports rank = nesting depth, with
+/// matching support in the host runtime
+/// (`nested_list_to_tensor_data`) and the C runtime
+/// (`chelis_tensor_from_value_list`).
+#[test]
+fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("to_tensor_2d.ch");
+    let out_dir = dir.path().join("to-tensor-2d-out");
+    write_file(
+        &path,
+        "result = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n",
+    );
+
+    // `chelis check` accepts the rank-2 form.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept nested-list to_tensor: {check_stdout}",
+    );
+
+    // `chelis build --target c` lowers and the generated source is
+    // valid C.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Compile + run the generated C and compare its stdout to
+    // `chelis eval --file`. With the runtime support in place, both
+    // paths must print the same shape and data.
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval_text = String::from_utf8(eval_stdout).expect("eval stdout utf8");
+    assert!(
+        eval_text.contains("shape=[2, 2]"),
+        "eval should report rank-2 shape: {eval_text}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "to_tensor_2d.c", "to_tensor_2d");
+    assert!(status.success(), "gcc failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("to_tensor_2d"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let run_text = String::from_utf8(run_output.stdout).expect("run stdout utf8");
+    // Eval prints `<tensor>\n`, the compiled binary prints
+    // `<binding-name> = <tensor>\n`. Match the existing
+    // `build_c_runs_top_level_tensor_add_and_matches_eval_output`
+    // convention.
+    assert_eq!(
+        run_text,
+        format!("result = {eval_text}"),
+        "compiled C binary stdout must equal eval stdout for nested-list to_tensor",
+    );
+}
+
+/// Bucket 4a regression: `chelis check` and `chelis build --target c`
+/// must agree on the shape of `expand(b: tensor[1, f32], 0, count)`.
+///
+/// The typer is canonical and accepts `[count, 1]` (INSERT semantics) for
+/// the linreg-style bias broadcast. The IR evaluator agrees (it consults
+/// the IR node's output type). Previously the host runtime
+/// (`tensor_expand_host` in `chelis-compiler-api`) silently picked the
+/// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
+/// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
+/// typer accepted — the divergence reproduced from the
+/// `examples/linreg.ch` shape (`expand(b, 0, 64)` over a rank-1 bias).
+#[test]
+fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("linreg_expand_bias.ch");
+    let out_dir = dir.path().join("linreg-expand-bias-out");
+    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // rank-2 [4, 1] output. This is the exact shape pattern the
+    // `examples/linreg.ch` predict/loss helpers rely on
+    // (`expand(b, 0, 64)` where `b: tensor[1, f32]`).
+    write_file(
+        &path,
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4)\n\
+         result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
+    );
+
+    // `chelis check` must accept the rank-2 annotation as canonical.
+    let check_output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let check_stdout = String::from_utf8(check_output).expect("check stdout utf8");
+    let check_json: serde_json::Value =
+        serde_json::from_str(&check_stdout).expect("check stdout is JSON");
+    assert_eq!(
+        check_json["score"].as_f64(),
+        Some(1.0),
+        "typer must accept the rank-2 expand annotation as canonical: {check_stdout}",
+    );
+
+    // `chelis build --target c` must lower without error.
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("linreg_expand_bias.c")).expect("generated c");
+    // Output ndim=2 and a [4, 1] shape literal must appear in the
+    // generated allocation; previously the runtime divergence caused
+    // the C emit to render the wrong rank.
+    assert!(
+        generated.contains("(int[]){ 4, 1 }"),
+        "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
+    );
+
+    // `chelis test`/`chelis eval` must produce the same shape as the
+    // typer (rank-2 [4, 1] with all entries equal to the singleton
+    // value). The host-runtime evaluator path is exercised by the
+    // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
+    // in `chelis-compiler-api`; this CLI test pins the typer + C emit
+    // legs of the agreement.
+    let status = gcc_compile_generated(&out_dir, "linreg_expand_bias.c");
+    assert!(
+        status.success(),
+        "gcc compile of generated C must succeed; status {status}",
+    );
+}
+
+/// Bucket 4c regression: top-level tensor bindings whose result type
+/// carries a polymorphic dim (e.g. `tensor[n, f32]`) must declare every
+/// referenced dim in the generated C. Previously a fresh dim variable
+/// (`d36`-style autogenerated name) could leak into a
+/// `chelis_alloc_view(1, (int[]){ d36 }, ...)` call without a
+/// corresponding `int d36 = inputs[k]->shape[axis];` declaration, so
+/// the generated C failed to compile with `error: 'd36' undeclared`.
+///
+/// The fix in `chelis_ir::dag::symbolic_occurrences` now sibling-sweeps
+/// every node's output type and ensures every `Named(_, None)` dim
+/// appears in the symbolic-occurrences list. If a non-Load node
+/// references a dim that no Load carries, the IR sweep panics loudly
+/// rather than emitting un-compilable C.
+#[test]
+fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("poly_top_dim.ch");
+    let out_dir = dir.path().join("poly-top-dim-out");
+    write_file(
+        &path,
+        "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
+         g: tensor[n, f32] = grad(quadratic, wrt=(theta))(to_tensor([1.0, 2.0, 3.0]))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("poly_top_dim.c")).expect("generated c");
+    // Every dim that appears in a `(int[]){ <name>` literal must also
+    // appear as an `int <name> = inputs[...]->shape[<axis>];`
+    // declaration. Walk both sets and assert containment.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in source.lines() {
+        if let Some(after) = line.split("(int[]){ ").nth(1) {
+            let name: String = after
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty() && !name.chars().all(|ch| ch.is_ascii_digit()) {
+                used.insert(name);
+            }
+        }
+    }
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in source.lines() {
+        if let Some(idx) = line.find("int ")
+            && let Some(rest) = line.get(idx + 4..)
+            && rest.contains(" = inputs[")
+        {
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty() {
+                declared.insert(name);
+            }
+        }
+    }
+    for name in &used {
+        assert!(
+            declared.contains(name),
+            "dim `{name}` used in `(int[]){{ {name} }}` but never declared as \
+             `int {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
+             leakage. Generated source:\n{source}",
+        );
+    }
+
+    // The generated C must link with gcc.
+    let status = gcc_link_generated(&out_dir, "poly_top_dim.c", "poly_top_dim");
+    assert!(
+        status.success(),
+        "gcc link failed with status {status}; the polymorphic-dim sweep \
+         left an undeclared identifier in the C source.",
+    );
+}
+
+/// Bucket 4d regression: a higher-order def whose non-callable params
+/// and return type are scalar `f32` (e.g. `(model: f32 -> f32, x: f32)
+/// -> f32` referencing `model(x)`) must emit its host wrapper
+/// definition in the generated C. Previously the predicate at
+/// `chelis_ir::host::lower_host_program` blocked the wrapper for any
+/// fn with callable params, and the DAG-only path can't represent
+/// scalar fn params -- so the def was silently dropped, leaving `gcc`
+/// to fail with `implicit declaration of function 'apply'`. The same
+/// shape with `tensor[n, f32]` had been working because the
+/// non-callable params were tensors and a different code path emitted
+/// a tensor-helper wrapper.
+#[test]
+fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("scalar_fn_param.ch");
+    let out_dir = dir.path().join("scalar-fn-param-out");
+    write_file(
+        &path,
+        "def apply(model: f32 -> f32, x: f32) -> f32 = model(x)\n\
+         def square(y: f32) -> f32 = mul(y, y)\n\
+         result = apply(square, cast(3.0, f32))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("scalar_fn_param.c")).expect("generated c");
+    // The wrapper definition must be emitted, not just the prototype.
+    assert!(
+        source.contains("static inline double apply(double (*model)(double), double x) {"),
+        "expected `apply` wrapper definition in the C source; only a forward \
+         declaration would leave gcc with `implicit declaration`. Source:\n{source}",
+    );
+    // Parity with the tensor case: the same shape with `tensor[n, f32]`
+    // already emits the wrapper. Make sure both shapes succeed in this
+    // test by also linking + running the binary.
+    let status = gcc_link_generated(&out_dir, "scalar_fn_param.c", "scalar_fn_param");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("scalar_fn_param"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `square(3) = 9`. The host emit prints `result = 9` (no decimal
+    // point for whole values).
+    assert_eq!(
+        stdout.trim_end(),
+        "result = 9",
+        "compiled binary stdout for `apply(square, 3.0)` must equal `9`; got: {stdout:?}",
+    );
+}
+
+/// Bucket 4e regression: a tensor-valued pipe expression (`xs |> step
+/// |> step` for a user-defined `step`, or `softmax(...) |> log |>
+/// mul(labels) |> sum(...) |> neg |> mean(...)` from `examples/mnist.ch`)
+/// must lower in the C lane to the same value as the equivalent
+/// nested-call form. Previously a top-level binding to a pipe whose
+/// stages included user-defined fns produced unit-typed C output
+/// (`out = ()`) because `lower_host_expr_kind` had no `pipe` arm and
+/// fell through to `HostExpr::new(HostExprKind::Unit)`. The fix adds a
+/// host-side pipe handler that beta-reduces lambda stages and rewrites
+/// var stages into nested-app form, plus an IR-side `lower_pipe`
+/// fallthrough fix so unknown vars are routed through
+/// `resolve_callable_expr` rather than silently no-op'ing.
+#[test]
+fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pipe_user_unary.ch");
+    let out_dir = dir.path().join("pipe-user-unary-out");
+    write_file(
+        &path,
+        "def step(x: tensor[3, f32]) -> tensor[3, f32] = mul(copy(x), x)\n\
+         out = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]) |> step |> step\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source = fs::read_to_string(out_dir.join("pipe_user_unary.c")).expect("generated c");
+    // The pipe must NOT degrade to a unit-typed binding. Before the
+    // fix the generated C contained `int out = __binding_0_value;`
+    // and `printf("()")`. After: `chelis_tensor* out = ...` and a
+    // `chelis_print_tensor_stdout(out)` call.
+    assert!(
+        !source.contains("int out = __binding_0_value;") && !source.contains(r#"printf("()");"#),
+        "pipe must not produce a unit-typed top-level binding; source:\n{source}",
+    );
+
+    let status = gcc_link_generated(&out_dir, "pipe_user_unary.c", "pipe_user_unary");
+    assert!(status.success(), "gcc link failed with status {status}");
+    let run_output = StdCommand::new(out_dir.join("pipe_user_unary"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status,
+    );
+    let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
+    // `step([1, 2, 3]) = [1, 4, 9]`, `step([1, 4, 9]) = [1, 16, 81]`.
+    assert_eq!(
+        stdout.trim_end(),
+        "out = tensor(shape=[3], data=[1.0, 16.0, 81.0])",
+        "compiled binary stdout for `xs |> step |> step` must match the \
+         nested-call form's value; got: {stdout:?}",
+    );
 }

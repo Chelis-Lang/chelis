@@ -137,6 +137,26 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("static inline float chelis_host_sigmoid_f32(float x) {".to_string());
     out.push("    return 1.0f / (1.0f + expf(-x));".to_string());
     out.push("}".to_string());
+    // Bucket 3 activation parity: `tanh`, `silu`, `gelu` mirror their
+    // IR-evaluator counterparts in
+    // `crates/chelis-compiler-api/src/runtime.rs`. All math runs
+    // through `float` so the two lanes agree byte-for-byte (modulo
+    // documented float ulp tolerance).
+    out.push("static inline float chelis_host_tanh_f32(float x) {".to_string());
+    out.push("    return tanhf(x);".to_string());
+    out.push("}".to_string());
+    out.push("static inline float chelis_host_silu_f32(float x) {".to_string());
+    out.push("    return x * chelis_host_sigmoid_f32(x);".to_string());
+    out.push("}".to_string());
+    // GELU tanh-approximation, matching `Std.Nn.Gelu.gelu_scalar` in
+    // `packages/chelis-std/src/nn/gelu.ch` and
+    // `activation_gelu_f32` in chelis-compiler-api/src/runtime.rs.
+    out.push("static inline float chelis_host_gelu_f32(float x) {".to_string());
+    out.push("    float c = 0.7978845608028654f;".to_string());
+    out.push("    float k = 0.044715f;".to_string());
+    out.push("    float inner = c * (x + k * x * x * x);".to_string());
+    out.push("    return 0.5f * x * (1.0f + tanhf(inner));".to_string());
+    out.push("}".to_string());
 }
 
 fn append_tensor_print_helper(out: &mut Vec<String>) {
@@ -868,6 +888,30 @@ impl HostEmitter {
                         target,
                         &arg_vars[0].0,
                         "chelis_host_sigmoid_f32",
+                    );
+                    return;
+                }
+                "tanh" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_tanh_f32",
+                    );
+                    return;
+                }
+                "silu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_silu_f32",
+                    );
+                    return;
+                }
+                "gelu" if matches!(&arg_vars[0].1, HostType::Tensor(_)) => {
+                    self.assign_tensor_unary_func_elementwise(
+                        target,
+                        &arg_vars[0].0,
+                        "chelis_host_gelu_f32",
                     );
                     return;
                 }

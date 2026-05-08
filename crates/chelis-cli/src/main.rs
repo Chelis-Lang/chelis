@@ -814,7 +814,101 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
     }
 }
 
-fn cmd_check(file: &Path, allow_style_violations: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_check(
+    target: &Path,
+    allow_style_violations: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Bucket 6b: when given a directory, walk it and run the per-file
+    // check on every `.ch` file found. We use the same dot-prefix and
+    // `target/` skip rules as `discover_test_files`, so editor tempfiles
+    // and build artifacts don't poison the corpus.
+    if target.is_dir() {
+        let files = discover_check_files(target)?;
+        if files.is_empty() {
+            // Empty corpus is legitimate (e.g. a fresh `examples/` skeleton).
+            // Match `chelis test` ergonomics and report an empty corpus
+            // explicitly rather than silently exiting 0 with no output.
+            println!("{{\"files\":[],\"errors\":[]}}");
+            return Ok(());
+        }
+        let mut had_error = false;
+        let mut entries: Vec<String> = Vec::with_capacity(files.len());
+        for file in &files {
+            match cmd_check_one(file, allow_style_violations) {
+                Ok(json) => {
+                    let rel = file.strip_prefix(target).unwrap_or(file).display();
+                    entries.push(format!(
+                        "{{\"file\":{},\"report\":{json}}}",
+                        serde_json::to_string(&rel.to_string()).unwrap_or_default(),
+                    ));
+                }
+                Err(e) => {
+                    had_error = true;
+                    let rel = file.strip_prefix(target).unwrap_or(file).display();
+                    entries.push(format!(
+                        "{{\"file\":{},\"error\":{}}}",
+                        serde_json::to_string(&rel.to_string()).unwrap_or_default(),
+                        serde_json::to_string(&e.to_string()).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+        println!("{{\"files\":[{}]}}", entries.join(","));
+        if had_error {
+            return Err("one or more files failed to check".into());
+        }
+        return Ok(());
+    }
+
+    let json = cmd_check_one(target, allow_style_violations)?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Walk a directory and collect all `.ch` files, mirroring
+/// `discover_test_files` exclusion rules (skip dot-prefixed entries and
+/// any `target/` directories that accumulate build artifacts).
+///
+/// The root entry (depth 0) is exempt from the dot-prefix filter so
+/// callers can point the walker at e.g. `tempfile::tempdir()` paths
+/// (`/tmp/.tmpXyZ/...`) without the entire walk getting filtered out
+/// because the temp-dir name starts with a dot.
+fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let walker = walkdir::WalkDir::new(target)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with('.') {
+                return false;
+            }
+            if entry.file_type().is_dir() && name == "target" {
+                return false;
+            }
+            true
+        });
+    for entry in walker {
+        let entry = entry.map_err(|e| format!("failed to walk {}: {e}", target.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ch") {
+            continue;
+        }
+        files.push(path.to_path_buf());
+    }
+    Ok(files)
+}
+
+fn cmd_check_one(
+    file: &Path,
+    allow_style_violations: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
         style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     }
@@ -907,85 +1001,30 @@ fn cmd_check(file: &Path, allow_style_violations: bool) -> Result<(), Box<dyn st
         serde_json::to_string(&report.unresolved_names)?,
         errors_json.join(","),
     );
-    println!("{json}");
-    Ok(())
+    Ok(json)
 }
 
-/// Recursively walks a Surf `Expr` looking for any `with seed(...) { ... }`
-/// form. The C and HIP backends do not currently plumb the user-provided
-/// seed into the emitted runtime, so any program containing `with seed`
-/// must be rejected with a hard error rather than silently dropped.
-fn expr_contains_with_seed(expr: &chelis_surf::ast::Expr) -> bool {
-    use chelis_surf::ast::Expr;
-    match expr {
-        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Constructor(_, _) => false,
-        Expr::Apply(f, args, _) => {
-            expr_contains_with_seed(f) || args.iter().any(expr_contains_with_seed)
-        }
-        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
-            items.iter().any(expr_contains_with_seed)
-        }
-        Expr::Record(_, fields, _) => fields.iter().any(|(_, e)| expr_contains_with_seed(e)),
-        Expr::Access(e, _, _)
-        | Expr::TupleGet(e, _, _)
-        | Expr::Unary(_, e, _)
-        | Expr::Cast(e, _, _)
-        | Expr::Grad(e, _, _)
-        | Expr::Vmap(e, _, _)
-        | Expr::Jit(e, _)
-        | Expr::Realize(e, _)
-        | Expr::Copy(e, _)
-        | Expr::Borrow(e, _)
-        | Expr::Annotate(e, _, _) => expr_contains_with_seed(e),
-        Expr::Binary(_, l, r, _) => expr_contains_with_seed(l) || expr_contains_with_seed(r),
-        Expr::Pipe(head, tail, _) => {
-            expr_contains_with_seed(head) || tail.iter().any(expr_contains_with_seed)
-        }
-        Expr::If(c, t, e, _) => {
-            expr_contains_with_seed(c) || expr_contains_with_seed(t) || expr_contains_with_seed(e)
-        }
-        Expr::Match(scrut, arms, _) => {
-            expr_contains_with_seed(scrut)
-                || arms.iter().any(|arm| expr_contains_with_seed(&arm.body))
-        }
-        Expr::Lambda(_, body, _) => expr_contains_with_seed(body),
-        Expr::WithSeed(_, _, _) => true,
-        Expr::WithDevice(_, body, _) => expr_contains_with_seed(body),
-        Expr::Block(bindings, tail, _) => {
-            bindings.iter().any(|b| expr_contains_with_seed(&b.value))
-                || expr_contains_with_seed(tail)
-        }
-    }
-}
-
-fn decls_contain_with_seed(decls: &[Decl]) -> bool {
-    decls.iter().any(|decl| match decl {
-        Decl::Module { decls, .. } => decls_contain_with_seed(decls),
-        Decl::FunDef { body, .. } => expr_contains_with_seed(body),
-        Decl::LetDef { value, .. } => expr_contains_with_seed(value),
-        Decl::MacroDef { body, .. } => expr_contains_with_seed(body),
-        Decl::Import { .. }
-        | Decl::Sig { .. }
-        | Decl::Dim { .. }
-        | Decl::TypeDef { .. }
-        | Decl::TypeAlias { .. }
-        | Decl::Export { .. } => false,
-    })
-}
-
+/// Bucket-5 closure: `with seed(...)` is now plumbed through the C and
+/// HIP backends. The seed binds at IR-lowering time
+/// (`chelis_ir::lower::lower_handle_effect`) and is baked into
+/// `RiscOp::UniformLike { seed }` / `RiscOp::Dropout { seed }` as a
+/// compile-time constant. The C emitter takes that constant and emits
+/// `chelis_uniform_sample_f32(seed, index, low, high)`, whose
+/// xorshift-splitmix algorithm matches the IR evaluator's
+/// `dropout_sample` (see `chelis_ir::eval`); the HIP backend reuses
+/// the same `chelis_uniform_sample_f32` device helper. So a program
+/// that contains `with seed(N) { uniform_like(...) }` lowered through
+/// either backend produces deterministic-on-seed output that agrees
+/// with `chelis eval` to f32 precision (eval reduces in f64; the
+/// emitted C/HIP runtime reduces in f32).
+///
+/// This function is retained as a forward-compatibility hook for
+/// future user-defined effect handlers that the backends genuinely
+/// cannot lower yet. Today it is a no-op.
 fn reject_with_seed_for_build_target(
-    decls: &[Decl],
-    target: &str,
+    _decls: &[Decl],
+    _target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if decls_contain_with_seed(decls) {
-        return Err(format!(
-            "`chelis build --target {target}` does not yet plumb `with seed(...)` into the generated runtime; \
-             rejecting rather than silently dropping the seed. Track at \
-             spec/design/chelis_phase3_plan.md §3j-pre Acknowledged Limitations \
-             (Batch 7b: C/HIP backends drop `with seed`). Run the seeded program through `chelis eval` instead."
-        )
-        .into());
-    }
     Ok(())
 }
 
@@ -1766,10 +1805,10 @@ fn cmd_test(
     json: bool,
     timeout_secs: u64,
 ) -> Result<i32, String> {
-    let cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
+    let raw_cwd = env::current_dir().map_err(|e| format!("failed to read cwd: {e}"))?;
     let target = match path {
         Some(p) => p.to_path_buf(),
-        None => cwd.join("tests"),
+        None => raw_cwd.join("tests"),
     };
 
     if !target.exists() {
@@ -1778,6 +1817,32 @@ fn cmd_test(
             target.display()
         ));
     }
+
+    // Bucket 6c: when the user runs `chelis test path/to/file.ch` from a
+    // directory that is not itself inside a reef package, derive the
+    // reef-package root from the target path instead of the raw cwd.
+    // We start the lookup at the target's directory (or the target itself
+    // if it is a directory) and walk upward; if no reef.toml is found we
+    // fall back to the raw cwd so the existing "no reef.toml" error path
+    // still fires with its actionable message.
+    let target_dir_for_reef = if target.is_dir() {
+        target.clone()
+    } else {
+        target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| raw_cwd.clone())
+    };
+    let cwd = match chelis_reef::find_package_root_for_dir(&target_dir_for_reef) {
+        Ok(Some(root)) => root,
+        // No reef found from the target — try the raw cwd next; if that
+        // fails too, fall through with raw_cwd and let `prepare_reef_graph`
+        // emit its standard error.
+        _ => match chelis_reef::find_package_root_for_dir(&raw_cwd) {
+            Ok(Some(root)) => root,
+            _ => raw_cwd.clone(),
+        },
+    };
 
     let test_files = discover_test_files(&target)?;
     if test_files.is_empty() {

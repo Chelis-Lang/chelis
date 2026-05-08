@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 
+use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::top_level_lowering_map;
+use chelis_ir::lower::{lower_subexpr_program, top_level_lowering_map};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
@@ -12,6 +14,24 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 pub(crate) struct RuntimeTensorValue {
     pub(crate) value: IrTensorValue,
     pub(crate) precision: Prim,
+}
+
+/// Kind of transform captured by [`RuntimeValue::Transform`].
+///
+/// Bucket 1 closure: the host runtime needs to honor `grad`, `vmap`, and
+/// `realize` so `chelis test`/`chelis eval` agree with the C backend on
+/// programs that pass `chelis check`. `realize` is identity in the host
+/// lane; `Grad` and `Vmap` capture the inner `(grad/vmap ...)` Deep form
+/// and resolve at application time by routing through
+/// [`chelis_ir::lower::lower_subexpr_program`] + the forward DAG
+/// evaluator — the same machinery the C backend uses.
+#[derive(Debug, Clone)]
+pub(crate) enum TransformKind {
+    /// `(grad {wrt: ...} fn-expr [index-expr])` — reverse-mode autodiff.
+    Grad,
+    /// `(vmap {} fn-expr axis-lit)` — vectorize the leading axis (or
+    /// the explicit axis from the trailing literal).
+    Vmap,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +54,18 @@ pub(crate) enum RuntimeValue {
         params: Vec<String>,
         body: Expr,
         env: HashMap<String, RuntimeValue>,
+    },
+    /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
+    /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
+    /// Deep form so we can re-emit it as the callee in a synthesized
+    /// `(app ...)` expression at apply time. `captured_env` snapshots the
+    /// host-runtime bindings active when the transform was constructed so
+    /// references to local closures (e.g. `target = fn (...) -> ...; grad(target)`)
+    /// still resolve once the synthesized DAG is lowered.
+    Transform {
+        kind: TransformKind,
+        transform_expr: Expr,
+        captured_env: HashMap<String, RuntimeValue>,
     },
     Unit,
 }
@@ -95,6 +127,29 @@ pub(crate) fn evaluate_host_program_with_library(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
+    evaluate_host_program_with_library_and_types(
+        program,
+        library_exprs,
+        &HashMap::new(),
+        library_lowered_names,
+        tensor_bindings,
+        selected_roots,
+    )
+}
+
+/// Variant of [`evaluate_host_program_with_library`] that also takes the
+/// library's Deep type-env. Bucket 1 (`grad`/`vmap`/`realize` in the host
+/// runtime) needs the merged type-env so the IR
+/// `lower_subexpr_program` call resolves library-name free vars in the
+/// inner fn body the same way the C backend does.
+pub(crate) fn evaluate_host_program_with_library_and_types(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+) -> Result<RuntimeOutcome, String> {
     // Lowered classification: start with library's (if provided), then
     // overlay the new-code program's. New-code wins on shadow.
     let new_lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
@@ -138,9 +193,20 @@ pub(crate) fn evaluate_host_program_with_library(
         /* register_runtime_order = */ true,
     );
 
+    // Compose the runtime's type-env from library + new-code program type
+    // envs. New code wins on shadow, mirroring `compose_type_env` semantics.
+    // We need this for grad/vmap/realize routing through
+    // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
+    // resolves free names against `full_type_env`.
+    let mut type_env: HashMap<String, Expr> = library_type_env.clone();
+    for (name, ty_expr) in program.type_env() {
+        type_env.insert(name.clone(), ty_expr.clone());
+    }
+
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         top_level_defs,
+        type_env,
         adt_fields,
         tensor_bindings,
         transcript: Vec::new(),
@@ -284,6 +350,12 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::Closure { .. } => ExecutionValue::String {
             value: "<closure>".to_string(),
         },
+        RuntimeValue::Transform { kind, .. } => ExecutionValue::String {
+            value: match kind {
+                TransformKind::Grad => "<grad>".to_string(),
+                TransformKind::Vmap => "<vmap>".to_string(),
+            },
+        },
         RuntimeValue::Unit => ExecutionValue::Unit,
     })
 }
@@ -313,6 +385,12 @@ pub(crate) fn lookup_runtime_value_for_root(
 struct EvalContext<'a> {
     bindings: HashMap<String, RuntimeValue>,
     top_level_defs: HashMap<String, Expr>,
+    /// Combined library + new-code Deep type-env. Threaded into
+    /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
+    /// hits a `grad` / `vmap` form so the lowerer can resolve free names
+    /// the same way the C backend does. Empty when no library context is
+    /// present (e.g. unit tests that don't need transform support).
+    type_env: HashMap<String, Expr>,
     adt_fields: HashMap<String, Vec<String>>,
     tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
     transcript: Vec<String>,
@@ -413,6 +491,37 @@ impl<'a> EvalContext<'a> {
             Some("fn") => self.eval_fn(list),
             Some("pipe") => self.eval_pipe(list),
             Some("cast") => self.eval_cast(list),
+            Some("realize") => {
+                // Bucket 1: `realize` is identity in the host runtime,
+                // matching the C-backend `lower_realize` pass-through
+                // (`crates/chelis-ir/src/host.rs::lower_host_expr`).
+                self.eval_expr(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| "realize missing value".to_string())?,
+                )
+            }
+            Some("grad") => {
+                // Bucket 1: capture the `(grad ...)` form so it can be
+                // applied later. The application path
+                // (`apply_resolved_callable` for a `Transform`) routes
+                // through `lower_subexpr_program` + the forward DAG
+                // evaluator — the same machinery that `chelis build
+                // --target c` uses.
+                Ok(RuntimeValue::Transform {
+                    kind: TransformKind::Grad,
+                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    captured_env: self.bindings.clone(),
+                })
+            }
+            Some("vmap") => {
+                // Bucket 1: same pattern as `grad` above, capture-and-apply.
+                Ok(RuntimeValue::Transform {
+                    kind: TransformKind::Vmap,
+                    transform_expr: Expr::List(list.clone(), Span::new(0, 0)),
+                    captured_env: self.bindings.clone(),
+                })
+            }
             Some("handle-effect") => {
                 let kids = children(list);
                 let effect = get_meta(list)
@@ -656,26 +765,8 @@ impl<'a> EvalContext<'a> {
             return self.eval_builtin(name, &args);
         }
 
-        match self.eval_expr(func)? {
-            RuntimeValue::Closure { params, body, env } => {
-                if params.len() != args.len() {
-                    return Err(format!(
-                        "closure expected {} args, got {}",
-                        params.len(),
-                        args.len()
-                    ));
-                }
-                let saved = self.bindings.clone();
-                self.bindings = env;
-                for (param, arg) in params.into_iter().zip(args) {
-                    self.bindings.insert(param, arg);
-                }
-                let value = self.eval_expr(&body);
-                self.bindings = saved;
-                value
-            }
-            other => Err(format!("cannot apply non-callable value {other:?}")),
-        }
+        let callable = self.eval_expr(func)?;
+        self.apply_resolved_callable(callable, args)
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -799,8 +890,8 @@ impl<'a> EvalContext<'a> {
             return self.eval_builtin(name, &args);
         }
         match self.eval_expr(stage)? {
-            RuntimeValue::Closure { params, body, env } => {
-                self.apply_resolved_callable(RuntimeValue::Closure { params, body, env }, args)
+            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
+                self.apply_resolved_callable(value, args)
             }
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
@@ -829,7 +920,161 @@ impl<'a> EvalContext<'a> {
                 self.bindings = saved;
                 value
             }
+            RuntimeValue::Transform {
+                kind,
+                transform_expr,
+                captured_env,
+            } => self.apply_transform(kind, &transform_expr, captured_env, args),
             other => Err(format!("value is not callable: {other:?}")),
+        }
+    }
+
+    /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
+    /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
+    /// `(app {} <transform-expr> (var __chelis_xform_arg_k))` form and
+    /// routes it through `chelis_ir::lower::lower_subexpr_program` +
+    /// `chelis_ir::eval::eval_tensor_*`. The IR pipeline already
+    /// implements grad and vmap (it's what the C backend uses); we just
+    /// reuse it instead of writing a parallel reverse-mode evaluator
+    /// inside the host-runtime tree.
+    fn apply_transform(
+        &mut self,
+        kind: TransformKind,
+        transform_expr: &Expr,
+        captured_env: HashMap<String, RuntimeValue>,
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        // Allocate placeholder names for the call's actual arguments. We
+        // synthesize `(var {type: ...} __chelis_xform_arg_K)` inside the
+        // app form and feed the corresponding tensor values via the
+        // load callback when forward-evaluating the lowered DAG.
+        let mut placeholder_names: Vec<String> = Vec::with_capacity(args.len());
+        let mut placeholder_types: Vec<TensorType> = Vec::with_capacity(args.len());
+        let mut placeholder_tensors: HashMap<String, IrTensorValue> =
+            HashMap::with_capacity(args.len());
+
+        // Best-effort fn-expr lookup so we can read the inner
+        // function's parameter type metadata. The transform_expr is the
+        // captured `(grad ... fn-expr ...)` or `(vmap ... fn-expr
+        // axis-lit)` form; the fn-expr is the first child.
+        let fn_expr = match transform_expr {
+            Expr::List(list, _) => children(list).first(),
+            _ => None,
+        };
+
+        for (index, value) in args.iter().enumerate() {
+            let placeholder = format!("__chelis_xform_arg_{index}");
+            let (tensor_value, tensor_type) = runtime_value_to_dag_input(value, fn_expr, index)?;
+            placeholder_tensors.insert(placeholder.clone(), tensor_value);
+            placeholder_names.push(placeholder);
+            placeholder_types.push(tensor_type);
+        }
+
+        // Synthesize `(app {} <transform-expr> (var __chelis_xform_arg_0) ...)`.
+        let span = Span::new(0, 0);
+        let mut app_elements: Vec<Expr> = Vec::with_capacity(2 + placeholder_names.len());
+        app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
+        app_elements.push(Expr::Map(MetaMap::default(), span));
+        app_elements.push(transform_expr.clone());
+        for (placeholder, ty) in placeholder_names.iter().zip(placeholder_types.iter()) {
+            app_elements.push(make_var_with_type(placeholder, ty, span));
+        }
+        let app_expr = Expr::List(
+            List {
+                elements: app_elements,
+            },
+            span,
+        );
+
+        let scoped_types: HashMap<String, TensorType> = placeholder_names
+            .iter()
+            .cloned()
+            .zip(placeholder_types.iter().cloned())
+            .collect();
+
+        // Build a fresh `program_defs` that includes both top-level
+        // defs from the host runtime AND any captured local closures
+        // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
+        // resolves `target` when the inner DAG lowering reaches it).
+        let mut program_defs = self.top_level_defs.clone();
+        for (name, value) in captured_env.iter() {
+            if let RuntimeValue::Closure { params, body, .. } = value {
+                program_defs
+                    .entry(name.clone())
+                    .or_insert_with(|| synth_fn_expr(params, body));
+            }
+        }
+
+        // Lower under suppress so any unrepresentable form panics
+        // quietly and we surface a clean error string.
+        let lower_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chelis_ir::lower::with_suppress_unrepresentable_panic(|| {
+                lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs)
+            })
+        }));
+        let dag = match lower_result {
+            Ok(dag) => dag,
+            Err(_) => {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                return Err(format!(
+                    "host runtime could not lower `{kind_label}(...)` for evaluation: \
+                     the inner fn body uses a construct the IR DAG does not support"
+                ));
+            }
+        };
+
+        // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
+        // by looking up placeholder names in our staged inputs (or
+        // tensor_bindings as a fallback for any external tensor refs
+        // captured by the inner fn body).
+        let tensor_bindings = self.tensor_bindings;
+        let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
+        if roots.is_empty() {
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            return Err(format!(
+                "host runtime: `{kind_label}(...)` lowering produced no roots"
+            ));
+        }
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+            placeholder_tensors
+                .get(name)
+                .cloned()
+                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+        })
+        .map_err(|err| {
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            format!("host runtime `{kind_label}` evaluation failed: {err}")
+        })?;
+
+        // Pack roots back into a RuntimeValue.
+        let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let tensor = values
+                .get(root)
+                .cloned()
+                .ok_or_else(|| format!("host runtime: missing root {} in eval output", root.0))?;
+            let precision = dag
+                .get(*root)
+                .map(|node| node.output_type.precision)
+                .unwrap_or(Prim::F32);
+            packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: tensor,
+                precision,
+            }));
+        }
+        if packed.len() == 1 {
+            Ok(packed.pop().expect("checked length"))
+        } else {
+            Ok(RuntimeValue::Tuple(packed))
         }
     }
 
@@ -1318,9 +1563,14 @@ impl<'a> EvalContext<'a> {
             }
             "to_tensor" => {
                 let values = expect_list_arg(args, 0)?;
-                let (precision, data) = list_to_tensor_data(&values)?;
+                // Bucket 4b: support nested numeric/bool lists. The outer
+                // list contributes the leading dim; if its elements are
+                // themselves uniformly-shaped numeric/bool lists, those
+                // contribute additional inner dims (and so on
+                // recursively).
+                let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![data.len()], data),
+                    value: IrTensorValue::from_vec(shape, data),
                     precision,
                 }))
             }
@@ -1760,6 +2010,53 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_softmax_host(&tensor, axis).map(RuntimeValue::Tensor)
             }
+            // Activation primitives (Bucket 3).
+            //
+            // Each activation must produce values byte-identical (to documented
+            // float tolerance) to the C backend's `chelis_host_*_f32` helpers
+            // emitted from `crates/chelis-backend-c/src/host_emit.rs`. Those
+            // helpers run all math through `float` (single precision); we
+            // therefore route every transcendental through `f32` here too —
+            // widening only happens at the very end when we re-store as
+            // `f64`-shaped tensor data. The closures themselves accept and
+            // return `f64` so `tensor_float_unop_f32` can cast at the
+            // boundary, which means `(x as f32).exp() as f64` and never
+            // `f64::exp(x)`.
+            "relu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_relu_f32,
+                )))
+            }
+            "sigmoid" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_sigmoid_f32,
+                )))
+            }
+            "tanh" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_tanh_f32,
+                )))
+            }
+            "silu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_silu_f32,
+                )))
+            }
+            "gelu" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
+                    &tensor,
+                    activation_gelu_f32,
+                )))
+            }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }
@@ -2046,6 +2343,83 @@ fn tensor_numeric_unop(
         ),
         precision: tensor.precision,
     }))
+}
+
+/// Tensor-elementwise unary that runs through `f32` precision so the
+/// host-runtime activation primitives stay byte-identical (to f32 ulp
+/// tolerance) with the C backend's `chelis_host_*_f32` helpers, which
+/// always go through `float` in `crates/chelis-backend-c/src/host_emit.rs`.
+///
+/// The closure receives an `f64` (cast down from `f32`) and returns an
+/// `f64` (cast down from the float result of its body). The wrapper
+/// itself takes care of the cast-down-cast-back at the boundary; the
+/// caller need only ensure every internal transcendental is invoked
+/// against an `f32` value (via `as f32` followed by libm `f32::*`).
+fn tensor_float_unop_f32(
+    tensor: &RuntimeTensorValue,
+    op: impl Fn(f32) -> f32,
+) -> RuntimeTensorValue {
+    RuntimeTensorValue {
+        value: IrTensorValue::from_vec(
+            tensor.value.shape.clone(),
+            tensor
+                .value
+                .data
+                .iter()
+                .map(|value| op(*value as f32) as f64)
+                .collect(),
+        ),
+        precision: tensor.precision,
+    }
+}
+
+/// `relu(x) = max(0, x)`. Exact in any precision; we still take `f32`
+/// here so the host-lane and C-lane storage shapes line up.
+fn activation_relu_f32(x: f32) -> f32 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+/// `sigmoid(x) = 1 / (1 + exp(-x))`. Mirrors `chelis_host_sigmoid_f32`
+/// in `crates/chelis-backend-c/src/host_emit.rs:137` exactly — single
+/// `expf` of `-x`, no f64 widening.
+fn activation_sigmoid_f32(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// `tanh(x)` via `f32::tanh`. Matches the C backend's `tanhf` helper.
+fn activation_tanh_f32(x: f32) -> f32 {
+    x.tanh()
+}
+
+/// `silu(x) = x * sigmoid(x)` (a.k.a. swish). Composed from
+/// `activation_sigmoid_f32` so the f32-rounding profile is identical
+/// to the C-backend helper — i.e., the C side computes
+/// `x * chelis_host_sigmoid_f32(x)` and we mirror it 1:1.
+fn activation_silu_f32(x: f32) -> f32 {
+    x * activation_sigmoid_f32(x)
+}
+
+/// `gelu(x)` via the tanh approximation, matching `Std.Nn.Gelu`'s
+/// `gelu_scalar` (`packages/chelis-std/src/nn/gelu.ch`):
+///
+///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+///
+/// We use the tanh-approx (not the erf-exact form) because the
+/// C-backend host helper composes the same way and the Std layer is
+/// the canonical reference. If/when a `Erf` RISC op is added the
+/// exact form can replace this and both lanes must move together.
+fn activation_gelu_f32(x: f32) -> f32 {
+    // The literal is the f64 value that `Std.Nn.Gelu` and the C-backend
+    // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
+    // explicit cast keeps the f32 round-trip identical to those lanes.
+    // `clippy::excessive_precision` complains about the trailing digits
+    // being beyond f32 representability — that's intentional (we want
+    // the same source-level constant the other lanes use).
+    #[allow(clippy::excessive_precision)]
+    const C: f32 = 0.7978845608028654_f32; // sqrt(2/pi)
+    const K: f32 = 0.044715_f32;
+    let inner = C * (x + K * x * x * x);
+    0.5 * x * (1.0 + inner.tanh())
 }
 
 fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
@@ -2340,6 +2714,69 @@ fn dict_lookup<'a>(
     dict.iter()
         .find(|(existing_key, _)| runtime_value_eq(existing_key, key))
         .map(|(_, value)| value)
+}
+
+/// Bucket 4b: recursively flatten a nested numeric/bool list into a
+/// rank-N tensor. Every nesting level contributes one outer dimension;
+/// the innermost level must be uniformly numeric or bool. All sibling
+/// sub-lists at the same level must have matching length and matching
+/// precision.
+///
+/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
+/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
+/// behaviour for compatibility).
+fn nested_list_to_tensor_data(
+    outer: &[RuntimeValue],
+) -> Result<(Prim, Vec<usize>, Vec<f64>), String> {
+    if outer.is_empty() {
+        return Ok((Prim::F32, vec![0], Vec::new()));
+    }
+
+    // Decide whether this is a leaf level (numeric/bool elements) or a
+    // recursive level (List elements) based on the first element. The
+    // homogeneity check below catches the mixed case.
+    let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
+
+    if !first_is_list {
+        // Leaf level — same code path as the original list_to_tensor.
+        let (precision, data) = list_to_tensor_data(outer)?;
+        return Ok((precision, vec![data.len()], data));
+    }
+
+    let mut precision: Option<Prim> = None;
+    let mut inner_shape: Option<Vec<usize>> = None;
+    let mut data = Vec::new();
+    for (idx, value) in outer.iter().enumerate() {
+        let RuntimeValue::List(inner) = value else {
+            return Err(format!(
+                "to_tensor expects homogeneous nested lists; element {idx} is not a List"
+            ));
+        };
+        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
+        match &precision {
+            None => precision = Some(sub_precision),
+            Some(p) if *p == sub_precision => {}
+            Some(p) => {
+                return Err(format!(
+                    "to_tensor requires homogeneous numeric or bool elements; expected {p:?}, got {sub_precision:?} at element {idx}"
+                ));
+            }
+        }
+        match &inner_shape {
+            None => inner_shape = Some(sub_shape),
+            Some(s) if *s == sub_shape => {}
+            Some(s) => {
+                return Err(format!(
+                    "to_tensor requires uniform inner shape; expected {s:?}, got {sub_shape:?} at element {idx}"
+                ));
+            }
+        }
+        data.extend(sub_data);
+    }
+
+    let mut shape = vec![outer.len()];
+    shape.extend(inner_shape.unwrap_or_default());
+    Ok((precision.unwrap_or(Prim::F32), shape, data))
 }
 
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
@@ -2714,12 +3151,25 @@ fn tensor_matmul_host(
     })
 }
 
-/// Replicate a tensor along a new axis. Matches the IR's `expand` semantics
-/// when the output rank is `input_rank + 1`: `expand(b, axis, count)` produces
-/// a tensor of shape `[..., count, ...]` (with `count` inserted at `axis`)
-/// where every "slice" along the new axis is a copy of `b`. Also handles the
-/// same-rank variant where the input axis has size 1 and is replicated to
-/// `count`.
+/// Replicate a tensor along a new axis.
+///
+/// Per the typer (`chelis-types::infer::check_expand_signature`),
+/// `expand(b, axis, count)` is canonically an INSERT operation: it
+/// produces a tensor of shape `[..., count, ...]` with `count` inserted
+/// at position `axis`, where every "slice" along the new axis is a copy
+/// of `b`. The output rank is always `input_rank + 1`.
+///
+/// The typer also accepts a same-rank "replace-singleton" interpretation
+/// when the user explicitly annotates the result as same-rank, but the
+/// host runtime has no access to user annotations, so it always picks
+/// the canonical INSERT branch — which is the typer's first-preference
+/// branch at infer.rs:7188 and the only branch synthesized by IR
+/// lowering in `tier2::lower_softmax`/`lower_layer_norm`/`lower_matmul`.
+/// Closes Bucket 4a: previously this function silently picked the
+/// same-rank REPLICATE-singleton branch whenever `in_shape[axis] == 1`,
+/// producing shape `[count]` for `expand([1], 0, count)` while the typer
+/// accepted the `[count, 1]` annotation, leaving `chelis test`/`chelis
+/// eval` disagreeing with `chelis check` on `examples/linreg.ch`.
 fn tensor_expand_host(
     tensor: &RuntimeTensorValue,
     axis: usize,
@@ -2733,39 +3183,19 @@ fn tensor_expand_host(
         ));
     }
 
-    // Determine the output shape and the index-mapping mode.
-    //
-    // Mode A (insert): if `axis == in_rank` OR the existing axis at `axis`
-    // is not 1, we INSERT a new axis of size `count` at position `axis`.
-    // Mode B (replicate-singleton): if `axis < in_rank` and the existing
-    // axis at `axis` is 1, we REPLACE that axis with size `count`.
-    let (out_shape, same_rank) = if axis < in_rank && in_shape[axis] == 1 {
-        let mut out = in_shape.clone();
-        out[axis] = count;
-        (out, true)
-    } else {
-        let mut out = Vec::with_capacity(in_rank + 1);
-        out.extend_from_slice(&in_shape[..axis]);
-        out.push(count);
-        out.extend_from_slice(&in_shape[axis..]);
-        (out, false)
-    };
+    // INSERT: create a new axis of size `count` at position `axis`.
+    let mut out_shape = Vec::with_capacity(in_rank + 1);
+    out_shape.extend_from_slice(&in_shape[..axis]);
+    out_shape.push(count);
+    out_shape.extend_from_slice(&in_shape[axis..]);
 
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_indices = linear_to_indices(out_linear, &out_shape);
-        let in_indices: Vec<usize> = if same_rank {
-            // Replicate singleton: input axis stays 0; other axes pass through.
-            let mut idx = out_indices.clone();
-            idx[axis] = 0;
-            idx
-        } else {
-            // Insert: drop the inserted axis to recover the input index.
-            let mut idx = out_indices;
-            idx.remove(axis);
-            idx
-        };
+        // Drop the inserted axis to recover the input index.
+        let mut in_indices = out_indices;
+        in_indices.remove(axis);
         let in_linear = indices_to_linear(&in_indices, &in_shape);
         *slot = tensor.value.data[in_linear];
     }
@@ -3457,6 +3887,10 @@ fn render_value(value: &RuntimeValue) -> String {
         ),
         RuntimeValue::MappedFile(bytes) => format!("<mapped-file:{}>", bytes.len()),
         RuntimeValue::Closure { .. } => "<closure>".to_string(),
+        RuntimeValue::Transform { kind, .. } => match kind {
+            TransformKind::Grad => "<grad>".to_string(),
+            TransformKind::Vmap => "<vmap>".to_string(),
+        },
         RuntimeValue::Unit => "()".to_string(),
     }
 }
@@ -3494,6 +3928,246 @@ fn uniform_like_value(
         value: IrTensorValue::from_vec(template.value.shape.clone(), data),
         precision: template.precision,
     }
+}
+
+/// Bucket 1 helper: convert a host-runtime argument into a
+/// `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar args
+/// (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
+/// pulled from the inner fn's parameter type metadata when available, or
+/// from the runtime value as a fallback.
+fn runtime_value_to_dag_input(
+    value: &RuntimeValue,
+    fn_expr: Option<&Expr>,
+    index: usize,
+) -> Result<(IrTensorValue, TensorType), String> {
+    match value {
+        RuntimeValue::Tensor(tensor) => {
+            let dims = tensor
+                .value
+                .shape
+                .iter()
+                .map(|&size| DimInfo::Lit(size))
+                .collect::<Vec<_>>();
+            let ty = TensorType {
+                dims,
+                precision: tensor.precision,
+            };
+            Ok((tensor.value.clone(), ty))
+        }
+        RuntimeValue::Float(value) => {
+            let precision = fn_expr
+                .and_then(|e| param_precision_at(e, index))
+                .unwrap_or(Prim::F32);
+            Ok((
+                IrTensorValue::scalar(*value),
+                TensorType {
+                    dims: vec![],
+                    precision,
+                },
+            ))
+        }
+        RuntimeValue::Int(value) => {
+            let precision = fn_expr
+                .and_then(|e| param_precision_at(e, index))
+                .unwrap_or(Prim::Int32);
+            Ok((
+                IrTensorValue::scalar(*value as f64),
+                TensorType {
+                    dims: vec![],
+                    precision,
+                },
+            ))
+        }
+        RuntimeValue::Bool(value) => Ok((
+            IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+        )),
+        other => Err(format!(
+            "grad/vmap argument {index} must be a tensor or scalar, got {other:?}"
+        )),
+    }
+}
+
+/// Best-effort lookup of `(fn ...)` param[index]'s primitive precision
+/// from its `type` metadata.
+fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
+    let Expr::List(list, _) = fn_expr else {
+        return None;
+    };
+    if tag(list) != Some("fn") {
+        return None;
+    }
+    let params = children(list).first()?;
+    let Expr::List(params_list, _) = params else {
+        return None;
+    };
+    let param = children(params_list).get(index)?;
+    let ty_expr = match param {
+        Expr::List(param_list, _) => match param_list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            _ => None,
+        },
+        Expr::MetaExpr(meta, _) => meta
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value),
+        _ => None,
+    }?;
+    extract_prim_from_type_expr(ty_expr)
+}
+
+fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    match tag(list) {
+        Some("t-prim") => children(list)
+            .first()
+            .and_then(symbol_name)
+            .and_then(prim_from_name),
+        Some("t-tensor") => children(list).last().and_then(extract_prim_from_type_expr),
+        _ => None,
+    }
+}
+
+fn prim_from_name(name: &str) -> Option<Prim> {
+    Some(match name {
+        "f32" => Prim::F32,
+        "f64" => Prim::F64,
+        "f16" => Prim::F16,
+        "bf16" => Prim::Bf16,
+        "f8e4m3" => Prim::F8e4m3,
+        "int8" => Prim::Int8,
+        "int32" => Prim::Int32,
+        "int64" => Prim::Int64,
+        "bool" => Prim::Bool,
+        "string" => Prim::String,
+        _ => return None,
+    })
+}
+
+/// Build a `(var {type: <encoded ty>} name)` Deep expression from a
+/// `TensorType`. Used when synthesizing the placeholder argument refs
+/// inside the host runtime's grad/vmap wrapper app.
+fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Expr {
+    let prim_name = match ty.precision {
+        Prim::F32 => "f32",
+        Prim::F64 => "f64",
+        Prim::F16 => "f16",
+        Prim::Bf16 => "bf16",
+        Prim::F8e4m3 => "f8e4m3",
+        Prim::Int8 => "int8",
+        Prim::Int32 => "int32",
+        Prim::Int64 => "int64",
+        Prim::Bool => "bool",
+        Prim::String => "string",
+    };
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+            ],
+        },
+        span,
+    );
+    let ty_expr = if ty.dims.is_empty() {
+        prim_node
+    } else {
+        let mut tensor_elems = vec![
+            Expr::Atom(Atom::Symbol("t-tensor".to_string()), span),
+            Expr::Map(MetaMap::default(), span),
+        ];
+        for dim in &ty.dims {
+            tensor_elems.push(dim_to_expr(dim, span));
+        }
+        tensor_elems.push(prim_node);
+        Expr::List(
+            List {
+                elements: tensor_elems,
+            },
+            span,
+        )
+    };
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), ty_expr));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("var".to_string()), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Symbol(name.to_string()), span),
+            ],
+        },
+        span,
+    )
+}
+
+fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
+    match dim {
+        DimInfo::Lit(value) => Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("d-lit".to_string()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::Atom(Atom::Int(*value as i64), span),
+                ],
+            },
+            span,
+        ),
+        DimInfo::Named(name, _) => Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("d-name".to_string()), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::Atom(Atom::Symbol(name.clone()), span),
+                ],
+            },
+            span,
+        ),
+    }
+}
+
+/// Synthesize a `(fn {} (params {} <p>...) <body>)` Deep expression
+/// from a host-runtime closure's params + body. Used when injecting
+/// captured local closures into the IR `program_defs` table.
+fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
+    let span = body.span();
+    let param_exprs = params
+        .iter()
+        .map(|name| Expr::Atom(Atom::Symbol(name.clone()), span))
+        .collect::<Vec<_>>();
+    let mut params_elements = vec![
+        Expr::Atom(Atom::Symbol("params".to_string()), span),
+        Expr::Map(MetaMap::default(), span),
+    ];
+    params_elements.extend(param_exprs);
+    let params_list = Expr::List(
+        List {
+            elements: params_elements,
+        },
+        span,
+    );
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Symbol("fn".to_string()), span),
+                Expr::Map(MetaMap::default(), span),
+                params_list,
+                body.clone(),
+            ],
+        },
+        span,
+    )
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
@@ -4001,6 +4675,31 @@ y = expand(b, cast(1, int32), cast(2, int32))
     }
 
     #[test]
+    fn host_runtime_expand_singleton_input_inserts_not_replicates() {
+        // Bucket 4a regression: `expand(b: tensor[1, f32], 0, count)` must
+        // produce shape `[count, 1]` (INSERT semantics), matching the
+        // typer's first-preference branch in
+        // `chelis-types::infer::check_expand_signature`. Previously the
+        // host runtime detected `in_shape[axis] == 1` and silently
+        // replicated the singleton in-place, producing `[count]` and
+        // diverging from `chelis check` on `examples/linreg.ch`.
+        let checked = checked_surf(
+            r#"
+b = to_tensor([cast(7.0, f32)])
+y = expand(b, cast(0, int32), cast(4, int32))
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("expand([1], 0, 4) should evaluate under host runtime");
+        assert_eq!(
+            first_tensor_shape(&outcome, "y"),
+            vec![4, 1],
+            "INSERT semantics: rank-1 [1] expand at axis 0 with count 4 must produce rank-2 [4, 1]",
+        );
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![7.0, 7.0, 7.0, 7.0]);
+    }
+
+    #[test]
     fn host_runtime_expand_negative_count_errors() {
         let checked = checked_surf(
             r#"
@@ -4013,6 +4712,62 @@ y = expand(b, cast(0, int32), cast(0, int32))
         assert!(
             err.contains("expand") && err.contains("count"),
             "expected expand count diagnostic, got: {err}"
+        );
+    }
+
+    // ----- to_tensor nested-list (Bucket 4b) -----
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_2d_float_literal() {
+        // Bucket 4b: previously rejected with
+        // "to_tensor expects numeric or bool List elements, got List f32".
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of [[1,2],[3,4]] must evaluate to a rank-2 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
+        assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_accepts_3d_float_literal() {
+        // 2x2x2 cube — exercises 3-deep recursion in
+        // `nested_list_to_tensor_data`.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([
+  [[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]],
+  [[cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32)]]
+])
+"#,
+        );
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("to_tensor of 2x2x2 nested list must evaluate to a rank-3 tensor");
+        assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2, 2]);
+        assert_eq!(
+            first_tensor_data(&outcome, "y"),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
+        // Negative parity for 4b: ragged inner-list shapes must error
+        // out at the host runtime, not silently produce a malformed
+        // tensor.
+        let checked = checked_surf(
+            r#"
+y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
+"#,
+        );
+        let err = evaluate_host_program(&checked, &HashMap::new())
+            .expect_err("ragged nested list must fail to_tensor");
+        assert!(
+            err.contains("uniform inner shape"),
+            "expected ragged-shape diagnostic, got: {err}"
         );
     }
 

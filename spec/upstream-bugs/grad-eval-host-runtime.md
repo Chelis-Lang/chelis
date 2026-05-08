@@ -1,19 +1,47 @@
 # grad-eval-host-runtime: `chelis test` host runtime does not support `grad`
 
-**Status:** open; deferred to Phase 5
+**Status:** **CLOSED 2026-05-07** (Bucket 1 of compiler-vs-interpreter
+closure campaign).
 **Filed:** 2026-04-29
+**Closed:** 2026-05-07 (commit `412fa61`)
 **Owning phase:** chelis-core (AD), chelis-cli (test runner)
 **Discovered by:** Phase 3l Shoals fix-up #2
 
-**Deferral rationale.** This bug surfaces the host-lane scalar AD gap.
-The host evaluator does not have `grad` support because host-lane scalar
-AD is not yet implemented. The architectural decision is locked at
+## Closure summary (2026-05-07)
+
+The host runtime now supports `grad`, `vmap`, and `realize` via
+delegation to the C backend's lowering machinery. `chelis test` and
+`chelis eval` route those forms through `lower_subexpr_program` +
+`eval_tensor_roots_with_strict` (the same machinery `chelis build
+--target c` uses), so all three execution lanes now agree on programs
+that pass `chelis check`. All three syntactic forms are accepted:
+`grad(f)(x)`, `let g = grad(f); g(x)`, and the wrapper-fn-param form.
+
+Implementation lives in
+`crates/chelis-compiler-api/src/runtime.rs::apply_transform`. The
+Phase-5 forward-mode dual-numbers design at
+`spec/design/phase5_host_scalar_ad.md` remains relevant only as a
+future performance optimisation; it is no longer load-bearing for
+correctness.
+
+Regression coverage in `crates/chelis-cli/tests/cli.rs`:
+`eval_realize_is_identity_in_host_runtime`,
+`eval_grad_inline_form_in_host_runtime`,
+`eval_grad_locally_bound_form_in_host_runtime`,
+`eval_grad_wrapper_fn_param_form_in_host_runtime`,
+`eval_vmap_in_host_runtime`, plus per-form host-vs-C parity probes.
+
+## Original deferral rationale (historical, now resolved)
+
+This bug surfaced the host-lane scalar AD gap. The host evaluator did
+not have `grad` support because host-lane scalar AD was not yet
+implemented. The architectural decision was locked at
 `spec/design/phase5_host_scalar_ad.md` (recommendation: forward-mode
-dual numbers; deferred until a real driver appears). Until Phase 5 lands
-host-lane scalar AD, downstream consumers (Shoals's Greeks tests and
-similar) work around this by using finite-difference approximations as a
-stand-in. The rest of this file documents the original repro and impact
-for when a real driver causes Phase 5 to be picked up.
+dual numbers; deferred until a real driver appears). The 2026-05-07
+closure resolved this by reusing the C backend's autodiff lowering
+inside the IR evaluator, sidestepping the need for a separate
+host-lane AD implementation. The rest of this file documents the
+original repro and impact for historical reference.
 
 ## Summary
 

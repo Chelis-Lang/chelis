@@ -555,3 +555,66 @@ def test_ok() -> unit = test_assert(true, "ok")
         output.status.code()
     );
 }
+
+/// Bucket 6c: `chelis test path/to/file.ch` must succeed when invoked from
+/// any cwd, by walking up the target file's ancestry to find `reef.toml`.
+/// The pre-fix behavior required the cwd to be inside the reef package,
+/// which forced workflows like `cd packages/foo && chelis test tests/x.ch`.
+#[test]
+fn chelis_test_resolves_reef_root_from_target_file_path() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-cwd-anywhere");
+    write_file(
+        &pkg.join("tests/pass.ch"),
+        r#"module Smoke.Tests.Pass
+
+def test_from_anywhere() -> unit = test_assert(true, "ok")
+"#,
+    );
+    let test_file = pkg.join("tests/pass.ch");
+
+    // Use the OS temp dir as the cwd. The temp-dir boundary in
+    // `find_package_root_from_dir` ensures we don't accidentally pick up a
+    // stray reef.toml from /tmp; we want the resolution to come from the
+    // *target file's* directory walk, not from the cwd.
+    let foreign_cwd = std::env::temp_dir();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&foreign_cwd)
+        .args(["test", test_file.to_str().expect("utf-8 path")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test_from_anywhere"))
+        .stdout(predicate::str::contains("PASS"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+/// Bucket 6c negative parity: `chelis test some_file.ch` from a foreign
+/// cwd, where the target also has no reef.toml in its ancestry, must
+/// produce the "no reef.toml found" error rather than silently succeeding
+/// or panicking.
+#[test]
+fn chelis_test_errors_clearly_when_no_reef_anywhere() {
+    let dir = tempdir().expect("tempdir");
+    let test_file = dir.path().join("orphan.ch");
+    write_file(
+        &test_file,
+        "module Orphan\n\ndef test_x() -> unit = test_assert(true, \"x\")\n",
+    );
+    let foreign_cwd = std::env::temp_dir();
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&foreign_cwd)
+        .args(["test", test_file.to_str().expect("utf-8 path")])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "expected failure when no reef found; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("reef.toml") || stdout.contains("reef.toml"),
+        "expected reef.toml mention in error; stdout={stdout}\nstderr={stderr}"
+    );
+}
