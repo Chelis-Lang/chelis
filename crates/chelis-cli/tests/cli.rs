@@ -5266,24 +5266,7 @@ fn build_c_with_seed_is_deterministic_across_runs() {
         .assert()
         .success();
 
-    let gcc_status = StdCommand::new("gcc")
-        .args([
-            "-O2",
-            "-fopenmp",
-            out_dir.join("seeded.c").to_str().unwrap(),
-            "-Lchelis_runtime",
-            "-L",
-            out_dir.to_str().unwrap(),
-            "-lchelis_runtime",
-            "-lm",
-            "-lpthread",
-            "-ldl",
-            "-fopenmp",
-            "-o",
-            out_dir.join("seeded").to_str().unwrap(),
-        ])
-        .status()
-        .expect("gcc must be available");
+    let gcc_status = gcc_link_generated(&out_dir, "seeded.c", "seeded");
     assert!(gcc_status.success(), "gcc compile of generated C failed");
 
     let run = || {
@@ -5323,23 +5306,7 @@ fn build_c_with_seed_is_deterministic_across_runs() {
         ])
         .assert()
         .success();
-    let other_gcc = StdCommand::new("gcc")
-        .args([
-            "-O2",
-            "-fopenmp",
-            other_out.join("seeded_other.c").to_str().unwrap(),
-            "-L",
-            other_out.to_str().unwrap(),
-            "-lchelis_runtime",
-            "-lm",
-            "-lpthread",
-            "-ldl",
-            "-fopenmp",
-            "-o",
-            other_out.join("seeded_other").to_str().unwrap(),
-        ])
-        .status()
-        .expect("gcc must be available");
+    let other_gcc = gcc_link_generated(&other_out, "seeded_other.c", "seeded_other");
     assert!(other_gcc.success(), "gcc compile of seed=42 binary failed");
     let other_stdout = StdCommand::new(other_out.join("seeded_other"))
         .output()
