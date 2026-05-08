@@ -31,6 +31,9 @@ impl Rule for ModuleCompoundTitlecase {
         let mut out = Vec::new();
         for decl in find_module_decls(source) {
             for component in &decl.components {
+                if component == "CEarchin" {
+                    continue;
+                }
                 if has_all_caps_run(component) {
                     out.push(Violation {
                         rule_id: self.id().to_string(),
@@ -135,6 +138,21 @@ mod tests {
         assert!(!has_all_caps_run("OrderBook"));
         assert!(!has_all_caps_run("CurveFit"));
         assert!(!has_all_caps_run("GroupBy"));
+    }
+
+    #[test]
+    fn end_to_end_accepts_c_earchin_prefix() {
+        use std::path::Path;
+        let src = "module CEarchin.Vocabulary\n\ndef x = 1\n";
+        let path = Path::new("c-earchin/src/vocabulary.ch");
+        let ctx = Context {
+            root: Path::new("/"),
+            path,
+            source: Some(src),
+            surface: Surface::SurfSource,
+        };
+        let v = ModuleCompoundTitlecase.check(&ctx);
+        assert!(v.is_empty(), "CEarchin is the c-earchin module prefix");
     }
 
     #[test]
