@@ -68,6 +68,8 @@ use tempfile::tempdir;
 use wiremock::matchers::{header, method, path as wm_path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+const CURRENT_COMPILER_PIN: &str = concat!("=", env!("CARGO_PKG_VERSION"));
+
 // ============================================================
 // Test fixture builders
 // ============================================================
@@ -90,9 +92,10 @@ fn build_test_archive(
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 module_prefix = "Test"
-{deps_toml}"#
+{deps_toml}"#,
+        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
 
@@ -138,7 +141,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.1".to_string(),
+        compiler: CURRENT_COMPILER_PIN.to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),

@@ -38,6 +38,8 @@ use tempfile::tempdir;
 use wiremock::matchers::{header, method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const CURRENT_COMPILER_PIN: &str = concat!("=", env!("CARGO_PKG_VERSION"));
+
 // ============================================================
 // Shared fixture plumbing.
 //
@@ -65,9 +67,10 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 module_prefix = "Test"
-{deps_toml}"#
+{deps_toml}"#,
+        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
     let mut tar_bytes = Vec::new();
@@ -109,7 +112,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.1".to_string(),
+        compiler: CURRENT_COMPILER_PIN.to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -937,7 +940,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 archive_sha256 = "{archive_sha}"
 shell_sha256 = "{shell_sha}"
 
@@ -945,6 +948,7 @@ shell_sha256 = "{shell_sha}"
 kind = "local_registry"
 remote_origin = "github://other-org/nautilus@v0.2.0"
 "#,
+        compiler = CURRENT_COMPILER_PIN,
         archive_sha = sha256_bytes(&archive_bytes),
         shell_sha = sha256_bytes(&shell_bytes),
     );

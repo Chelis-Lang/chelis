@@ -27,6 +27,11 @@ Every Deep AST node is a 3-tuple:
 
 The meta map carries compiler-relevant annotations. An agent MAY include metadata to constrain inference, or MAY write `{}` everywhere and let the compiler fill it in.
 
+Metadata keys use the same identifier character set as user-defined Deep
+symbols: `[A-Za-z_][A-Za-z0-9_]*`. This admits producer-specific keys such as
+`c_earchin_role` while preserving the no-hyphen rule that keeps Deep symbols
+portable across Surf and Reef boundaries.
+
 **Active keys:**
 
 | Key | Value | Semantics |
