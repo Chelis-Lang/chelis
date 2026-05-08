@@ -61,6 +61,7 @@ impl Rule for ModulePascalComponents {
 const KNOWN_SINGLE_WORDS: &[&str] = &[
     // Top-level repo prefixes
     "Chelis",
+    "CEarchin",
     "Nautilus",
     "Coral",
     "Shoals",
@@ -103,6 +104,7 @@ const KNOWN_SINGLE_WORDS: &[&str] = &[
     "Math",
     // Octant subsystems
     "Version",
+    "Vocabulary",
     // Generic short words
     "Core",
     "Demo",
@@ -352,6 +354,8 @@ mod tests {
         assert_eq!(component_violation("Activation"), None);
         assert_eq!(component_violation("Integrate"), None);
         assert_eq!(component_violation("Interpolation"), None);
+        assert_eq!(component_violation("CEarchin"), None);
+        assert_eq!(component_violation("Vocabulary"), None);
     }
 
     #[test]

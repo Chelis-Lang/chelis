@@ -339,6 +339,12 @@ mod tests {
     }
 
     #[test]
+    fn deep_accepts_snake_case_metadata_keys() {
+        let source = "(def {c_earchin_role: \"property_witness\"} req_PRC_001 (fn {} (params {}) (lit {type: (t-prim {} bool)} true)))";
+        validate_deep(source).expect("producer metadata keys may be snake_case");
+    }
+
+    #[test]
     fn deep_rejects_invalid_effects_children() {
         let source = "(effects {} 1)";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
