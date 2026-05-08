@@ -400,31 +400,46 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // the harness fails loud rather than silently shrinking.
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_dict_foundation() {
     drive_parity(&examples_root().join("dict_foundation.ch"), true);
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_iter_foundation() {
     drive_parity(&examples_root().join("iter_foundation.ch"), true);
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_list_foundation() {
     drive_parity(&examples_root().join("list_foundation.ch"), true);
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_scalar_string_foundation() {
     drive_parity(&examples_root().join("scalar_string_foundation.ch"), true);
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_tensor_structural_ops() {
     drive_parity(&examples_root().join("tensor_structural_ops.ch"), true);
 }
@@ -434,13 +449,19 @@ fn parity_tensor_structural_ops() {
 // happy.
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_hello_tensor_library_only() {
     drive_parity(&examples_root().join("hello_tensor.ch"), false);
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_linreg_library_only() {
     drive_parity(&examples_root().join("linreg.ch"), false);
 }
@@ -472,7 +493,10 @@ fn parity_transformer_block_library_only() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)")]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "diagnostic: isolating macOS Smoke failure (closure campaign)"
+)]
 fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
 }
