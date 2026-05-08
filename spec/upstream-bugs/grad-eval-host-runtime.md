@@ -160,17 +160,17 @@ is `[2.0, 4.0, 6.0]` (the gradient of `sum(x^2)` is `2*x`).
 
 ## Downstream impact
 
-Shoals v0.1.0-alpha defines four `grad`-derived Greek functions in
+Shoals v0.1.0-alpha defined four `grad`-derived Greek functions in
 `src/pricing.ch` (`deltas_call`, `deltas_put`, `vegas_call`, plus a
-helper `call_total_per_sigma`). All of them compile cleanly under
-`chelis check` (score 1.0) but cannot be exercised under
-`chelis test`. Shoals's runtime Greeks tests use central
-finite-difference approximations as a stand-in until this bug is
-resolved.
+helper `call_total_per_sigma`). At filing time, all compiled cleanly
+under `chelis check` (score 1.0) but could not be exercised under
+`chelis test`, so Shoals's runtime Greeks tests used central
+finite-difference approximations as a stand-in.
 
-When the upstream eval path lands, the property
-`properties/pricing.ch::matches_textbook_reference` will swap from
-finite-difference comparison to grad-vs-textbook comparison
-automatically (one-line change to the property body), and the
-chelis-cli phase oracle's `#[ignore = "blocked on grad eval"]` test
-guard becomes a one-line removal.
+After closure, generic host-runtime `grad` probes run in `chelis eval`
+and match the C lane. Shoals is narrower: its full Black-Scholes Greek
+body still contains constructs the IR DAG path cannot cheaply execute.
+Accordingly, the Chelis-side Shoals Greek probe is a focused manual
+gate that runtime-skips with a warning when the downstream body is not
+IR-lowerable, while Shoals's default executable tests keep their
+finite-difference Greek coverage.
