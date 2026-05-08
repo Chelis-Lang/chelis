@@ -168,11 +168,16 @@ Examples:
 | coral           | `coral`        | `Coral`         |
 | shoals          | `shoals`       | `Shoals`        |
 | octant          | `octant`       | `Octant`        |
+| c-earchin       | `c-earchin`    | `CEarchin`      |
 
 The `module_prefix` form is forced by Surf's case-split rule (§1.1):
 identifiers must be uppercase-leading to be module-path components.
 The short prefix `Std` is preferred over `ChelisStd` for the runtime
 package.
+
+`CEarchin` is the deliberate c-earchin exception: the capital `C` followed by
+`Earchin` preserves the visual distinction between package prefix `c` and
+domain name `earchin`. It is not an ALL-CAPS abbreviation.
 
 ### 2.7 Cross-shell dependency keys
 

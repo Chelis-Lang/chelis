@@ -80,6 +80,9 @@ use tempfile::tempdir;
 use wiremock::matchers::{header, method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const CURRENT_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_COMPILER_PIN: &str = concat!("=", env!("CARGO_PKG_VERSION"));
+
 /// The chelis monorepo root (two levels up from `crates/chelis-cli`).
 fn monorepo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -106,9 +109,10 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 module_prefix = "Test"
-{deps_toml}"#
+{deps_toml}"#,
+        compiler = CURRENT_COMPILER_PIN,
     );
     let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
     let mut tar_bytes = Vec::new();
@@ -147,7 +151,7 @@ fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Ve
             name: name.to_string(),
             version: version.to_string(),
         },
-        compiler: "=0.6.1".to_string(),
+        compiler: CURRENT_COMPILER_PIN.to_string(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         archive_sha256: archive_sha256.to_string(),
@@ -304,7 +308,8 @@ fn phaseA_item9_lockfile_origin_oracle() {
 /// has no `remote_origin` field. The new code must parse it cleanly
 /// and surface `remote_origin = None` on every `LocalRegistry` entry.
 fn oracle_backcompat_deserializes_old_schema() {
-    let toml = r#"
+    let toml = format!(
+        r#"
 [package]
 name = "demo"
 version = "0.2.0"
@@ -312,7 +317,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 archive_sha256 = "deadbeef"
 shell_sha256 = "cafebabe"
 
@@ -322,15 +327,17 @@ kind = "local_registry"
 [[dependencies]]
 name = "neighbor"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 archive_sha256 = "abcd"
 shell_sha256 = "ef01"
 
 [dependencies.source]
 kind = "path"
 path = "../neighbor"
-"#;
-    let lock: ReefLock = toml::from_str(toml).expect("old-schema lockfile must deserialize");
+"#,
+        compiler = CURRENT_COMPILER_PIN,
+    );
+    let lock: ReefLock = toml::from_str(&toml).expect("old-schema lockfile must deserialize");
     assert_eq!(lock.dependencies.len(), 2);
     let std_entry = lock
         .dependencies
@@ -369,7 +376,7 @@ fn oracle_roundtrip_with_and_without_origin() {
                 name: name.to_string(),
                 version: "0.2.0".to_string(),
                 source,
-                compiler: "=0.6.1".to_string(),
+                compiler: CURRENT_COMPILER_PIN.to_string(),
                 archive_sha256: "ABC".to_string(),
                 shell_sha256: "DEF".to_string(),
             }],
@@ -404,7 +411,7 @@ fn oracle_roundtrip_with_and_without_origin() {
 
     // Bundled (the language runtime). Same fixed-point property.
     let bundled_source = LockSource::Bundled {
-        compiler_version: "0.6.1".to_string(),
+        compiler_version: CURRENT_COMPILER_VERSION.to_string(),
     };
     let lock = synth_lock(bundled_source, "chelis-std");
     let serialized = toml::to_string_pretty(&lock).expect("serialize bundled");
@@ -413,7 +420,9 @@ fn oracle_roundtrip_with_and_without_origin() {
         "Bundled variant must serialize with `bundled` tag; got: {serialized}"
     );
     assert!(
-        serialized.contains("compiler_version = \"0.6.1\""),
+        serialized.contains(&format!(
+            "compiler_version = \"{CURRENT_COMPILER_VERSION}\""
+        )),
         "Bundled must record compiler_version; got: {serialized}"
     );
     let parsed: ReefLock = toml::from_str(&serialized).expect("parse bundled");
@@ -804,12 +813,15 @@ fn phaseA_item9_old_chelis_std_lockfile_migrates_to_bundled() {
     fs::create_dir_all(&pkg_root).unwrap();
     fs::write(
         pkg_root.join("reef.toml"),
-        r#"[package]
+        format!(
+            r#"[package]
 name = "downstream"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 module_prefix = "Downstream"
 "#,
+            compiler = CURRENT_COMPILER_PIN,
+        ),
     )
     .unwrap();
     // Note: the entry has no remote_origin AND no version match against
@@ -817,20 +829,23 @@ module_prefix = "Downstream"
     // chelis-std is now treated as bundled regardless.
     fs::write(
         pkg_root.join("reef.lock"),
-        r#"[package]
+        format!(
+            r#"[package]
 name = "downstream"
 version = "0.2.0"
 
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
 [dependencies.source]
 kind = "local_registry"
 "#,
+            compiler = CURRENT_COMPILER_PIN,
+        ),
     )
     .unwrap();
 
@@ -930,14 +945,15 @@ fn phaseA_item9_remote_origin_404_surfaces_release_asset_not_found() {
     fs::create_dir_all(&pkg_root).unwrap();
     fs::write(
         pkg_root.join("reef.lock"),
-        r#"[package]
+        format!(
+            r#"[package]
 name = "x"
 version = "0.2.0"
 
 [[dependencies]]
 name = "nautilus"
 version = "9.9.9"
-compiler = "=0.6.1"
+compiler = "{compiler}"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
@@ -945,6 +961,8 @@ shell_sha256 = "def"
 kind = "local_registry"
 remote_origin = "github://chelis-lang/nautilus@v9.9.9"
 "#,
+            compiler = CURRENT_COMPILER_PIN,
+        ),
     )
     .unwrap();
 
