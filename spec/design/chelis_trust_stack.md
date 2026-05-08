@@ -112,7 +112,7 @@ No separate differential testing infrastructure needed. It's a property that com
 For Shoals (finance):
 
 - `properties/pricing.ch` -- put-call parity, price positivity, call bounded by spot, delta in [0,1], gamma positive for vanilla Europeans
-- `properties/greeks.ch` -- grad-derived Greeks match finite-difference Greeks within tolerance, vega positive for vanilla options
+- `properties/greeks.ch` -- source-level grad-derived Greeks match textbook Black-Scholes Greeks within tolerance; executable tests retain finite-difference checks until the full pricing body is IR-lowerable under host-runtime `grad`
 - `properties/monte_carlo.ch` -- Monte Carlo price converges to analytic price as path count increases, variance decreases with path count
 - `properties/no_arbitrage.ch` -- no-arbitrage conditions on option spreads (bull spread payoff non-negative, butterfly spread payoff non-negative)
 

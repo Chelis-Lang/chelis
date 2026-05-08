@@ -1329,7 +1329,9 @@ requires understanding the type system's extension points).
 - `Shoals.Pricing`: Monte Carlo price converges to Black-Scholes analytical for
   vanilla European call (< 1% error with 100K paths)
 - `Shoals.Pricing`: Greeks via `grad` match analytical Black-Scholes Greeks
-  (< 1e-6 error)
+  (< 1e-6 error). Current Shoals status is source-level/typechecked only; the
+  focused runtime smoke skips with a warning until the full pricing body is
+  IR-lowerable under host-runtime `grad`.
 - `Shoals.Risk`: Parametric VaR matches `Nautilus.Distributions.Normal.ppf` at standard
   confidence levels
 - `Shoals.Curves`: Bootstrap reproduces known market instrument prices (< 1bp error)
@@ -1354,8 +1356,9 @@ reference `@property` functions:
 
 - `properties/pricing.ch` — put-call parity, price positivity, call bounded by spot,
   delta in [0,1], gamma positive for vanilla Europeans
-- `properties/greeks.ch` — grad-derived Greeks match finite-difference Greeks within
-  tolerance, vega positive for vanilla options
+- `properties/greeks.ch` — source-level grad-derived Greeks match textbook
+  Black-Scholes Greeks within tolerance; executable tests retain finite-difference
+  checks until the full pricing body is IR-lowerable under host-runtime `grad`
 - `properties/monte_carlo.ch` — Monte Carlo price converges to analytic price as path
   count increases, variance decreases with path count
 - `properties/no_arbitrage.ch` — bull spread payoff non-negative, butterfly spread
@@ -1383,8 +1386,12 @@ write their own references only for proprietary models. Full design:
 
 `cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle -- --ignored --exact --nocapture`
 — prices a European call option via Black-Scholes and Monte Carlo, verifies
-convergence, computes Greeks via `grad`, loads market data via `coral`, and produces
-a risk report.
+convergence, and checks same-seed reproducibility. A separate focused manual smoke,
+`cargo test -p chelis-cli --test phase3l_shoals_oracle phase3l_shoals_oracle_grad_greeks_match_analytic -- --ignored --exact --nocapture`,
+checks that Shoals's grad-derived Greek properties are lower/type-check clean
+without paying the Monte Carlo oracle runtime, then runtime-skips with a
+warning because the downstream pricing body still contains constructs the IR
+DAG path cannot execute.
 
 **Manual gate.** Wall-clock ~5 minutes on AMD Ryzen AI Max+ 395 (driven by the
 host evaluator's 20K MC sample loop on Shoals). The test is marked `#[ignore]`
