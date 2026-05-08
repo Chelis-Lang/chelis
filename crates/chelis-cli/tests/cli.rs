@@ -1546,6 +1546,7 @@ fn build_c_grad_locally_bound_alias_form_lowers() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -1598,6 +1599,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
         write_file(source_path, source);
         Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args([
                 "build",
                 source_path.to_str().unwrap(),
@@ -1624,6 +1626,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
     fn eval_to_string(source_path: &Path) -> String {
         let bytes = Command::cargo_bin("chelis")
             .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .args(["eval", "--file", source_path.to_str().unwrap()])
             .assert()
             .success()
@@ -4619,6 +4622,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
     // `chelis check` must pass cleanly.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["check", path.to_str().unwrap()])
         .assert()
         .success()
@@ -4627,6 +4631,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
     // IR-evaluator lane.
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
@@ -4637,6 +4642,7 @@ fn run_activation_parity(name: &str, source_body: &str) -> (Vec<u8>, Vec<u8>) {
     // C-backend lane: build, compile, run.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -4702,6 +4708,7 @@ ok = test_assert_close_tensor(actual, wrong, 0.000001, "relu wrong")
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .failure();
@@ -5001,6 +5008,7 @@ fn eval_grad_wrapper_fn_param_form_returns_correct_gradient() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .assert()
         .success()
@@ -5031,6 +5039,7 @@ fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
     // Host-eval lane.
     let host_output = Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args(["eval", "--file", path.to_str().unwrap()])
         .output()
         .expect("chelis eval should run");
@@ -5049,6 +5058,7 @@ fn eval_grad_wrapper_form_matches_c_backend_within_tolerance() {
     let out_dir = dir.path().join("grad-parity-build");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
@@ -5598,6 +5608,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
             "build",
             path.to_str().unwrap(),
