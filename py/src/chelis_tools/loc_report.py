@@ -3,12 +3,12 @@
 
 Uses pygount for standard language counting with manual overrides for
 Chelis-specific file types (.ch, .dp, .pest, .scm) that pygount doesn't
-recognize. Outputs a markdown table to docs/archive/reports/loc_report.md.
+recognize. Outputs a markdown table to docs/loc_report.md.
 
 Requirements: pygount (pip install pygount)
 
 Usage:
-    python scripts/loc_report.py              # write to docs/archive/reports/loc_report.md
+    python scripts/loc_report.py              # write to docs/loc_report.md
     python scripts/loc_report.py --stdout     # print to stdout instead
     python scripts/loc_report.py --json       # print raw data as JSON
 """
@@ -40,10 +40,15 @@ class LangEntry:
         return self.code + self.comments + self.blanks
 
 
-DEFAULT_OUTPUT = "docs/archive/reports/loc_report.md"
+DEFAULT_OUTPUT = "docs/loc_report.md"
 
 # Directories to always skip
 SKIP_DIRS = {"target", ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}
+SKIP_NESTED_DIRS = {
+    (".claude", "worktrees"),
+    (".codex", "worktrees"),
+    ("docs", "book", "book"),
+}
 
 # Display names and notes for languages pygount recognizes
 LANGUAGE_NOTES: dict[str, str] = {
@@ -104,7 +109,14 @@ def find_repo_root() -> Path:
 
 def should_skip(path: Path) -> bool:
     """Return True if path is under a directory we should skip."""
-    return any(part in SKIP_DIRS for part in path.parts)
+    parts = path.parts
+    if any(part in SKIP_DIRS for part in parts):
+        return True
+    return any(
+        tuple(parts[index : index + len(skip)]) == skip
+        for skip in SKIP_NESTED_DIRS
+        for index in range(len(parts) - len(skip) + 1)
+    )
 
 
 def collect_all_files(repo_root: Path) -> list[Path]:

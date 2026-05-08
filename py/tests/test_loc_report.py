@@ -8,6 +8,7 @@ import pytest
 
 from chelis_tools.loc_report import (
     CustomLang,
+    DEFAULT_OUTPUT,
     LangEntry,
     count_custom_files,
     format_number,
@@ -52,6 +53,22 @@ class TestShouldSkip:
 
     def test_skips_pycache(self):
         assert should_skip(Path("/repo/__pycache__/foo.pyc"))
+
+    def test_skips_claude_worktrees(self):
+        assert should_skip(Path("/repo/.claude/worktrees/agent-a/target/debug/foo.rs"))
+
+    def test_skips_codex_worktrees(self):
+        assert should_skip(Path("/repo/.codex/worktrees/agent-a/crates/lib.rs"))
+
+    def test_skips_generated_book_output(self):
+        assert should_skip(Path("/repo/docs/book/book/index.html"))
+
+    def test_allows_tracked_agent_commands(self):
+        assert not should_skip(Path("/repo/.claude/commands/red-team.md"))
+
+
+def test_default_output_matches_ci_commit_path():
+    assert DEFAULT_OUTPUT == "docs/loc_report.md"
 
 
 class TestCountCustomFiles:
