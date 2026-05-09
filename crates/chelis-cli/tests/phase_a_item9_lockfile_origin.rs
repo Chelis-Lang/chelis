@@ -106,7 +106,7 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -312,7 +312,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 archive_sha256 = "deadbeef"
 shell_sha256 = "cafebabe"
 
@@ -322,7 +322,7 @@ kind = "local_registry"
 [[dependencies]]
 name = "neighbor"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 archive_sha256 = "abcd"
 shell_sha256 = "ef01"
 
@@ -516,7 +516,7 @@ fn oracle_install_from_monorepo_leaves_field_none() {
             "install",
             "--from-monorepo",
             monorepo_root().to_str().unwrap(),
-            "chelis-std=0.2.0",
+            "chelis-std=0.3.0",
         ])
         .assert()
         .success();
@@ -807,7 +807,7 @@ fn phaseA_item9_old_chelis_std_lockfile_migrates_to_bundled() {
         r#"[package]
 name = "downstream"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 module_prefix = "Downstream"
 "#,
     )
@@ -824,7 +824,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 
@@ -937,7 +937,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "9.9.9"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 archive_sha256 = "abc"
 shell_sha256 = "def"
 

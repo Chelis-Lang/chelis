@@ -1,6 +1,6 @@
 module Std.Nn.Gelu
 export (forward, tanh_scalar, gelu_scalar)
-def forward[n](x: tensor[n, f32]) -> tensor[n, f32] = to_tensor(map(fn (v: f32) -> gelu_scalar(v), to_list(x)))
+def forward[n](x: &tensor[n, f32]) -> tensor[n, f32] = to_tensor(map(fn (v: f32) -> gelu_scalar(v), to_list(x)))
 def tanh_scalar(z: f32) -> f32 = {
   e_pos = exp(z)
   e_neg = exp(neg(z))

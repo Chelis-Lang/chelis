@@ -1033,10 +1033,14 @@ impl HostEmitter {
                 return;
             }
             "drop" => {
-                self.lines.push(format!(
-                    "{}{target} = chelis_list_drop({}, {});",
-                    self.indent, arg_vars[0].0, arg_vars[1].0
-                ));
+                if arg_vars.len() == 1 {
+                    self.lines.push(format!("{}{target} = 0;", self.indent));
+                } else {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_list_drop({}, {});",
+                        self.indent, arg_vars[0].0, arg_vars[1].0
+                    ));
+                }
                 return;
             }
             "chunk" => {

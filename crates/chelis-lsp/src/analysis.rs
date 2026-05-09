@@ -1379,6 +1379,7 @@ fn format_type_expr(ty: &TypeExpr) -> String {
                 .join(", ");
             format!("({args}) -> {}", format_type_expr(ret))
         }
+        TypeExpr::Ref(inner, _) => format!("&{}", format_type_expr(inner)),
         TypeExpr::App(name, args, _) => {
             let args = args
                 .iter()

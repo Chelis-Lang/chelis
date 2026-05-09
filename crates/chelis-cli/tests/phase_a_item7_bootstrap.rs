@@ -90,7 +90,7 @@ fn build_test_archive(
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 module_prefix = "Test"
 {deps_toml}"#
     );

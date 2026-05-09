@@ -1880,6 +1880,10 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
             ret: Box::new(wire_type_expr(ret)),
             span: span(*s),
         },
+        TypeExpr::Ref(inner, s) => WireSurfTypeExpr::Ref {
+            inner: Box::new(wire_type_expr(inner)),
+            span: span(*s),
+        },
         TypeExpr::App(name, args, s) => WireSurfTypeExpr::App {
             name: name.clone(),
             args: args.iter().map(wire_type_expr).collect(),

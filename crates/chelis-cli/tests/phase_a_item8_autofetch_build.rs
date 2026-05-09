@@ -65,7 +65,7 @@ fn build_test_archive(name: &str, version: &str, deps: &[(&str, &str)]) -> Vec<u
         r#"[package]
 name = "{name}"
 version = "{version}"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 module_prefix = "Test"
 {deps_toml}"#
     );
@@ -937,7 +937,7 @@ version = "0.2.0"
 [[dependencies]]
 name = "nautilus"
 version = "0.2.0"
-compiler = "=0.6.1"
+compiler = "=0.7.0"
 archive_sha256 = "{archive_sha}"
 shell_sha256 = "{shell_sha}"
 

@@ -4359,6 +4359,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             _ => Some(HostType::Unknown),
         },
         "tuple-get" => Some(HostType::Unknown),
+        "drop" if arg_tys.len() == 1 => Some(HostType::Unit),
         "take" | "drop" => match arg_tys.first() {
             Some(HostType::List(inner)) => Some(HostType::List(Box::new((**inner).clone()))),
             _ => Some(HostType::Unknown),

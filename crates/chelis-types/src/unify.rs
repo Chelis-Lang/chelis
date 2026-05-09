@@ -182,6 +182,7 @@ impl Subst {
                 let ret = Box::new(self.apply(ret));
                 Type::Fn(args, ret)
             }
+            Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
             Type::Tensor(dims, prec) => {
                 let dims = dims.iter().map(|d| self.apply_dim(d)).collect();
                 Type::Tensor(dims, *prec)
@@ -258,6 +259,8 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         }),
 
         (Type::Unit, Type::Unit) => Ok(()),
+
+        (Type::Ref(inner1), Type::Ref(inner2)) => unify(inner1, inner2, subst),
 
         // Type variable binding
         (Type::Var(v), _) => bind_tvar(*v, &t2, subst),
@@ -411,6 +414,7 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
         Type::Fn(args, ret) => {
             args.iter().any(|a| occurs_in(v, a, subst)) || occurs_in(v, ret, subst)
         }
+        Type::Ref(inner) => occurs_in(v, inner, subst),
         Type::Tensor(_, _) => false, // tensors don't contain type vars in dims
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),

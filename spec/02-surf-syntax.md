@@ -398,7 +398,7 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
-| `&x` | `(borrow {} (var {} x))` | Only valid as a direct call argument in Phase 2b |
+| `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 When `grad` targets one differentiable parameter, the result is that gradient value.
@@ -821,6 +821,7 @@ bool                              ⟹  (t-prim {} bool)
 string                            ⟹  (t-prim {} string)
 tensor[batch, seq, f32]           ⟹  (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))
 tensor[a, b, f32]  (polymorphic)  ⟹  (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
+&tensor[batch, f32]               ⟹  (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 A -> B -> C                       ⟹  (t-fn {} A' B' C')  -- flat, last is return
 Option[f32]                       ⟹  (t-adt {} Option (t-prim {} f32))
 (f32, f32)                        ⟹  (t-tuple {} (t-prim {} f32) (t-prim {} f32))

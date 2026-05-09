@@ -126,6 +126,8 @@ pub enum Type {
     Prim(Prim),
     /// Function type: args → return.
     Fn(Vec<Type>, Box<Type>),
+    /// Read-only non-owning borrow of a value.
+    Ref(Box<Type>),
     /// Tensor type: dimensions + precision.
     Tensor(Vec<Dim>, Prim),
     /// Algebraic data type: name + type arguments.
@@ -244,6 +246,7 @@ impl fmt::Display for Type {
                 let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "({}) -> {}", arg_strs.join(", "), ret)
             }
+            Type::Ref(inner) => write!(f, "&{inner}"),
             Type::Tensor(dims, prec) => {
                 let dim_strs: Vec<String> = dims.iter().map(|d| format!("{d:?}")).collect();
                 write!(f, "tensor[{}, {}]", dim_strs.join(", "), prec.name())

@@ -348,9 +348,14 @@ fn var_ref_to_let_bound_name_records_span_on_cached_node() {
         (def {} top
           (let {}
             (bind {} a (lit {type: (t-tensor {} (t-prim {} f32)) span: "lit_a"} 7.0))
-            (app {type: (t-tensor {} (t-prim {} f32))}
-                 (var {} neg)
-                 (var {type: (t-tensor {} (t-prim {} f32)) span: "var_a_use"} a))))
+            (let {}
+              (bind {} out
+                (app {type: (t-tensor {} (t-prim {} f32))}
+                     (var {} neg)
+                     (var {type: (t-tensor {} (t-prim {} f32)) span: "var_a_use"} a)))
+              (let {}
+                (bind {} __drop_a (app {} (var {} drop) (var {} a)))
+                (var {} out)))))
     "#;
 
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
@@ -413,9 +418,14 @@ fn var_ref_without_span_does_not_fabricate_one() {
         (def {} top
           (let {}
             (bind {} a (lit {type: (t-tensor {} (t-prim {} f32)) span: "lit_a"} 7.0))
-            (app {type: (t-tensor {} (t-prim {} f32))}
-                 (var {} neg)
-                 (var {type: (t-tensor {} (t-prim {} f32))} a))))
+            (let {}
+              (bind {} out
+                (app {type: (t-tensor {} (t-prim {} f32))}
+                     (var {} neg)
+                     (var {type: (t-tensor {} (t-prim {} f32))} a)))
+              (let {}
+                (bind {} __drop_a (app {} (var {} drop) (var {} a)))
+                (var {} out)))))
     "#;
 
     let checked = check(source);
@@ -452,9 +462,14 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
         (def {} top
           (let {}
             (bind {} a (lit {type: (t-tensor {} (t-prim {} f32)) span: "lit_a"} 7.0))
-            (app {type: (t-tensor {} (t-prim {} f32)) span: "outer_app"}
-                 (var {} neg)
-                 (var {type: (t-tensor {} (t-prim {} f32))} a))))
+            (let {}
+              (bind {} out
+                (app {type: (t-tensor {} (t-prim {} f32)) span: "outer_app"}
+                     (var {} neg)
+                     (var {type: (t-tensor {} (t-prim {} f32))} a)))
+              (let {}
+                (bind {} __drop_a (app {} (var {} drop) (var {} a)))
+                (var {} out)))))
     "#;
 
     let checked = check(source);

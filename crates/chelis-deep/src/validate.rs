@@ -41,12 +41,13 @@ const VALID_TAGS: &[&str] = &[
     "pat-as",
     // Reserved / Phase 1 (1)
     "record-update",
-    // Types (7)
+    // Types (8)
     "t-prim",
     "t-fn",
     "t-tensor",
     "t-adt",
     "t-var",
+    "t-ref",
     "t-unit",
     "t-tuple",
     // Dimensions (3)
@@ -123,7 +124,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                                 kind: WarningKind::UnknownTag,
                                 offset: span.offset,
                                 message: format!(
-                                    "unknown tag '{tag}' — not in the 60-tag vocabulary"
+                                    "unknown tag '{tag}' — not in the 61-tag vocabulary"
                                 ),
                             });
                         } else {
@@ -414,5 +415,28 @@ mod tests {
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::Arity));
+    }
+
+    #[test]
+    fn t_ref_type_tag_is_valid() {
+        let node = make_list(vec![
+            sym("t-ref"),
+            empty_map(),
+            make_list(vec![
+                sym("t-tensor"),
+                empty_map(),
+                make_list(vec![
+                    sym("d-lit"),
+                    empty_map(),
+                    Expr::Atom(Atom::Int(4), ZERO),
+                ]),
+                make_list(vec![sym("t-prim"), empty_map(), sym("f32")]),
+            ]),
+        ]);
+        let warnings = validate(&[node]);
+        assert!(
+            warnings.is_empty(),
+            "t-ref should be part of the closed Deep type vocabulary: {warnings:?}"
+        );
     }
 }

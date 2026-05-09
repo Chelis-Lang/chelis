@@ -2648,6 +2648,7 @@ fn should_attach_type_metadata(tag: &str) -> bool {
             | "t-tensor"
             | "t-adt"
             | "t-var"
+            | "t-ref"
             | "t-unit"
             | "t-tuple"
             | "d-name"
@@ -2664,6 +2665,7 @@ fn type_to_deep_expr(ty: &Type) -> deep::Expr {
             children.push(type_to_deep_expr(ret));
             node_expr("t-fn", children)
         }
+        Type::Ref(inner) => node_expr("t-ref", vec![type_to_deep_expr(inner)]),
         Type::Tensor(dims, prim) => {
             let mut children: Vec<deep::Expr> = dims.iter().map(dim_to_deep_expr).collect();
             children.push(type_to_deep_expr(&Type::Prim(*prim)));
@@ -2921,6 +2923,9 @@ fn tensor_dims_from_type_expr(expr: &deep::Expr) -> Option<Vec<DeepDimKind>> {
         deep::Expr::List(list, _) => list,
         _ => return None,
     };
+    if get_tag(list) == Some("t-ref") {
+        return children(list).first().and_then(tensor_dims_from_type_expr);
+    }
     if get_tag(list) != Some("t-tensor") {
         return None;
     }
@@ -3638,7 +3643,10 @@ fn infer_expr(
                         );
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
-                            Type::Tensor(_, _) | Type::Error => inner_ty,
+                            Type::Tensor(_, _) | Type::Error => resolved,
+                            Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
+                                *inner
+                            }
                             _ => {
                                 errors.push(CheckError::new(
                                     CheckErrorKind::TypeMismatch,
@@ -3667,8 +3675,9 @@ fn infer_expr(
                         );
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
+                            Type::Ref(_) => resolved,
                             Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
-                                inner_ty
+                                Type::Ref(Box::new(resolved))
                             }
                             _ => {
                                 errors.push(CheckError::new(
@@ -3897,6 +3906,10 @@ fn infer_app(
         })
         .collect();
 
+    if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
+        return Type::Unit;
+    }
+
     // If func or any arg is Error, propagate
     if matches!(func_ty, Type::Error) || arg_tys.iter().any(|t| matches!(t, Type::Error)) {
         return Type::Error;
@@ -3920,8 +3933,8 @@ fn infer_app(
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
         && arg_tys.len() == 2
     {
-        let lhs_resolved = subst.apply(&arg_tys[0]);
-        let rhs_resolved = subst.apply(&arg_tys[1]);
+        let lhs_resolved = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs_resolved = type_for_readonly_check(&arg_tys[1], subst);
         let is_eq_family = matches!(fname.as_str(), "eq" | "neq");
         let precisions_compatible = |tensor_prec: &Prim, scalar_prec: &Prim| -> bool {
             tensor_prec == scalar_prec && (is_eq_family || tensor_prec.is_numeric())
@@ -3945,6 +3958,7 @@ fn infer_app(
         arg_tys.clone()
     };
 
+    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, unify_arg_tys, subst);
     let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
     const TENSOR_OPS: &[&str] = &[
@@ -3989,7 +4003,7 @@ fn infer_app(
                 && TENSOR_OPS.contains(&fname.as_str())
             {
                 for arg_ty in &arg_tys {
-                    let resolved = subst.apply(arg_ty);
+                    let resolved = type_for_readonly_check(arg_ty, subst);
                     let ok = match fname.as_str() {
                         "matmul" | "layer_norm" | "normalize" => {
                             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
@@ -4049,7 +4063,7 @@ fn infer_app(
                 )
             {
                 if let Some(first_arg) = arg_tys.first() {
-                    let resolved = subst.apply(first_arg);
+                    let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
                         Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
                         _ => {
@@ -4089,7 +4103,7 @@ fn infer_app(
                 && fname == "uniform_like"
             {
                 if let Some(first_arg) = arg_tys.first() {
-                    let resolved = subst.apply(first_arg);
+                    let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
                         Type::Tensor(_, prim) if prim.is_float() => {}
                         Type::Tensor(_, _) => {
@@ -4125,7 +4139,7 @@ fn infer_app(
                 }
 
                 for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
-                    let resolved = subst.apply(arg_ty);
+                    let resolved = type_for_readonly_check(arg_ty, subst);
                     match &resolved {
                         Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
                         _ => {
@@ -4165,7 +4179,7 @@ fn infer_app(
                 && fname == "dropout"
             {
                 if let Some(first_arg) = arg_tys.first() {
-                    let resolved = subst.apply(first_arg);
+                    let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
                         Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
                         _ => {
@@ -4205,7 +4219,7 @@ fn infer_app(
                 && fname == "conv2d"
             {
                 for (index, arg_ty) in arg_tys.iter().enumerate() {
-                    let resolved = subst.apply(arg_ty);
+                    let resolved = type_for_readonly_check(arg_ty, subst);
                     if index < 2 {
                         match &resolved {
                             Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
@@ -4359,7 +4373,7 @@ fn infer_app(
                 && LOGICAL_OPS.contains(&fname.as_str())
             {
                 for arg_ty in &arg_tys {
-                    let resolved = subst.apply(arg_ty);
+                    let resolved = type_for_readonly_check(arg_ty, subst);
                     match &resolved {
                         Type::Tensor(_, Prim::Bool)
                         | Type::Prim(Prim::Bool)
@@ -4415,7 +4429,7 @@ fn infer_app(
                 }
                 // No tensor arg → scalar comparison, returns scalar bool.
                 if let Some(first_arg) = arg_tys.first() {
-                    let resolved_arg = subst.apply(first_arg);
+                    let resolved_arg = type_for_readonly_check(first_arg, subst);
                     if matches!(resolved_arg, Type::Prim(_)) {
                         return Type::Prim(Prim::Bool);
                     }
@@ -4629,7 +4643,7 @@ fn infer_app(
                     }
                     "rank" => {
                         if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
+                            match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
                                     return Type::Prim(Prim::Int32);
                                 }
@@ -4649,7 +4663,7 @@ fn infer_app(
                     }
                     "shape" => {
                         let input_dims = if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
+                            match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, _) => Some(dims),
                                 Type::Var(_) | Type::Error => None,
                                 other => {
@@ -4720,7 +4734,7 @@ fn infer_app(
                     }
                     "numel" => {
                         if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
+                            match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
                                     return Type::Prim(Prim::Int64);
                                 }
@@ -4740,7 +4754,7 @@ fn infer_app(
                     }
                     "tensor_to_scalar" => {
                         if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
+                            match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if !dims.is_empty() {
                                         errors.push(CheckError::new(
@@ -4830,8 +4844,8 @@ fn infer_app(
                             return Type::Error;
                         }
                         let axis = kids.get(3).and_then(extract_axis_literal).unwrap_or(0);
-                        let tensor_ty = subst.apply(&arg_tys[0]);
-                        let indices_ty = subst.apply(&arg_tys[1]);
+                        let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
+                        let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
                         match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                             Ok(ty) => return ty,
                             Err(message) => {
@@ -4851,9 +4865,9 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let cond_ty = subst.apply(&arg_tys[0]);
-                        let then_ty = subst.apply(&arg_tys[1]);
-                        let else_ty = subst.apply(&arg_tys[2]);
+                        let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
+                        let then_ty = type_for_readonly_check(&arg_tys[1], subst);
+                        let else_ty = type_for_readonly_check(&arg_tys[2], subst);
                         match (&cond_ty, &then_ty, &else_ty) {
                             (
                                 Type::Tensor(cond_dims, Prim::Bool),
@@ -4904,7 +4918,7 @@ fn infer_app(
                             return Type::Error;
                         }
                         let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        match subst.apply(&arg_tys[0]) {
+                        match type_for_readonly_check(&arg_tys[0], subst) {
                             Type::Tensor(dims, precision) => {
                                 if axis >= dims.len() {
                                     errors.push(CheckError::new(
@@ -4942,7 +4956,11 @@ fn infer_app(
                         }
                         let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
                         let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
-                        match infer_diagonal_result_type(&subst.apply(&arg_tys[0]), axis1, axis2) {
+                        match infer_diagonal_result_type(
+                            &type_for_readonly_check(&arg_tys[0], subst),
+                            axis1,
+                            axis2,
+                        ) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 errors.push(CheckError::new(
@@ -4963,7 +4981,11 @@ fn infer_app(
                         }
                         let axis1 = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
                         let axis2 = kids.get(3).and_then(extract_axis_literal).unwrap_or(1);
-                        match infer_trace_result_type(&subst.apply(&arg_tys[0]), axis1, axis2) {
+                        match infer_trace_result_type(
+                            &type_for_readonly_check(&arg_tys[0], subst),
+                            axis1,
+                            axis2,
+                        ) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 errors.push(CheckError::new(
@@ -4982,9 +5004,9 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let input_ty = subst.apply(&arg_tys[0]);
-                        let low_ty = subst.apply(&arg_tys[1]);
-                        let high_ty = subst.apply(&arg_tys[2]);
+                        let input_ty = type_for_readonly_check(&arg_tys[0], subst);
+                        let low_ty = type_for_readonly_check(&arg_tys[1], subst);
+                        let high_ty = type_for_readonly_check(&arg_tys[2], subst);
                         match (&input_ty, &low_ty, &high_ty) {
                             (
                                 Type::Tensor(input_dims, input_prec),
@@ -5038,7 +5060,7 @@ fn infer_app(
                             return Type::Error;
                         }
                         let axis = kids.get(2).and_then(extract_axis_literal).unwrap_or(0);
-                        match subst.apply(&arg_tys[0]) {
+                        match type_for_readonly_check(&arg_tys[0], subst) {
                             Type::Tensor(dims, precision) => {
                                 if axis >= dims.len() {
                                     errors.push(CheckError::new(
@@ -5270,7 +5292,7 @@ fn infer_app(
                         if arg_tys.len() != 3 {
                             return Type::Error;
                         }
-                        let tensor_ty = subst.apply(&arg_tys[0]);
+                        let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let axis_ty = subst.apply(&arg_tys[1]);
                         let sizes_ty = subst.apply(&arg_tys[2]);
                         if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
@@ -6131,7 +6153,7 @@ fn infer_app(
                     }
                     "to_list" => {
                         if let Some(first_arg) = arg_tys.first() {
-                            match subst.apply(first_arg) {
+                            match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if dims.len() != 1 {
                                         errors.push(CheckError::new(
@@ -6365,6 +6387,31 @@ fn infer_app(
     }
 }
 
+fn auto_borrow_call_arg_types(func_ty: &Type, arg_tys: Vec<Type>, subst: &Subst) -> Vec<Type> {
+    let Type::Fn(params, _) = subst.apply(func_ty) else {
+        return arg_tys;
+    };
+    arg_tys
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, actual)| match params.get(index).map(|param| subst.apply(param)) {
+                Some(Type::Ref(_)) if !matches!(subst.apply(&actual), Type::Ref(_)) => {
+                    Type::Ref(Box::new(actual))
+                }
+                _ => actual,
+            },
+        )
+        .collect()
+}
+
+fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
+    match subst.apply(ty) {
+        Type::Ref(inner) => subst.apply(&inner),
+        other => other,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn infer_permute_app(
     list: &deep::List,
@@ -6444,7 +6491,7 @@ fn infer_permute_app(
         }
     }
 
-    let input_ty = subst.apply(&input_ty);
+    let input_ty = type_for_readonly_check(&input_ty, subst);
     let Type::Tensor(dims, prec) = input_ty else {
         if matches!(input_ty, Type::Var(_) | Type::Error) {
             return input_ty;
@@ -6549,7 +6596,7 @@ fn infer_reshape_app(
         typed_nodes,
         total_nodes,
     );
-    match subst.apply(&input_ty) {
+    match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(
@@ -6743,9 +6790,9 @@ fn check_layer_norm_signature(
         return Type::Error;
     }
 
-    let x_ty = subst.apply(&arg_tys[0]);
-    let gamma_ty = subst.apply(&arg_tys[1]);
-    let beta_ty = subst.apply(&arg_tys[2]);
+    let x_ty = type_for_readonly_check(&arg_tys[0], subst);
+    let gamma_ty = type_for_readonly_check(&arg_tys[1], subst);
+    let beta_ty = type_for_readonly_check(&arg_tys[2], subst);
 
     let (x_dims, x_prec) = match x_ty {
         Type::Tensor(dims, prec) => (dims, prec),
@@ -6862,8 +6909,8 @@ fn check_conv2d_signature(
         return Type::Error;
     }
 
-    let input_ty = subst.apply(&arg_tys[0]);
-    let kernel_ty = subst.apply(&arg_tys[1]);
+    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
+    let kernel_ty = type_for_readonly_check(&arg_tys[1], subst);
 
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
@@ -6988,8 +7035,8 @@ fn check_matmul_signature(
         return Type::Error;
     }
 
-    let lhs = subst.apply(&arg_tys[0]);
-    let rhs = subst.apply(&arg_tys[1]);
+    let lhs = type_for_readonly_check(&arg_tys[0], subst);
+    let rhs = type_for_readonly_check(&arg_tys[1], subst);
 
     let (lhs_dims, lhs_prec) = match lhs {
         Type::Tensor(dims, prec) => (dims, prec),
@@ -7068,7 +7115,7 @@ fn check_reduction_signature(
         return Type::Error;
     }
 
-    let input_ty = subst.apply(&arg_tys[0]);
+    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (dims, prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error => return subst.apply(result_ty),
@@ -7128,7 +7175,7 @@ fn check_expand_signature(
         return Type::Error;
     }
 
-    let input_ty = subst.apply(&arg_tys[0]);
+    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
         Type::Var(_) | Type::Error => return subst.apply(result_ty),
@@ -7856,7 +7903,8 @@ fn infer_pipe(
             total_nodes,
         );
         let ret_tv = vg.fresh_type();
-        let expected = Type::Fn(vec![current_ty.clone()], Box::new(ret_tv.clone()));
+        let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
+        let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
 
         match unify(&stage_ty, &expected, subst) {
             Ok(()) => {
@@ -8194,6 +8242,7 @@ fn grad_argument_type(arg: &Type) -> Option<Type> {
     match arg {
         Type::Prim(prim) if prim.is_float() => Some(Type::Prim(*prim)),
         Type::Tensor(dims, prim) if prim.is_float() => Some(Type::Tensor(dims.clone(), *prim)),
+        Type::Ref(inner) => grad_argument_type(inner),
         _ => None,
     }
 }
@@ -8274,6 +8323,9 @@ fn infer_vmap(
 
 fn vmap_transform_param_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<Type, String> {
     match ty {
+        Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_param_type(
+            inner, axis, batch_dim,
+        )?))),
         Type::Tensor(dims, precision) => {
             if axis > dims.len() {
                 return Err(format!(
@@ -8297,6 +8349,9 @@ fn vmap_transform_param_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<
 
 fn vmap_transform_result_type(ty: &Type, axis: usize, batch_dim: &Dim) -> Result<Type, String> {
     match ty {
+        Type::Ref(inner) => Ok(Type::Ref(Box::new(vmap_transform_result_type(
+            inner, axis, batch_dim,
+        )?))),
         Type::Prim(precision) => Ok(Type::Tensor(vec![batch_dim.clone()], *precision)),
         Type::Tensor(dims, precision) => {
             if axis > dims.len() {
@@ -8414,6 +8469,14 @@ fn deep_type_to_type_inner(
                     let ret =
                         deep_type_to_type_inner(&kids[kids.len() - 1], vg, tvar_map, dvar_map);
                     Type::Fn(args, Box::new(ret))
+                }
+                "t-ref" => {
+                    if kids.len() != 1 {
+                        return Type::Error;
+                    }
+                    Type::Ref(Box::new(deep_type_to_type_inner(
+                        &kids[0], vg, tvar_map, dvar_map,
+                    )))
                 }
                 "t-tensor" => {
                     if kids.is_empty() {

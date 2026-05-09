@@ -1545,6 +1545,12 @@ impl Parser {
                 };
                 Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
             }
+            TokenKind::Amp => {
+                let tok = self.advance();
+                let inner = self.parse_type_atom()?;
+                let span = tok.span.merge(type_span(&inner));
+                Ok(TypeExpr::Ref(Box::new(inner), span))
+            }
             TokenKind::LParen => {
                 let start = self.advance().span;
                 if *self.peek() == TokenKind::RParen {
@@ -1909,6 +1915,7 @@ fn type_span(t: &TypeExpr) -> Span {
         TypeExpr::Named(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,
+        TypeExpr::Ref(_, s) => *s,
         TypeExpr::App(_, _, s) => *s,
         TypeExpr::Tuple(_, s) => *s,
         TypeExpr::Infer(s) => *s,
@@ -2957,6 +2964,22 @@ mod tests {
                 );
             }
             _ => panic!("expected Apply, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn borrow_type_parses() {
+        let decls = p("def f(x: &tensor[4, f32]) -> tensor[4, f32] = relu(x)");
+        match &decls[0] {
+            Decl::FunDef { params, .. } => match &params[0].ty {
+                Some(TypeExpr::Ref(inner, _)) => {
+                    assert!(
+                        matches!(inner.as_ref(), TypeExpr::Tensor(_, precision, _) if precision == "f32")
+                    );
+                }
+                other => panic!("expected borrowed tensor parameter, got {other:?}"),
+            },
+            other => panic!("expected function definition, got {other:?}"),
         }
     }
 

@@ -26,7 +26,7 @@ impl LinearityInfo {
 
 #[derive(Debug, Clone)]
 enum BindingState {
-    Live,
+    Live { borrow_sites: Vec<String> },
     Consumed(ConsumeSite),
 }
 
@@ -47,23 +47,34 @@ impl LinearScope {
         self.bindings
             .entry(name.clone())
             .or_default()
-            .push(BindingState::Live);
+            .push(BindingState::Live {
+                borrow_sites: Vec::new(),
+            });
         self.types.entry(name).or_default().push(ty);
     }
 
-    fn pop(&mut self, name: &str) {
-        if let Some(stack) = self.bindings.get_mut(name) {
-            stack.pop();
-            if stack.is_empty() {
-                self.bindings.remove(name);
-            }
-        }
-        if let Some(stack) = self.types.get_mut(name) {
-            stack.pop();
+    fn pop(&mut self, name: &str) -> Option<(Option<Expr>, BindingState)> {
+        let ty = if let Some(stack) = self.types.get_mut(name) {
+            let ty = stack.pop();
             if stack.is_empty() {
                 self.types.remove(name);
             }
-        }
+            ty
+        } else {
+            None
+        };
+
+        let state = if let Some(stack) = self.bindings.get_mut(name) {
+            let state = stack.pop();
+            if stack.is_empty() {
+                self.bindings.remove(name);
+            }
+            state
+        } else {
+            None
+        };
+
+        state.map(|state| (ty.flatten(), state))
     }
 
     fn top(&self, name: &str) -> Option<&BindingState> {
@@ -82,6 +93,14 @@ impl LinearScope {
             && let Some(top) = stack.last_mut()
         {
             *top = BindingState::Consumed(site);
+        }
+    }
+
+    fn borrow(&mut self, name: &str, site: String) {
+        if let Some(stack) = self.bindings.get_mut(name)
+            && let Some(BindingState::Live { borrow_sites }) = stack.last_mut()
+        {
+            borrow_sites.push(site);
         }
     }
 
@@ -232,6 +251,10 @@ impl Checker {
             if let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
                 && !(is_var_expr(body) && var_name(body) == Some(name))
             {
+                if matches!(get_tag_expr(body), Some("borrow")) {
+                    self.invalid_borrow(body, "borrow cannot be returned from a function");
+                    return;
+                }
                 self.check_expr(body, scope);
             }
             return;
@@ -251,10 +274,12 @@ impl Checker {
             Expr::List(list, _) => match get_tag(list) {
                 Some("var") => self.consume_var_expr(expr, scope, generic_site(expr)),
                 Some("copy") => self.check_copy(list, scope),
+                Some("realize") => self.check_realize(expr, list, scope),
                 Some("borrow") => {
                     self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                 }
                 Some("app") => self.check_app(expr, list, scope),
+                Some("pipe") => self.check_pipe(list, scope),
                 Some("let") => self.check_let(list, scope),
                 Some("fn") => self.check_fn(expr, list, scope),
                 Some("if") => self.check_if(list, scope),
@@ -270,8 +295,20 @@ impl Checker {
 
     fn check_copy(&mut self, list: &List, scope: &mut LinearScope) {
         if let Some(child) = children(list).first() {
-            if is_var_expr(child) && self.expr_is_linear(child, scope) {
+            if let Some(borrowed) = borrow_inner(child) {
+                self.check_borrow_arg(child, borrowed, scope);
+            } else if is_var_expr(child) && self.expr_is_owned_linear(child, scope) {
                 self.read_var_expr(child, scope);
+            } else {
+                self.check_expr(child, scope);
+            }
+        }
+    }
+
+    fn check_realize(&mut self, expr: &Expr, list: &List, scope: &mut LinearScope) {
+        if let Some(child) = children(list).first() {
+            if is_var_expr(child) && self.expr_is_owned_linear(child, scope) {
+                self.consume_var_expr(child, scope, realize_site(expr));
             } else {
                 self.check_expr(child, scope);
             }
@@ -287,18 +324,41 @@ impl Checker {
         for (index, arg) in kids.iter().enumerate().skip(1) {
             if let Some(borrowed) = borrow_inner(arg) {
                 self.check_borrow_arg(arg, borrowed, scope);
-            } else if builtin_arg_is_observational(builtin, index - 1)
+            } else if self.arg_is_borrowed(kids.first(), builtin, index - 1, scope)
                 && is_var_expr(arg)
-                && self.expr_is_linear(arg, scope)
+                && self.expr_is_owned_linear(arg, scope)
             {
                 self.read_var_expr(arg, scope);
-            } else if is_var_expr(arg) && self.expr_is_linear(arg, scope) {
+            } else if is_var_expr(arg) && self.expr_is_owned_linear(arg, scope) {
                 self.consume_var_expr(arg, scope, app_site(expr, list));
             } else {
                 self.check_expr(arg, scope);
             }
         }
         self.maybe_mark_reusable_app_input(expr, kids, scope);
+    }
+
+    fn check_pipe(&mut self, list: &List, scope: &mut LinearScope) {
+        let kids = children(list);
+        if kids.is_empty() {
+            return;
+        }
+        let mut current = &kids[0];
+        for stage in &kids[1..] {
+            let stage_builtin = var_name(stage);
+            if self.arg_is_borrowed(Some(stage), stage_builtin, 0, scope) {
+                if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
+                    self.read_var_expr(current, scope);
+                } else {
+                    self.check_expr(current, scope);
+                }
+            } else if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
+                self.consume_var_expr(current, scope, pipe_site(current, stage));
+            } else {
+                self.check_expr(current, scope);
+            }
+            current = stage;
+        }
     }
 
     fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
@@ -309,7 +369,7 @@ impl Checker {
             );
             return;
         }
-        if !self.expr_is_linear(inner, scope) {
+        if !self.expr_is_owned_or_borrow_linear(inner, scope) {
             self.invalid_borrow(
                 borrow_expr,
                 "borrowed arguments must be tensor or tensor-carrying values",
@@ -334,7 +394,7 @@ impl Checker {
                     continue;
                 };
                 let value = &bind_kids[index + 1];
-                if is_var_expr(value) && self.expr_is_linear(value, scope) {
+                if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
                     self.consume_var_expr(
                         value,
                         scope,
@@ -357,7 +417,7 @@ impl Checker {
         }
         self.check_expr(&kids[1], scope);
         for name in pushed.into_iter().rev() {
-            scope.pop(&name);
+            self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
         }
     }
 
@@ -398,9 +458,13 @@ impl Checker {
                 pushed.push(param);
             }
         }
-        self.check_expr(&kids[1], &mut inner_scope);
+        if matches!(get_tag_expr(&kids[1]), Some("borrow")) {
+            self.invalid_borrow(&kids[1], "borrow cannot be returned from a function");
+        } else {
+            self.check_expr(&kids[1], &mut inner_scope);
+        }
         for name in pushed.into_iter().rev() {
-            inner_scope.pop(&name);
+            self.pop_and_check_param(&mut inner_scope, &name, expr_scope_end(&kids[1]));
         }
     }
 
@@ -423,7 +487,7 @@ impl Checker {
         if kids.is_empty() {
             return;
         }
-        if is_var_expr(&kids[0]) && self.expr_is_linear(&kids[0], scope) {
+        if is_var_expr(&kids[0]) && self.expr_is_owned_linear(&kids[0], scope) {
             self.consume_var_expr(
                 &kids[0],
                 scope,
@@ -456,7 +520,7 @@ impl Checker {
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
             for name in pattern_names.into_iter().rev() {
-                arm_scope.pop(&name);
+                self.pop_and_check(&mut arm_scope, &name, expr_scope_end(&arm_kids[2]));
             }
             arm_scopes.push(arm_scope);
         }
@@ -475,7 +539,7 @@ impl Checker {
                 _ => None,
             });
             if let Some(site) = consumed_site
-                && matches!(scope.top(name), Some(BindingState::Live))
+                && matches!(scope.top(name), Some(BindingState::Live { .. }))
             {
                 scope.consume(name, site);
             }
@@ -483,14 +547,16 @@ impl Checker {
     }
 
     fn maybe_mark_reusable_app_input(&mut self, expr: &Expr, kids: &[Expr], scope: &LinearScope) {
-        if !self.expr_is_linear(expr, scope) {
+        if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
         let Some(output_ty) = self.expr_type(expr, scope) else {
             return;
         };
         for (index, arg) in kids.iter().skip(1).enumerate() {
-            if borrow_inner(arg).is_some() || !is_var_expr(arg) || !self.expr_is_linear(arg, scope)
+            if borrow_inner(arg).is_some()
+                || !is_var_expr(arg)
+                || !self.expr_is_owned_linear(arg, scope)
             {
                 continue;
             }
@@ -508,11 +574,11 @@ impl Checker {
         let Some(name) = var_name(expr) else {
             return;
         };
-        if !self.expr_is_linear(expr, scope) {
+        if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
         match scope.top(name) {
-            Some(BindingState::Live) => scope.consume(name, site),
+            Some(BindingState::Live { .. }) => scope.consume(name, site),
             Some(BindingState::Consumed(consumed_at)) => self.errors.push(CheckError::new(
                 CheckErrorKind::UseAfterConsume,
                 with_macro_provenance(
@@ -535,10 +601,11 @@ impl Checker {
         let Some(name) = var_name(expr) else {
             return;
         };
-        if !self.expr_is_linear(expr, scope) {
+        if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
         self.read_or_error(name, expr, scope);
+        scope.borrow(name, borrow_site(expr));
     }
 
     fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
@@ -568,6 +635,49 @@ impl Checker {
         ));
     }
 
+    fn pop_and_check(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
+        self.pop_and_check_inner(scope, name, end_offset, false);
+    }
+
+    fn pop_and_check_param(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
+        self.pop_and_check_inner(scope, name, end_offset, true);
+    }
+
+    fn pop_and_check_inner(
+        &mut self,
+        scope: &mut LinearScope,
+        name: &str,
+        end_offset: usize,
+        allow_param_boundary_drop: bool,
+    ) {
+        let Some((ty, state)) = scope.pop(name) else {
+            return;
+        };
+        if !ty.as_ref().is_some_and(type_expr_is_owned_linear) {
+            return;
+        }
+        let BindingState::Live { borrow_sites } = state else {
+            return;
+        };
+        if allow_param_boundary_drop {
+            return;
+        }
+        let borrowed = if borrow_sites.is_empty() {
+            "never borrowed".to_string()
+        } else {
+            format!("borrowed by {}", borrow_sites.join(", "))
+        };
+        self.errors.push(CheckError::new(
+            CheckErrorKind::UnconsumedLinear,
+            format!(
+                "owned value `{name}` was {borrowed}; scope ends without consuming it at offset {end_offset}"
+            ),
+            vec![
+                format!("Add a final owned use of `{name}`, call `realize({name})`, or call `drop({name})`"),
+            ],
+        ));
+    }
+
     fn expr_type<'a>(&'a self, expr: &'a Expr, scope: &'a LinearScope) -> Option<&'a Expr> {
         type_metadata(expr).or_else(|| {
             var_name(expr)
@@ -575,7 +685,28 @@ impl Checker {
         })
     }
 
-    fn expr_is_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
+    fn arg_is_borrowed(
+        &self,
+        func: Option<&Expr>,
+        builtin: Option<&str>,
+        arg_index: usize,
+        scope: &LinearScope,
+    ) -> bool {
+        if builtin_arg_is_borrowed(builtin, arg_index) {
+            return true;
+        }
+        let Some(func_ty) = func.and_then(|expr| self.expr_type(expr, scope)) else {
+            return false;
+        };
+        type_expr_fn_arg(func_ty, arg_index).is_some_and(type_expr_is_ref)
+    }
+
+    fn expr_is_owned_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
+        self.expr_type(expr, scope)
+            .is_some_and(type_expr_is_owned_linear)
+    }
+
+    fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
         self.expr_type(expr, scope)
             .is_some_and(type_expr_contains_tensor)
     }
@@ -798,7 +929,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
     }
 }
 
-fn builtin_arg_is_observational(name: Option<&str>, arg_index: usize) -> bool {
+fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     // Tensor→host conversions read the tensor without taking ownership — the
     // runtime implementations (`chelis_list_from_tensor`, `chelis_tensor_to_f64`,
     // `chelis_print_f32`, `chelis_tensor_rank`, `chelis_tensor_shape`,
@@ -806,21 +937,83 @@ fn builtin_arg_is_observational(name: Option<&str>, arg_index: usize) -> bool {
     // never call `chelis_free`, so the caller still owns the input afterwards.
     // Keeping these observational avoids forcing callers to sprinkle
     // `copy(x)` before every query or host-lane conversion.
+    let Some(name) = name else {
+        return false;
+    };
     matches!(
+        name,
+        "add"
+            | "mul"
+            | "max_elem"
+            | "sub"
+            | "div"
+            | "eq"
+            | "neq"
+            | "lt"
+            | "gt"
+            | "lte"
+            | "gte"
+            | "and"
+            | "or"
+            | "matmul"
+            | "layer_norm"
+            | "where"
+            | "clamp"
+            | "test_assert_close_tensor"
+            | "test_assert_eq_tensor_int64"
+    ) || matches!(
         (name, arg_index),
         (
-            Some(
-                "print"
-                    | "debug"
-                    | "to_string"
-                    | "rank"
-                    | "shape"
-                    | "numel"
-                    | "to_list"
-                    | "tensor_to_scalar"
-            ),
+            "neg"
+                | "exp"
+                | "log"
+                | "sin"
+                | "sqrt"
+                | "cos"
+                | "tan"
+                | "atan"
+                | "abs"
+                | "floor"
+                | "ceil"
+                | "uniform_like"
+                | "cmplt"
+                | "not"
+                | "relu"
+                | "sigmoid"
+                | "softmax"
+                | "normalize"
+                | "mean"
+                | "min_elem"
+                | "sum"
+                | "max_reduce"
+                | "min_reduce"
+                | "prod_reduce"
+                | "argmax_reduce"
+                | "argmin_reduce"
+                | "reshape"
+                | "permute"
+                | "expand"
+                | "pad"
+                | "shrink"
+                | "stride"
+                | "dropout"
+                | "print"
+                | "debug"
+                | "to_string"
+                | "rank"
+                | "shape"
+                | "numel"
+                | "to_list"
+                | "tensor_to_scalar",
             0
-        )
+        ) | ("conv2d", 0 | 1)
+            | ("einsum", 1 | 2)
+            | ("split", 0)
+            | ("gather", 0 | 1)
+            | ("cumsum", 0)
+            | ("sort", 0)
+            | ("diagonal", 0)
+            | ("trace", 0)
     )
 }
 
@@ -863,10 +1056,33 @@ fn type_expr_contains_tensor(expr: &Expr) -> bool {
     };
     match get_tag(list) {
         Some("t-tensor") => true,
+        Some("t-ref") => children(list).iter().any(type_expr_contains_tensor),
         Some("t-tuple") | Some("t-adt") => children(list).iter().any(type_expr_contains_tensor),
         Some("t-fn") => false,
         _ => false,
     }
+}
+
+fn type_expr_is_ref(expr: &Expr) -> bool {
+    matches!(get_tag_expr(expr), Some("t-ref"))
+}
+
+fn type_expr_is_owned_linear(expr: &Expr) -> bool {
+    type_expr_contains_tensor(expr) && !type_expr_is_ref(expr)
+}
+
+fn type_expr_fn_arg(expr: &Expr, index: usize) -> Option<&Expr> {
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
+    if get_tag(list) != Some("t-fn") {
+        return None;
+    }
+    let kids = children(list);
+    if index >= kids.len().saturating_sub(1) {
+        return None;
+    }
+    kids.get(index)
 }
 
 fn type_expr_eq(lhs: &Expr, rhs: &Expr) -> bool {
@@ -889,4 +1105,28 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("use at offset {}", expr.span().offset),
     }
+}
+
+fn realize_site(expr: &Expr) -> ConsumeSite {
+    ConsumeSite {
+        description: format!("realize at offset {}", expr.span().offset),
+    }
+}
+
+fn pipe_site(current: &Expr, stage: &Expr) -> ConsumeSite {
+    ConsumeSite {
+        description: format!(
+            "pipe into stage at offset {} from offset {}",
+            stage.span().offset,
+            current.span().offset
+        ),
+    }
+}
+
+fn borrow_site(expr: &Expr) -> String {
+    format!("borrow at offset {}", expr.span().offset)
+}
+
+fn expr_scope_end(expr: &Expr) -> usize {
+    expr.span().offset + expr.span().len
 }

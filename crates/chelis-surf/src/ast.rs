@@ -195,6 +195,7 @@ pub enum TypeExpr {
     Named(String, Span),                       // f32, bool, MyType
     Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
     Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
+    Ref(Box<TypeExpr>, Span),                  // &T
     App(String, Vec<TypeExpr>, Span),          // Option f32
     Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
     Infer(Span),                               // _

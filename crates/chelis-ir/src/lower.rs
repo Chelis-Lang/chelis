@@ -701,7 +701,6 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "append"
                         | "concat"
                         | "take"
-                        | "drop"
                         | "chunk"
                         | "range"
                         | "map"
@@ -749,6 +748,9 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "Nil"
                 ) {
                     return true;
+                }
+                if name == "drop" {
+                    return children(list).len() != 2;
                 }
                 if matches!(
                     name,
@@ -1688,10 +1690,24 @@ impl LowerCtx {
                 precision: prim,
             };
         }
+        if let Some(inner) = Self::try_extract_ref_type(expr) {
+            return Self::type_from_type_expr(inner);
+        }
         if let Some(tt) = Self::try_extract_tensor_type(expr) {
             return tt;
         }
         Self::default_type()
+    }
+
+    fn try_extract_ref_type(expr: &Expr) -> Option<&Expr> {
+        if let Expr::List(list, _) = expr
+            && list.elements.len() >= 3
+            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+            && tag == "t-ref"
+        {
+            return list.elements.get(2);
+        }
+        None
     }
 
     fn try_extract_prim(expr: &Expr) -> Option<Prim> {
@@ -3057,6 +3073,15 @@ impl LowerCtx {
             }
 
             // Tier 1: unary elementwise
+            "drop" if args.len() == 1 => {
+                let _ = self.lower_expr_node(&args[0], "drop input");
+                self.dag.add_node(
+                    RiscOp::Const { value: 0.0 },
+                    vec![],
+                    Self::default_type(),
+                    self.current_span_id.clone(),
+                )
+            }
             "neg" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "neg input");
                 let out_ty = if *ty == Self::default_type() {
@@ -4369,7 +4394,11 @@ mod tests {
     fn lower_let_binding() {
         let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
-                (app {} (var {} neg) (var {} x)))
+                (let {}
+                  (bind {} out (app {} (var {} neg) (var {} x)))
+                  (let {}
+                    (bind {} __drop_x (app {} (var {} drop) (var {} x)))
+                    (var {} out))))
         "#;
         let dag = parse_and_lower(src);
         // x=Const(10), Neg(x)
@@ -5168,7 +5197,13 @@ mod regression_tests {
         let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 1.0)
                            y (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
-                (app {} (var {} add) (var {} x) (var {} y)))
+                (let {}
+                  (bind {} out (app {} (var {} add) (var {} x) (var {} y)))
+                  (let {}
+                    (bind {} __drop_x (app {} (var {} drop) (var {} x)))
+                    (let {}
+                      (bind {} __drop_y (app {} (var {} drop) (var {} y)))
+                      (var {} out)))))
         "#;
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 3);

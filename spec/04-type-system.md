@@ -566,9 +566,9 @@ the active Phase 2a extension points.
 ### 8.1 Model
 
 Phase 2b uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
-system. Tensor values are consume-by-default. A consuming use makes the binding dead
-unless the program inserted `copy(...)` before that use. Borrowing with `&x` provides
-temporary read-only access without consumption.
+system. Tensor values are owned by default, but read-only calls borrow their tensor
+arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
+live and still requiring one eventual consume inside its local scope.
 
 ### 8.2 Type Representation
 
@@ -577,16 +577,19 @@ temporary read-only access without consumption.
 (t-tensor {lin: once} (d-name {} batch) (t-prim {} f32))
 
 ;; Borrowed tensor (read-only reference)
-(t-tensor {lin: borrow} (d-name {} batch) (t-prim {} f32))
+(t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 ```
 
-The `lin` metadata key remains a representation hook, but the shipped Phase 2b user
-surface is expression-based:
+The shipped Phase 2b user surface is type- and expression-based:
 
-- `copy(x)` is the only explicit duplication form
-- `&x` is only valid as a direct call argument
-- passing a tensor to a normal call consumes it unless the caller wrote `&x`
-- borrows cannot be stored, returned, rebound for later use, or captured by closures
+- `&T` is the read-only borrow type, represented in Deep as `t-ref`
+- `&x` is an optional explicit borrow expression, represented as `(borrow {} x)`
+- passing owned `T` where `&T` is expected auto-borrows; this rule also applies to pipe stages
+- passing `&T` where owned `T` is expected is a type error unless the program writes `copy(x)`
+- `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value
+- borrows cannot be stored in aggregates, returned, or captured by closures
+- borrow types are erased before IR and backend lowering; AD and `vmap` operate on the
+  existing owned IR after checking
 
 Linearity is checked after effect inference, before lowering:
 
@@ -598,8 +601,17 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 
 ### 8.3 Static Rules
 
-- A bare linear binding is consumed on use.
+- A local owned linear binding must be consumed exactly once on every path through its
+  scope. Borrow sites do not count as consumes.
+- Function parameters are ownership-transfer boundaries: an owned parameter may be
+  borrowed throughout the function body and then leave the function scope without an
+  implicit local `drop` expression.
+- A local value that was borrowed but never consumed is diagnosed separately from a
+  completely unused value. The diagnostic points at the borrow sites and says the
+  scope ends without consuming the owner; fixes are a final owned use, `realize`, or
+  explicit `drop`.
 - `copy(x)` reads `x` without consuming it and yields a fresh tensor value.
+- `drop(x)` is an explicit consume. Chelis does not have implicit local drop.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
 - Creating a closure that captures a tensor consumes that outer binding at closure

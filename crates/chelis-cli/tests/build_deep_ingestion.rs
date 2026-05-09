@@ -179,13 +179,14 @@ fn build_ch_without_deep_flag_takes_the_surf_path() {
     // Deep parser ever being invoked.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("hello.ch");
-    // Tensors are linear; pre-bind a copy via a let block so neither
-    // direct `x` nor `copy(x)` race on the same call site.
     fs::write(
         &path,
         "def hello(x: tensor[4, f32]) -> tensor[4, f32] = {\n  \
          x_copy = copy(x)\n  \
-         add(x, x_copy)\n\
+         out = add(x, x_copy)\n  \
+         _ = drop(x)\n  \
+         _ = drop(x_copy)\n  \
+         out\n\
          }\n",
     )
     .expect("write");
@@ -220,17 +221,20 @@ fn build_span_free_deep_matches_surf_shape() {
     // Deep also produces zero of).
     let dir = tempdir().expect("tempdir");
     let dp_path = dir.path().join("nospan.dp");
-    // Tensors are linear; one of the two `add` operands must come
-    // from `(copy {} (var {} x))`. The other consumes the original
-    // `x` binding.
     fs::write(
         &dp_path,
         r#"(def {} hello
   (fn {}
     (params {} (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
     (let {}
-      (bind {} x2 (copy {} (var {} x)))
-      (app {} (var {} add) (var {} x) (var {} x2)))))
+        (bind {} x2 (copy {} (var {} x)))
+        (let {}
+          (bind {} out (app {} (var {} add) (var {} x) (var {} x2)))
+          (let {}
+          (bind {} __drop_x (app {} (var {} drop) (var {} x)))
+          (let {}
+            (bind {} __drop_x2 (app {} (var {} drop) (var {} x2)))
+            (var {} out)))))))
 "#,
     )
     .expect("write dp");
@@ -257,7 +261,7 @@ fn build_span_free_deep_matches_surf_shape() {
     // stem).
     assert!(
         src.contains("nospan("),
-        "span-free Deep must produce a C function `nospan` (named after file stem); got src:\n{src}"
+        "span-free Deep must produce the file-stem C function `nospan`; got src:\n{src}"
     );
 }
 
