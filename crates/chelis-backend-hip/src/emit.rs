@@ -161,7 +161,8 @@ impl HipEmitter {
                 .unwrap_or(false);
 
             if is_load {
-                // Load is already a host tensor — look up the correct input slot by name
+                // Root loads are borrowed inputs. Return an owned host tensor so
+                // callers may free outputs without double-freeing their inputs.
                 let load_name = match &dag.get(output.id).unwrap().op {
                     RiscOp::Load { name } => name.as_str().to_string(),
                     _ => unreachable!(),
@@ -169,7 +170,9 @@ impl HipEmitter {
                 let input_idx = input_slots
                     .get(&load_name)
                     .unwrap_or_else(|| panic!("missing input slot for load '{load_name}'"));
-                e.line(&format!("outputs[{slot}] = inputs[{input_idx}];"));
+                e.line(&format!(
+                    "outputs[{slot}] = chelis_contiguous(inputs[{input_idx}]);"
+                ));
             } else {
                 // Allocate host tensor and transfer from device
                 let ty = &dag.get(output.id).unwrap().output_type;
@@ -671,7 +674,8 @@ impl HipEmitter {
             | RiscOp::Expand { .. }
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
-            | RiscOp::Stride { .. } => None,
+            | RiscOp::Stride { .. }
+            | RiscOp::BlasMatmul { .. } => None,
             RiscOp::FusedElem { .. } => Some(format!("kernel_fused_{}", node.id.0)),
         }
     }
@@ -906,6 +910,16 @@ impl HipEmitter {
                     ops,
                     &node.output_type,
                 );
+            }
+            RiscOp::BlasMatmul { m, n, k } => {
+                let info = blas::MatmulInfo {
+                    a: node.inputs[0],
+                    b: node.inputs[1],
+                    m: *m,
+                    n: *n,
+                    k: *k,
+                };
+                self.emit_blas_matmul(id, &info, &node.output_type);
             }
         }
     }
@@ -1711,7 +1725,8 @@ impl HipEmitter {
             | RiscOp::Argmin { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
-            | RiscOp::FusedElem { .. } => true,
+            | RiscOp::FusedElem { .. }
+            | RiscOp::BlasMatmul { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }

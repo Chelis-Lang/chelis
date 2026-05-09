@@ -155,7 +155,8 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::Cast { .. }
                 | RiscOp::FusedElem { .. }
                 | RiscOp::Pad { .. }
-                | RiscOp::Shrink { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
+                | RiscOp::Shrink { .. }
+                | RiscOp::BlasMatmul { .. } => NodeMemoryKind::SlotBacked { slot: usize::MAX },
             }
         };
         kinds.push(kind);

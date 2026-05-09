@@ -77,6 +77,23 @@ fn meta_empty() -> deep::Expr {
     deep::Expr::Map(deep::MetaMap::default(), sp())
 }
 
+fn surf_span_id(span: Span) -> Option<String> {
+    if span.len == 0 {
+        None
+    } else {
+        Some(format!("surf:{}..{}", span.offset, span.end()))
+    }
+}
+
+fn span_entry(span: Span) -> Option<(String, deep::Expr)> {
+    surf_span_id(span).map(|id| {
+        (
+            "span".to_string(),
+            deep::Expr::Atom(deep::Atom::Str(id), sp()),
+        )
+    })
+}
+
 fn meta_with_type(ty: deep::Expr) -> deep::Expr {
     meta_with_entries(vec![("type".to_string(), ty)])
 }
@@ -102,6 +119,56 @@ fn node_meta(tag: &str, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Ex
 /// Variable reference: (var {} name)
 fn dvar(name: &str) -> deep::Expr {
     node("var", vec![sym(name)])
+}
+
+fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
+    let Some(entry) = span_entry(span) else {
+        return expr;
+    };
+
+    match expr {
+        deep::Expr::List(list, list_span) => {
+            let mut elements = list.elements;
+            if let Some(deep::Expr::Map(map, _)) = elements.get_mut(1) {
+                map.entries.retain(|(key, _)| key != "span");
+                map.entries.push(entry);
+            }
+            deep::Expr::List(deep::List { elements }, list_span)
+        }
+        other => other,
+    }
+}
+
+fn expr_span(expr: &Expr) -> Span {
+    match expr {
+        Expr::Lit(_, span)
+        | Expr::Var(_, span)
+        | Expr::Constructor(_, span)
+        | Expr::Apply(_, _, span)
+        | Expr::List(_, span)
+        | Expr::Record(_, _, span)
+        | Expr::Access(_, _, span)
+        | Expr::TupleGet(_, _, span)
+        | Expr::Binary(_, _, _, span)
+        | Expr::Unary(_, _, span)
+        | Expr::Pipe(_, _, span)
+        | Expr::If(_, _, _, span)
+        | Expr::Match(_, _, span)
+        | Expr::Lambda(_, _, span)
+        | Expr::Tuple(_, span)
+        | Expr::Cast(_, _, span)
+        | Expr::Grad(_, _, span)
+        | Expr::Vmap(_, _, span)
+        | Expr::Jit(_, span)
+        | Expr::Realize(_, span)
+        | Expr::Copy(_, span)
+        | Expr::Borrow(_, span)
+        | Expr::WithSeed(_, _, span)
+        | Expr::WithDevice(_, _, span)
+        | Expr::Par(_, span)
+        | Expr::Annotate(_, _, span)
+        | Expr::Block(_, _, span) => *span,
+    }
 }
 
 /// Build a bare list (no tag/meta) for structural helpers like params, bind
@@ -212,8 +279,16 @@ fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
         deep::Expr::List(list, span) => {
             let mut elements = list.elements;
             if elements.len() >= 2 {
-                // Replace the metadata map (element[1]) with one containing the type
-                elements[1] = meta_with_type(ty);
+                let mut entries = match elements.remove(1) {
+                    deep::Expr::Map(map, _) => map
+                        .entries
+                        .into_iter()
+                        .filter(|(key, _)| key != "type")
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                entries.push(("type".to_string(), ty));
+                elements.insert(1, meta_with_entries(entries));
             }
             deep::Expr::List(deep::List { elements }, span)
         }
@@ -724,7 +799,7 @@ impl DesugarCtx {
     }
 
     fn desugar_expr_with_scope(&self, expr: &Expr, local_fn_params: &[String]) -> deep::Expr {
-        match expr {
+        let desugared = match expr {
             Expr::Lit(lit, _) => desugar_literal(lit),
             Expr::Var(name, _) => dvar(name),
             Expr::Constructor(name, _) => dvar(name),
@@ -953,7 +1028,8 @@ impl DesugarCtx {
                     )
                 }
             }
-        }
+        };
+        attach_span_metadata(desugared, expr_span(expr))
     }
 }
 

@@ -356,6 +356,16 @@ impl CEmitter {
             RiscOp::FusedElem { ops } => {
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type);
             }
+            RiscOp::BlasMatmul { m, n, k } => {
+                let info = crate::blas::MatmulInfo {
+                    a: node.inputs[0],
+                    b: node.inputs[1],
+                    m: *m,
+                    n: *n,
+                    k: *k,
+                };
+                self.emit_blas_matmul(id, &info, &node.output_type);
+            }
         }
     }
 

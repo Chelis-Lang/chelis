@@ -70,6 +70,13 @@ traced back to the original external source. Producer-side interpretation
 (LaTeX byte range, Surf line/col, other DSL anchor) lives in the producer's
 sidecar and is none of chelis's concern.
 
+When Chelis itself desugars parsed Surf, it acts as the span producer for
+ordinary Surf expression bodies and emits opaque byte-range IDs of the form
+`surf:<start>..<end>`. These IDs follow the same preservation and validation
+rules as producer-supplied Deep spans. If a programmatic Surf AST has no real
+source byte range, the desugarer omits `span` and downstream synthesized-node
+fallbacks remain available.
+
 The `span_*` prefix is reserved for future richer span data. If a need arises
 to embed byte offsets or file identifiers directly inside Deep metadata
 (rather than indirecting through a sidecar), they MUST be added under the

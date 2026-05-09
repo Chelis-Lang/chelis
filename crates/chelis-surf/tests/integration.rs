@@ -170,7 +170,7 @@ fn typed_def_emits_defsig() {
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(text.contains("(defsig {} f"), "Missing defsig in:\n{text}");
-    assert!(text.contains("(def {} f"), "Missing def in:\n{text}");
+    assert!(text.contains("(def {}\n  f"), "Missing def in:\n{text}");
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn annotation_in_metadata() {
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
-        text.contains("{type: (t-prim {} f32)}"),
+        text.contains("type: (t-prim {} f32)"),
         "Expected type annotation in metadata, got:\n{text}"
     );
 }
@@ -240,12 +240,32 @@ fn effect_annotations_desugar_into_t_fn_metadata() {
 }
 
 #[test]
+fn parsed_surf_expression_spans_enter_deep_metadata() {
+    let source = "def f(x) = add(x, 1)";
+    let decls = surf_parse(source).unwrap();
+    let deep = desugar_program(&decls);
+    let text = print_canonical(&deep);
+    assert!(
+        text.contains("(app {span: \"surf:11..20\"}"),
+        "Expected app node to carry its Surf byte range, got:\n{text}"
+    );
+    assert!(
+        text.contains("(var {span: \"surf:11..14\"} add)"),
+        "Expected callee var node to carry its Surf byte range, got:\n{text}"
+    );
+    assert!(
+        text.contains("(lit {span: \"surf:18..19\", type: (t-prim {} int32)} 1)"),
+        "Expected literal node to preserve both span and type metadata, got:\n{text}"
+    );
+}
+
+#[test]
 fn with_seed_desugars_to_handle_effect() {
     let decls = surf_parse("def f() = with seed(42) { dropout(x, 0.5) }").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
-        text.contains("(handle-effect {effect: random}"),
+        text.contains("(handle-effect {effect: random"),
         "Expected random handler node, got:\n{text}"
     );
 }
@@ -256,7 +276,7 @@ fn with_device_desugars_to_handle_effect() {
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
-        text.contains("(handle-effect {effect: resource}"),
+        text.contains("(handle-effect {effect: resource"),
         "Expected resource handler node, got:\n{text}"
     );
 }

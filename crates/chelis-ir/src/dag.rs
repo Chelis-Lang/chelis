@@ -311,6 +311,15 @@ pub enum RiscOp {
     FusedElem {
         ops: Vec<FusedStep>,
     },
+
+    // --- Backend specialization ---
+    /// Matmul recognized from the Tier-2 `Sum(Mul(Expand(A), Expand(B)))`
+    /// lowering after AD has run.
+    BlasMatmul {
+        m: usize,
+        n: usize,
+        k: usize,
+    },
 }
 
 /// A single node in the DAG.

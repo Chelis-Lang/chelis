@@ -285,6 +285,29 @@ fn binary_map(lhs: &TensorValue, rhs: &TensorValue, f: impl Fn(f64, f64) -> f64)
     }
 }
 
+fn matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
+    assert_eq!(lhs.shape.len(), 2);
+    assert_eq!(rhs.shape.len(), 2);
+    let m = lhs.shape[0];
+    let k = lhs.shape[1];
+    assert_eq!(rhs.shape[0], k);
+    let n = rhs.shape[1];
+    let mut data = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0;
+            for kk in 0..k {
+                acc += lhs.data[i * k + kk] * rhs.data[kk * n + j];
+            }
+            data[i * n + j] = acc;
+        }
+    }
+    TensorValue {
+        data,
+        shape: vec![m, n],
+    }
+}
+
 fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
     assert!(axis < input.shape.len());
     let mut out_shape = input.shape.clone();
@@ -680,6 +703,7 @@ where
                     .expect("FusedElem must have at least one step")
             }
             RiscOp::Cast { .. } => values[&node.inputs[0]].clone(),
+            RiscOp::BlasMatmul { .. } => matmul(&values[&node.inputs[0]], &values[&node.inputs[1]]),
         };
         values.insert(node.id, value);
     }

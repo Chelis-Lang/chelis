@@ -522,13 +522,14 @@ fn expand_to_match(
 // Tier 2 higher-level decompositions (spec §3.4, §4.1–4.2)
 // ---------------------------------------------------------------------------
 
-/// matmul(A: [i, j], B: [j, k]) -> [i, k]
+/// matmul(A: [..., i, j], B: [..., j, k]) -> [..., i, k]
 ///
 /// Lowering (spec §4.1):
-///   1. Expand A from [i, j] to [i, j, k] by adding a trailing dim
-///   2. Expand B from [j, k] to [i, j, k] by adding a leading dim
-///   3. Mul the expanded tensors -> [i, j, k]
-///   4. Sum over axis 1 (the j dimension) -> [i, k]
+///   1. Broadcast leading axes.
+///   2. Expand A from [..., i, j] to [..., i, j, k].
+///   3. Expand B from [..., j, k] to [..., i, j, k].
+///   4. Mul the expanded tensors -> [..., i, j, k].
+///   5. Sum over the j dimension -> [..., i, k].
 ///
 pub fn lower_matmul(
     dag: &mut Dag,
@@ -538,69 +539,173 @@ pub fn lower_matmul(
     b_ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    // Extract dimension sizes: A is [i, j], B is [j, k].
-    let i_dim = require_dim(a_ty.dims.first(), "matmul lhs axis 0");
+    assert!(
+        a_ty.dims.len() >= 2 && b_ty.dims.len() >= 2,
+        "lower_matmul expects rank >= 2 tensors"
+    );
+    let a_lead = &a_ty.dims[..a_ty.dims.len() - 2];
+    let b_lead = &b_ty.dims[..b_ty.dims.len() - 2];
+    let lead_dims = broadcast_leading_dims(a_lead, b_lead);
+    let lead_len = lead_dims.len();
+    let i_dim = require_dim(a_ty.dims.get(a_ty.dims.len() - 2), "matmul lhs row axis");
     let j_dim = require_dim(
-        a_ty.dims.get(1).or_else(|| b_ty.dims.first()),
+        a_ty.dims
+            .last()
+            .or_else(|| b_ty.dims.get(b_ty.dims.len() - 2)),
         "matmul shared axis",
     );
-    let k_dim = require_dim(b_ty.dims.get(1), "matmul rhs axis 1");
+    let k_dim = require_dim(b_ty.dims.last(), "matmul rhs col axis");
     let i_size = DimExpr::from(&i_dim);
     let k_size = DimExpr::from(&k_dim);
 
-    // The intermediate expanded type is [i, j, k].
+    // The intermediate expanded type is [..., i, j, k].
+    let mut expanded_dims = lead_dims.clone();
+    expanded_dims.extend([i_dim.clone(), j_dim.clone(), k_dim.clone()]);
     let expanded_ty = TensorType {
-        dims: vec![i_dim.clone(), j_dim.clone(), k_dim.clone()],
+        dims: expanded_dims,
         precision: a_ty.precision,
     };
 
-    // The result type is [i, k].
+    // The result type is [..., i, k].
+    let mut result_dims = lead_dims.clone();
+    result_dims.extend([i_dim.clone(), k_dim.clone()]);
     let result_ty = TensorType {
-        dims: vec![i_dim, k_dim],
+        dims: result_dims,
         precision: a_ty.precision,
     };
 
-    // 1. Expand A: add dim for k at axis 2 -> [i, j, k]
+    let a_aligned = align_matmul_operand(
+        dag,
+        a,
+        a_ty,
+        &lead_dims,
+        &[i_dim.clone(), j_dim.clone()],
+        parent_span,
+    );
     let a_expanded = add_synth(
         dag,
         RiscOp::Expand {
-            axis: 2,
+            axis: lead_len + 2,
             size: k_size,
         },
-        vec![a],
+        vec![a_aligned],
         expanded_ty.clone(),
         parent_span,
     );
 
-    // 2. Expand B: add dim for i at axis 0 -> [i, j, k]
-    let b_expanded = add_synth(
+    let b_aligned = align_matmul_operand(
+        dag,
+        b,
+        b_ty,
+        &lead_dims,
+        &[j_dim.clone(), k_dim.clone()],
+        parent_span,
+    );
+    let b_with_i = add_synth(
         dag,
         RiscOp::Expand {
-            axis: 0,
+            axis: lead_len,
             size: i_size,
         },
-        vec![b],
+        vec![b_aligned],
         expanded_ty.clone(),
         parent_span,
     );
 
-    // 3. Elementwise multiply -> [i, j, k]
     let product = add_synth(
         dag,
         RiscOp::Mul,
-        vec![a_expanded, b_expanded],
+        vec![a_expanded, b_with_i],
         expanded_ty,
         parent_span,
     );
 
-    // 4. Sum over axis 1 (j) -> [i, k]
     add_synth(
         dag,
-        RiscOp::Sum { axis: 1 },
+        RiscOp::Sum { axis: lead_len + 1 },
         vec![product],
         result_ty,
         parent_span,
     )
+}
+
+fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
+    let len = lhs.len().max(rhs.len());
+    let mut out = Vec::with_capacity(len);
+    for offset in 0..len {
+        let lhs_idx = lhs.len().checked_sub(len - offset);
+        let rhs_idx = rhs.len().checked_sub(len - offset);
+        let dim = match (lhs_idx.map(|idx| &lhs[idx]), rhs_idx.map(|idx| &rhs[idx])) {
+            (Some(a), Some(b)) if is_one_dim(a) => b.clone(),
+            (Some(a), Some(b)) if is_one_dim(b) => a.clone(),
+            (Some(a), Some(_)) => a.clone(),
+            (Some(a), None) => a.clone(),
+            (None, Some(b)) => b.clone(),
+            (None, None) => unreachable!(),
+        };
+        out.push(dim);
+    }
+    out
+}
+
+fn is_one_dim(dim: &DimInfo) -> bool {
+    matches!(dim, DimInfo::Lit(1) | DimInfo::Named(_, Some(1)))
+}
+
+fn align_matmul_operand(
+    dag: &mut Dag,
+    node: NodeId,
+    ty: &TensorType,
+    lead_dims: &[DimInfo],
+    matrix_dims: &[DimInfo; 2],
+    parent_span: Option<&str>,
+) -> NodeId {
+    let source_lead = &ty.dims[..ty.dims.len() - 2];
+    let mut current = node;
+    let mut current_dims = ty.dims.clone();
+    let missing = lead_dims.len().saturating_sub(source_lead.len());
+    for (axis, lead_dim) in lead_dims.iter().take(missing).enumerate() {
+        let size = DimExpr::from(lead_dim);
+        current_dims.insert(axis, lead_dim.clone());
+        let out_ty = TensorType {
+            dims: current_dims.clone(),
+            precision: ty.precision,
+        };
+        current = add_synth(
+            dag,
+            RiscOp::Expand { axis, size },
+            vec![current],
+            out_ty,
+            parent_span,
+        );
+    }
+
+    for lead_axis in 0..lead_dims.len() {
+        if current_dims[lead_axis] != lead_dims[lead_axis] && is_one_dim(&current_dims[lead_axis]) {
+            current_dims[lead_axis] = lead_dims[lead_axis].clone();
+            let out_ty = TensorType {
+                dims: current_dims.clone(),
+                precision: ty.precision,
+            };
+            current = add_synth(
+                dag,
+                RiscOp::Expand {
+                    axis: lead_axis,
+                    size: DimExpr::from(&lead_dims[lead_axis]),
+                },
+                vec![current],
+                out_ty,
+                parent_span,
+            );
+        }
+    }
+
+    debug_assert_eq!(
+        &current_dims[current_dims.len() - 2..],
+        matrix_dims,
+        "matmul matrix dims must already be checked before lowering"
+    );
+    current
 }
 
 /// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
@@ -1408,6 +1513,53 @@ mod tests {
         assert_eq!(result_node.output_type.dims.len(), 2);
         assert_eq!(result_node.output_type.dims[0], DimInfo::Lit(2));
         assert_eq!(result_node.output_type.dims[1], DimInfo::Lit(4));
+    }
+
+    #[test]
+    fn batched_matmul_rank4_produces_batched_sum_axis() {
+        let mut dag = Dag::new();
+        let a_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+                DimInfo::Lit(5),
+                DimInfo::Lit(7),
+            ],
+            precision: Prim::F32,
+        };
+        let b_ty = TensorType {
+            dims: vec![
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+                DimInfo::Lit(7),
+                DimInfo::Lit(11),
+            ],
+            precision: Prim::F32,
+        };
+        let a = dag.add_node(
+            RiscOp::Load { name: "A".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::Load { name: "B".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let result = lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let result_node = dag.get(result).unwrap();
+        assert_eq!(
+            result_node.output_type.dims,
+            vec![
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+                DimInfo::Lit(5),
+                DimInfo::Lit(11)
+            ]
+        );
+        assert!(matches!(result_node.op, RiscOp::Sum { axis: 3 }));
     }
 
     #[test]

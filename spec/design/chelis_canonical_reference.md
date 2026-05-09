@@ -460,11 +460,23 @@ The Tier 2 derived built-ins (`relu`, `sigmoid`, `softmax`, `matmul`, `layer_nor
 them to RISC primitives during IR lowering.
 The type checker knows their signatures.
 The optimizer can fuse them.
-They cannot be defined as user-space library functions because a user-space function
-cannot teach the AD engine its adjoint or the GPU backend its kernel fusion strategy.
+In the shipped compiler, ordinary user-space functions cannot teach the AD engine a new
+adjoint or the backend a new library/kernel specialization strategy.
+That is a current boundary, not a permanent design principle: cross-function
+user-defined specialization is a known limitation tracked as a separate workstream in
+[`cross_function_specialization.md`](cross_function_specialization.md).
+Until that workstream ships, library helpers that wrap `matmul`-equivalent tensor math
+may compile correctly but miss the BLAS fast path when the helper sits behind a
+function-call boundary.
 
 The core transforms (`grad`, `vmap`, `jit`) are also compiler-intrinsic for the same
 reason: they require compiler cooperation to implement.
+
+Compiler options such as clang LTO can reduce some helper-call overhead after C code has
+already been emitted, but they are only a workaround for this limitation.
+They are not the Chelis codegen story for BLAS/cuDNN-equivalent user abstractions,
+because backend dispatch must be selected before generated C/HIP reaches the native
+compiler.
 
 This is roughly the scope of PyTorch's `torch` namespace — the fundamental tensor
 operations, basic neural network layers, loss functions, and optimizers that are

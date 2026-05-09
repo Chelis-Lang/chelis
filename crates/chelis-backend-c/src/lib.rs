@@ -112,15 +112,22 @@ pub fn codegen_with_options(
     func_name: &str,
     options: CodegenOptions,
 ) -> CodegenResult {
+    let specialized;
+    let dag = if options.use_blas {
+        specialized = chelis_ir::specialize::specialize_for_blas(dag);
+        &specialized
+    } else {
+        dag
+    };
     let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options);
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
     let needs_blas = options.use_blas
-        && dag.nodes().iter().any(|node| {
-            matches!(node.op, chelis_ir::dag::RiscOp::Sum { .. })
-                && crate::blas::detect_matmul_pattern(dag, node.id).is_some()
-        });
+        && dag
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
     let symbolic_dims = chelis_ir::dag::symbolic_params(dag);

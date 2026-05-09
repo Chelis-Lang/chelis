@@ -97,6 +97,46 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     }
                 }
             }
+            RiscOp::BlasMatmul { m, n, k } => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "blas matmul at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                }
+                if arity == 2
+                    && let (Some(lhs), Some(rhs)) =
+                        (dag.get(node.inputs[0]), dag.get(node.inputs[1]))
+                {
+                    if lhs.output_type.precision != rhs.output_type.precision {
+                        errors.push(format!(
+                            "blas matmul at node {} has mismatched precisions: {:?} vs {:?}",
+                            node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                        ));
+                    }
+                    if lhs.output_type.dims.len() != 2 || rhs.output_type.dims.len() != 2 {
+                        errors.push(format!(
+                            "blas matmul at node {} expects rank-2 inputs, got rank {} and {}",
+                            node.id.0,
+                            lhs.output_type.dims.len(),
+                            rhs.output_type.dims.len()
+                        ));
+                    }
+                    if node.output_type.dims.len() != 2 {
+                        errors.push(format!(
+                            "blas matmul at node {} expects rank-2 output, got rank {}",
+                            node.id.0,
+                            node.output_type.dims.len()
+                        ));
+                    }
+                    if *m == 0 || *n == 0 || *k == 0 {
+                        errors.push(format!(
+                            "blas matmul at node {} has zero dimension m={m} n={n} k={k}",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
             RiscOp::Neg
             | RiscOp::Exp
             | RiscOp::Log
