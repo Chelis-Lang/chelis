@@ -465,6 +465,7 @@ fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
         TypeExpr::Arrow(args, ret, _) => {
             args.iter().any(|arg| type_mentions_name(arg, name)) || type_mentions_name(ret, name)
         }
+        TypeExpr::Ref(inner, _) => type_mentions_name(inner, name),
         TypeExpr::App(found, args, _) => {
             found == name || args.iter().any(|arg| type_mentions_name(arg, name))
         }
@@ -1246,6 +1247,8 @@ fn desugar_type_with_dims(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Ex
             children.push(desugar_type_with_dims(ret, dim_vars));
             node("t-fn", children)
         }
+
+        TypeExpr::Ref(inner, _) => node("t-ref", vec![desugar_type_with_dims(inner, dim_vars)]),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];

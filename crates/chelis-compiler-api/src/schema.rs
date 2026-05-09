@@ -695,6 +695,10 @@ pub enum WireSurfTypeExpr {
         ret: Box<WireSurfTypeExpr>,
         span: Span,
     },
+    Ref {
+        inner: Box<WireSurfTypeExpr>,
+        span: Span,
+    },
     App {
         name: String,
         args: Vec<WireSurfTypeExpr>,

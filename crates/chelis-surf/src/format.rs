@@ -190,6 +190,7 @@ fn format_type(ty: &TypeExpr) -> String {
             parts.push(format_type(ret));
             parts.join(" -> ")
         }
+        TypeExpr::Ref(inner, _) => format!("&{}", format_type(inner)),
         TypeExpr::App(name, args, _) if args.is_empty() => name.clone(),
         TypeExpr::App(name, args, _) => {
             format!(

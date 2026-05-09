@@ -151,6 +151,9 @@ pub fn builtin_env() -> (Env, VarGen) {
     let mut vg = VarGen::default();
 
     // --- Signature builders ---
+    fn borrowed(ty: Type) -> Type {
+        Type::Ref(Box::new(ty))
+    }
 
     // ∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,p]
     // D is represented as a single DimVar. At unification time, tensor dims are
@@ -168,7 +171,10 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![dv],
-            body: Type::Fn(vec![Type::Var(tv), Type::Var(tv)], Box::new(Type::Var(tv))),
+            body: Type::Fn(
+                vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
+                Box::new(Type::Var(tv)),
+            ),
         };
         let _ = pv; // precision enforcement happens during unification
         env.bind(name.to_string(), scheme);
@@ -181,7 +187,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
-            body: Type::Fn(vec![Type::Var(tv)], Box::new(Type::Var(tv))),
+            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -213,7 +219,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvars: vec![tv],
             dvars: vec![],
             body: Type::Fn(
-                vec![Type::Var(tv), Type::Var(tv)],
+                vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
                 Box::new(Type::Var(tv)), // inference engine overrides for cmplt
             ),
         };
@@ -227,7 +233,10 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
-            body: Type::Fn(vec![Type::Var(tv), Type::Var(tv)], Box::new(Type::Var(tv))),
+            body: Type::Fn(
+                vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
+                Box::new(Type::Var(tv)),
+            ),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -238,7 +247,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
-            body: Type::Fn(vec![Type::Var(tv)], Box::new(Type::Var(tv))),
+            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -251,7 +260,11 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvars: vec![t1, t2, t3],
             dvars: vec![],
             body: Type::Fn(
-                vec![Type::Var(t1), Type::Var(t2), Type::Var(t3)],
+                vec![
+                    borrowed(Type::Var(t1)),
+                    borrowed(Type::Var(t2)),
+                    borrowed(Type::Var(t3)),
+                ],
                 Box::new(Type::Var(t1)),
             ),
         };
@@ -265,7 +278,10 @@ pub fn builtin_env() -> (Env, VarGen) {
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
             dvars: vec![],
-            body: Type::Fn(vec![Type::Var(t1), Type::Var(t2)], Box::new(Type::Var(out))),
+            body: Type::Fn(
+                vec![borrowed(Type::Var(t1)), borrowed(Type::Var(t2))],
+                Box::new(Type::Var(out)),
+            ),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -277,7 +293,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvars: vec![input, out],
             dvars: vec![],
             body: Type::Fn(
-                vec![Type::Var(input), Type::Prim(Prim::Int32)],
+                vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
                 Box::new(Type::Var(out)),
             ),
         };
@@ -292,7 +308,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             body: Type::Fn(
                 vec![
-                    Type::Var(input),
+                    borrowed(Type::Var(input)),
                     Type::Prim(Prim::Int32),
                     Type::Prim(Prim::Int32),
                 ],
@@ -308,7 +324,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvars: vec![input],
             dvars: vec![],
             body: Type::Fn(
-                vec![Type::Var(input), Type::Prim(Prim::F32)],
+                vec![borrowed(Type::Var(input)), Type::Prim(Prim::F32)],
                 Box::new(Type::Var(input)),
             ),
         };
@@ -322,7 +338,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             body: Type::Fn(
                 vec![
-                    Type::Var(input),
+                    borrowed(Type::Var(input)),
                     Type::Prim(Prim::F32),
                     Type::Prim(Prim::F32),
                 ],
@@ -341,8 +357,8 @@ pub fn builtin_env() -> (Env, VarGen) {
             dvars: vec![],
             body: Type::Fn(
                 vec![
-                    Type::Var(input),
-                    Type::Var(kernel),
+                    borrowed(Type::Var(input)),
+                    borrowed(Type::Var(kernel)),
                     Type::Prim(Prim::Int32),
                     Type::Prim(Prim::Int32),
                 ],
@@ -358,7 +374,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvars: vec![input],
             dvars: vec![],
             body: Type::Fn(
-                vec![Type::Var(input), Type::Prim(Prim::Int32)],
+                vec![borrowed(Type::Var(input)), Type::Prim(Prim::Int32)],
                 Box::new(Type::Var(input)),
             ),
         };
@@ -407,6 +423,74 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
+    fn generic_triop_first_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(a)), Type::Var(b), Type::Var(c)],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_triop_first_two_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(a)), borrowed(Type::Var(b)), Type::Var(c)],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_triop_all_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![
+                    borrowed(Type::Var(a)),
+                    borrowed(Type::Var(b)),
+                    borrowed(Type::Var(c)),
+                ],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_triop_second_third_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let a = vg.fresh_tvar();
+        let b = vg.fresh_tvar();
+        let c = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![a, b, c, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![Type::Var(a), borrowed(Type::Var(b)), borrowed(Type::Var(c))],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
     fn generic_pentaop(name: &str, env: &mut Env, vg: &mut VarGen) {
         let a = vg.fresh_tvar();
         let b = vg.fresh_tvar();
@@ -431,12 +515,41 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
-    fn generic_unop_same(name: &str, env: &mut Env, vg: &mut VarGen) {
+    fn generic_unop_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![input, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(input))],
+                Box::new(Type::Var(output)),
+            ),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_unop_borrow_same(name: &str, env: &mut Env, vg: &mut VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
             dvars: vec![],
-            body: Type::Fn(vec![Type::Var(tv)], Box::new(Type::Var(tv))),
+            body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
+        };
+        env.bind(name.to_string(), scheme);
+    }
+
+    fn generic_binop_first_borrow(name: &str, env: &mut Env, vg: &mut VarGen) {
+        let lhs = vg.fresh_tvar();
+        let rhs = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let scheme = Scheme {
+            tvars: vec![lhs, rhs, output],
+            dvars: vec![],
+            body: Type::Fn(
+                vec![borrowed(Type::Var(lhs)), Type::Var(rhs)],
+                Box::new(Type::Var(output)),
+            ),
         };
         env.bind(name.to_string(), scheme);
     }
@@ -514,9 +627,9 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);
     tensor_with_rate("dropout", &mut env, &mut vg);
-    generic_unop("print", &mut env, &mut vg);
+    generic_unop_borrow("print", &mut env, &mut vg);
     generic_unop("fail", &mut env, &mut vg);
-    generic_unop_same("debug", &mut env, &mut vg);
+    generic_unop_borrow_same("debug", &mut env, &mut vg);
 
     // Test builtins. Effects (`! { Test }`) are not carried on the scheme itself;
     // they are assigned by chelis-effects when the name is encountered in an `app`
@@ -602,8 +715,8 @@ pub fn builtin_env() -> (Env, VarGen) {
                 dvars: vec![],
                 body: Type::Fn(
                     vec![
-                        Type::Var(tensor_tv),
-                        Type::Var(tensor_tv),
+                        borrowed(Type::Var(tensor_tv)),
+                        borrowed(Type::Var(tensor_tv)),
                         Type::Prim(Prim::F32),
                         Type::Prim(Prim::String),
                     ],
@@ -623,8 +736,8 @@ pub fn builtin_env() -> (Env, VarGen) {
                 dvars: vec![],
                 body: Type::Fn(
                     vec![
-                        Type::Var(tensor_tv),
-                        Type::Var(tensor_tv),
+                        borrowed(Type::Var(tensor_tv)),
+                        borrowed(Type::Var(tensor_tv)),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),
@@ -669,13 +782,13 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    generic_unop("to_string", &mut env, &mut vg);
+    generic_unop_borrow("to_string", &mut env, &mut vg);
     generic_unop("to_int", &mut env, &mut vg);
     generic_unop("to_float", &mut env, &mut vg);
-    generic_unop("rank", &mut env, &mut vg);
-    generic_binop("shape", &mut env, &mut vg);
-    generic_unop("numel", &mut env, &mut vg);
-    generic_unop("tensor_to_scalar", &mut env, &mut vg);
+    generic_unop_borrow("rank", &mut env, &mut vg);
+    generic_binop_first_borrow("shape", &mut env, &mut vg);
+    generic_unop_borrow("numel", &mut env, &mut vg);
+    generic_unop_borrow("tensor_to_scalar", &mut env, &mut vg);
     generic_unop("scalar_to_tensor", &mut env, &mut vg);
     generic_unop("len", &mut env, &mut vg);
     generic_binop("index", &mut env, &mut vg);
@@ -738,7 +851,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("dict_values", &mut env, &mut vg);
     generic_unop("dict_entries", &mut env, &mut vg);
     generic_unop("to_tensor", &mut env, &mut vg);
-    generic_unop("to_list", &mut env, &mut vg);
+    generic_unop_borrow("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
     generic_triop("pad_sequences_to", &mut env, &mut vg);
     generic_unop("read_file", &mut env, &mut vg);
@@ -750,16 +863,16 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("mmap_file", &mut env, &mut vg);
     generic_triop("mmap_read", &mut env, &mut vg);
     generic_unop("mmap_len", &mut env, &mut vg);
-    generic_triop("einsum", &mut env, &mut vg);
-    generic_triop("split", &mut env, &mut vg);
-    generic_triop("gather", &mut env, &mut vg);
+    generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
+    generic_triop_first_borrow("split", &mut env, &mut vg);
+    generic_triop_first_two_borrow("gather", &mut env, &mut vg);
     generic_pentaop("scatter", &mut env, &mut vg);
-    generic_triop("where", &mut env, &mut vg);
-    generic_binop("cumsum", &mut env, &mut vg);
-    generic_binop("sort", &mut env, &mut vg);
-    generic_triop("diagonal", &mut env, &mut vg);
-    generic_triop("trace", &mut env, &mut vg);
-    generic_triop("clamp", &mut env, &mut vg);
+    generic_triop_all_borrow("where", &mut env, &mut vg);
+    generic_binop_first_borrow("cumsum", &mut env, &mut vg);
+    generic_binop_first_borrow("sort", &mut env, &mut vg);
+    generic_triop_first_borrow("diagonal", &mut env, &mut vg);
+    generic_triop_first_borrow("trace", &mut env, &mut vg);
+    generic_triop_all_borrow("clamp", &mut env, &mut vg);
 
     (env, vg)
 }
@@ -962,7 +1075,10 @@ mod tests {
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
         let expected_fn = Type::Fn(
-            vec![tensor_f32.clone(), tensor_f32.clone()],
+            vec![
+                Type::Ref(Box::new(tensor_f32.clone())),
+                Type::Ref(Box::new(tensor_f32.clone())),
+            ],
             Box::new(tensor_f32),
         );
 
@@ -981,7 +1097,10 @@ mod tests {
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
         let t2 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::Bf16);
-        let bad_fn = Type::Fn(vec![t1, t2], Box::new(Type::Var(vg.fresh_tvar())));
+        let bad_fn = Type::Fn(
+            vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
+            Box::new(Type::Var(vg.fresh_tvar())),
+        );
 
         let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
@@ -998,7 +1117,10 @@ mod tests {
         // add(tensor[batch,f32], int32) should fail
         let t1 = Type::Tensor(vec![Dim::Name("batch".into())], Prim::F32);
         let t2 = Type::Prim(Prim::Int32);
-        let bad_fn = Type::Fn(vec![t1, t2], Box::new(Type::Var(vg.fresh_tvar())));
+        let bad_fn = Type::Fn(
+            vec![Type::Ref(Box::new(t1)), Type::Ref(Box::new(t2))],
+            Box::new(Type::Var(vg.fresh_tvar())),
+        );
 
         let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());

@@ -1178,7 +1178,7 @@ const REEF_HOME_LOCK_FILE: &str = ".reef-lock";
 /// Default acquire-timeout for the Item 8 process-level lock. 60 seconds
 /// is comfortably longer than any single `install_from_github` round
 /// trip on a real GitHub release (the heaviest canonical asset today is
-/// `chelis-std-0.2.0.tar.zst` at well under 1 MB) and short enough to
+/// `chelis-std-0.3.0.tar.zst` at well under 1 MB) and short enough to
 /// surface a deadlocked / wedged peer process within a developer's
 /// single iteration loop. Locked by `phaseA_item8_autofetch_build_oracle`.
 const REEF_HOME_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -4911,6 +4911,7 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
             Box::new(rewrite_type(ret, resolver)),
             *span,
         ),
+        TypeExpr::Ref(inner, span) => TypeExpr::Ref(Box::new(rewrite_type(inner, resolver)), *span),
         TypeExpr::App(name, args, span) => TypeExpr::App(
             resolver
                 .own_names
@@ -6525,8 +6526,8 @@ additional_sources = ["properties"]
         // same prerequisite. Mirror its behavior so this test does
         // not falsely red-flag a bare clone.
         let dist = monorepo.join("packages/chelis-std/dist");
-        if !dist.join("chelis-std-0.2.0.chb").exists()
-            || !dist.join("chelis-std-0.2.0.tar.zst").exists()
+        if !dist.join("chelis-std-0.3.0.chb").exists()
+            || !dist.join("chelis-std-0.3.0.tar.zst").exists()
         {
             eprintln!(
                 "skipping publish_package_index_update_is_atomic: \
@@ -6545,7 +6546,7 @@ additional_sources = ["properties"]
         }
         let installed = install_from_monorepo(
             &monorepo,
-            &[("chelis-std".to_string(), Some("0.2.0".to_string()))],
+            &[("chelis-std".to_string(), Some("0.3.0".to_string()))],
         )
         .expect("install chelis-std into fresh registry");
         assert_eq!(installed.len(), 1);
@@ -6572,7 +6573,7 @@ compiler = "{ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.2.0" }}
+chelis-std = {{ version = "0.3.0" }}
 "#,
                 ver = CURRENT_COMPILER_VERSION,
             ),

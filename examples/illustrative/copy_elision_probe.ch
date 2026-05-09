@@ -4,5 +4,11 @@ def fanout(x: tensor[1024, 1024, f32]) -> tensor[1024, 1024, f32] = {
   c = sin(copy(x))
   d = neg(copy(x))
   e = sqrt(copy(x))
-  add(add(add(a, b), add(c, d)), e)
+  out = add(add(add(a, b), add(c, d)), e)
+  _ = drop(a)
+  _ = drop(b)
+  _ = drop(c)
+  _ = drop(d)
+  _ = drop(e)
+  out
 }

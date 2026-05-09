@@ -19,6 +19,14 @@ All operands must have matching dimensions. No implicit rank extension, no impli
 
 RISC primitives are built-in functions in the compiler's scope, not syntax tags. They are accessed via `(var {} name)` and called via `(app {} ...)`. If the primitive set changes, the syntax doesn't.
 
+### 1.3.1 Borrow-Typed Inputs
+
+Read-only tensor primitive parameters are typed as `&tensor[...]` at the type-system
+surface. Owned tensor arguments auto-borrow at ordinary call sites and pipe stages.
+Outputs remain owned tensors. The borrow distinction is erased before IR and backend
+lowering, so primitive DAG nodes and backend kernels keep their existing value model.
+Consuming operations such as `realize` and explicit `drop` keep owned parameters.
+
 ### 1.4 Two Tiers
 
 **Tier 1: RISC Primitives** — the irreducible set. The compiler's IR operates on these. AD adjoint rules are defined for each.
@@ -46,10 +54,10 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 | Name | Signature | Semantics | AD Adjoint (∂L/∂inputs given ∂L/∂output = g) |
 |---|---|---|---|
-| `add` | `(tensor[D,p], tensor[D,p]) → tensor[D,p]` | Element-wise addition | `(g, g)` |
-| `mul` | `(tensor[D,p], tensor[D,p]) → tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
-| `cmplt` | `(tensor[D,p], tensor[D,p]) → tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
-| `max_elem` | `(tensor[D,p], tensor[D,p]) → tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
+| `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise addition | `(g, g)` |
+| `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
+| `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
+| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 
@@ -59,11 +67,11 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
-| `neg` | `(tensor[D,p]) → tensor[D,p]` | Element-wise negation: -x | `-g` |
-| `exp` | `(tensor[D,p]) → tensor[D,p]` | Element-wise e^x | `g * exp(x)` |
-| `log` | `(tensor[D,p]) → tensor[D,p]` | Element-wise ln(x) | `g / x` |
-| `sin` | `(tensor[D,p]) → tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` where `cos(x) = sin(x + π/2)` |
-| `sqrt` | `(tensor[D,p]) → tensor[D,p]` | Element-wise √x | `g / (2 * sqrt(x))` |
+| `neg` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise negation: -x | `-g` |
+| `exp` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise e^x | `g * exp(x)` |
+| `log` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ln(x) | `g / x` |
+| `sin` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sin(x) | `g * cos(x)` where `cos(x) = sin(x + π/2)` |
+| `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
 
 **Precision rule:** Float types only (f32, f64, f16, bf16). Not valid on integer types (type error).
 
@@ -71,8 +79,8 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
-| `sum` | `(tensor[d₁,...,dₙ, p], axis: int) → tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Sum over axis k, removing that dimension | `expand(g, original_shape, axis=k)` |
-| `max_reduce` | `(tensor[d₁,...,dₙ, p], axis: int) → tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
+| `sum` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Sum over axis k, removing that dimension | `expand(g, original_shape, axis=k)` |
+| `max_reduce` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
 
 **Axis:** Zero-indexed integer. Must be a valid axis for the input rank.
 
@@ -82,12 +90,12 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `reshape` | `(tensor[D_old, p], shape) → tensor[D_new, p]` | Reinterpret memory layout. Product of dimensions must match. |
-| `permute` | `(tensor[d₁,...,dₙ, p], axes) → tensor[d_{axes[0]},...,d_{axes[n-1]}, p]` | Reorder dimensions. `axes` is a permutation of 0..n-1. |
-| `expand` | `(tensor[D_small, p], shape) → tensor[D_large, p]` | Broadcast a dimension of size 1 to a larger size. Does NOT copy data. |
-| `pad` | `(tensor[D, p], padding, fill) → tensor[D', p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
-| `shrink` | `(tensor[D, p], bounds) → tensor[D', p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
-| `stride` | `(tensor[D, p], strides) → tensor[D', p]` | Strided access: take every n-th element along each axis. |
+| `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
+| `permute` | `(&tensor[d1,...,dn,p], axes) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1. |
+| `expand` | `(&tensor[D_small,p], shape) -> tensor[D_large,p]` | Broadcast a dimension of size 1 to a larger size. Does NOT copy data. |
+| `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
+| `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
+| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
 
 **Movement AD adjoints:**
 
@@ -117,8 +125,8 @@ from computation on existing tensors.
 
 | Name | Signature | Semantics | AD / effect note |
 |---|---|---|---|
-| `dropout` | `(tensor[D, f32], f32) → tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
-| `uniform_like` | `(tensor[D, f32], f32, f32) → tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
+| `dropout` | `(&tensor[D, f32], f32) -> tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
+| `uniform_like` | `(&tensor[D, f32], f32, f32) -> tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
 
 Operational note: the evaluator and lowering path implement seeded `dropout`, but
 `chelis build` does not yet codegen it for the `c` or `hip` backend targets.

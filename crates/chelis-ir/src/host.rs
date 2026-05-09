@@ -2370,7 +2370,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    if matches!(tag(list), Some("tuple-get" | "if" | "let" | "match")) {
+    if matches!(tag(list), Some("tuple-get" | "if" | "match")) {
         return true;
     }
     if tag(list) != Some("app") {
@@ -3820,6 +3820,39 @@ fn actualize_tensor_helper_types(
         })
     }
 
+    fn synthetic_dim(dim: &crate::dag::DimInfo) -> bool {
+        matches!(dim, crate::dag::DimInfo::Named(name, None) if {
+            let mut chars = name.chars();
+            matches!(chars.next(), Some('d')) && chars.all(|ch| ch.is_ascii_digit())
+        })
+    }
+
+    fn merge_dim(lhs: &crate::dag::DimInfo, rhs: &crate::dag::DimInfo) -> crate::dag::DimInfo {
+        match (synthetic_dim(lhs), synthetic_dim(rhs)) {
+            (true, false) => rhs.clone(),
+            _ => lhs.clone(),
+        }
+    }
+
+    fn merge_binary_tensor_types(
+        lhs: &TensorType,
+        rhs: &TensorType,
+        precision: chelis_types::types::Prim,
+    ) -> TensorType {
+        if lhs.dims.len() != rhs.dims.len() {
+            return precision_like(lhs, precision);
+        }
+        TensorType {
+            dims: lhs
+                .dims
+                .iter()
+                .zip(rhs.dims.iter())
+                .map(|(lhs, rhs)| merge_dim(lhs, rhs))
+                .collect(),
+            precision,
+        }
+    }
+
     let mut inferred = HashMap::<crate::dag::NodeId, TensorType>::new();
     let mut uses = HashMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
     for node in dag.nodes() {
@@ -3835,8 +3868,18 @@ fn actualize_tensor_helper_types(
             crate::dag::RiscOp::Add
             | crate::dag::RiscOp::Mul
             | crate::dag::RiscOp::CmpLt
-            | crate::dag::RiscOp::MaxElem
-            | crate::dag::RiscOp::Neg
+            | crate::dag::RiscOp::MaxElem => node
+                .inputs
+                .first()
+                .and_then(|lhs| inferred.get(lhs))
+                .map(|lhs| {
+                    node.inputs
+                        .get(1)
+                        .and_then(|rhs| inferred.get(rhs))
+                        .map(|rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision))
+                        .unwrap_or_else(|| precision_like(lhs, node.output_type.precision))
+                }),
+            crate::dag::RiscOp::Neg
             | crate::dag::RiscOp::Exp
             | crate::dag::RiscOp::Log
             | crate::dag::RiscOp::Sin
@@ -3877,6 +3920,30 @@ fn actualize_tensor_helper_types(
                         .filter_map(|axis| input.dims.get(*axis).cloned())
                         .collect(),
                     precision: node.output_type.precision,
+                }),
+            crate::dag::RiscOp::Expand { axis, size } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .and_then(|input| {
+                    let mut dims = input.dims.clone();
+                    if *axis > dims.len() {
+                        return None;
+                    }
+                    let inserted = match size {
+                        crate::dag::DimExpr::Concrete(value) => crate::dag::DimInfo::Lit(*value),
+                        crate::dag::DimExpr::Sym(name) => {
+                            crate::dag::DimInfo::Named(name.clone(), None)
+                        }
+                        crate::dag::DimExpr::Mul(_, _) | crate::dag::DimExpr::Div(_, _) => {
+                            return None;
+                        }
+                    };
+                    dims.insert(*axis, inserted);
+                    Some(TensorType {
+                        dims,
+                        precision: node.output_type.precision,
+                    })
                 }),
             _ => None,
         }
@@ -4115,6 +4182,22 @@ fn infer_app_expr_host_type(
             axis as usize,
         )));
     }
+    if name == "expand"
+        && let (Some(input), Some(axis_expr), Some(size_expr)) =
+            (kids.get(1), kids.get(2), kids.get(3))
+        && let HostType::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let (Some(axis), Some(size)) = (expr_int_literal(axis_expr), expr_int_literal(size_expr))
+    {
+        let mut dims = tensor_ty.dims.clone();
+        let axis = axis as usize;
+        if axis <= dims.len() {
+            dims.insert(axis, crate::dag::DimInfo::Lit(size as usize));
+            return Some(HostType::Tensor(TensorType {
+                dims,
+                precision: tensor_ty.precision,
+            }));
+        }
+    }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
@@ -4349,6 +4432,11 @@ fn parse_host_type_with_subst(expr: &Expr, subst: &HashMap<String, HostType>) ->
             _ => HostType::Unknown,
         },
         Some("t-tensor") => HostType::Tensor(crate::lower::tensor_type_from_deep(expr)),
+        Some("t-ref") => list
+            .elements
+            .get(2)
+            .map(|inner| parse_host_type_with_subst(inner, subst))
+            .unwrap_or(HostType::Unknown),
         Some("t-var") => children(list)
             .first()
             .and_then(symbol_name)
@@ -4651,6 +4739,7 @@ fn infer_builtin_host_type_from_arg_tys(name: &str, arg_tys: &[HostType]) -> Opt
             _ => Some(HostType::Unknown),
         },
         "tuple-get" => Some(HostType::Unknown),
+        "drop" if arg_tys.len() == 1 => Some(HostType::Unit),
         "take" | "drop" => match arg_tys.first() {
             Some(HostType::List(inner)) => Some(HostType::List(Box::new((**inner).clone()))),
             _ => Some(HostType::Unknown),
@@ -5273,5 +5362,126 @@ mod tests {
                 .map(|input| (&input.name, &input.ty))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn host_type_parser_unwraps_borrowed_tensor_refs() {
+        let expr = chelis_deep::parser::parse_str(
+            "(t-ref {} (t-tensor {} (d-name {} n) (t-prim {} f32)))",
+        )
+        .expect("parse ref type")
+        .into_iter()
+        .next()
+        .expect("one type expr");
+
+        match parse_host_type(&expr) {
+            HostType::Tensor(tensor) => {
+                assert_eq!(
+                    tensor.dims,
+                    vec![crate::dag::DimInfo::Named("n".into(), None)]
+                );
+                assert_eq!(tensor.precision, Prim::F32);
+            }
+            other => panic!("expected borrowed tensor ref to parse as tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tensor_helper_actualization_merges_matmul_synthetic_expand_dims() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+
+        let batch = DimInfo::Named("batch".into(), None);
+        let in_dim = DimInfo::Named("in_dim".into(), None);
+        let out_dim = DimInfo::Named("out_dim".into(), None);
+        let d417 = DimInfo::Named("d417".into(), None);
+        let d420 = DimInfo::Named("d420".into(), None);
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![batch.clone(), in_dim.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let w = dag.add_node(
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            TensorType {
+                dims: vec![in_dim.clone(), out_dim.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let expanded_x = dag.add_node(
+            RiscOp::Expand {
+                axis: 2,
+                size: DimExpr::Sym("d420".into()),
+            },
+            vec![x],
+            TensorType {
+                dims: vec![batch.clone(), in_dim.clone(), d420.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let expanded_w = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Sym("d417".into()),
+            },
+            vec![w],
+            TensorType {
+                dims: vec![d417, in_dim.clone(), out_dim.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let product = dag.add_node(
+            RiscOp::Mul,
+            vec![expanded_x, expanded_w],
+            TensorType {
+                dims: vec![batch.clone(), in_dim.clone(), d420],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::Sum { axis: 1 },
+            vec![product],
+            TensorType {
+                dims: vec![batch.clone(), out_dim.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+
+        let mut scope = HashMap::new();
+        scope.insert(
+            "x".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![batch.clone(), in_dim.clone()],
+                precision: Prim::F32,
+            }),
+        );
+        scope.insert(
+            "w".into(),
+            HostType::Tensor(TensorType {
+                dims: vec![in_dim.clone(), out_dim.clone()],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        for node in actualized.nodes() {
+            assert!(
+                !node.output_type.dims.iter().any(|dim| {
+                    matches!(dim, DimInfo::Named(name, None) if name == "d417" || name == "d420")
+                }),
+                "node retained synthetic dims: {node:?}"
+            );
+        }
     }
 }

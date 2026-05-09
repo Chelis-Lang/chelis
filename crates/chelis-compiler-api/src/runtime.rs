@@ -1283,16 +1283,20 @@ impl<'a> EvalContext<'a> {
                     list.into_iter().take(count as usize).collect(),
                 ))
             }
-            "drop" => {
-                let list = expect_list_arg(args, 0)?;
-                let count = expect_int_arg(args, 1)?;
-                if count < 0 {
-                    return Err(format!("drop requires non-negative count, got {count}"));
+            "drop" => match args.len() {
+                1 => Ok(RuntimeValue::Unit),
+                2 => {
+                    let list = expect_list_arg(args, 0)?;
+                    let count = expect_int_arg(args, 1)?;
+                    if count < 0 {
+                        return Err(format!("drop requires non-negative count, got {count}"));
+                    }
+                    Ok(RuntimeValue::List(
+                        list.into_iter().skip(count as usize).collect(),
+                    ))
                 }
-                Ok(RuntimeValue::List(
-                    list.into_iter().skip(count as usize).collect(),
-                ))
-            }
+                n => Err(format!("drop expects 1 or 2 arguments, got {n}")),
+            },
             "chunk" => {
                 let list = expect_list_arg(args, 0)?;
                 let size = expect_int_arg(args, 1)?;
@@ -4267,6 +4271,33 @@ x = with seed(7) {
             RuntimeValue::Float(v) => assert!((*v >= 0.0) && (*v <= 1.0), "got {v}"),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ownership_drop_is_unit_and_does_not_shadow_list_drop_runtime() {
+        let checked = checked_surf(
+            r#"
+x = {
+  t = to_tensor([cast(1.0, f32), cast(2.0, f32)])
+  values = to_list(t)
+  actual = index(values, cast(0, int64))
+  _ = drop(t)
+  actual
+}
+y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int64))
+"#,
+        );
+
+        let outcome = evaluate_host_program(&checked, &HashMap::new())
+            .expect("ownership drop and list drop should both evaluate");
+        assert!(matches!(
+            outcome.host_bindings.get("x"),
+            Some(RuntimeValue::Float(v)) if (*v - 1.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            outcome.host_bindings.get("y"),
+            Some(RuntimeValue::Int(20))
+        ));
     }
 
     // ----- Phase 3t.1: test_assert_* builtins -----

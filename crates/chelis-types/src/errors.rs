@@ -27,6 +27,7 @@ pub enum CheckErrorKind {
     CastNonTensor,
     TupleIndexOutOfBounds,
     UseAfterConsume,
+    UnconsumedLinear,
     InvalidBorrow,
     CycleDetected,
     /// A tensor type uses a precision the Phase 0f backend cannot represent
@@ -48,6 +49,7 @@ impl CheckErrorKind {
             CheckErrorKind::CastNonTensor => 0.6,
             CheckErrorKind::TupleIndexOutOfBounds => 0.7,
             CheckErrorKind::UseAfterConsume => 0.9,
+            CheckErrorKind::UnconsumedLinear => 0.9,
             CheckErrorKind::InvalidBorrow => 0.8,
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,

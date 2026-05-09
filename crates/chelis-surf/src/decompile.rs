@@ -1772,6 +1772,15 @@ fn decompile_type_expr(expr: &Expr) -> String {
                 let parts: Vec<String> = kids.iter().map(decompile_type_expr).collect();
                 return parts.join(" -> ");
             }
+            Some("t-ref") => {
+                let kids = children(list);
+                return format!(
+                    "&{}",
+                    kids.first()
+                        .map(decompile_type_expr)
+                        .unwrap_or_else(|| "_".to_string())
+                );
+            }
             Some("t-tensor") => {
                 let kids = children(list);
                 if kids.is_empty() {

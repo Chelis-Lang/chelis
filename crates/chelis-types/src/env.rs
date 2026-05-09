@@ -130,6 +130,7 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
             }
             collect_tvars(ret, vars);
         }
+        Type::Ref(inner) => collect_tvars(inner, vars),
         Type::Adt(_, args) => {
             for a in args {
                 collect_tvars(a, vars);
@@ -168,6 +169,7 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
             }
             collect_dvars(ret, vars);
         }
+        Type::Ref(inner) => collect_dvars(inner, vars),
         Type::Adt(_, args) => {
             for a in args {
                 collect_dvars(a, vars);

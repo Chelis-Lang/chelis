@@ -332,15 +332,7 @@ pub fn remap_tensor_dim_symbols(
     formal_params: &[TensorType],
     actual_args: &[TensorType],
 ) -> Dag {
-    let substitutions = formal_params
-        .iter()
-        .zip(actual_args.iter())
-        .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
-        .filter_map(|(formal_dim, actual_dim)| match formal_dim {
-            DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let substitutions = tensor_dim_substitutions(formal_params, actual_args);
     if substitutions.is_empty() {
         return dag.clone();
     }
@@ -408,6 +400,21 @@ pub fn remap_tensor_dim_symbols(
         }
     }
     specialized
+}
+
+fn tensor_dim_substitutions(
+    formal_params: &[TensorType],
+    actual_args: &[TensorType],
+) -> HashMap<String, DimInfo> {
+    formal_params
+        .iter()
+        .zip(actual_args.iter())
+        .flat_map(|(formal, actual)| formal.dims.iter().zip(actual.dims.iter()))
+        .filter_map(|(formal_dim, actual_dim)| match formal_dim {
+            DimInfo::Named(name, None) => Some((name.clone(), actual_dim.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn top_level_expr_is_lowered(
@@ -701,7 +708,6 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "append"
                         | "concat"
                         | "take"
-                        | "drop"
                         | "chunk"
                         | "range"
                         | "map"
@@ -749,6 +755,9 @@ fn expr_requires_host_runtime(expr: &Expr) -> bool {
                         | "Nil"
                 ) {
                     return true;
+                }
+                if name == "drop" {
+                    return children(list).len() != 2;
                 }
                 if matches!(
                     name,
@@ -1523,6 +1532,7 @@ struct LowerCtx {
     random_seed: Option<u64>,
     linearity: LinearityInfo,
     inlining_names: HashSet<String>,
+    dim_substitutions: HashMap<String, DimInfo>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -1547,6 +1557,7 @@ impl LowerCtx {
             random_seed: None,
             linearity,
             inlining_names: HashSet::new(),
+            dim_substitutions: HashMap::new(),
             current_span_id: None,
         }
     }
@@ -1691,10 +1702,24 @@ impl LowerCtx {
                 precision: prim,
             };
         }
+        if let Some(inner) = Self::try_extract_ref_type(expr) {
+            return Self::type_from_type_expr(inner);
+        }
         if let Some(tt) = Self::try_extract_tensor_type(expr) {
             return tt;
         }
         Self::default_type()
+    }
+
+    fn try_extract_ref_type(expr: &Expr) -> Option<&Expr> {
+        if let Expr::List(list, _) = expr
+            && list.elements.len() >= 3
+            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+            && tag == "t-ref"
+        {
+            return list.elements.get(2);
+        }
+        None
     }
 
     fn try_extract_prim(expr: &Expr) -> Option<Prim> {
@@ -2536,17 +2561,39 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let saved_callables = self.local_callables.clone();
-        for (name, arg_expr) in param_names.iter().zip(args.iter()) {
+        let saved_dim_substitutions = self.dim_substitutions.clone();
+        let param_types: Vec<TensorType> = param_names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                extract_param_type(fn_expr, index)
+                    .map(Self::type_from_type_expr)
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect();
+        let mut formal_types = Vec::new();
+        let mut actual_types = Vec::new();
+        for ((name, arg_expr), param_ty) in param_names.iter().zip(args.iter()).zip(param_types) {
             if let Some(callable) = self.callable_binding_expr(arg_expr) {
                 self.local_callables.insert(name.clone(), callable);
             } else {
                 let arg_id = self.lower_expr(arg_expr);
+                if let LoweredValue::Node(node_id) = &arg_id
+                    && let Some(actual_ty) =
+                        self.dag.get(*node_id).map(|node| node.output_type.clone())
+                {
+                    formal_types.push(param_ty);
+                    actual_types.push(actual_ty);
+                }
                 self.bindings.insert(name.clone(), arg_id);
             }
         }
+        self.dim_substitutions
+            .extend(tensor_dim_substitutions(&formal_types, &actual_types));
         let result = self.lower_expr(body);
         self.bindings = saved;
         self.local_callables = saved_callables;
+        self.dim_substitutions = saved_dim_substitutions;
         result
     }
 
@@ -3060,6 +3107,15 @@ impl LowerCtx {
             }
 
             // Tier 1: unary elementwise
+            "drop" if args.len() == 1 => {
+                let _ = self.lower_expr_node(&args[0], "drop input");
+                self.dag.add_node(
+                    RiscOp::Const { value: 0.0 },
+                    vec![],
+                    Self::default_type(),
+                    self.current_span_id.clone(),
+                )
+            }
             "neg" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "neg input");
                 let out_ty = if *ty == Self::default_type() {
@@ -3586,12 +3642,9 @@ impl LowerCtx {
                 } else {
                     DimExpr::Concrete(1)
                 };
-                let out_ty = if *ty == Self::default_type() {
-                    self.fallback_expand_type(x, axis, &size)
-                        .unwrap_or_else(|| ty.clone())
-                } else {
-                    ty.clone()
-                };
+                let out_ty = self
+                    .fallback_expand_type(x, axis, &size)
+                    .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
                     RiscOp::Expand { axis, size },
                     vec![x],
@@ -3701,16 +3754,23 @@ impl LowerCtx {
         }
 
         match expr {
-            Expr::Atom(Atom::Symbol(name), _) => Some(DimExpr::Sym(name.clone())),
+            Expr::Atom(Atom::Symbol(name), _) => Some(self.resolve_dim_expr_symbol(name)),
             Expr::List(list, _) => match (list.elements.first(), list.elements.get(2)) {
                 (
                     Some(Expr::Atom(Atom::Symbol(tag), _)),
                     Some(Expr::Atom(Atom::Symbol(name), _)),
-                ) if tag == "var" => Some(DimExpr::Sym(name.clone())),
+                ) if tag == "var" => Some(self.resolve_dim_expr_symbol(name)),
                 _ => None,
             },
             _ => None,
         }
+    }
+
+    fn resolve_dim_expr_symbol(&self, name: &str) -> DimExpr {
+        self.dim_substitutions
+            .get(name)
+            .map(DimExpr::from)
+            .unwrap_or_else(|| DimExpr::Sym(name.to_string()))
     }
 
     fn lower_handle_effect(&mut self, elems: &[Expr]) -> LoweredValue {
@@ -4514,7 +4574,11 @@ mod tests {
     fn lower_let_binding() {
         let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
-                (app {} (var {} neg) (var {} x)))
+                (let {}
+                  (bind {} out (app {} (var {} neg) (var {} x)))
+                  (let {}
+                    (bind {} __drop_x (app {} (var {} drop) (var {} x)))
+                    (var {} out))))
         "#;
         let dag = parse_and_lower(src);
         // x=Const(10), Neg(x)
@@ -5313,7 +5377,13 @@ mod regression_tests {
         let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 1.0)
                            y (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
-                (app {} (var {} add) (var {} x) (var {} y)))
+                (let {}
+                  (bind {} out (app {} (var {} add) (var {} x) (var {} y)))
+                  (let {}
+                    (bind {} __drop_x (app {} (var {} drop) (var {} x)))
+                    (let {}
+                      (bind {} __drop_y (app {} (var {} drop) (var {} y)))
+                      (var {} out)))))
         "#;
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 3);

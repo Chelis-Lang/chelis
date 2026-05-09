@@ -27,11 +27,11 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 const LIBRARY_SRC: &str = r#"
-def assert_shape(t: tensor[4, f32], expected_n: int64, label: string) -> int32 = {
+def assert_shape(t: &tensor[4, f32], expected_n: int64, label: string) -> int32 = {
   actual_n = cast(shape(t, cast(0, int32)), int64)
   rank(t)
 }
-def assert_close_tensor(actual: tensor[4, f32], expected: tensor[4, f32], tol: f32, label: string) -> int32 = rank(actual)
+def assert_close_tensor(actual: &tensor[4, f32], expected: &tensor[4, f32], tol: f32, label: string) -> int32 = rank(actual)
 def linspace(start: f32, stop: f32, count: int32) -> tensor[4, f32] = to_tensor([start, stop, start, stop])
 "#;
 
@@ -39,7 +39,10 @@ const NEW_SRC: &str = r#"
 def test_linspace_endpoints(expected: tensor[4, f32]) -> int32 = {
   actual = linspace(cast(0.0, f32), cast(1.0, f32), cast(3, int32))
   _ = assert_shape(actual, cast(3, int64), "len")
-  assert_close_tensor(actual, expected, cast(0.000001, f32), "vals")
+  close = assert_close_tensor(actual, expected, cast(0.000001, f32), "vals")
+  _ = drop(actual)
+  _ = drop(expected)
+  close
 }
 "#;
 

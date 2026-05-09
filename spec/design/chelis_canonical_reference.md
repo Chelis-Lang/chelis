@@ -101,14 +101,14 @@ fitness scoring, error reporting), and before CLI paths such as `chelis deep`,
 `check`, `build`, and `eval`.
 Provenance metadata in the `{}` slot traces expanded nodes back to their macro source
 (e.g., `{source: (relu input)}`).
-The 60-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
+The 61-tag vocabulary is the complete LLM-facing grammar regardless of how many macros
 exist in the ecosystem.
 Macros are a human authoring convenience that compiles away before LLMs touch the code.
 Compiler-internal pre-expansion forms such as `defmacro` and `macro-invoke` are not
 public Deep and are rejected by strict Deep validation.
 
 The same properties that make Deep a stable generation target for agents
-also make it a stable editing target. The 60-tag closed vocabulary, the
+also make it a stable editing target. The 61-tag closed vocabulary, the
 3-tuple uniformity, and the metadata-map slot for provenance mean
 structural edits (replace a function body, rename a symbol, change a
 signature) are well-defined operations rather than character-level

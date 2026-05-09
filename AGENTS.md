@@ -215,6 +215,10 @@ When writing or rewriting Surf in this repository:
 - keep meaningful intermediates like `h1`, `logits`, `probs`, and `loss`
 - combine short tensor operations when the composed expression is clearer than over-decomposed single-op bindings
 - treat decompiler-generated verbose load chains and checker-inserted ascriptions as debug output, not example style
+- user code typically writes neither explicit `&` nor explicit `copy()` for fan-out
+  into read-only primitives; auto-borrow handles it. Write `&x` when an exported
+  API or dense signature benefits from clarity. Write `copy(x)` only when forking
+  ownership for downstream consumption.
 - type identifiers are PascalCase (`surf-type-pascal-case`, §3.1)
 - function/value identifiers are snake_case (`surf-value-snake-case`, §3.2)
 - functions carrying the `Test` effect are named `test_*` or `example_*`
@@ -226,7 +230,7 @@ When writing or rewriting Surf in this repository:
 
 - Every Deep node is a 3-tuple: `(tag {} children...)`
 - Metadata map is always present at element 1
-- 60-tag closed vocabulary; see `spec/03-deep-syntax.md`
+- 61-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
 

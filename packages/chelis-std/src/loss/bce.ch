@@ -1,8 +1,8 @@
 module Std.Loss.Bce
 export (bce_with_logits)
-def bce_with_logits[n](z: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = {
-  z_list = to_list(copy(z))
-  y_list = to_list(copy(y))
+def bce_with_logits[n](z: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = {
+  z_list = to_list(z)
+  y_list = to_list(y)
   if neq(len(z_list), len(y_list)) then fail("bce_with_logits: z and y have different lengths") else to_tensor(map(fn (pair: (f32, f32)) -> {
     zv = pair.0
     yv = pair.1

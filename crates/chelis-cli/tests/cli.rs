@@ -2015,7 +2015,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.2.0" }}
+chelis-std = {{ version = "0.3.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -2997,9 +2997,8 @@ fn phase3e_pipe_first_acceptance_oracle() {
         .success()
         .stdout(predicate::str::contains("let h1").not())
         .stdout(predicate::str::contains("let logits").not())
-        .stdout(predicate::str::contains(
-            "softmax(logits, 1)\n  |> log\n  |> mul(labels)\n  |> sum(1)\n  |> neg\n  |> mean(0)",
-        ))
+        .stdout(predicate::str::contains("probs = softmax(logits, 1)"))
+        .stdout(predicate::str::contains("out = mean(neg_loss, 0)"))
         .stdout(predicate::str::contains("(softmax(logits, 1) :").not())
         .stdout(predicate::str::contains("(matmul(x, w1) :").not());
 }
@@ -3075,11 +3074,11 @@ fn reef_build_emits_shell_and_archive() {
         .args(["reef", "build", pkg.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Built chelis-std 0.2.0"));
+        .stdout(predicate::str::contains("Built chelis-std 0.3.0"));
 
     assert!(pkg.join("reef.lock").exists());
-    assert!(pkg.join("dist/chelis-std-0.2.0.chb").exists());
-    assert!(pkg.join("dist/chelis-std-0.2.0.tar.zst").exists());
+    assert!(pkg.join("dist/chelis-std-0.3.0.chb").exists());
+    assert!(pkg.join("dist/chelis-std-0.3.0.tar.zst").exists());
 }
 
 #[test]
@@ -3110,7 +3109,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.2.0" }}
+chelis-std = {{ version = "0.3.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -3120,8 +3119,6 @@ chelis-std = {{ version = "0.2.0" }}
         r#"module Demo.Main
 
 import Std.Nn.Linear (forward)
-import Std.Loss.CrossEntropy (loss)
-import Std.Init.Xavier (sample)
 
 export (main)
 
@@ -3194,7 +3191,7 @@ compiler = "={ver}"
 module_prefix = "Demo"
 
 [dependencies]
-chelis-std = {{ version = "0.2.0" }}
+chelis-std = {{ version = "0.3.0" }}
 "#,
             ver = chelis_compiler_api::COMPILER_VERSION,
         ),
@@ -3796,7 +3793,7 @@ fn check_reports_linearity_errors() {
     let path = dir.path().join("linearity.ch");
     write_file(
         &path,
-        "def bad(x: tensor[4, f32]): tensor[4, f32] = {\n  y: tensor[4, f32] = relu(x)\n  add(x, y)\n}\n",
+        "def bad(x: tensor[4, f32]): tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
     );
 
     let json = run_json_check(&path);
@@ -3805,7 +3802,7 @@ fn check_reports_linearity_errors() {
         error["kind"].as_str() == Some("UseAfterConsume")
             && error["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("relu"))
+                .is_some_and(|message| message.contains("realize"))
     }));
     assert!(json["score"].as_f64().unwrap() < 1.0);
 }
@@ -3838,7 +3835,7 @@ fn check_reports_macro_provenance_for_linearity_errors() {
     write_file(
         &path,
         r#"
-macro dup_relu(x) = add(relu(x), x)
+macro dup_relu(x) = add(realize(x), x)
 def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
 "#,
     );

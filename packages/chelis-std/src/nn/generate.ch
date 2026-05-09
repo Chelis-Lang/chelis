@@ -17,15 +17,23 @@ def generate_greedy_loop[batch, seq, vocab, p](model: tensor[batch, seq, int64] 
   next_ids = greedy_next_tokens(step.0)
   generate_greedy_loop(model, concat([current, ids_to_batch_tensor(next_ids)], cast(1, int32)), Some(step.1), sub(remaining, cast(1, int64)))
 } }
-def greedy_next_tokens[batch, vocab](logits: tensor[batch, vocab, f32]) -> List[int64] = {
+def greedy_next_tokens[batch, vocab](logits: &tensor[batch, vocab, f32]) -> List[int64] = {
   batch_size = cast(shape(logits, cast(0, int32)), int64)
   rows = split(logits, cast(0, int32), one_sizes(batch_size))
-  map(fn (row: tensor[piece, vocab, f32]) -> greedy_next_token(row), rows)
+  map(fn (row: tensor[piece, vocab, f32]) -> {
+    out = greedy_next_token(row)
+    _ = drop(row)
+    out
+  }, rows)
 }
-def sample_next_tokens[batch, vocab](logits: tensor[batch, vocab, f32], config: GenerateConfig) -> List[int64] = {
+def sample_next_tokens[batch, vocab](logits: &tensor[batch, vocab, f32], config: GenerateConfig) -> List[int64] = {
   batch_size = cast(shape(logits, cast(0, int32)), int64)
   rows = split(logits, cast(0, int32), one_sizes(batch_size))
-  map(fn (row: tensor[piece, vocab, f32]) -> sample_next_token(row, config), rows)
+  map(fn (row: tensor[piece, vocab, f32]) -> {
+    out = sample_next_token(row, config)
+    _ = drop(row)
+    out
+  }, rows)
 }
 def generate_loop[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), current: tensor[batch, seq, int64], cache: Option[KVCache[p]], remaining: int64, config: GenerateConfig) = { if lte(remaining, cast(0, int64)) then current else generate_loop_step(model, current, cache, remaining, config) }
 def generate_loop_step[batch, seq, vocab, p](model: tensor[batch, seq, int64] -> Option[KVCache[p]] -> (tensor[batch, vocab, f32], KVCache[p]), current: tensor[batch, seq, int64], cache: Option[KVCache[p]], remaining: int64, config: GenerateConfig) = {
@@ -34,35 +42,47 @@ def generate_loop_step[batch, seq, vocab, p](model: tensor[batch, seq, int64] ->
   generate_loop(model, concat([current, ids_to_batch_tensor(next_ids)], cast(1, int32)), Some(step.1), sub(remaining, cast(1, int64)), config)
 }
 def ids_to_batch_tensor(ids: List[int64]) = pad_sequences_to(map(fn (id: int64) -> [id], ids), cast(1, int64), cast(0, int64))
-def greedy_next_token[piece, vocab](logits: tensor[piece, vocab, f32]) -> int64 = {
+def greedy_next_token[piece, vocab](logits: &tensor[piece, vocab, f32]) -> int64 = {
   pair = sort(logits, cast(1, int32))
   ids = tensor_row_to_ints(pair.1)
   index(ids, sub(len(ids), cast(1, int64)))
 }
-def sample_next_token[piece, vocab](logits: tensor[piece, vocab, f32], config: GenerateConfig) -> int64 = { match config with {
+def sample_next_token[piece, vocab](logits: &tensor[piece, vocab, f32], config: GenerateConfig) -> int64 = { match config with {
   | GenerateConfig { temperature: temperature, top_k: top_k, top_p: top_p, max_tokens: max_tokens } => {
-  probs = sorted_probs(copy(logits), temperature)
+  probs = sorted_probs(logits, temperature)
   ids = sorted_ids(logits, temperature)
   start = top_p_start(probs, top_k_start(len(probs), top_k), top_p)
   sample_from_sorted(ids, probs, start, mul(random_unit(), suffix_sum(probs, start)), cast(0.0, f32))
 }
 } }
-def sorted_probs[piece, vocab](logits: tensor[piece, vocab, f32], temperature: f32) -> List[f32] = {
+def sorted_probs[piece, vocab](logits: &tensor[piece, vocab, f32], temperature: f32) -> List[f32] = {
   sorted = tensor_row_to_floats(sort(logits, cast(1, int32)).0)
   scaled = map(fn (x: f32) -> exp(div(x, temperature)), sorted)
   total = fold(fn (acc: f32, x: f32) -> add(acc, x), cast(0.0, f32), scaled)
   map(fn (x: f32) -> div(x, total), scaled)
 }
-def sorted_ids[piece, vocab](logits: tensor[piece, vocab, f32], temperature: f32) -> List[int64] = tensor_row_to_ints(sort(logits, cast(1, int32)).1)
-def tensor_row_to_floats[piece, vocab](row: tensor[piece, vocab, f32]) -> List[f32] = {
-  vocab_size = cast(shape(copy(row), cast(1, int32)), int64)
+def sorted_ids[piece, vocab](logits: &tensor[piece, vocab, f32], temperature: f32) -> List[int64] = tensor_row_to_ints(sort(logits, cast(1, int32)).1)
+def tensor_row_to_floats[piece, vocab](row: &tensor[piece, vocab, f32]) -> List[f32] = {
+  vocab_size = cast(shape(row, cast(1, int32)), int64)
   cols = split(row, cast(1, int32), one_sizes(vocab_size))
-  map(fn (col: tensor[piece, unit, f32]) -> tensor_to_scalar(trace(col, cast(0, int32), cast(1, int32))), cols)
+  map(fn (col: tensor[piece, unit, f32]) -> {
+    traced = trace(col, cast(0, int32), cast(1, int32))
+    out = tensor_to_scalar(traced)
+    _ = drop(traced)
+    _ = drop(col)
+    out
+  }, cols)
 }
-def tensor_row_to_ints[piece, vocab](row: tensor[piece, vocab, int64]) -> List[int64] = {
-  vocab_size = cast(shape(copy(row), cast(1, int32)), int64)
+def tensor_row_to_ints[piece, vocab](row: &tensor[piece, vocab, int64]) -> List[int64] = {
+  vocab_size = cast(shape(row, cast(1, int32)), int64)
   cols = split(row, cast(1, int32), one_sizes(vocab_size))
-  map(fn (col: tensor[piece, unit, int64]) -> tensor_to_scalar(trace(col, cast(0, int32), cast(1, int32))), cols)
+  map(fn (col: tensor[piece, unit, int64]) -> {
+    traced = trace(col, cast(0, int32), cast(1, int32))
+    out = tensor_to_scalar(traced)
+    _ = drop(traced)
+    _ = drop(col)
+    out
+  }, cols)
 }
 def sample_from_sorted(ids: List[int64], probs: List[f32], start: int64, target: f32, acc: f32) -> int64 = pick_sorted_desc(ids, probs, sub(len(ids), cast(1, int64)), start, target, acc)
 def one_sizes(count: int64) -> List[int64] = if lte(count, cast(0, int64)) then [] else append(one_sizes(sub(count, cast(1, int64))), cast(1, int64))

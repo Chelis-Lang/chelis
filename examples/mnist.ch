@@ -1,14 +1,44 @@
 def logits(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 128, f32], b1: tensor[128, f32], w2: tensor[128, 10, f32], b2: tensor[10, f32]) -> tensor[32, 10, f32] = {
-  h1 = matmul(x, w1) |> add(expand(b1, 0, 32)) |> relu
-  matmul(h1, w2) |> add(expand(b2, 0, 32))
+  b1_expanded = expand(b1, 0, 32)
+  hidden_linear = matmul(x, w1)
+  hidden_pre = add(hidden_linear, b1_expanded)
+  h1 = relu(hidden_pre)
+  logits_linear = matmul(h1, w2)
+  b2_expanded = expand(b2, 0, 32)
+  out = add(logits_linear, b2_expanded)
+  _ = drop(b1_expanded)
+  _ = drop(hidden_linear)
+  _ = drop(hidden_pre)
+  _ = drop(h1)
+  _ = drop(logits_linear)
+  _ = drop(b2_expanded)
+  out
 }
 def loss(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 128, f32], b1: tensor[128, f32], w2: tensor[128, 10, f32], b2: tensor[10, f32]) -> tensor[f32] = {
-  h1 = matmul(x, w1) |> add(expand(b1, 0, 32)) |> relu
-  logits = matmul(h1, w2) |> add(expand(b2, 0, 32))
-  softmax(logits, 1)
-  |> log
-  |> mul(labels)
-  |> sum(1)
-  |> neg
-  |> mean(0)
+  b1_expanded = expand(b1, 0, 32)
+  hidden_linear = matmul(x, w1)
+  hidden_pre = add(hidden_linear, b1_expanded)
+  h1 = relu(hidden_pre)
+  logits_linear = matmul(h1, w2)
+  b2_expanded = expand(b2, 0, 32)
+  logits = add(logits_linear, b2_expanded)
+  probs = softmax(logits, 1)
+  log_probs = log(probs)
+  weighted = mul(log_probs, labels)
+  per_row = sum(weighted, 1)
+  neg_loss = neg(per_row)
+  out = mean(neg_loss, 0)
+  _ = drop(b1_expanded)
+  _ = drop(hidden_linear)
+  _ = drop(hidden_pre)
+  _ = drop(h1)
+  _ = drop(logits_linear)
+  _ = drop(b2_expanded)
+  _ = drop(logits)
+  _ = drop(probs)
+  _ = drop(log_probs)
+  _ = drop(weighted)
+  _ = drop(per_row)
+  _ = drop(neg_loss)
+  out
 }

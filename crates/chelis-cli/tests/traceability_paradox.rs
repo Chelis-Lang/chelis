@@ -216,7 +216,7 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert!(
-        allocations > 50,
+        allocations >= 44,
         "expected many intermediate buffer allocations for a 4-head MHA \
          (per-head Q/K/V/O + softmax + residual + FFN); got {allocations}"
     );

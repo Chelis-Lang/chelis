@@ -281,7 +281,7 @@ pure tape-only or pure full-recompute AD.
 **LLM representation constraint:** The macro system must produce clean expanded Deep
 with provenance metadata in the `{}` slot.
 Macro expansion is a compilation step that happens before any LLM-facing operation.
-The expanded form uses only the base 60-tag vocabulary.
+The expanded form uses only the base 61-tag vocabulary.
 LLMs never see, generate, or reason about unexpanded macro invocations.
 This is a settled design decision, not an open question for Phase 2c.
 The Phase 2c design task is: expansion rules, hygiene, phase separation, and the
@@ -1298,7 +1298,7 @@ depends on it.
 |---|---|---|---|
 | **Effect system design** | effect typing rules, handler syntax, HM interaction; investigate Dex's Accum effect for parallelism-preserving gradient accumulation, and distinguish parallelism-preserving effects from sequentializing ones | Phase 2a | **HIGH** |
 | **Linear type design** | linearity rules, borrowing rules, effect interaction | Phase 2b | **HIGH** |
-| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 60-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
+| **Macro system design** | expansion rules, hygiene, phase separation, provenance annotation format (`{source: ...}` metadata key), interaction with the 61-tag vocabulary constraint (macros cannot introduce new tags) | Phase 2c | **MEDIUM** |
 | **Fusion rules** | DAG fusion constraints and correctness conditions | Phase 1b | **MEDIUM** |
 | **GPU memory model** | device-memory semantics and ownership model | Phase 1 / 2a | **MEDIUM** |
 | **Effect handler syntax** | Surf and Deep syntax for handling effects | Phase 2a | **MEDIUM** |
