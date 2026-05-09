@@ -868,6 +868,11 @@ pub enum WireRiscOp {
     FusedElem {
         ops: Vec<WireFusedStep>,
     },
+    BlasMatmul {
+        m: usize,
+        n: usize,
+        k: usize,
+    },
 }
 
 fn default_true() -> bool {

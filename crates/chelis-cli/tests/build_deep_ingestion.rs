@@ -169,14 +169,13 @@ fn build_ch_with_deep_flag_routes_through_deep_path() {
     );
 }
 
-// ── Row 4: `chelis build foo.ch` (Surf path, today's behavior) ─────────
+// ── Row 4: `chelis build foo.ch` (Surf path) ───────────────────────────
 
 #[test]
 fn build_ch_without_deep_flag_takes_the_surf_path() {
-    // The Surf path with span-free input emits no `// span:` lines (or
-    // only synthesized markers from optimization passes). The
-    // load-bearing thing here is that the build SUCCEEDS without a
-    // Deep parser ever being invoked.
+    // The load-bearing thing here is that the build SUCCEEDS without a
+    // Deep parser ever being invoked. The Surf desugarer now supplies
+    // parser byte-range spans directly.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("hello.ch");
     // Tensors are linear; pre-bind a copy via a let block so neither
@@ -205,9 +204,8 @@ fn build_ch_without_deep_flag_takes_the_surf_path() {
         .assert()
         .success();
 
-    // No assertion on `// span:` content here — Surf input has no
-    // span metadata, but optimization-pass synthesized markers
-    // (e.g., `__synthesized_tier2__`) MAY appear. Either is fine.
+    // No assertion on `// span:` content here — this test is about path
+    // selection. Span shape is covered by the traceability tests.
     assert!(out.exists(), "Surf path must produce output file");
 }
 

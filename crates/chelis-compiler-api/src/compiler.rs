@@ -166,7 +166,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                 ));
             }
             reject_unsized_named_dims(&compiled.dag, "c")?;
-            let fused = chelis_ir::fuse::fuse(&compiled.dag);
+            let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
+            let fused = chelis_ir::fuse::fuse(&specialized);
             let result = chelis_backend_c::codegen_with_options(
                 &fused,
                 &func_name,
@@ -224,7 +225,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
             reject_unsized_named_dims(&hip_dag, "hip")?;
             reject_unsupported_hip_ops(&hip_dag)?;
-            let fused = chelis_ir::fuse::fuse(&hip_dag);
+            let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+            let fused = chelis_ir::fuse::fuse(&specialized);
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name);
             Ok(compiled_execution_artifact(
                 request.target,
@@ -2088,6 +2090,11 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         .collect(),
                 })
                 .collect(),
+        },
+        RiscOp::BlasMatmul { m, n, k } => WireRiscOp::BlasMatmul {
+            m: *m,
+            n: *n,
+            k: *k,
         },
     }
 }

@@ -21,6 +21,13 @@ LaTeX-derived dot-paths (`n_001`, `expr.5.lhs`); other producers may use
 other conventions. Chelis preserves the strings and stays
 producer-interpretation-agnostic.
 
+Surf parsing participates in the same contract during desugaring: when a
+Surf AST node carries a real parser byte range, the desugarer writes a
+Deep `span` ID of the form `surf:<start>..<end>` onto the corresponding
+Deep node. Hand-constructed Surf nodes with the zero-length sentinel are
+treated as spanless, so synthesized-marker fallbacks remain limited to
+genuinely absent source ranges.
+
 ## 2. Contract
 
 ### 2.1 Deep-side (already shipped)
@@ -367,8 +374,9 @@ This test is committed to chelis CI as the canary regression once S5 lands.
 
 ## 5. Out of scope
 
-Surf metadata syntax (Surf is metadata-lossy by design; `chelis build --deep`
-is the metadata-preserving path); runtime trace tooling; Octant-side
+Surf user-authored metadata syntax (`chelis build --deep` remains the
+metadata-preserving path for producer-supplied Deep metadata beyond parser
+byte ranges); runtime trace tooling; Octant-side
 changes; span survival through external compilation/linking (DWARF,
 post-roadmap); span performance optimization until profiling shows cost.
 

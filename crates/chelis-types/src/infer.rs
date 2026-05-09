@@ -7049,11 +7049,11 @@ fn check_matmul_signature(
         ));
         return Type::Error;
     }
-    if lhs_dims.len() != 2 || rhs_dims.len() != 2 {
+    if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
         errors.push(CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
-                "matmul expects rank-2 tensors, got rank {} and {}",
+                "matmul expects tensors of rank >= 2, got rank {} and {}",
                 lhs_dims.len(),
                 rhs_dims.len()
             ),
@@ -7061,15 +7061,51 @@ fn check_matmul_signature(
         ));
         return Type::Error;
     }
-    if let Err(te) = unify_dim(&lhs_dims[1], &rhs_dims[0], subst) {
+    if let Err(te) = unify_dim(
+        &lhs_dims[lhs_dims.len() - 1],
+        &rhs_dims[rhs_dims.len() - 2],
+        subst,
+    ) {
         errors.push(te.into());
         return Type::Error;
     }
 
-    let canonical = Type::Tensor(
-        vec![subst.apply_dim(&lhs_dims[0]), subst.apply_dim(&rhs_dims[1])],
-        lhs_prec,
-    );
+    let lhs_lead = &lhs_dims[..lhs_dims.len() - 2];
+    let rhs_lead = &rhs_dims[..rhs_dims.len() - 2];
+    let lead_len = lhs_lead.len().max(rhs_lead.len());
+    let mut out_dims = Vec::with_capacity(lead_len + 2);
+    for offset in 0..lead_len {
+        let lhs_idx = lhs_lead.len().checked_sub(lead_len - offset);
+        let rhs_idx = rhs_lead.len().checked_sub(lead_len - offset);
+        let dim = match (
+            lhs_idx.map(|idx| &lhs_lead[idx]),
+            rhs_idx.map(|idx| &rhs_lead[idx]),
+        ) {
+            (Some(lhs_dim), Some(rhs_dim)) => {
+                let lhs_applied = subst.apply_dim(lhs_dim);
+                let rhs_applied = subst.apply_dim(rhs_dim);
+                if lhs_applied == Dim::Lit(1) {
+                    rhs_applied
+                } else if rhs_applied == Dim::Lit(1) {
+                    lhs_applied
+                } else {
+                    if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
+                        errors.push(te.into());
+                        return Type::Error;
+                    }
+                    subst.apply_dim(&lhs_applied)
+                }
+            }
+            (Some(lhs_dim), None) => subst.apply_dim(lhs_dim),
+            (None, Some(rhs_dim)) => subst.apply_dim(rhs_dim),
+            (None, None) => unreachable!(),
+        };
+        out_dims.push(dim);
+    }
+    out_dims.push(subst.apply_dim(&lhs_dims[lhs_dims.len() - 2]));
+    out_dims.push(subst.apply_dim(&rhs_dims[rhs_dims.len() - 1]));
+
+    let canonical = Type::Tensor(out_dims, lhs_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
         errors.push(te.into());
         return Type::Error;
@@ -9566,6 +9602,27 @@ mod tests {
              (def {} b (lit {type: (t-tensor {} (d-name {} hidden) (d-name {} classes) (t-prim {} f32))} 0))
              (def {} c (app {type: (t-tensor {} (d-name {} batch) (d-name {} classes) (t-prim {} f32))}
                  (var {} matmul) (var {} a) (var {} b)))",
+        );
+    }
+
+    #[test]
+    fn builtin_batched_matmul_rank4() {
+        check_ok(
+            "(def {} q (lit {type: (t-tensor {} (d-name {} batch) (d-name {} head) (d-name {} seq) (d-name {} dim) (t-prim {} f32))} 0))
+             (def {} k (lit {type: (t-tensor {} (d-name {} batch) (d-name {} head) (d-name {} dim) (d-name {} seq) (t-prim {} f32))} 0))
+             (def {} scores (app {type: (t-tensor {} (d-name {} batch) (d-name {} head) (d-name {} seq) (d-name {} seq) (t-prim {} f32))}
+                 (var {} matmul) (var {} q) (var {} k)))",
+        );
+    }
+
+    #[test]
+    fn builtin_batched_matmul_rejects_incompatible_leading_dim() {
+        check_err(
+            "(def {} q (lit {type: (t-tensor {} (d-name {} batch) (d-name {} head) (d-name {} seq) (d-name {} dim) (t-prim {} f32))} 0))
+             (def {} k (lit {type: (t-tensor {} (d-name {} other_batch) (d-name {} head) (d-name {} dim) (d-name {} seq) (t-prim {} f32))} 0))
+             (def {} scores (app {type: (t-tensor {} (d-name {} batch) (d-name {} head) (d-name {} seq) (d-name {} seq) (t-prim {} f32))}
+                 (var {} matmul) (var {} q) (var {} k)))",
+            CheckErrorKind::DimensionMismatch,
         );
     }
 

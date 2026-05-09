@@ -1,6 +1,7 @@
-# matmul-rank2-rule-vs-einsum-shipped: `matmul` type rule rejects rank ≥ 2 even though `einsum` is the documented batched answer
+# matmul-rank2-rule-vs-einsum-shipped: `matmul` type rule rejected rank ≥ 2 even though `einsum` is the documented batched answer
 
-**Status:** **OPEN**
+**Status:** **PARTIALLY CLOSED by M3** — rank ≥ 2 `matmul` now type-checks
+and lowers generically; batched BLAS specialization remains open.
 **Filed:** 2026-05-08
 **Owning phase:** Phase 3h / language ergonomics
 **Discovered by:** Canonical heads-as-dimension MHA expressibility
@@ -19,8 +20,7 @@ shipped in `spec/12-roadmap.md`, and the project plan's perf
 boundary explicitly notes the rank-2 BLAS specialization is
 intentional (`spec/design/phase1d_flattening.md:39`).
 
-Empirically, however, the **`matmul` type rule still hard-rejects
-rank ≥ 2**:
+Before M3, however, the **`matmul` type rule hard-rejected rank ≥ 2**:
 
 ```rust
 // crates/chelis-types/src/infer.rs:7052
@@ -46,38 +46,32 @@ q, k, v = chunk(qkv, 3, dim=-1)
 scores = matmul(q, permute(k, [0, 1, 3, 2]))  // batched [batch, head, seq, seq]
 ```
 
-gets blocked at the `matmul(q, permute(k, ...))` line with
-`matmul expects rank-2 tensors, got rank 4 and 4`. The error
-message does not mention `einsum`, so users are left without a
-discoverable path forward. The corpus's published 4-head MHA
-(`examples/transformer_block.ch`) works around this by manually
-unrolling per head — i.e., 4 separate sets of `wq_i / wk_i / wv_i /
-wo_i` and 4 explicit rank-2 matmul lines per head.
+was blocked at the `matmul(q, permute(k, ...))` line with
+`matmul expects rank-2 tensors, got rank 4 and 4`. M3 chose Option B:
+`matmul` now accepts rank ≥ 2 with leading-axis broadcasting and lowers
+through generic RISC `expand + mul + sum`. The corpus now includes
+`examples/illustrative/mha_heads_as_dim.ch` as the accepted heads-as-dim
+shape.
 
 ## Why this matters
 
-1. **PyTorch / JAX users importing mental models cannot translate
+1. **PyTorch / JAX users importing mental models could not translate
    them.** The most common transformer block layout in the literature
    is `[batch, head, seq, dim]` with batched matmul broadcasting
-   over leading axes. Today's Chelis requires either reshaping
-   everything down to rank-2 manually or rewriting via `einsum` —
-   neither is what the user expected.
+   over leading axes. M3 closes this expressibility gap.
 
-2. **The compiler doesn't direct the user to the documented
-   answer.** `infer.rs:7052` produces a `DimensionMismatch` error
-   without a hint string. The right ergonomic answer is "use
-   `einsum("...,...->...", q, k)` for batched contractions" but
-   that's nowhere in the diagnostic.
+2. **The performance fast path still has a narrower scope.** C and HIP
+   specialization still target rank-2 BLAS matmul. Batched matmul stays
+   correct through generic lowering until a batched BLAS recognizer lands.
 
-3. **It blocks honest expression of `Std.Nn.Attention`.** The
+3. **It used to block honest expression of `Std.Nn.Attention`.** The
    `scaled_dot_product_attention` reference shipped in
    `chelis_phase3_plan.md:871` notes it ships as concrete rank-2.
-   This is a legitimate scope choice but means the `Std.Nn` surface
-   doesn't currently expose a heads-as-dim MHA primitive.
+   M3 removes the type-system barrier for heads-as-dim formulations.
 
 ## Two scope-level questions
 
-The closure path depends on which intent the spec is committing to:
+M3 resolved the language-level question in favor of Option B:
 
 - **Option A: einsum is the canonical batched answer; matmul stays
   rank-2.** Then the gap is purely an ergonomics / diagnostic gap.
@@ -89,7 +83,8 @@ The closure path depends on which intent the spec is committing to:
   broadcasting.** Then this is a language-feature gap: lift the type
   rule, generalize `lower_matmul` to emit batched expand+mul+sum,
   and add a batched-GEMM specializer to the BLAS recognizer in both
-  backends. Larger surface but matches PyTorch ergonomics.
+  backends. M3 implemented the type rule and generic lowering pieces.
+  The batched-GEMM specializer is still a performance follow-up.
 
 Per `spec/design/chelis_canonical_reference.md:438-443` ("the
 existing HIP rank-2 BLAS fast path does not yet upgrade vmapped
@@ -97,23 +92,15 @@ rank-3 matmul into a batched BLAS call"), the implicit current
 intent is Option A *for the BLAS specialization* but Option B
 *for type-checker acceptance*. That's not yet decided in writing.
 
-## Closure plan
+## Remaining closure plan
 
-Decide between A and B, then:
-
-- **If A:** add a hint string to the `matmul` rank-mismatch
-  diagnostic pointing at `einsum`. Update
-  `packages/chelis-std/SKILL.md` to include a worked
-  batched-contraction example. Optionally add a rejection test that
-  asserts the new hint is present.
-- **If B:** lift `infer.rs:7052` to accept rank ≥ 2 with
-  leading-axis broadcasting unification, extend `lower_matmul` to
-  emit batched expand+mul+sum, and add batched-GEMM detection in
-  `crates/chelis-backend-c/src/blas.rs` and the HIP analogue.
-
-Either closure must update `examples/illustrative/` with a working
-canonical heads-as-dimension MHA so the corpus reflects the
-ergonomic answer.
+Add batched-GEMM detection in `crates/chelis-backend-c/src/blas.rs` and
+the HIP analogue. Static eligibility should match the existing rank-2
+detector discipline: every operand/result dimension needed for loop
+bounds and BLAS strides must be `Lit(n)` or `Named(_, Some(n))`; any
+symbolic or polymorphic dimension falls through to the generic lowering.
+The test suite should lock both the positive statically concrete case and
+the negative symbolic-dimension case.
 
 ## Probe corpus
 
@@ -124,6 +111,5 @@ workaround.
 `examples/illustrative/mha_single_head.ch` — single-head reference
 for the rank-2 matmul shape.
 
-The `mha_canonical_heads.ch` attempt that motivated this filing is
-not in the corpus today because it does not type-check; it lives in
-the planning thread for this bug filing.
+`examples/illustrative/mha_heads_as_dim.ch` — accepted M3
+heads-as-dimension batched matmul corpus example.

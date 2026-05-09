@@ -122,7 +122,9 @@ Benchmark results from `BENCHMARK_FINDINGS.md`:
 - Distribution CDFs: 2.3x after convergence optimization
 - Solver per-call: 45x (`brent`) to 4000x (`rk4` vs scipy dispatch, with honest caveats)
 - 881 scipy-parity assertions validating correctness
-- LTO finding: 3.8x improvement from cross-TU inlining - a codegen insight, not just a benchmark result
+- LTO finding: 3.8x improvement from cross-TU inlining - an important workaround for
+  generated helper overhead, but not the long-term codegen story for backend library
+  dispatch
 
 ### Section 5: Related Work (~2 pages)
 
@@ -150,10 +152,21 @@ Honest:
 - Single-machine only (no distributed computation)
 - OpenMP doesn't parallelize composed functions (only single RISC ops)
 - No SIMD vectorization in the C backend (relies on gcc auto-vectorization)
+- Cross-function user-defined helpers can currently hide BLAS-equivalent tensor math
+  from the backend specializer; clang LTO mitigates helper overhead but does not replace
+  a compiler-owned specialization pass
 - Small team, early-stage ecosystem, zero production deployments
 - GPU backend (HIP) less mature than C backend
 
-Future: distributed runtime (the D1-D4 phasing), complex numbers (Phase 5f, unblocking Signal), the Octant LaTeX bridge, general-n iterative LinAlg, and Hull - a self-hosted executable specification shell where the LaCaDiLE typing rules are implemented as Chelis functions over Deep AST ADTs, enabling differential testing between the spec and the compiler in the language itself. Hull is a natural OOPSLA story: the language specifies itself, the spec is checked by the compiler, and the compiler is tested against the spec. Self-hosted executable specifications are rare in PL literature and directly reinforce the "designed for AI reimplementation" thesis.
+Future: distributed runtime (the D1-D4 phasing), cross-function specialization for
+BLAS-equivalent library helpers (`cross_function_specialization.md`), complex numbers
+(Phase 5f, unblocking Signal), the Octant LaTeX bridge, general-n iterative LinAlg, and
+Hull - a self-hosted executable specification shell where the LaCaDiLE typing rules are
+implemented as Chelis functions over Deep AST ADTs, enabling differential testing
+between the spec and the compiler in the language itself. Hull is a natural OOPSLA
+story: the language specifies itself, the spec is checked by the compiler, and the
+compiler is tested against the spec. Self-hosted executable specifications are rare in
+PL literature and directly reinforce the "designed for AI reimplementation" thesis.
 
 The executable-properties-as-spec pattern (`@property` annotations + `chelis fuzz`) is a natural extension of the compiler fitness story for this section: properties are the user-facing version of what the compiler fitness score does for the RLVR training loop. The compiler checks structural soundness automatically; properties check domain correctness empirically. Together they form a trust stack that no Python-based platform can offer. If `chelis fuzz` with `@property` is shipped before submission, it strengthens Section 3 (novel capabilities). If not, it belongs here in Section 6 (future work). Full design: `chelis_trust_stack.md`.
 

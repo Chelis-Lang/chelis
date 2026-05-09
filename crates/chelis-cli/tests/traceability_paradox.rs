@@ -8,20 +8,17 @@
 //! This test compiles the existing 4-head MHA + FFN block in
 //! `examples/transformer_block.ch` and inspects the emitted C source. The
 //! recorded measurements are: number of span comments, share that are
-//! synthesized markers vs original Surf source spans, number of fused
+//! synthesized markers vs Surf parser byte-range spans, number of fused
 //! kernels, number of BLAS specializations actually fired, and the buffer
 //! allocation footprint in bytes (peak working set under the C backend's
 //! Phase-0 allocate-per-node strategy).
 //!
 //! Findings (locked here as assertions):
-//!   * Every emitted `// span:` line in the C source is a synthesized
-//!     marker — `__synthesized_tier2__`, `__synthesized_grad__`, etc. — not
-//!     an original Surf source line. The reason is upstream of fusion: the
-//!     Surf parser does not currently attach source spans to the Deep AST
-//!     for this corpus, so there is nothing for the IR pipeline to thread
-//!     through. The traceability paradox manifests, but the root cause is
-//!     not "fusion erased the spans" — it is "the spans never entered the
-//!     pipeline."
+//!   * Emitted `// span:` lines include Surf parser byte-range IDs of the
+//!     form `surf:<start>..<end>`. Synthesized markers may still appear for
+//!     nodes that genuinely have no source range, but the traceability
+//!     chain no longer bottoms out at `__synthesized_*__` for ordinary Surf
+//!     bodies.
 //!   * Despite the file containing 13 `matmul` calls, zero of them
 //!     specialize to BLAS. The reason is the symbolic `seq` dimension on the
 //!     input tensor: `extract_matmul_dims` in
@@ -187,6 +184,10 @@ fn transformer_block_traceability_state_is_locked() {
         .iter()
         .filter(|l| l.contains("__synthesized"))
         .count();
+    let surf_spans = span_lines
+        .iter()
+        .filter(|l| l.contains("// span: surf:"))
+        .count();
     let fused_kernels = source.matches("parallel for simd").count();
     let allocations = source.matches("chelis_alloc(").count();
     let blas_calls = source.matches("cblas_sgemm").count()
@@ -198,15 +199,16 @@ fn transformer_block_traceability_state_is_locked() {
         total_spans > 0,
         "expected the emitter to write some `// span:` lines; got zero"
     );
-    assert_eq!(
-        synthesized_spans,
-        total_spans,
-        "expected every emitted span to be a `__synthesized_*__` marker, but \
-         {} of {} carried a user-source span. If you start propagating Surf \
-         source spans into the IR, update this test (and remove the doc claim \
-         that says they don't).",
-        total_spans - synthesized_spans,
-        total_spans
+    assert!(
+        surf_spans > 0,
+        "expected Surf parser byte-range spans to reach emitted C; got zero \
+         `// span: surf:<start>..<end>` lines out of {total_spans} total spans"
+    );
+    assert!(
+        synthesized_spans < total_spans,
+        "expected ordinary Surf source spans to replace the old all-synthesized \
+         traceability state; got {synthesized_spans} synthesized spans out of \
+         {total_spans} total spans"
     );
     assert!(
         fused_kernels >= 10,

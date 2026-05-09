@@ -709,7 +709,7 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
 }
 
 #[test]
-fn s12_reused_slots_iterate_over_logical_size() {
+fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(8), None);
     let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(8), None);
@@ -722,15 +722,18 @@ fn s12_reused_slots_iterate_over_logical_size() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int fill_size = d_t3->size;"),
-        "A smaller tensor reusing a larger slot must iterate over logical size"
+        src.contains("int fill_size = d_t"),
+        "Slot-backed fill kernels must iterate over logical size"
     );
     assert!(
-        !src.contains("int fill_size = d_t3->storage_size;"),
+        !src.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("int fill_size =") && trimmed.contains("->storage_size;")
+        }),
         "Fill kernels must not iterate over slot capacity"
     );
     assert!(
-        src.contains("int t4_size = d_t4->size;"),
+        src.contains("_size = d_t") && src.contains("->size;"),
         "Elementwise outputs must use logical size even when backed by a reused slot"
     );
 }

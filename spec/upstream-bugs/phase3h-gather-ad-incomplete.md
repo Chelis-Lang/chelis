@@ -78,6 +78,16 @@ is correctly accumulated — the AD side will pass by construction.
 The new requirement is that the recognizer pass also fire so the
 forward path is bounded in memory.
 
+Acceptance must be structural, not an attempted 200 GB runtime probe:
+
+- C and HIP build output for an embedding/MoE-shaped fixture must select a
+  bounded sparse gather/scatter kernel path.
+- The generated code must not allocate the dense `[N, V, D]`
+  one-hot/materialized product buffer.
+- A small fixture is sufficient as long as emitted-code inspection proves
+  the allocation shape is sub-linear in vocabulary size and duplicate-index
+  accumulation still matches the contract test.
+
 ## Why this isn't already filed
 
 The Phase 3h plan

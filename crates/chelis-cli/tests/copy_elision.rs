@@ -64,6 +64,28 @@ use std::process::Command;
 use assert_cmd::cargo::CommandCargoExt;
 use tempfile::tempdir;
 
+fn build_copy_elision_c_source() -> String {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("copy_elision_out");
+
+    let status = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .args([
+            "build",
+            "../../examples/illustrative/copy_elision_probe.ch",
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .status()
+        .expect("chelis build should run");
+    assert!(status.success(), "chelis build failed");
+
+    let c_path = out_dir.join("copy_elision_probe.c");
+    fs::read_to_string(&c_path).expect("read generated c")
+}
+
 /// Sum of bytes allocated by every `chelis_alloc(N, (int[]){...}, CHELIS_<T>)`
 /// call in the C source. This approximates peak working set under the Phase-0
 /// allocate-per-node / free-all-at-end strategy that
@@ -136,25 +158,7 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
 
 #[test]
 fn copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result() {
-    let dir = tempdir().expect("tempdir");
-    let out_dir = dir.path().join("copy_elision_out");
-
-    let status = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .args([
-            "build",
-            "../../examples/illustrative/copy_elision_probe.ch",
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .status()
-        .expect("chelis build should run");
-    assert!(status.success(), "chelis build failed");
-
-    let c_path = out_dir.join("copy_elision_probe.c");
-    let source = fs::read_to_string(&c_path).expect("read generated c");
+    let source = build_copy_elision_c_source();
 
     let alloc_calls = source.matches("chelis_alloc(").count();
     let memcpy_calls = source.matches("memcpy(").count();
@@ -229,5 +233,27 @@ fn copy_elision_probe_emits_no_memcpy_and_one_buffer_per_unary_result() {
         "Linear projection to 2 GiB input: peak working set ≈ {projected_2gib_peak_gib:.1} GiB \
          (excludes the 2 GiB input itself). With the borrowed input: ~{:.1} GiB total.",
         projected_2gib_peak_gib + 2.0
+    );
+}
+
+#[test]
+#[ignore = "M2a target behavior: enable when C memory planning lands"]
+fn target_behavior_copy_elision_reuses_c_backend_buffers() {
+    let source = build_copy_elision_c_source();
+    let memcpy_calls = source.matches("memcpy(").count();
+    let (total_bytes, count, per) = measure_alloc_footprint(&source);
+
+    assert_eq!(
+        memcpy_calls, 0,
+        "target behavior still requires copy(x) to stay marker-only"
+    );
+
+    let one_buffer = 1024 * 1024 * 4;
+    let target_max = 3 * one_buffer;
+    assert!(
+        total_bytes <= target_max,
+        "target behavior: C memory planning should reuse non-overlapping \
+         unary buffers. Got {count} allocs and {total_bytes} bytes with \
+         per-alloc bytes {per:?}; expected at most three 4 MiB slots."
     );
 }

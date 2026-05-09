@@ -132,8 +132,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     }
 }
 
-#[test]
-fn semantic_gap_inline_vs_user_def() {
+fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static str) {
     let direct = "def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                   -> tensor[8, 4, f32] = matmul(a, b)\n";
     let inline_manual = "def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
@@ -155,6 +154,12 @@ fn semantic_gap_inline_vs_user_def() {
                            def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                            -> tensor[8, 4, f32] = my_mm(a, b)\n";
 
+    (direct, inline_manual, user_def_builtin, user_def_manual)
+}
+
+#[test]
+fn semantic_gap_inline_vs_user_def() {
+    let (direct, inline_manual, user_def_builtin, user_def_manual) = semantic_gap_sources();
     let direct_c = build_and_count(direct, "sgap_direct");
     let inline_c = build_and_count(inline_manual, "sgap_inline_manual");
     let user_b = build_and_count(user_def_builtin, "sgap_user_def_builtin");
@@ -220,28 +225,11 @@ fn semantic_gap_inline_vs_user_def() {
         user_m.blas, user_m.allocs, user_m.fused, user_m.total_alloc_bytes
     );
 
-    // ---- Surprising finding: dead-Mul intermediate ----
+    // ---- Closed finding: dead-Mul intermediate ----
     //
-    // At this 8×16 shape, direct/inline/user_def_builtin all allocate
-    // 2176 bytes = 2048-byte 3-D Mul intermediate (`[8, 16, 4]`) + 128-byte
-    // 2-D result. The Mul intermediate is allocated and computed even when
-    // BLAS specialization fires, because BLAS replaces only the *Sum* step
-    // (Sum-Mul-Expand-Expand → cblas_sgemm reading inputs directly), not
-    // the Mul that was already emitted by Tier 2 lowering. The Mul output
-    // is then freed without ever being read — pure dead compute and dead
-    // memory.
-    //
-    // This is a NEW gap not in the original five: **DCE does not eliminate
-    // the Tier-2 Mul intermediate when its consumer (Sum) is replaced by
-    // a BLAS call.** Cost grows cubically with matmul size — for a
-    // 1024×1024 matmul the dead intermediate is 1024³ × 4 B = 4 GiB,
-    // wasted on every BLAS-hit matmul. Tracking is left as a follow-up.
-    //
-    // The original semantic-gap finding (BLAS misses on user-def helpers)
-    // remains valid as a *compute-throughput* finding — the user_def
-    // variants take the scalar reduction path on the Mul output, while
-    // direct/inline take cblas_sgemm. The memory cost is comparable; the
-    // compute cost differs by ~50-100×.
+    // M1 moved matmul specialization into an IR pass. Direct and inline
+    // matmul now replace the Sum/Mul/Expand subgraph before DCE/fusion, so
+    // the 3-D Mul intermediate is not allocated or computed on BLAS-hit paths.
 
     // Locked assertion: direct and inline_manual must produce the same
     // working set (both go through the same IR DAG → same codegen).
@@ -252,23 +240,42 @@ fn semantic_gap_inline_vs_user_def() {
          bytes, inline={} bytes.",
         direct_c.total_alloc_bytes, inline_c.total_alloc_bytes
     );
+    assert_eq!(
+        direct_c.total_alloc_bytes,
+        8 * 4 * 4,
+        "direct BLAS-hit matmul should allocate only the 8x4 f32 result \
+         buffer after the IR specialization pass removes the dead Mul"
+    );
+    assert_eq!(
+        inline_c.total_alloc_bytes,
+        8 * 4 * 4,
+        "inline expand+mul+sum should also specialize to result-only memory"
+    );
 
-    // Linear projection: scale the inputs to 1024×1024 @ 1024×1024.
-    // The 3-D Mul intermediate (allocated under both BLAS-hit and
-    // BLAS-miss paths) becomes 1024×1024×1024×4 B = 4 GiB. This is the
-    // dominant working-set cost for any non-trivial matmul shape, and
-    // it's wasted compute under BLAS specialization. Closing the
-    // dead-Mul gap (run DCE *after* BLAS detection, or fold BLAS detection
-    // into the optimize pass instead of codegen) would reduce a 1024
-    // matmul's working set from ~4 GiB to ~4 MiB — a 1000× reduction.
-    let scale_factor: u64 = (1024_u64 * 1024 * 1024) / (8 * 16 * 4);
-    let proj_direct_bytes = (direct_c.total_alloc_bytes as u64) * scale_factor;
-    let proj_direct_gib = proj_direct_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let proj_direct_bytes = 1024_u64 * 1024 * 4;
+    let proj_direct_mib = proj_direct_bytes as f64 / (1024.0 * 1024.0);
     eprintln!(
         "Linear projection to 1024×1024 @ 1024×1024 inputs:\n  \
-         direct (BLAS hit, dead Mul): {proj_direct_gib:.2} GiB peak working set\n  \
-         inline (same IR, same codegen): {proj_direct_gib:.2} GiB\n  \
-         user_def variants: comparable peak (Mul is allocated either way), \
-         but compute path is scalar reduction instead of sgemm — much slower."
+         direct (BLAS hit, no dead Mul): {proj_direct_mib:.2} MiB result buffer\n  \
+         inline (same IR, same codegen): {proj_direct_mib:.2} MiB result buffer\n  \
+         user_def variants: still miss BLAS specialization across the call boundary, \
+         so the compute path is scalar reduction instead of sgemm — much slower."
+    );
+}
+
+#[test]
+#[ignore = "M5 target behavior: enable when cross-function specialization summaries land"]
+fn target_behavior_user_def_matmul_helpers_hit_blas() {
+    let (_, _, user_def_builtin, user_def_manual) = semantic_gap_sources();
+    let user_b = build_and_count(user_def_builtin, "sgap_target_user_def_builtin");
+    let user_m = build_and_count(user_def_manual, "sgap_target_user_def_manual");
+
+    assert!(
+        user_b.blas >= 1,
+        "target behavior: user-def wrapper around builtin matmul should emit BLAS"
+    );
+    assert!(
+        user_m.blas >= 1,
+        "target behavior: user-def wrapper around expand+mul+sum should emit BLAS"
     );
 }

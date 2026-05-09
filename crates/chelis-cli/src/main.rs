@@ -1207,7 +1207,8 @@ fn cmd_build(
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
-                let fused = chelis_ir::fuse::fuse(&dag);
+                let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+                let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
@@ -1245,7 +1246,8 @@ fn cmd_build(
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
                 reject_unsupported_hip_ops(&hip_dag)?;
-                let fused = chelis_ir::fuse::fuse(&hip_dag);
+                let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
@@ -1423,7 +1425,8 @@ fn cmd_build_deep(
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
-                let fused = chelis_ir::fuse::fuse(&dag);
+                let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+                let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
@@ -1456,7 +1459,8 @@ fn cmd_build_deep(
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
                 reject_unsupported_hip_ops(&hip_dag)?;
-                let fused = chelis_ir::fuse::fuse(&hip_dag);
+                let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
+                let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }

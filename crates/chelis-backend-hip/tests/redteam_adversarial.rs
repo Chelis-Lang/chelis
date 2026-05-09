@@ -17,6 +17,13 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
+fn vec_bool(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Bool,
+    }
+}
+
 fn mat_f32(rows: usize, cols: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -277,15 +284,15 @@ fn rt7_different_reductions_different_kernels() {
 }
 
 // ===========================================================================
-// RT8: Load-as-output uses wrong input slot when Store nodes exist
+// RT8: Load-as-output uses wrong input slot and ownership when Store nodes exist
 // ===========================================================================
 
 #[test]
 fn rt8_load_as_output_with_store() {
     // A DAG where a Load is also a root, AND there's a Store node.
     // The Store is collected as output[0], then the Load-root as output[1].
-    // The output emission for the Load currently does `outputs[slot] = inputs[slot]`
-    // which would be `outputs[1] = inputs[1]` — but the Load might be inputs[0]!
+    // The load-root output must use the correct input slot and must be an owned
+    // tensor because host callers free every output slot.
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
@@ -309,13 +316,16 @@ fn rt8_load_as_output_with_store() {
     assert_eq!(result.input_labels, vec!["x"]);
     assert_eq!(result.output_labels, vec!["computed", "root1"]);
 
-    // The generated code for the Load-as-output should reference inputs[0], not inputs[1]
-    // Current buggy code would emit: outputs[1] = inputs[1]  (wrong!)
-    // Correct code should emit: outputs[1] = inputs[0]
+    // The generated code for the Load-as-output should reference inputs[0], not inputs[1],
+    // and it should clone to an owned contiguous host tensor rather than aliasing input storage.
     assert!(
         !src.contains("outputs[1] = inputs[1]"),
         "BUG: Load-as-output must use the correct input slot, not the output slot. \
          Load 'x' is inputs[0] but appears as outputs[1]. Code incorrectly maps to inputs[1]."
+    );
+    assert!(
+        src.contains("outputs[1] = chelis_contiguous(inputs[0]);"),
+        "Load-as-output must return an owned host tensor so callers can free outputs independently"
     );
 }
 
@@ -418,10 +428,10 @@ fn rt12_cast_emits_kernel() {
     let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
     let c = dag.add_node(
         RiscOp::Cast {
-            new_precision: Prim::F32,
+            new_precision: Prim::Bool,
         },
         vec![x],
-        vec_f32(4),
+        vec_bool(4),
         None,
     );
     dag.add_root(c);

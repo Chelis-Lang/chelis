@@ -1,6 +1,11 @@
 # Chelis Compiler Gaps — Empirical Findings
 
-**Status:** open — six gaps documented, each with a regression test.
+**Status:** partially closed — Gaps 2 and 6 are closed by M1; the adjacent
+Surf-span finding is closed by M2b; Gap 4's rank ≥ 2 expressibility path is
+closed by M3 with batched BLAS specialization still open. The remaining
+work is explicitly tracked in `docs/gap_synthesis.md` §5 "Remaining Work
+Register": Gap 1/M2a, Gap 3/M4, Gap 4/M3b, Gap 5 implementation, and the
+formal M3 red-team follow-up.
 **Filed:** 2026-05-08
 **Owning phase:** cross-phase (perf + ergonomics)
 
@@ -58,17 +63,29 @@ backend directly.
 Asserts 5 allocs, 0 memcpy, ≥2 fused parallel-for-simd, restrict
 present.
 
+**Target test:** the same file also contains ignored test
+`target_behavior_copy_elision_reuses_c_backend_buffers`, which asserts the
+post-M2a target of at most three 4 MiB slots for the 1024×1024 probe:
+`cargo test -p chelis-cli --test copy_elision target_behavior_copy_elision_reuses_c_backend_buffers -- --ignored --nocapture`.
+
 **Probe corpus:** `examples/illustrative/copy_elision_probe.ch`.
 
-## Gap 2 — Pattern matchers are brittle to no-op interleaving
+## Gap 2 — Pattern matchers are brittle to no-op interleaving — CLOSED by M1
 
-**Claim qualified:** "Recognizable Tier 2 patterns survive the lowering
-pipeline back into BLAS / cuDNN / MKL specializations."
+**Claim qualified:** "Recognizable Tier 2 matmul patterns survive the
+lowering pipeline back into BLAS specialization."
 
-**Observation:** The C backend's BLAS detector keys off the literal
-shape `Sum → Mul → (Expand, Expand)`. Inserting a no-op `Cast` (e.g.
-`f32 → f32`) between an `Expand` and the `Mul` causes the detector to
-miss, falling through to the scalar `expand+mul+sum` codegen.
+**Current status:** M1 added `chelis_ir::specialize`, an IR-level
+specialization substrate that runs after AD and before DCE/fusion/codegen.
+Its closed-list no-op cleanup removes identity `Cast`, identity `Reshape`,
+and identity `Permute` nodes before replacing recognized matmul subgraphs
+with `RiscOp::BlasMatmul`.
+
+**Original observation:** The raw C backend BLAS detector keys off the
+literal shape `Sum → Mul → (Expand, Expand)`. Inserting a no-op `Cast`
+(e.g. `f32 → f32`) between an `Expand` and the `Mul` caused the detector
+to miss. The raw detector remains strict, but the user-facing pipeline now
+cleans the identity cast before specialization.
 
 **Where it lives:** `crates/chelis-backend-c/src/blas.rs:42-64` —
 `detect_matmul_pattern` walks `sum.inputs[0].op == Mul` then
@@ -83,9 +100,8 @@ optimized BLAS / cuDNN / MKL calls" or "may special-case this pattern
 for efficiency." The recognizer is an optimization, not a correctness
 contract.
 
-**What would close it:** either (a) a constant-fold / no-op-cast
-elimination pass before the BLAS detector runs, or (b) walk-through
-detectors that skip identity / no-op nodes.
+**What closed it:** option (a), implemented as a closed-list no-op cleanup
+inside the IR specialization pass before BLAS replacement.
 
 **Spec coverage:**
 - `spec/05-risc-primitives.md` §3.5 / §4.1 / §4.5 acknowledge the
@@ -95,11 +111,11 @@ detectors that skip identity / no-op nodes.
   the broader optimize-pass design list constant-folding and
   algebraic identities, but no "no-op cast elimination before BLAS
   detection" pre-pass is concretely scoped.
-- **Not addressed:** the order between cast-eliding constant-fold
-  and BLAS detection isn't pinned down; today the BLAS detector runs
-  on a DAG that may still contain identity casts.
+- **Addressed by M1:** pass order is pinned as semantic lowering/AD first,
+  then closed-list no-op cleanup, specialization replacement, DCE, fusion,
+  and backend codegen.
 — `canonical_matmul_pattern_is_detected` (positive),
-`cast_perturbed_matmul_pattern_misses` (negative),
+`cast_perturbed_matmul_specializes_after_noop_cleanup` (positive),
 `structural_no_gather_recognizer_today` (sentinel that there is no
 analogous gather→scatter recognizer yet — see Gap 3).
 
@@ -127,30 +143,16 @@ from a `Sum` node:
 If all nine conditions hold, the detector returns
 `Some(MatmulInfo { m, n, k })`. Otherwise `None`.
 
-**2. The dispatch** — `crates/chelis-backend-c/src/emit.rs:1525-1530`,
-inside `emit_reduce_sum`:
+**2. The dispatch** — M1 moved user-facing dispatch to
+`chelis_ir::specialize::specialize_for_blas`. The pass replaces the
+recognized `Sum(Mul(Expand, Expand))` root with `RiscOp::BlasMatmul`,
+then DCE removes the orphan `Mul` and `Expand` nodes before backend
+emission. The C and HIP emitters now emit BLAS directly from the
+specialized node.
 
-```rust
-if self.use_blas
-    && let Some(matmul) = crate::blas::detect_matmul_pattern(dag, NodeId(id))
-{
-    self.emit_blas_matmul(id, &matmul, ty);
-    return;
-}
-```
-
-On hit, the emitter produces `cblas_sgemm(...)` reading directly
-from the original `A` and `B` (not from any intermediate buffer)
-and writes to a fresh result tensor, then `return`s — short-
-circuiting the generic Sum-of-Mul reduction code that would
-otherwise emit a scalar reduction loop. **The `Mul` predecessor is
-still emitted by an independent visitor pass** (the dead-Mul
-finding in Gap 6).
-
-**3. The link-flag side-channel** —
-`crates/chelis-backend-c/src/lib.rs:122` runs
-`detect_matmul_pattern` across every `Sum` node before codegen so
-the build can decide whether to require the `-lopenblas` link flag.
+**3. The link-flag side-channel** — C codegen now decides BLAS
+requirements by scanning the post-specialization DAG for
+`RiscOp::BlasMatmul`.
 
 ### Empirical brittleness sweep
 
@@ -186,27 +188,18 @@ source, the only easy ways to disable BLAS specialization are:
    detector runs on the caller's DAG which only sees the call.
    Real-world impact: Coral / Nautilus / Octant abstractions over
    `matmul` lose specialization (Gap 5).
-3. **Interposing a node between Expand and Mul (or Mul and Sum) at
-   the IR level.** Not easy from Surf today — the desugarer doesn't
-   emit such nodes for any standard idiom — but trivial from Deep
-   or programmatic DAG construction. Future DCE / CSE / fusion
-   passes that interleave nodes will silently break BLAS detection
-   for any matmul they touch.
+3. **Interposing a non-identity node between Expand and Mul (or Mul
+   and Sum) at the IR level.** Identity casts, identity reshapes, and
+   identity permutes are now removed by the M1 closed-list cleanup.
+   Other interposed nodes still intentionally block specialization.
 
-The brittleness is **latent**: it doesn't bite typical Surf code
-today, but it bites as soon as (a) symbolic-dim matmul becomes
-common (transformer training), (b) library code gets layered, or
-(c) future optimization passes start interleaving casts / no-ops
-between Tier 2 nodes. The cast-perturbation regression test in
-`pattern_matcher_brittleness.rs` is the early-warning system for
-case (c).
+The original no-op brittleness is closed for the M1 no-op list. The
+remaining miss cases are symbolic dimensions (Gap 4/M3b scope) and
+user-`def` boundaries (Gap 5 workstream).
 
-The structurally-better fix is the same one outlined in Gap 6:
-move BLAS detection out of codegen and into the optimize pass,
-where (a) it runs alongside algebraic simplification so identity
-casts and reshape no-ops can be skipped, and (b) it can rewrite
-the DAG to remove the now-orphan Mul once the Sum has been
-replaced. Both Gap 2 and Gap 6 close together under that approach.
+The structurally-better fix shipped in M1: BLAS detection moved into
+the IR specialization substrate, paired with post-specialization DCE.
+Gap 2 and Gap 6 close together under this approach.
 
 ## Gap 3 — `gather` lowering not wired; OOM trap conditional
 
@@ -264,21 +257,35 @@ gradient `[3, 3, 0, 0]` for an all-zero indices stress case. The test
 proves the AD side will be correct by construction whenever §3.5
 ships; it does not prove the OOM trap is closed.
 
+**Required M4 oracle:** closure must add emitted-code inspection for both
+C and HIP that proves embedding/MoE-shaped gather/scatter does not allocate
+the dense `[N, V, D]` one-hot materialization. The test should check for the
+bounded sparse kernel path and for absence of any allocation whose shape is
+the full token-by-vocabulary-by-feature product; small fixture sizes are
+acceptable because the assertion is structural, not a large-memory runtime
+probe.
+
 **Probe corpus:** `examples/illustrative/moe_gather_duplicate_indices.ch`
 (single MoE-style routing block with deliberately duplicated indices).
 
-## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible
+## Gap 4 — `matmul` is rank-2 only; canonical heads-as-dim MHA not expressible — PARTIALLY CLOSED by M3
 
 **Claim qualified:** "Multi-head attention expresses naturally as a
 heads dimension, with batched matmul broadcasting over leading axes."
 
-**Observation:** Chelis's `matmul` is hard rank-2 at the type-checker
-level. PyTorch's canonical MHA form
+**Current status:** M3 lifted `matmul` to rank ≥ 2 at the type checker
+and Tier 2 lowering layers. Batched matmul now broadcasts over leading
+axes and lowers through the generic `expand + mul + sum` path. The
+remaining Gap 4 performance follow-up is batched BLAS specialization:
+the C/HIP fast paths still target statically concrete rank-2 matmul only.
+
+**Original observation:** Chelis's `matmul` was hard rank-2 at the
+type-checker level. PyTorch's canonical MHA form
 (`qkv.reshape(batch, seq, num_heads, 3*head_dim).permute(0, 2, 1, 3)`
 followed by batched scaled-dot-product attention over
-`[batch, head, seq, dim]`) is not expressible.
+`[batch, head, seq, dim]`) was not expressible.
 
-**Where it lives:** `crates/chelis-types/src/infer.rs:7052`:
+**Where it lived:** `crates/chelis-types/src/infer.rs:7052` before M3:
 
 ```rust
 if lhs_dims.len() != 2 || rhs_dims.len() != 2 {
@@ -292,17 +299,17 @@ if lhs_dims.len() != 2 || rhs_dims.len() != 2 {
 }
 ```
 
-**Workaround in current corpus:** multi-head attention is written as
+**Former workaround in current corpus:** multi-head attention is written as
 N per-head unrolled blocks, each with its own rank-2 `wq_i / wk_i /
 wv_i / wo_i` and an explicit `matmul(copy(x), wq_i)` — see
 `examples/transformer_block.ch` (4 heads) and
 `examples/illustrative/mha_two_heads_unrolled.ch` (2 heads).
 
-**What would close it:** generalize `lower_matmul` and the matmul
-type rule to accept rank ≥ 2, broadcasting over leading axes (the
-natural `... + matrix-pair` shape rule). The Tier 2 lowering already
-emits expand+mul+sum which would extend cleanly, but the BLAS
-specializer would need to recognize batched-GEMM patterns too.
+**What closed the expressibility gap:** generalizing `lower_matmul` and
+the matmul type rule to accept rank ≥ 2, broadcasting over leading axes
+(the natural `... + matrix-pair` shape rule). What remains is extending
+the BLAS specializer to recognize statically concrete batched-GEMM
+patterns.
 
 **Spec coverage:**
 - `spec/design/chelis_canonical_reference.md:438-443` explicitly
@@ -319,17 +326,13 @@ specializer would need to recognize batched-GEMM patterns too.
   **`einsum`** as the planned answer: "covers matmul, batched matmul,
   transpose, trace, outer products, and common contraction patterns
   in one primitive."
-- **Roadmap status conflict:** `einsum` is registered as a Tier 2
-  builtin (`crates/chelis-types/src/builtins.rs:135`) and Phase 3h
-  is marked shipped, but empirically the **type checker for
-  `matmul` itself still rejects rank ≥ 2** (`infer.rs:7052`). The
-  PyTorch-style heads-as-dim MHA form requires `matmul` (or einsum
-  via reshape gymnastics) to broadcast cleanly; today users must
-  unroll heads as separate rank-2 matmuls.
-- **Not explicitly addressed:** whether `einsum` is meant to fully
-  *replace* `matmul` for batched cases, or whether `matmul`'s type
-  rule should be lifted to rank ≥ 2 for ergonomic parity with
-  PyTorch.
+- **Addressed by M3:** `matmul` itself now accepts rank ≥ 2 and
+  broadcasts leading axes for ergonomic parity with PyTorch-style
+  batched matmul.
+- **Still open:** batched matmul remains on the generic lowering path.
+  Any operand/result dimension needed for a future batched BLAS loop
+  bound or stride that is not `Lit(n)` or `Named(_, Some(n))` must fall
+  through to the generic path.
 
 **Probe corpus:**
 - `examples/illustrative/mha_single_head.ch` — single-head reference,
@@ -337,9 +340,11 @@ specializer would need to recognize batched-GEMM patterns too.
 - `examples/illustrative/mha_two_heads_unrolled.ch` — multi-head via
   unrolling, the corpus-supported alternative to canonical
   heads-as-dim.
+- `examples/illustrative/mha_heads_as_dim.ch` — canonical heads-as-dim
+  batched matmul accepted by the M3 type rule and generic lowering.
 - `examples/illustrative/mha_slice_combined_qkv.ch` — combined-QKV
   with `shrink(&qkv)` borrows demonstrating linearity allows the
-  zero-copy slicing pattern (single-head, since matmul is rank-2).
+  zero-copy slicing pattern.
 
 ## Gap 5 — Cross-function pattern matching / inlining
 
@@ -378,54 +383,46 @@ AD adjoints over opaque nalgebra calls
 `spec/design/chelis_project_plan.md:557-562`) — but the user-level
 broader concession isn't documented.
 
-**What would close it:** either (a) cross-function inlining before
-optimize/fuse so helpers are visible to the BLAS detector, or (b)
-call-graph-aware pattern matching that runs the detector on each
-function's DAG independently and remembers a "this helper is a
-matmul" annotation, then re-emits the helper as a BLAS call.
+**What would close it:** the M5 follow-up workstream chooses path (b):
+verified BLAS-equivalent function summaries plus callsite specialization.
+Whole-program inlining remains an implementation technique for small
+helpers, not the design contract.
 
 **Spec coverage:**
-- `spec/design/chelis_canonical_reference.md:463-464` makes the
-  scope boundary explicit by design: *"They cannot be defined as
-  user-space library functions because a user-space function cannot
-  teach the AD engine its adjoint or the GPU backend its kernel
-  fusion strategy."* Tier 2 specialization is **only for the named
-  builtins**; user defs are out of scope by intent.
+- `spec/design/chelis_canonical_reference.md:463-464` now frames the
+  boundary as current behavior, not a permanent design principle, and
+  points to `spec/design/cross_function_specialization.md`.
 - `spec/design/chelis_phase2_plan.md:326` confirms the same rule on
-  the linearity side: "Linearity checking is intra-procedural — no
-  cross-function lifetime analysis."
+  the linearity side as current scope: no general cross-function helper
+  specialization is part of the Phase 2 completion claim.
 - `spec/design/chelis_oopsla_paper_plan.md:125` documents the perf
-  cost they've already measured: *"LTO finding: 3.8x improvement
-  from cross-TU inlining — a codegen insight, not just a benchmark
-  result."* The current workaround is to lean on **clang LTO at link
-  time** rather than source-level inlining inside Chelis.
+  cost and now frames clang LTO as a workaround rather than the codegen
+  story for backend dispatch.
 - `spec/design/chelis_span_survival.md:97` documents one *narrow*
   inlining mechanism — `inline_top_level_host_call` for HOF
   specialization (e.g. `grad(local_fn)(theta)`), which is how AD
   through user-defined wrapper functions stays correct.
-- **Not addressed:** general user-`def`-boundary inlining for
-  tensor pattern matching. The OOPSLA paper plan documents the LTO
-  workaround as the codegen story; no proposal exists for moving
-  inlining earlier (pre-optimize/fuse) so BLAS detection sees user
-  helpers. **This is the most architecturally entrenched gap of the
-  five** — it's not "not yet shipped," it's "explicitly out of scope
-  for source-level optimization, recovered partially via clang LTO."
+- **Addressed by M5 docs, not implemented:** the workstream doc anchors
+  acceptance to `cross_library_semantic_gap.rs`: the two user-def cases
+  must flip from BLAS misses to generated-C BLAS hits.
 
 **Locked test:** `crates/chelis-cli/tests/cross_library_semantic_gap.rs`
 — `semantic_gap_inline_vs_user_def`. Asserts BLAS hits for the two
 inline forms and misses for the two user-`def` forms.
 
-## Gap 6 — BLAS-specialized matmul still allocates and computes the dead `Mul` intermediate
+## Gap 6 — BLAS-specialized matmul still allocates and computes the dead `Mul` intermediate — CLOSED by M1
 
 **Claim qualified:** "Tier 2 BLAS specialization eliminates the
 naïve `expand+mul+sum` cost when the pattern is recognized."
 
-**Observation:** It eliminates the *compute cost* on the `Sum`
-step (replaced by `cblas_sgemm`), but **not** the memory cost on
-the `Mul` step. The 3-D `Mul` intermediate `[m, k, n]` is still
-allocated and computed in a fused parallel-for-simd loop, then
-freed without ever being read by sgemm (which reads inputs
-directly).
+**Current status:** M1 eliminates both the compute and memory cost for
+BLAS-hit rank-2 matmul. The IR specialization pass replaces the
+recognized subgraph with `RiscOp::BlasMatmul` before DCE/fusion, so the
+3-D `Mul` intermediate is not emitted.
+
+**Original observation:** Codegen-time BLAS detection eliminated the
+compute cost on the `Sum` step but left the 3-D `Mul` intermediate
+allocated and computed independently.
 
 **Where it lives:** `crates/chelis-ir/src/tier2.rs::lower_matmul`
 emits the `Mul` node into the IR DAG. BLAS detection at
@@ -449,11 +446,9 @@ working-set cost — ~3 MiB per `seq` token, almost entirely from
 dead `Mul` intermediates that BLAS hits would have eliminated in
 any normal compiler pipeline.
 
-**What would close it:** either (a) move BLAS detection into the
-optimize pass so it can run DCE afterwards and prune the orphan
-`Mul`, or (b) keep codegen-time detection but extend the emitter
-to skip emission of the `Mul` (and its `Expand` operands) when
-the consumer has been specialized to sgemm.
+**What closed it:** option (a). BLAS detection now runs as an IR
+replacement pass followed by DCE, which prunes the orphan `Mul` and
+`Expand` nodes.
 
 **Spec coverage:**
 - `spec/design/phase1d_flattening.md` ships the BLAS specializer
@@ -461,15 +456,13 @@ the consumer has been specialized to sgemm.
   dead-`Mul` follow-on.
 - `spec/06-transformations.md` §5.2 (DCE) defines DCE but does
   not require it to run after codegen-time pattern matching.
-- **Not addressed.** The cost was discovered empirically when
-  parsing emitted C for cost-profile assertions.
+- **Addressed by M1.** The cost-profile assertions now require the
+  direct and inline BLAS-hit paths to allocate only the result buffer.
 
 **Locked test:** the cost-profile assertions in
 `crates/chelis-cli/tests/cross_library_semantic_gap.rs` already
-encode today's reality (8×16 @ 16×4 → 2176 working bytes, of
-which 2048 are the dead `Mul`). When this gap closes, the
-assertion will flip to ~128 bytes (result only) and the test
-docstring needs updating.
+encode the closed behavior (8×16 @ 16×4 → 128 working bytes, result
+only) while keeping the user-`def` specialization miss locked for Gap 5.
 
 **Probe corpus:** any matmul-heavy program. The
 `mha_two_heads_unrolled.ch` and `transformer_block.ch` examples
@@ -479,23 +472,25 @@ the dead-`Mul` tax.
 **Tracked in:**
 `spec/upstream-bugs/dead-mul-after-blas-specialization.md`.
 
-## Adjacent finding (not in the six)
+## Adjacent finding (not in the six) — closed by M2b
 
-**Surf-source spans don't reach the IR.** Compiling
-`examples/transformer_block.ch` to C produces 158 `// span:` comments,
-all of which are `__synthesized_tier2__`. None of them carries an
-original Surf line number. The cause is upstream of fusion: the Surf
-parser does not currently attach source spans to the Deep AST for
-this corpus, so there is nothing for the IR pipeline to thread
-through. The traceability machinery in
-`spec/design/chelis_span_survival.md` is correct and runs; the bug is
-that no spans enter the pipeline. This makes the audit chain
-practically useless for back-tracing a generated C kernel to a Surf
-line of business code.
+**Surf-source spans now reach the IR.** The Surf desugarer threads
+parser byte ranges into Deep `meta["span"]` as opaque IDs of the form
+`surf:<start>..<end>` for ordinary Surf expression bodies. Downstream
+IR lowering, transformation passes, and backend emitters already
+preserve `meta["span"]`, so generated source can now contain Surf
+byte-range comments instead of bottoming out entirely at
+`__synthesized_tier2__`.
+
+Synthesized markers remain valid only for nodes whose source span input
+is genuinely absent. Hand-constructed Surf ASTs that carry the legacy
+zero-length sentinel still desugar without `meta["span"]`, preserving
+the existing fallback behavior for tests and synthetic producers.
 
 **Locked test:** `crates/chelis-cli/tests/traceability_paradox.rs` —
-`transformer_block_traceability_state_is_locked`. Asserts every span
-is a `__synthesized_*` marker.
+`transformer_block_traceability_state_is_locked`. Asserts that emitted
+span comments include `surf:<start>..<end>` byte-range IDs and are no
+longer all `__synthesized_*` markers.
 
 **Spec coverage:**
 - `spec/design/chelis_span_survival.md:64-72` defines the
@@ -503,15 +498,11 @@ is a `__synthesized_*` marker.
   CSE / Tier 2 / AD / Fusion / Vmap / Verify / Codegen). The rules
   are correct and the implementation follows them.
 - The same doc accommodates "parent had no span" via the
-  `__synthesized_tier2__` fallback (line 68). This is exactly the
-  case our test observes: parent Deep nodes carry no `meta["span"]`,
-  so every Tier 2 sub-node falls through to the synthesized marker.
-- **Not addressed:** the upstream cause — that the **Surf parser
-  does not attach `meta["span"]` to Deep nodes** for typical
-  function bodies — isn't tracked anywhere in `spec/upstream-bugs/`
-  or in the span-survival doc. The audit chain machinery is
-  designed correctly, but the user-source spans never enter the
-  pipeline, so the chain bottoms out at "synthesized."
+  `__synthesized_tier2__` fallback. After M2b this fallback is reserved
+  for genuinely spanless inputs, not ordinary parsed Surf bodies.
+- **Addressed:** the upstream cause was the Surf desugarer emitting empty
+  Deep metadata for parsed Surf expressions. It now writes `meta["span"]`
+  when the Surf AST span has a real byte range.
 
 ## Honest scope
 

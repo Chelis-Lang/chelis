@@ -10,6 +10,13 @@ fn expand_surf(source: &str) -> String {
     print_canonical(expanded.exprs())
 }
 
+fn assert_contains_var_ref(text: &str, name: &str) {
+    assert!(
+        text.contains("(var {") && text.contains(&format!(" {name})")),
+        "expected expanded Deep to contain var reference `{name}`; got:\n{text}"
+    );
+}
+
 #[test]
 fn simple_macro_expands_to_base_tags_with_source_metadata() {
     let text = expand_surf(
@@ -33,7 +40,7 @@ def f(residual, x: tensor[4, f32]): tensor[4, f32] = residual(x)
 "#,
     );
 
-    assert!(text.contains("(var {} residual)"));
+    assert_contains_var_ref(&text, "residual");
     assert!(!text.contains("source: (residual"));
 }
 
@@ -51,7 +58,7 @@ def f(x: f32): f32 = capture(x)
     let text = print_canonical(expanded.exprs());
 
     assert!(text.contains("x_macro_"));
-    assert!(text.contains("(var {} x)"));
+    assert_contains_var_ref(&text, "x");
 }
 
 #[test]

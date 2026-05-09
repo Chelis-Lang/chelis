@@ -1,7 +1,7 @@
 //! Test 2 — Brittle Pattern Matcher
 //!
-//! Probes whether the C backend's BLAS specializer (`detect_matmul_pattern`)
-//! survives a "useless" intermediate cast. The test framing comes from a
+//! Probes whether the IR-level specialization pass survives a "useless"
+//! intermediate cast. The test framing comes from a
 //! third-party review: if a user inserts a no-op cast (e.g. `cast(.., f32)`)
 //! between the canonical lowering steps, does the pattern-match still fire,
 //! or does the program degrade silently to the scalar fallback?
@@ -17,16 +17,14 @@
 //!    recognizer. Until then, gather doesn't OOM because the dangerous
 //!    decomposition isn't generated.
 //!
-//! 2. The closest detector that *does* ship is `detect_matmul_pattern`
-//!    (`crates/chelis-backend-c/src/blas.rs:27`), which keys off
-//!    `Sum -> Mul -> (Expand, Expand)`. We use it here as a proxy for the
-//!    third-party's brittleness claim and confirm: yes, inserting a Cast
-//!    between Expand and Mul makes the pattern miss, falling through to the
-//!    scalar `expand+mul+sum` codegen. That is the exact failure mode the
-//!    review predicted, just for matmul instead of gather.
+//! 2. The raw backend detector still keys off `Sum -> Mul -> (Expand, Expand)`,
+//!    but M1 added `chelis_ir::specialize`, which runs closed-list no-op
+//!    cleanup first. The user-facing contract is that identity `Cast(f32)`
+//!    no longer hides a matmul from BLAS specialization.
 
 use chelis_backend_c::blas::detect_matmul_pattern;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::specialize::specialize_for_blas;
 use chelis_types::types::Prim;
 
 fn mat(r: usize, c: usize) -> TensorType {
@@ -83,7 +81,7 @@ fn canonical_matmul_pattern_is_detected() {
 }
 
 #[test]
-fn cast_perturbed_matmul_pattern_misses() {
+fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     // Same DAG as above, but with a `Cast(_, f32)` inserted between each
     // Expand and the Mul. Mathematically a no-op (precision unchanged); the
     // pattern matcher should not care. In practice it does — the detector
@@ -130,14 +128,30 @@ fn cast_perturbed_matmul_pattern_misses() {
     );
     let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
     let sum = dag.add_node(RiscOp::Sum { axis: 1 }, vec![mul], mat(2, 4), None);
+    dag.add_root(sum);
 
     assert!(
         detect_matmul_pattern(&dag, sum).is_none(),
-        "pattern matcher should NOT see a matmul through an interposed Cast — \
-         this is the brittleness Test 2 in the third-party review predicted. \
-         To reach BLAS in this case, either (a) a constant-fold pass would \
-         have to elide the no-op cast before BLAS detection, or (b) the \
-         detector itself would need to walk through Cast nodes."
+        "the raw backend detector remains intentionally strict; the IR \
+         specialize pass is responsible for removing identity casts before \
+         detection"
+    );
+
+    let specialized = specialize_for_blas(&dag);
+    assert!(
+        specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { m: 2, n: 4, k: 3 })),
+        "identity casts must not prevent the IR specialize pass from replacing \
+         the matmul pattern with a specialized BLAS node"
+    );
+    assert!(
+        !specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Mul | RiscOp::Expand { .. })),
+        "post-specialization DCE must remove the orphan Mul and Expand nodes"
     );
 }
 

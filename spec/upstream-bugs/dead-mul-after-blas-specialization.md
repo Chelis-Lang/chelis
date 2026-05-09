@@ -1,6 +1,6 @@
 # dead-mul-after-blas-specialization: BLAS-hit matmul still allocates and computes the Tier-2 `Mul` intermediate
 
-**Status:** **OPEN**
+**Status:** **CLOSED by M1**
 **Filed:** 2026-05-08
 **Owning phase:** Phase 1d (BLAS specialization) / DCE pipeline
 **Discovered by:** Cost-profile inspection of
@@ -9,13 +9,16 @@
 
 ## Summary
 
-When the C backend specializes a matmul subgraph to `cblas_sgemm`,
-the Tier-2 `Mul` intermediate that the desugarer emitted alongside
-the `Sum` is **still allocated and computed at runtime**. The
-sgemm call reads directly from the original input tensors (the
-operands of the two `Expand` views) and produces the result in a
-fresh buffer; the `Mul` output buffer is filled with values that
-are never read, then freed at function return.
+M1 moved BLAS specialization into `chelis_ir::specialize` as an IR
+replacement pass. The pass runs after AD and before DCE/fusion/codegen,
+replacing recognized rank-2 matmul subgraphs with `RiscOp::BlasMatmul`.
+DCE then removes the orphan `Mul` and `Expand` nodes. The C and HIP
+emitters emit BLAS from the specialized node, so BLAS-hit direct and
+inline matmul allocate only the result buffer.
+
+Original finding: when the C backend specialized a matmul subgraph to
+`cblas_sgemm` at codegen time, the Tier-2 `Mul` intermediate was still
+allocated and computed at runtime.
 
 Reproducer: build the smallest BLAS-eligible matmul and inspect
 the generated C.
@@ -151,26 +154,22 @@ Cons: codegen-time skipping is fragile — easy to miss a
 "sometimes the Mul is shared with another consumer" edge case.
 A test would need to lock the contract.
 
-Either approach requires extending the regression coverage:
+M1 chose Approach A. Regression coverage now asserts:
 
 - The Test 5 cost-profile assertion in
-  `crates/chelis-cli/tests/cross_library_semantic_gap.rs` should
-  flip from "direct and inline_manual produce identical 2176-byte
-  working sets (= dead Mul + result)" to "direct and inline_manual
-  produce 128-byte working sets (= result only)."
-- A new dead-code assertion: scan the emitted C for
-  `chelis_alloc(...) ; ... ; chelis_free(...)` patterns where the
-  buffer between alloc and free is never read after the `if
-  contiguous { ... }` block, and assert their absence on
-  BLAS-hit matmuls.
+  `crates/chelis-cli/tests/cross_library_semantic_gap.rs` requires direct
+  and inline_manual to produce identical 128-byte working sets (= result
+  only).
+- `crates/chelis-backend-c/tests/pattern_matcher_brittleness.rs` requires
+  identity-cast-perturbed matmul to specialize after no-op cleanup and
+  post-specialization DCE.
 
 ## Probe corpus
 
 `crates/chelis-cli/tests/cross_library_semantic_gap.rs` already
-documents this finding empirically. The cost-profile output
-shows `direct = 2176 bytes` for an 8×16 @ 16×4 matmul where
-only 128 bytes of result are user-visible — the 2048-byte gap is
-this dead `Mul`.
+documents this finding empirically. The current cost-profile output
+shows `direct = 128 bytes` for an 8×16 @ 16×4 matmul: the dead
+2048-byte `Mul` allocation is gone on BLAS-hit paths.
 
 ## Related gaps
 

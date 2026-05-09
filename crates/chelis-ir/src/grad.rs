@@ -848,6 +848,7 @@ fn compute_adjoints(
             // is not yet supported.
             None
         }
+        RiscOp::BlasMatmul { .. } => None,
     }
 }
 

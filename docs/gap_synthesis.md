@@ -29,30 +29,31 @@ The gaps are not six independent issues. They cluster:
 |---|---|---|
 | **A. Pipeline ordering** | 2, 6 | BLAS detection runs at codegen, AFTER DCE / algebraic-simp could have helped. Same architectural fix closes both. |
 | **B. Recognizer coverage** | 3, 4 (partial) | Each specialised kernel needs its own detector. New primitives ship without their recognizer. |
-| **C. Architecture-by-design** | 5 | Spec §8.5 explicitly: "user-space functions cannot teach the AD engine its adjoint or the GPU backend its kernel fusion strategy." |
+| **C. Cross-function specialization boundary** | 5 | User-defined helper calls do not yet carry compiler-verified specialization summaries across function boundaries. |
 | **D. Backend parity** | 1 | HIP shipped Phase 1c memory planner; C didn't. Pure replication work. |
-| **E. Pipeline plumbing** | adjacent | Surf parser doesn't attach `meta["span"]` to Deep nodes; downstream propagation is correct but receives empty input. |
+| **E. Pipeline plumbing** | adjacent, closed by M2b | Surf desugaring now attaches parser byte-range `meta["span"]` IDs to ordinary Deep expression nodes; downstream propagation remains the consumer. |
 
 Pattern A is the highest-leverage fix — one architectural change closes
 two gaps and sets up the substrate for closing more. Pattern C is the
-most architecturally-entrenched (drawn explicitly in spec §8.5). The
-rest are bounded coverage / replication / plumbing work.
+most architecturally-entrenched, but M5 now tracks it as a concrete
+follow-up workstream rather than a permanent design exclusion. The rest
+are bounded coverage / replication / plumbing work.
 
 ## 2. Difficulty × fundamentality
 
-"Fundamental" here means "deciding to close it would require rethinking
-a deliberately-drawn design boundary." Only Gap 5 qualifies; the rest
-are unfinished implementation work.
+"Fundamental" here means "closing it requires adding cross-function
+compiler summaries rather than only improving a local pass." Only Gap 5
+qualifies; the rest are unfinished implementation work.
 
 | Gap | Effort | Fundamental? | Notes |
 |---|---|:---:|---|
 | **1** — C memory planner | ~1 week | No | Port HIP's interference-graph coloring (`crates/chelis-backend-hip/src/memory.rs`) to C. Greedy and well-understood. |
-| **2** — Pattern matcher brittleness | ~2 weeks | No | Move BLAS detection from codegen into a new "specialize" optimize pass. Add walk-through-no-op-cast. |
+| **2** — Pattern matcher brittleness | closed by M1 | No | BLAS detection moved into `chelis_ir::specialize`; identity casts/reshapes/permutes are cleaned before replacement. |
 | **3** — Gather lowering | ~1 month | Medium | Two coupled changes: §3.5 RISC lowering + scatter-recognition pattern matcher. Must ship together or arm the OOM trap. |
-| **4** — Rank-2 matmul | ~1-2 months | Medium-high | Lift type rule + `lower_matmul` + AD adjoint + BLAS specializer (both backends). Many touch points, but bounded. |
-| **5** — Cross-function specialization | ~6 months OR never | **Yes** | Either source-level inlining before optimize/fuse (large), or call-graph-aware pattern matching (also large). Current position: rely on clang LTO (3.8× recovery per OOPSLA paper plan). Spec §8.5 makes this explicitly out-of-scope. |
-| **6** — Dead Mul after BLAS hit | ~2 weeks | No | Merges with Gap 2 fix. |
-| Adjacent — Surf spans | ~1 week | No | Surf parser already tracks token positions; just plumb them into Deep node metadata. |
+| **4** — Rank-2 matmul | partially closed by M3 | Medium-high | Type rule + generic `lower_matmul` now accept rank ≥ 2. Batched BLAS specialization remains open. |
+| **5** — Cross-function specialization | separate workstream | **Yes** | M5 documents path (b): verified BLAS-equivalent helper summaries plus callsite emission. clang LTO is documented as a workaround, not the codegen story. |
+| **6** — Dead Mul after BLAS hit | closed by M1 | No | `RiscOp::BlasMatmul` replacement plus DCE removes the orphan `Mul`/`Expand` subgraph. |
+| Adjacent — Surf spans | closed by M2b | No | Surf parser token positions are now plumbed into Deep node metadata as `surf:<start>..<end>` IDs. |
 
 ## 3. Concrete cost picture (measured)
 
@@ -98,10 +99,10 @@ Decomposition at seq=2048:
 - 8.8 GiB quadratic-in-seq — attention-score and probs@V Mul
   intermediates
 
-**Closing Gap 6 alone (eliminate dead Mul intermediates after BLAS
-hit) drops the seq=2048 peak from 14.6 GiB to ~700 MiB — a 20×
-reduction.** This is the single highest-leverage fix in the whole
-catalogue.
+**M1 closed Gap 6 for concrete rank-2 BLAS-hit matmul** by replacing
+recognized matmul subgraphs before DCE/fusion. The transformer corpus
+still shows the old symbolic-dim working set until Gap 4/M3b addresses
+symbolic and batched matmul specialization.
 
 If Gap 4 also closes (batched matmul) so that BLAS specialization
 fires on the per-head matmuls, drops further. If FlashAttention-style
@@ -117,15 +118,14 @@ Same logical 8×16 @ 16×4 matmul, four code paths:
 
 | Form | BLAS hits? | Working bytes | Throughput estimate |
 |---|:---:|---|---|
-| `f(a, b) = matmul(a, b)` | ✅ | 2176 | ~100% (sgemm) |
-| `f(a, b) = { ae=expand(a,...); be=expand(b,...); sum(mul(ae,be), 1) }` | ✅ | 2176 | same |
+| `f(a, b) = matmul(a, b)` | ✅ | 128 | ~100% (sgemm) |
+| `f(a, b) = { ae=expand(a,...); be=expand(b,...); sum(mul(ae,be), 1) }` | ✅ | 128 | same |
 | `def my_mm = matmul; def f = my_mm` | ❌ | 2176 (Mul allocated either way) | ~1-2% (scalar reduction) |
 | `def my_mm = expand+mul+sum; def f = my_mm` | ❌ | 0 (host lane) | host-lane scalar |
 
-Memory: comparable at this shape (the dead Mul exists either way).
-Throughput: **~50-100× difference** between the BLAS path and the
-scalar-reduction fallback. This is the cost of any matmul that lives
-behind a user-`def` boundary.
+M1 makes inline BLAS-hit matmul result-only in memory. The remaining Gap 5
+cost is the function-boundary specialization miss: user-`def` wrappers still
+lose BLAS dispatch and take the scalar-reduction fallback.
 
 ### Specialization dispatch reality
 
@@ -135,7 +135,7 @@ Five common ML operations compiled to C:
 
 | Op | Specialised? | Generic-path cost vs cuBLAS / cuDNN equivalent |
 |---|:---:|---|
-| matmul | ✅ cblas_sgemm | matches BLAS |
+| concrete rank-2 matmul | ✅ cblas_sgemm | matches BLAS |
 | softmax | ❌ | ~3-5× slower (no online-softmax, no SRAM tiling) |
 | layer_norm | ❌ | ~3-5× slower (no fused mean+var pass) |
 | scatter | ❌ runtime-call | ~10-50× slower (no parallel-radix-sort, no warp-aware) |
@@ -146,26 +146,25 @@ in the *emitted* code, not in the compiler itself.
 
 ## 4. Sequenced fix plan
 
-A six-month plan that closes the five non-fundamental gaps. Gap 5
-stays as a documented boundary unless the language directionally
-pivots toward "users can teach the compiler about their abstractions."
+A staged plan that closes the local compiler gaps while splitting Gap 5
+into a dedicated cross-function specialization workstream.
 
-**Phase α (~1 month, highest-leverage):** Architectural change A —
-move BLAS / pattern detection out of codegen and into a new
-"specialize" optimize pass. Closes Gaps 2 + 6 simultaneously. Sets up
-the substrate for future recognizers (softmax, layer_norm, attention,
-gather→scatter). **20× transformer working-memory reduction.**
+**Phase α (closed by M1):** Architectural change A moved BLAS / pattern
+detection out of codegen and into `chelis_ir::specialize`. It closes
+Gaps 2 + 6 for rank-2 concrete matmul and sets up the substrate for
+future recognizers (softmax, layer_norm, attention, gather→scatter).
 
 **Phase β (~1 month, parallel to α):** Port HIP memory planner to C
-(Gap 1). Lift Surf parser to attach span metadata to Deep nodes
-(adjacent finding). Both bounded, independent, easy to staff in
-parallel.
+(Gap 1). The adjacent Surf-span plumbing item has been closed by M2b:
+desugared Deep now receives `surf:<start>..<end>` metadata for parsed
+Surf expression bodies.
 
-**Phase γ (~1-2 months):** Lift `matmul` to rank ≥ 2 (Gap 4).
-Generalise `lower_matmul` and the BLAS specializer for batched-GEMM.
-Closes the ergonomic story for canonical heads-as-dim attention. (The
-spec also offers `einsum` as the alternative answer; pick which one
-is canonical before investing.)
+**Phase γ (partially closed by M3):** `matmul` now accepts rank ≥ 2
+and `lower_matmul` emits the generic batched `expand + mul + sum`
+decomposition. This closes the ergonomic story for canonical
+heads-as-dim attention. The remaining Gap 4 performance work is batched
+BLAS specialization for statically concrete shapes, with symbolic dims
+falling through to generic lowering.
 
 **Phase δ (~1 month, paired):** Ship the §3.5 gather lowering paired
 with a scatter-recognition pattern in Phase α's new specialize pass
@@ -177,13 +176,31 @@ for softmax, layer_norm, and attention (FlashAttention-style fusion
 is the largest of these). Each one is bounded; they accumulate in the
 specialize pass as Tier-2-shape-recognition rules.
 
-**Gap 5 — defer.** Document the user-`def`-boundary specialization
-loss as a known design boundary. Continue to lean on clang LTO for
-cross-TU recovery. Revisit only if a concrete driver appears (RLVR
-training pipeline showing measurable cost, large library benchmarks,
-etc.).
+**Gap 5 — M5 workstream doc landed.** The active specs now frame
+user-`def` specialization loss as a known limitation intended to close
+through verified BLAS-equivalent helper summaries and callsite emission
+rules, anchored by `cross_library_semantic_gap.rs`.
 
-## 5. Verdict on structural feasibility
+## 5. Remaining Work Register
+
+These items are not optional cleanup. They are the explicit backlog left
+after the M1/M2b/M3/M5 documentation batch.
+
+| ID | Tracks | Required closure | Current executable anchor |
+|---|---|---|---|
+| **M2a** | Gap 1, C-backend memory planning | Port or lift HIP-style slot planning into the C backend while preserving C ownership rules for borrowed loads, non-contiguous reshape, stores, and output materialization. | `crates/chelis-cli/tests/copy_elision.rs::target_behavior_copy_elision_reuses_c_backend_buffers` is ignored until this lands. |
+| **M3b** | Gap 4 performance follow-up | Add batched BLAS specialization for rank ≥ 3 matmul where every loop-bound/stride dimension is statically known. Symbolic dimensions must continue to fall through to generic lowering. | `crates/chelis-ir/src/specialize.rs::symbolic_matmul_stays_on_generic_path` locks the negative side; a positive batched-BLAS test still needs to be added with the implementation. |
+| **M4** | Gap 3, gather/scatter lowering | Ship §3.5 gather lowering together with sparse gather/scatter recognition so embedding/MoE-shaped programs do not allocate dense `[N, V, D]` intermediates. | `crates/chelis-ir/tests/grad_gather_contract.rs` locks duplicate-index AD; emitted C/HIP structural tests for bounded sparse kernels still need to be added. |
+| **M5-impl** | Gap 5, cross-function specialization | Implement verified BLAS-equivalent helper summaries and callsite emission rules from `spec/design/cross_function_specialization.md`. | `crates/chelis-cli/tests/cross_library_semantic_gap.rs::target_behavior_user_def_matmul_helpers_hit_blas` is ignored until this lands. |
+| **M3-redteam** | Validation process | Run a contract-compliant fresh-context red-team pass for rank ≥ 2 matmul once local subagent execution is available. | The previous validation pass found no blockers but did not satisfy `redteam-exec`; do not count it as a formal red team. |
+
+HIP manual gate status for this batch: run 2026-05-09 on the local ROCm/HIP
+workstation with the documented `HSA_OVERRIDE_GFX_VERSION=11.5.1` environment;
+`cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored
+--test-threads=1` passed all 32 GPU correctness tests after fixing the
+load-root host-output ownership bug exposed by `g7_host_device_roundtrip`.
+
+## 6. Verdict on structural feasibility
 
 **Yes, structurally feasible.** The dominant cost (Gap 6 dead-Mul) is
 20× of the transformer working-memory bloat and closes with a
@@ -193,19 +210,17 @@ coverage / replication / plumbing work.
 
 ### Caveats worth pinning
 
-1. **Gap 5 is a design boundary.** If the language wants to maintain
-   its current scope ("Tier 2 specialization is only for the named
-   builtins"), then Coral / Nautilus / Octant operations will continue
-   to be ~50-100× slower than equivalent direct primitive use. The
-   OOPSLA paper plan's 3.8× clang LTO recovery is the planned story
-   for this. Closing this gap honestly would require treating
-   user-defined library functions as compiler-visible abstractions —
-   which means rethinking what "Tier 2" means.
+1. **Gap 5 is a separate architecture workstream.** Coral / Nautilus /
+   Octant helpers behind user-`def` boundaries still miss backend
+   specialization today. The planned closure is not blind inlining or
+   native-compiler LTO; it is a verified helper-summary mechanism that
+   lets backend specialization treat selected user functions as
+   compiler-visible abstractions.
 
-2. **Gap 4 has two equally valid closures.** Lifting `matmul` to
-   rank ≥ 2 is the PyTorch-ergonomic answer; pushing all batched
-   contraction through `einsum` is the compositional answer. The
-   spec hasn't picked. Worth deciding before investing.
+2. **Gap 4 is split between ergonomics and performance.** M3 picked the
+   PyTorch-ergonomic answer by lifting `matmul` to rank ≥ 2. Batched
+   BLAS remains deliberately narrower and should only specialize shapes
+   whose loop bounds and strides are statically known.
 
 3. **The dispatch-coverage tail is unbounded.** Softmax, layer_norm,
    attention, batched-attention, MoE routing, etc. each need their
@@ -235,7 +250,7 @@ correctness-bearing code. The framework's headline claim ("AD is
 correct by construction through linearity + the RISC adjoint table")
 remains intact.
 
-## 6. Cross-references
+## 7. Cross-references
 
 - Per-gap detail: [`docs/identified_gaps.md`](identified_gaps.md)
 - Filed upstream bugs:
