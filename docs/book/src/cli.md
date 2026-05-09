@@ -10,6 +10,7 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
 - `chelis eval` runs the host/runtime evaluator.
+- `chelis prove` discovers and runs Level 2 executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
@@ -66,6 +67,29 @@ same gate before doing semantic work.
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
+
+## Property Proof Loop
+
+`chelis prove` runs first-class Surf properties and bridge-emitted Deep property
+witnesses:
+
+```sh
+chelis prove
+chelis prove properties/
+chelis prove src/model.ch --only invariant_* --samples 1000 --seed 42
+chelis prove references/vocabulary_miss.dp --spans references/vocabulary_miss.spans.json --json
+```
+
+With no path, discovery scans the current package's `properties/**/*.ch` and
+`src/**/*.ch`, skipping `tests/`, hidden directories, `target/`, `dist/`, and
+dependency trees. Explicit `.ch` inputs discover properties only in that file;
+imports are for name resolution, not discovery. Explicit `.dp` inputs are
+validated first, then scanned for canonical `chelis_role: "property"` metadata
+or legacy `c_earchin_role: "property_witness"` metadata.
+
+Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
+property unsupported by the v1 generator, and `3` setup/input/config error.
+`--json` emits NDJSON property records followed by one summary record.
 
 ## Output Contract
 

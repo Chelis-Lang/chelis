@@ -53,29 +53,37 @@ This is the capability that addresses the customer's concern directly: "I can't 
 
 ```chelis
 -- Domain invariants: things that must always be true
-@property fn price_is_positive(spot, vol, rate, T, strike) -> bool =
-  gt(price(spot, vol, rate, T, strike), 0.0)
+@property price_is_positive forall(
+    spot: f32, vol: f32, rate: f32, t: f32, strike: f32
+) where spot > 0.0, vol > 0.0, t > 0.0, strike > 0.0:
+  price(spot, vol, rate, t, strike) > 0.0
 
-@property fn delta_in_unit_interval(spot, vol, rate, T, strike) -> bool =
-  let d = grad(price, wrt=spot)(spot, vol, rate, T, strike)
-  in and(gte(d, 0.0), lte(d, 1.0))
+@property delta_in_unit_interval forall(
+    spot: f32, vol: f32, rate: f32, t: f32, strike: f32
+) where spot > 0.0, vol > 0.0, t > 0.0, strike > 0.0:
+  (grad(price, wrt=spot)(spot, vol, rate, t, strike) >= 0.0)
+    && (grad(price, wrt=spot)(spot, vol, rate, t, strike) <= 1.0)
 
-@property fn put_call_parity_holds(spot, vol, rate, T, strike) -> bool =
+@property put_call_parity_holds forall(
+    spot: f32, vol: f32, rate: f32, t: f32, strike: f32
+) where spot > 0.0, vol > 0.0, t > 0.0, strike > 0.0:
   close(
-    sub(call_price(spot, vol, rate, T, strike),
-        put_price(spot, vol, rate, T, strike)),
-    sub(spot, mul(strike, exp(neg(mul(rate, T))))),
+    sub(call_price(spot, vol, rate, t, strike),
+        put_price(spot, vol, rate, t, strike)),
+    sub(spot, mul(strike, exp(neg(mul(rate, t))))),
     1e-4)
 
 -- Spec correspondence: the complex code matches the simple formula
-@property fn matches_textbook(spot, vol, rate, T, strike) -> bool =
+@property matches_textbook forall(
+    spot: f32, vol: f32, rate: f32, t: f32, strike: f32
+) where spot > 0.0, vol > 0.0, t > 0.0, strike > 0.0:
   close(
-    price(spot, vol, rate, T, strike),
-    textbook_black_scholes(spot, vol, rate, T, strike),
+    price(spot, vol, rate, t, strike),
+    textbook_black_scholes(spot, vol, rate, t, strike),
     1e-6)
 ```
 
-The last pattern -- `matches_textbook` -- is the highest-value property type. The user (or their quant) writes a 5-line direct transcription of the formula from a textbook. It's obviously correct by inspection. The AI generates the optimized `price` function (vectorized, fused, GPU-dispatched). The toolchain runs both on 100,000 random inputs and verifies they agree.
+The last pattern -- `matches_textbook` -- is the highest-value property type. The user (or their quant) writes a 5-line direct transcription of the formula from a textbook. It's obviously correct by inspection. The AI generates the optimized `price` function (vectorized, fused, GPU-dispatched). The toolchain runs both on deterministic samples from the property binders and verifies they agree.
 
 **The customer doesn't review the generated code. They review the properties.** Properties say what correct means. If the properties are right and the code satisfies them, the code is right. If the AI generates code that violates a property, it doesn't ship.
 
@@ -87,25 +95,25 @@ The last pattern -- `matches_textbook` -- is the highest-value property type. Th
 
 3. **Behavioral constraints.** Monotonicity (price increases with spot), continuity (small input change produces small output change), symmetry (put-call symmetry), convergence (Monte Carlo converges as path count increases). These encode domain knowledge that test suites can't express.
 
-**Implementation: evolution of `chelis fuzz`**
+**Implementation: evolution of `chelis prove`**
 
-The currently planned `chelis fuzz` accepts CLI flags for simple properties. The evolution:
+`chelis prove` runs first-class property declarations:
 
 - Properties are Chelis functions (not CLI flags). They live in `properties/*.ch` alongside the code, version-controlled, CI-enforced.
-- `chelis fuzz src/pricer.ch` discovers `@property` annotations and tests each on random inputs drawn from the parameter types.
-- Random input generation is type-directed: `f32` draws from a configurable range, `tensor[n, f32]` draws element-wise, `bool` draws uniformly.
+- `chelis prove src/pricer.ch` discovers `@property` annotations and tests each on random inputs drawn from the parameter types.
+- Random input generation is type-directed. V1 supports scalar binders and fixed-shape numeric tensors.
 - Failure on any input produces the failing input as a minimal reproducible case: "property `price_is_positive` violated at spot=0.001, vol=3.5, rate=-0.02, T=0.001, strike=1000.0".
-- `chelis fuzz --trials 100000` controls the number of random inputs. Default: 10,000.
-- CI integration: `chelis fuzz` runs as a CI gate alongside `chelis test`. Properties must hold on all sampled inputs for the build to pass.
+- `chelis prove --samples 1000` controls the number of random inputs. Default: 100.
+- CI integration: `chelis prove` runs as a CI gate alongside `chelis test`. Properties must hold on all sampled inputs for the build to pass.
 
-**Differential testing is a special case of property-based fuzzing:**
+**Differential testing is a special case of property sampling:**
 
 ```chelis
-@property fn matches_reference(x: tensor[n, f32]) -> bool =
+@property matches_reference forall(x: tensor[32, f32]):
   close(optimized_fn(x), reference_fn(x), 1e-6)
 ```
 
-No separate differential testing infrastructure needed. It's a property that compares two implementations. The fuzzer handles the random input generation and the agreement checking.
+No separate differential testing infrastructure needed. It's a property that compares two implementations. The property runner handles the random input generation and the agreement checking.
 
 **Canonical domain properties ship with domain shells.** Every domain shell includes a `properties/` directory containing reference `@property` functions for the domain's standard invariants. These are not tests (they live alongside `tests/`, not inside it). They are verification contracts that demonstrate the `@property` pattern on real domain code.
 
@@ -123,9 +131,9 @@ For Octant (LaTeX bridge):
 
 For future vertical shells: the same pattern. Canonical properties are the first thing a new domain shell ships, alongside the implementation code they verify.
 
-The onboarding story: "Install Shoals. Run `chelis fuzz src/`. See 15 canonical finance properties pass on the reference implementations. Now write your own pricing model and add your own properties." The properties are documentation-by-example, not a separate product.
+The onboarding story: "Install Shoals. Run `chelis prove src/`. See 15 canonical finance properties pass on the reference implementations. Now write your own pricing model and add your own properties." The properties are documentation-by-example, not a separate product.
 
-The convention is a hard rule: properties are co-located with the implementation they verify, NOT packaged as a separate "properties" shell. The `@property` infrastructure is in the compiler (`chelis fuzz`); the properties themselves are domain-specific and belong inside the domain shell. A standalone "finance properties" package with no implementation code is an empty vessel.
+The convention is a hard rule: properties are co-located with the implementation they verify, NOT packaged as a separate "properties" shell. The `@property` infrastructure is in the compiler (`chelis prove`); the properties themselves are domain-specific and belong inside the domain shell. A standalone "finance properties" package with no implementation code is an empty vessel.
 
 ### Reference Implementations as Spec Artifacts
 
@@ -181,7 +189,7 @@ Not currently designed. Recorded as a future shell (Beacon) in the ecosystem. De
 
 **"How do I know the AI-generated code does what I asked?"**
 
-You don't read the generated code. You write properties that define what "correct" means -- price is positive, delta is bounded, the output matches your textbook formula. The toolchain verifies the code against your properties on 100,000 random inputs. If the properties hold, the code is correct (to the confidence level of the random testing). If a property fails, you get the exact input that violates it.
+You don't read the generated code. You write properties that define what "correct" means -- price is positive, delta is bounded, the output matches your textbook formula. The toolchain verifies the code against deterministic samples from those properties. If the properties hold, the code is correct to the confidence level of the random testing. If a property fails, you get the exact input that violates it.
 
 **"How is this different from just writing tests?"**
 
@@ -201,13 +209,13 @@ For the strongest guarantee, the customer writes the properties themselves. They
 
 ## Relationship to Existing Plans
 
-**`chelis fuzz` (planned, Phase 3 / pre-Phase 4).** Currently scoped as a CLI tool with simple property flags. This document expands the scope: properties become first-class Chelis functions with `@property` annotations, living in the source tree, CI-enforced, with type-directed random input generation and minimal-counterexample reporting.
+**`chelis prove` (planned, Phase 3 / pre-Phase 4).** Currently scoped as a CLI tool with simple property flags. This document expands the scope: properties become first-class Chelis functions with `@property` annotations, living in the source tree, CI-enforced, with type-directed random input generation and minimal-counterexample reporting.
 
-**Hull (future shell).** Hull validates the compiler against the language spec via differential testing. The same pattern (reference implementation + production implementation + agreement checking) is what `@property fn matches_reference(...)` does for user code. Hull proves the pattern works on the highest-stakes code in the system (the compiler itself).
+**Hull (future shell).** Hull validates the compiler against the language spec via differential testing. The same pattern (reference implementation + production implementation + agreement checking) is what `@property matches_reference forall(...)` does for user code. Hull proves the pattern works on the highest-stakes code in the system (the compiler itself).
 
 **Phase 5g (trusted annotations).** `@convex`, `@lipschitz` start as trusted, evolve toward verified as Beacon (abstract interpretation) matures. No change to the current plan -- this document extends the vision.
 
-**Octant.** LaTeX-to-Deep provenance gives formula traceability. Combined with `@property fn matches_textbook(...)`, the trust chain is: LaTeX formula (human-verified) -> compiled Deep (provenance-linked) -> optimized code (property-verified against the formula). Every link in the chain is machine-checkable, and the chain is shipped end-to-end. Octant emits span-attributed Deep + sidecar `.spans.json`; the chelis-side preservation of those spans through IR lowering, transformation passes, and backend codegen lands per `chelis_span_survival.md` (phases S0-S6, all shipped). Both the DAG-routed path (compute-heavy tensor kernels, §2.4) and the host-routed path (pure-scalar / control-flow / scaffolding, §2.4 host-path rules + §2.4.2) preserve spans, and the post-S6 canary in §4 demonstrably runs Black-Scholes scalar form end-to-end: LaTeX byte range -> Deep node -> IR / HostExpr node -> emitted `// span: <id>` comment in the generated C source line.
+**Octant.** LaTeX-to-Deep provenance gives formula traceability. Combined with `@property matches_textbook forall(...)`, the trust chain is: LaTeX formula (human-verified) -> compiled Deep (provenance-linked) -> optimized code (property-verified against the formula). Every link in the chain is machine-checkable, and the chain is shipped end-to-end. Octant emits span-attributed Deep + sidecar `.spans.json`; the chelis-side preservation of those spans through IR lowering, transformation passes, and backend codegen lands per `chelis_span_survival.md` (phases S0-S6, all shipped). Both the DAG-routed path (compute-heavy tensor kernels, §2.4) and the host-routed path (pure-scalar / control-flow / scaffolding, §2.4 host-path rules + §2.4.2) preserve spans, and the post-S6 canary in §4 demonstrably runs Black-Scholes scalar form end-to-end: LaTeX byte range -> Deep node -> IR / HostExpr node -> emitted `// span: <id>` comment in the generated C source line.
 
 **CProof.** The commercial pitch incorporates the trust stack directly: "Your quants write pricing models. AI generates optimized code. The compiler guarantees structural soundness. Your quants write domain properties. The toolchain verifies the code satisfies them. You deploy with confidence."
 
@@ -251,8 +259,8 @@ These limits are stable: each will move from "limit" to "shipped" only when a co
 
 | Shell/Tool | Change | Status |
 |---|---|---|
-| `chelis fuzz` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | Planned, scope expanded by this document |
+| `chelis prove` | Evolve from CLI flags to first-class Chelis property functions with `@property`, type-directed input generation, counterexample minimization | Planned, scope expanded by this document |
 | Beacon (abstract interpretation) | New future shell: automated static analysis on the tensor DAG, input range specification, overflow/div-zero/NaN detection | Future, not designed |
-| `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis fuzz` is the companion for property-based verification. | Shipped |
-| Hull | No change to Hull itself. Hull validates the pattern (differential testing against a reference) that user-facing `@property fn matches_reference` uses. | Future (stub) |
+| `Std.Test` | No change -- `chelis test` remains for deterministic assertion-based tests. `chelis prove` is the companion for property-based verification. | Shipped |
+| Hull | No change to Hull itself. Hull validates the pattern (differential testing against a reference) that user-facing `@property matches_reference` uses. | Future (stub) |
 | Phase 5g annotations | No change to near-term plan. Long-term: Beacon may verify annotations automatically. | Deferred |

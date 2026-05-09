@@ -1366,11 +1366,11 @@ reference `@property` functions:
 
 Convention (cross-cutting, applies to every domain shell): properties are co-located
 with the implementation code they constrain — same repo, same package, version-
-controlled together. Properties are NOT a separate shell. `chelis fuzz src/` runs them
-all against the shipped exports. Status of the underlying tool: `chelis fuzz` with
+controlled together. Properties are NOT a separate shell. `chelis prove src/` runs them
+all against the shipped exports. Status of the underlying tool: `chelis prove` with
 first-class `@property` annotations is **demo-blocking, scoped, ready to build** for
 the first commercial CProof prospect. Full conventions: `chelis_trust_stack.md`,
-`chelis_fuzz_spec.md`.
+`chelis_property_spec.md`.
 
 **Reference implementations.** Shoals' delivery scope now includes a `references/`
 directory alongside `properties/`. Each standard model in `Shoals.Pricing`,
@@ -1378,7 +1378,7 @@ directory alongside `properties/`. Each standard model in `Shoals.Pricing`,
 textbook-formula reference (Black-Scholes call/put + Greeks, Heston, Vasicek, CIR,
 vanilla Monte Carlo, VaR/CVaR via historical simulation). The optimized `src/`
 implementation is verified against the reference by
-`@property fn matches_textbook_reference(...)` in `properties/pricing.ch`. Customers
+`@property matches_textbook_reference forall(...)` in `properties/pricing.ch`. Customers
 write their own references only for proprietary models. Full design:
 `chelis_reference_implementations_spec.md`.
 
@@ -1712,14 +1712,14 @@ Three further shells are named and reserved but scoped as stubs beyond Phase 3:
   self-hosted reference type checker, reference evaluator, and spec-driven random
   program generation over Deep AST ADTs so the compiler can validate the spec and the
   spec can validate the compiler. Blocked on LaCaDiLE rule finalization, a Deep parser
-  in Chelis, and `chelis fuzz` infrastructure. Phase 4/5 item, not a Phase 3 sub-phase.
+  in Chelis, and `chelis prove` infrastructure. Phase 4/5 item, not a Phase 3 sub-phase.
 - `beacon` — automated static analysis on the tensor DAG. Depends on `chelis-std`
   + the compiler's DAG IR. Computes over-approximations of value ranges at each node
   to detect division by zero, overflow, NaN propagation, and unbounded outputs without
   user annotations. Pre-deployment gate (minutes, not milliseconds). Trust stack
   Level 3. Future stub, not designed.
 
-`chelis fuzz` scope has expanded from a CLI-flag property testing tool to first-class
+`chelis prove` scope has expanded from a CLI-flag property testing tool to first-class
 executable properties with `@property` annotations. See `chelis_trust_stack.md` for the
 full design. Implementation remains deferred until after the RLVR pipeline (Phase 4)
 but the design is locked.

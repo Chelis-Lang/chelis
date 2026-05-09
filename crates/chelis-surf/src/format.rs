@@ -87,6 +87,14 @@ fn format_decl(decl: &Decl) -> String {
             let body = format_function_body(body);
             format!("def {name}{dims}({params}){ret}{effects} = {body}")
         }
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            ..
+        } => format_property(name, params, preconditions, body, options),
         Decl::LetDef {
             name, ty, value, ..
         } => {
@@ -106,6 +114,48 @@ fn format_decl(decl: &Decl) -> String {
             )
         }
         Decl::Export { names, .. } => format!("export ({})", names.join(", ")),
+    }
+}
+
+fn format_property(
+    name: &str,
+    params: &[Param],
+    preconditions: &[Expr],
+    body: &Expr,
+    options: &[PropertyOption],
+) -> String {
+    let params = params
+        .iter()
+        .map(format_param)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = format!("@property {name} forall({params})");
+    if !preconditions.is_empty() {
+        out.push_str(" where ");
+        out.push_str(
+            &preconditions
+                .iter()
+                .map(format_expr)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    out.push_str(":\n  ");
+    out.push_str(&format_expr(body).replace('\n', "\n  "));
+    for option in options {
+        out.push('\n');
+        out.push_str(&format_property_option(option));
+    }
+    out
+}
+
+fn format_property_option(option: &PropertyOption) -> String {
+    match option {
+        PropertyOption::Tolerance(value, _) => {
+            format!("  with tolerance = {}", format_expr(value))
+        }
+        PropertyOption::Seed(value, _) => format!("  with seed = {}", format_expr(value)),
+        PropertyOption::Samples(value, _) => format!("  with samples = {}", format_expr(value)),
     }
 }
 

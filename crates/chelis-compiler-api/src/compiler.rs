@@ -25,9 +25,9 @@ use crate::schema::{
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode, WireDeepAtom,
     WireDeepExpr, WireDeepExprKind, WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp,
     WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
-    WireParam, WirePattern, WireRecordExprField, WireRecordPatternField, WireRecordTypeField,
-    WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireUnaryOp,
-    WireVariant, WireVariantFields,
+    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
+    WireUnaryOp, WireVariant, WireVariantFields,
 };
 
 const RUNTIME_H: &str = include_str!(concat!(
@@ -1574,6 +1574,21 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             body: wire_expr(body),
             span: span(*s),
         },
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            span: s,
+        } => WireSurfDecl::Property {
+            name: name.clone(),
+            params: params.iter().map(wire_param).collect(),
+            preconditions: preconditions.iter().map(wire_expr).collect(),
+            body: wire_expr(body),
+            options: options.iter().map(wire_property_option).collect(),
+            span: span(*s),
+        },
         Decl::LetDef {
             name,
             ty,
@@ -1587,6 +1602,23 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         },
         Decl::Export { names, span: s } => WireSurfDecl::Export {
             names: names.clone(),
+            span: span(*s),
+        },
+    }
+}
+
+fn wire_property_option(option: &chelis_surf::ast::PropertyOption) -> WirePropertyOption {
+    match option {
+        chelis_surf::ast::PropertyOption::Tolerance(value, s) => WirePropertyOption::Tolerance {
+            value: wire_expr(value),
+            span: span(*s),
+        },
+        chelis_surf::ast::PropertyOption::Seed(value, s) => WirePropertyOption::Seed {
+            value: wire_expr(value),
+            span: span(*s),
+        },
+        chelis_surf::ast::PropertyOption::Samples(value, s) => WirePropertyOption::Samples {
+            value: wire_expr(value),
             span: span(*s),
         },
     }

@@ -269,6 +269,10 @@
           "named": true
         },
         {
+          "type": "property_declaration",
+          "named": true
+        },
+        {
           "type": "signature_declaration",
           "named": true
         }
@@ -1089,6 +1093,72 @@
     }
   },
   {
+    "type": "property_declaration",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "precondition": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "parameter",
+          "named": true
+        },
+        {
+          "type": "property_option",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "property_option",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "record_expression",
     "named": true,
     "fields": {
@@ -1570,6 +1640,10 @@
     "named": false
   },
   {
+    "type": "forall",
+    "named": false
+  },
+  {
     "type": "grad",
     "named": false
   },
@@ -1619,7 +1693,19 @@
     "named": false
   },
   {
+    "type": "property",
+    "named": false
+  },
+  {
     "type": "realize",
+    "named": false
+  },
+  {
+    "type": "samples",
+    "named": false
+  },
+  {
+    "type": "seed",
     "named": false
   },
   {
@@ -1639,12 +1725,20 @@
     "named": false
   },
   {
+    "type": "tolerance",
+    "named": false
+  },
+  {
     "type": "true",
     "named": false
   },
   {
     "type": "type_identifier",
     "named": true
+  },
+  {
+    "type": "where",
+    "named": false
   },
   {
     "type": "with",

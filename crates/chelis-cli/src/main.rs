@@ -1,5 +1,6 @@
 //! Chelis compiler CLI.
 
+mod prove;
 mod style_gate;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
@@ -272,6 +273,29 @@ enum Command {
         #[clap(long, default_value = "30")]
         timeout: u64,
     },
+    /// Run L2 property checks discovered in Surf or Deep inputs
+    Prove {
+        /// Path to a package, directory, `.ch`, or `.dp` input
+        path: Option<PathBuf>,
+        /// Filter by property name, substring, or trailing-* prefix glob
+        #[clap(long)]
+        only: Option<String>,
+        /// Samples per property
+        #[clap(long)]
+        samples: Option<usize>,
+        /// Deterministic run seed
+        #[clap(long)]
+        seed: Option<u64>,
+        /// Maximum generated attempts before precondition exhaustion
+        #[clap(long)]
+        max_attempts: Option<usize>,
+        /// Emit newline-delimited JSON records instead of plain text
+        #[clap(long)]
+        json: bool,
+        /// Override bridge span manifest for a single `.dp` input
+        #[clap(long)]
+        spans: Option<PathBuf>,
+    },
     /// Lint naming conventions per `spec/01-nomenclature.md`
     Lint {
         /// Paths to lint. Defaults to the current directory.
@@ -517,6 +541,29 @@ fn main() {
             Err(err) => {
                 eprintln!("error: {err}");
                 std::process::exit(2);
+            }
+        },
+        Some(Command::Prove {
+            path,
+            only,
+            samples,
+            seed,
+            max_attempts,
+            json,
+            spans,
+        }) => match prove::cmd_prove(prove::ProveOptions {
+            path: path.as_deref(),
+            only: only.as_deref(),
+            samples,
+            seed,
+            max_attempts,
+            json,
+            spans: spans.as_deref(),
+        }) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(3);
             }
         },
         Some(Command::Lint { paths, check, rule }) => match cmd_lint(paths, check, rule.as_deref())

@@ -670,13 +670,13 @@ that produces the audit artifact is the missing piece. Full design:
 standard pricing models (put-call parity, delta bounds, price positivity,
 reference-implementation correspondence). These demonstrate the
 executable-properties-as-spec pattern to finance customers — properties are the
-artifact the customer reviews; `chelis fuzz` enforces that the optimized
+artifact the customer reviews; `chelis prove` enforces that the optimized
 implementation satisfies them. See `chelis_trust_stack.md`.
 
 **Canonical domain properties.** Shoals ships with a `properties/` directory
 containing reference `@property` functions for standard finance invariants: put-call
 parity, price positivity, delta/gamma bounds, Monte Carlo convergence, no-arbitrage
-conditions on spreads. These are onboarding tools (run `chelis fuzz src/` to see them
+conditions on spreads. These are onboarding tools (run `chelis prove src/` to see them
 pass), credibility artifacts (the shell verifies itself), and templates for
 customer-written properties. Convention: every domain shell ships canonical properties
 alongside its implementation code. Properties are NOT a separate shell — they are
@@ -688,7 +688,7 @@ Greeks, Heston, Vasicek, CIR, vanilla Monte Carlo pricer, standard portfolio ris
 measures. These are co-located with the production implementations in `src/`.
 Customer pattern: customer writes proprietary models in their own packages, uses
 Shoals references for standard models, writes properties that include
-`@property fn matches_reference(...)`. Full design:
+`@property matches_reference forall(...)`. Full design:
 `chelis_reference_implementations_spec.md`.
 
 ### 3n: Octant — LaTeX ↔ Deep Bridge (Part A)
@@ -716,7 +716,7 @@ Octant uses Python (sympy / latex2sympy2) as the external oracle for LaTeX parsi
 round-trip: `parse(render(expr))` recovers the original expression and
 `lower(parse(latex))` type-checks) and `properties/provenance.ch` (every Deep AST node
 has a valid source span pointing inside the original LaTeX string). Same convention as
-Shoals: properties co-located with implementation, run via `chelis fuzz src/`, never
+Shoals: properties co-located with implementation, run via `chelis prove src/`, never
 packaged as a separate shell. See `chelis_trust_stack.md`.
 
 ### 3o: Octant — Finance Notation + Notebook (Part B)
@@ -779,11 +779,11 @@ but no Phase 3 sub-phase implements them.
   closes the spec-implementation gap without requiring an external tool or a full
   extraction from the Lean mechanization.
 
-  Prerequisites: LaCaDiLE typing rules finalized, a Deep parser in Chelis, and `chelis
-  fuzz` infrastructure for language-level random generation. Phase 4 or Phase 5 item —
-  not actively developed yet. Recorded because it is the natural answer to "how do you
-  know the compiler implements the spec?" and because it is a strong future-work story
-  for the OOPSLA paper.
+  Prerequisites: LaCaDiLE typing rules finalized, a Deep parser in Chelis, and reusable
+  property-runner generation infrastructure for language-level random generation. Phase
+  4 or Phase 5 item — not actively developed yet. Recorded because it is the natural
+  answer to "how do you know the compiler implements the spec?" and because it is a
+  strong future-work story for the OOPSLA paper.
 - **`octant-docs`** — Octant Phase 4 (from the design doc). Parses full LaTeX model
   documents, extracts `\begin{equation}` environments, and associates formulas with
   surrounding prose so model-validation teams can ingest an entire model document as
@@ -900,11 +900,11 @@ of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API m
 change when autonomous Random sampling lands). Apply the same convention to Coral and
 Shoals when they ship.
 
-**`chelis fuzz` — executable properties as spec.** The earlier pre-Phase 4 framing of
-`chelis fuzz` as a CLI-flag property tester is now subsumed by the broader
+**`chelis prove` — executable properties as spec.** The earlier pre-Phase 4 framing of
+`chelis prove` as a CLI-flag property tester is now subsumed by the broader
 executable-properties-as-spec design (first-class `@property` Chelis functions,
 type-directed input generation, counterexample minimization). See the expanded
-`chelis fuzz` section below and `chelis_trust_stack.md` for the full design.
+`chelis prove` section below and `chelis_trust_stack.md` for the full design.
 
 ### Why This Is a Distinct Phase
 
@@ -1045,7 +1045,7 @@ Phase 4 success condition:
   optional research extra
 - ChelisBench provides reproducible evidence for the "designed for LLMs" thesis
 
-### `chelis fuzz` — Executable Properties as Spec
+### `chelis prove` — Executable Properties as Spec
 
 Evolution of the originally planned CLI-flag property testing tool into Chelis's core
 verification mechanism for AI-generated code. Properties are first-class Chelis
@@ -1062,43 +1062,46 @@ Three property categories:
 3. **Behavioral constraints** — monotonicity, continuity, symmetry, convergence. Domain
    knowledge encoded as executable checks.
 
-`chelis fuzz src/pricer.ch` discovers `@property` annotations, generates type-directed
-random inputs, tests each property, reports failures with minimal counterexamples. CI
-integration via `chelis fuzz` as a gate alongside `chelis test`.
+`chelis prove src/pricer.ch` discovers `@property NAME forall(...)` declarations,
+generates type-directed random inputs, tests each property, and reports the first
+deterministic counterexample. CI integration via `chelis prove` as a gate alongside
+`chelis test`.
 
 This is the highest-ranking new value prop for consequential computing customers. The
 customer writes properties that define correctness. The toolchain verifies the
 generated code satisfies them. The customer reviews properties (simple, one-line domain
 facts), not generated code (complex, optimized, opaque).
 
-Value for the AI story: fuzz properties become part of the RLVR reward signal. A
-generated function that passes 10k random inputs without NaN is higher quality than one
-that only passes fixed golden tests. The reward function can incorporate `chelis fuzz`
-results as a continuous reward component alongside the 0-1 fitness score.
+Value for the AI story: sampled properties become part of the RLVR reward signal. A
+generated function that passes a deterministic property corpus without NaN is higher
+quality than one that only passes fixed golden tests. The reward function can
+incorporate `chelis prove` results as a continuous reward component alongside the 0-1
+fitness score.
 
 Value for the numerical library story: catches edge cases that golden fixture grids
-miss. The Nautilus bessel_y1 drift in (7.5, 8) would have been caught by fuzzing before
-it became a documented known limitation.
+miss. The Nautilus bessel_y1 drift in (7.5, 8) would have been caught by property
+sampling before it became a documented known limitation.
 
 **Convention: domain shells ship canonical properties.** Every shell that targets a
 specific domain (Shoals for finance, Octant for LaTeX, future vertical shells)
 includes a `properties/` directory with reference `@property` functions, and (where
 the domain has standard textbook models) a co-located `references/` directory with
 simple, obviously-correct reference implementations. These are the onboarding entry
-point for new users (install the shell, run `chelis fuzz src/`, see the canonical
+point for new users (install the shell, run `chelis prove src/`, see the canonical
 properties pass), the credibility proof that the shell's implementations satisfy
 standard domain invariants, and the spec artifact for the spec-correspondence
 property category. The properties and references are co-located with the
 implementation, NOT packaged separately — a standalone "properties" shell with no
 implementation code is an empty vessel.
 
-**Priority elevation.** `chelis fuzz` with first-class `@property` annotations is now
+**Priority elevation.** `chelis prove` with first-class `@property` annotations is now
 demo-blocking for the first commercial CProof prospect. The trust stack pitch lives
 or dies on this being demonstrable. Specification is concrete (see
-`chelis_fuzz_spec.md`) and the build is a focused project, not a research
-investigation. Components: parser changes for `@property` and `@range`, type-directed
-input generation, counterexample minimizer, CLI subcommand. Move ahead of
-secondary-priority Phase 4 prep work.
+`chelis_property_spec.md`) and the build is a focused project, not a research
+investigation. Components: parser changes for `@property NAME forall(...)`,
+type-directed input generation, deterministic first-counterexample reporting, Deep
+bridge metadata discovery, and the CLI subcommand. Move ahead of secondary-priority
+Phase 4 prep work.
 
 **`chelis manifest` priority elevation.** The compile-time guarantee on the Random
 effect is shipped. The CLI tool that produces the audit artifact is now demo-blocking
@@ -1106,7 +1109,7 @@ for regulated-finance prospects. Specification is concrete (see
 `chelis_manifest_spec.md`). Build the subcommand and JSON output format. CI
 integration via `chelis manifest --check` as a gate.
 
-Full design: `chelis_trust_stack.md`, `chelis_fuzz_spec.md`,
+Full design: `chelis_trust_stack.md`, `chelis_property_spec.md`,
 `chelis_manifest_spec.md`, `chelis_reference_implementations_spec.md`.
 
 ---

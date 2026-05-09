@@ -404,6 +404,14 @@ pub enum WireSurfDecl {
         body: WireSurfExpr,
         span: Span,
     },
+    Property {
+        name: String,
+        params: Vec<WireParam>,
+        preconditions: Vec<WireSurfExpr>,
+        body: WireSurfExpr,
+        options: Vec<WirePropertyOption>,
+        span: Span,
+    },
     LetDef {
         name: String,
         ty: Option<WireSurfTypeExpr>,
@@ -414,6 +422,14 @@ pub enum WireSurfDecl {
         names: Vec<String>,
         span: Span,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WirePropertyOption {
+    Tolerance { value: WireSurfExpr, span: Span },
+    Seed { value: WireSurfExpr, span: Span },
+    Samples { value: WireSurfExpr, span: Span },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

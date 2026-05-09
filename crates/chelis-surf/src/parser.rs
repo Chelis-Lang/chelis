@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
 use chelis_deep::Span;
+use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,12 +37,47 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
         pos: 0,
         module_allowed: true,
     };
-    p.parse_program()
+    let decls = p.parse_program()?;
+    validate_property_names(&decls)?;
+    Ok(decls)
 }
 
 pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
     parse(&tokens)
+}
+
+fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
+    let mut value_names = HashSet::new();
+    let mut property_names = HashSet::new();
+    for decl in decls {
+        match decl {
+            Decl::Property { name, span, .. } => {
+                if value_names.contains(name) || !property_names.insert(name.clone()) {
+                    return Err(ParseError::Expected {
+                        expected: "unique property name within module value namespace".into(),
+                        found: name.clone(),
+                        offset: span.offset,
+                    });
+                }
+            }
+            Decl::FunDef { name, span, .. }
+            | Decl::LetDef { name, span, .. }
+            | Decl::Sig { name, span, .. } => {
+                if property_names.contains(name) {
+                    return Err(ParseError::Expected {
+                        expected: "unique property name within module value namespace".into(),
+                        found: name.clone(),
+                        offset: span.offset,
+                    });
+                }
+                value_names.insert(name.clone());
+            }
+            Decl::Module { decls, .. } => validate_property_names(decls)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +211,7 @@ impl Parser {
                     | TokenKind::Module
                     | TokenKind::Import
                     | TokenKind::Export
+                    | TokenKind::At
             )
         )
     }
@@ -249,6 +286,73 @@ impl Parser {
     fn parse_expr_until_decl_separator(&mut self) -> Result<Expr, ParseError> {
         let end = self.decl_expr_end();
         self.parse_expr_in_range(end, "end of declaration expression")
+    }
+
+    fn property_expr_end(&self) -> usize {
+        let mut pos = self.pos;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut started = false;
+        while let Some(token) = self.tokens.get(pos) {
+            match token.kind {
+                TokenKind::Newline | TokenKind::Semicolon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    if !started {
+                        pos += 1;
+                        continue;
+                    }
+                    let next_sig = self
+                        .tokens
+                        .iter()
+                        .enumerate()
+                        .skip(pos + 1)
+                        .find(|(_, next)| !matches!(next.kind, TokenKind::Newline))
+                        .map(|(idx, _)| idx);
+                    if matches!(
+                        next_sig.and_then(|idx| self.tokens.get(idx).map(|t| &t.kind)),
+                        Some(TokenKind::Pipe)
+                    ) {
+                        pos += 1;
+                        continue;
+                    }
+                    if next_sig.is_none_or(|idx| {
+                        matches!(self.tokens[idx].kind, TokenKind::With | TokenKind::Eof)
+                            || self.is_decl_start_at(idx)
+                    }) {
+                        break;
+                    }
+                }
+                TokenKind::Eof if started => break,
+                TokenKind::LParen => {
+                    started = true;
+                    paren_depth += 1;
+                }
+                TokenKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                TokenKind::LBracket => {
+                    started = true;
+                    bracket_depth += 1;
+                }
+                TokenKind::RBracket if bracket_depth > 0 => bracket_depth -= 1,
+                TokenKind::LBrace => {
+                    started = true;
+                    brace_depth += 1;
+                }
+                TokenKind::RBrace if brace_depth > 0 => brace_depth -= 1,
+                TokenKind::Eof => break,
+                _ => {
+                    started = true;
+                }
+            }
+            pos += 1;
+        }
+        pos
+    }
+
+    fn parse_expr_until_property_option(&mut self) -> Result<Expr, ParseError> {
+        let end = self.property_expr_end();
+        self.parse_expr_in_range(end, "property predicate or option boundary")
     }
 
     fn parse_expr_in_range(&mut self, end: usize, expected: &str) -> Result<Expr, ParseError> {
@@ -392,9 +496,10 @@ impl Parser {
             }
             TokenKind::Import => self.parse_import(),
             TokenKind::Export => self.parse_export(),
+            TokenKind::At => self.parse_property_decl(),
             _ => Err(ParseError::Expected {
                 expected:
-                    "declaration (def, sig, binding, type, dim, macro, module, import, export)"
+                    "declaration (def, sig, binding, type, dim, macro, module, import, export, @property)"
                         .into(),
                 found: format!("{:?}", self.peek()),
                 offset: self.current_offset(),
@@ -405,6 +510,139 @@ impl Parser {
     // ---------------------------------------------------------------------------
     // Declarations
     // ---------------------------------------------------------------------------
+
+    fn parse_property_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.advance().span; // consume @
+        let (keyword, _) = self.expect_ident()?;
+        if keyword != "property" {
+            return Err(ParseError::Expected {
+                expected: "`property` after `@`".into(),
+                found: keyword,
+                offset: self.current_offset(),
+            });
+        }
+        let (name, _) = self.expect_ident()?;
+        let (forall, _) = self.expect_ident()?;
+        if forall != "forall" {
+            return Err(ParseError::Expected {
+                expected: "`forall`".into(),
+                found: forall,
+                offset: self.current_offset(),
+            });
+        }
+        self.expect(&TokenKind::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(&TokenKind::RParen)?;
+        for param in &params {
+            if param.ty.is_none() {
+                return Err(ParseError::Expected {
+                    expected: "explicit property binder type".into(),
+                    found: param.name.clone(),
+                    offset: param.span.offset,
+                });
+            }
+        }
+
+        let preconditions = if matches!(self.peek(), TokenKind::Ident(word) if word == "where") {
+            self.advance();
+            self.parse_exprs_until_colon()?
+        } else {
+            Vec::new()
+        };
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_expr_until_property_option()?;
+        self.consume_block_separators();
+
+        let mut options = Vec::new();
+        while *self.peek() == TokenKind::With {
+            options.push(self.parse_property_option()?);
+            self.consume_block_separators();
+        }
+        let end = options
+            .last()
+            .map(PropertyOption::span)
+            .unwrap_or_else(|| expr_span(&body));
+        Ok(Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            span: start.merge(end),
+        })
+    }
+
+    fn parse_exprs_until_colon(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut exprs = Vec::new();
+        loop {
+            if *self.peek() == TokenKind::Colon {
+                break;
+            }
+            let end = self.find_property_clause_end()?;
+            exprs.push(self.parse_expr_in_range(end, "`,` or `:` in property where clause")?);
+            if *self.peek() == TokenKind::Comma {
+                self.advance();
+                continue;
+            }
+            if *self.peek() == TokenKind::Colon {
+                break;
+            }
+            return Err(ParseError::Expected {
+                expected: "`,` or `:` in property where clause".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
+        Ok(exprs)
+    }
+
+    fn find_property_clause_end(&self) -> Result<usize, ParseError> {
+        let mut pos = self.pos;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        while let Some(token) = self.tokens.get(pos) {
+            match token.kind {
+                TokenKind::Comma | TokenKind::Colon
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    return Ok(pos);
+                }
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket if bracket_depth > 0 => bracket_depth -= 1,
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace if brace_depth > 0 => brace_depth -= 1,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+        Err(ParseError::Expected {
+            expected: "`:` after property where clause".into(),
+            found: format!("{:?}", self.peek()),
+            offset: self.current_offset(),
+        })
+    }
+
+    fn parse_property_option(&mut self) -> Result<PropertyOption, ParseError> {
+        let start = self.advance().span; // consume with
+        let (name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expr_until_block_separator()?;
+        let span = start.merge(expr_span(&value));
+        match name.as_str() {
+            "tolerance" => Ok(PropertyOption::Tolerance(value, span)),
+            "seed" => Ok(PropertyOption::Seed(value, span)),
+            "samples" => Ok(PropertyOption::Samples(value, span)),
+            _ => Err(ParseError::Expected {
+                expected: "property option `tolerance`, `seed`, or `samples`".into(),
+                found: name,
+                offset: start.offset,
+            }),
+        }
+    }
 
     fn parse_fun_def(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Def
@@ -1943,6 +2181,7 @@ fn decl_span(d: &Decl) -> Span {
         Decl::TypeDef { span, .. } => *span,
         Decl::TypeAlias { span, .. } => *span,
         Decl::FunDef { span, .. } => *span,
+        Decl::Property { span, .. } => *span,
         Decl::LetDef { span, .. } => *span,
         Decl::MacroDef { span, .. } => *span,
         Decl::Export { span, .. } => *span,

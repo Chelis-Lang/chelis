@@ -168,7 +168,7 @@ story: the language specifies itself, the spec is checked by the compiler, and t
 compiler is tested against the spec. Self-hosted executable specifications are rare in
 PL literature and directly reinforce the "designed for AI reimplementation" thesis.
 
-The executable-properties-as-spec pattern (`@property` annotations + `chelis fuzz`) is a natural extension of the compiler fitness story for this section: properties are the user-facing version of what the compiler fitness score does for the RLVR training loop. The compiler checks structural soundness automatically; properties check domain correctness empirically. Together they form a trust stack that no Python-based platform can offer. If `chelis fuzz` with `@property` is shipped before submission, it strengthens Section 3 (novel capabilities). If not, it belongs here in Section 6 (future work). Full design: `chelis_trust_stack.md`.
+The executable-properties-as-spec pattern (`@property` annotations + `chelis prove`) is a natural extension of the compiler fitness story for this section: properties are the user-facing version of what the compiler fitness score does for the RLVR training loop. The compiler checks structural soundness automatically; properties check domain correctness empirically. Together they form a trust stack that no Python-based platform can offer. If `chelis prove` with `@property` is shipped before submission, it strengthens Section 3 (novel capabilities). If not, it belongs here in Section 6 (future work). Full design: `chelis_trust_stack.md`.
 
 ### Section 7: Conclusion (~0.5 pages)
 

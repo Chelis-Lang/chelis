@@ -37,7 +37,7 @@
       "patterns": [
         {
           "name": "keyword.control.chelis",
-          "match": "\\b(module|import|export|def|sig|type|dim|let|in|if|then|else|match|with|fn|grad|vmap|jit|realize|copy|par)\\b"
+          "match": "\\b(module|import|export|def|sig|type|dim|let|in|if|then|else|match|with|fn|grad|vmap|jit|realize|copy|par|property|forall|where)\\b"
         },
         {
           "name": "constant.language.boolean.chelis",

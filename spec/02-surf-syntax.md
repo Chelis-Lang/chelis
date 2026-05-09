@@ -33,12 +33,12 @@ that are not yet the full self-sufficient AI-programming story.
 Reserved. Cannot be used as identifiers.
 
 ```
-def  sig  type  dim  match  with  fn  module
+def  sig  type  dim  match  with  fn  module  property  forall
 import  export  if  then  else  grad  vmap  jit  cast  macro
-realize  copy  par  true  false
+realize  copy  par  true  false  where
 ```
 
-**Total: 23.**
+**Total: 26.**
 
 Reserved for Phase 2 (parse as keywords, emit "reserved for future use" error):
 ```
@@ -481,7 +481,7 @@ Program       <- S ModuleDecl S Decl* EOF
 ModuleDecl    <- 'module' S ModulePath
 
 Decl          <- ImportDecl / ExportDecl / DimDecl
-               / TypeDecl / TypeAlias / SigDecl / FunDecl
+               / TypeDecl / TypeAlias / SigDecl / PropertyDecl / FunDecl
 
 # ═══════════════════════════════════════════════════
 #  MODULE, IMPORT, EXPORT
@@ -527,6 +527,15 @@ FieldDecl     <- Ident S ':' S TypeExpr
 # ═══════════════════════════════════════════════════
 
 SigDecl       <- 'sig' S Ident S ':' S TypeExpr
+
+# ═══════════════════════════════════════════════════
+#  PROPERTY DECLARATIONS
+# ═══════════════════════════════════════════════════
+
+PropertyDecl  <- '@property' S Ident S 'forall' S Params
+                 (S 'where' S Expr (S ',' S Expr)*)?
+                 S ':' S Expr PropertyOption*
+PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
 
 # ═══════════════════════════════════════════════════
 #  FUNCTION DEFINITIONS

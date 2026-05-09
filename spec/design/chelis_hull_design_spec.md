@@ -3,7 +3,7 @@
 **Shell name:** Hull (`chelis-lang/hull`)
 **Marine rationale:** The hull defines the shape of the vessel. The spec defines the shape of the language.
 **Depends on:** `chelis-std` (required). No other shells.
-**Status:** Stub. Phase 4/5 item. Prerequisites: LaCaDiLE typing rules finalized, Deep parser in Chelis, `chelis fuzz` infrastructure.
+**Status:** Stub. Phase 4/5 item. Prerequisites: LaCaDiLE typing rules finalized, Deep parser in Chelis, `chelis prove` infrastructure.
 
 ---
 
@@ -721,9 +721,9 @@ chelis-lang/hull/
 
 ### Relationship to other tools:
 - **LaCaDiLE (Lean):** Proves the typing rules are sound. Hull implements the rules as executable code. Lean proves "these rules are correct"; Hull checks "the compiler follows these rules."
-- **`chelis fuzz`:** Language-level random generation. `chelis fuzz` generates random inputs to test individual functions. Hull generates random programs to test the compiler. Different levels of abstraction, complementary.
+- **`chelis prove`:** Language-level random generation. `chelis prove` generates random inputs to test individual functions. Hull generates random programs to test the compiler. Different levels of abstraction, complementary.
 - **Conformance test suite:** Hull generates the suite. The suite is checked into the repo. The suite runs in CI against the Rust compiler. Hull is the test generator; the suite is the test artifact.
-- **Trust stack — proof of pattern:** Hull validates the executable-properties-as-spec pattern on the highest-stakes code in the system: the compiler itself. The reference type checker is a property ("the compiler's type-checking behavior matches the formal rules"). Differential testing is the verification mechanism. The same architecture — reference implementation + production implementation + agreement on random inputs — is what user-facing `@property fn matches_reference(...)` does for application code. Hull proves the pattern works; `chelis fuzz` makes it available to users. See `chelis_trust_stack.md`.
+- **Trust stack — proof of pattern:** Hull validates the executable-properties-as-spec pattern on the highest-stakes code in the system: the compiler itself. The reference type checker is a property ("the compiler's type-checking behavior matches the formal rules"). Differential testing is the verification mechanism. The same architecture — reference implementation + production implementation + agreement on random inputs — is what user-facing `@property matches_reference forall(...)` does for application code. Hull proves the pattern works; `chelis prove` makes it available to users. See `chelis_trust_stack.md`.
 - **Hull as the internal version of the canonical-properties pattern:** Domain shells ship `@property` functions in a co-located `properties/` directory that verify their implementations against domain invariants (Shoals: put-call parity, no-arbitrage; Octant: round-trip, provenance). Hull does the same thing for the compiler: the reference type checker is a "property" that verifies the compiler's behavior against the formal typing rules. The same architecture (reference implementation + production implementation + agreement checking) applies at both levels. Hull is the proof that the pattern works on the highest-stakes code; domain shell properties are the user-facing application.
 
 ---
@@ -737,7 +737,7 @@ chelis-lang/hull/
 | ADTs + pattern matching in Chelis | Working (v0.1.7) | Hull's entire data model is ADTs |
 | Option type + `?` operator | Working | Hull returns `Option` from every check |
 | String operations in Chelis | Working (3c) | Hull parses source strings |
-| `chelis fuzz` design | Planned | Hull's generator is the language-level version |
+| `chelis prove` design | Planned | Hull's generator is the language-level version |
 
 **Timing:** Phase 4 or Phase 5. Not before the POPL paper finalizes the typing rules and the ICLR pipeline establishes the AI training loop. Hull's value increases as the language stabilizes - building it while the typing rules are still changing means constant maintenance. Build it when the rules are final and use it to prevent regression.
 

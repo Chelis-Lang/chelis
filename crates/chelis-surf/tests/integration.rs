@@ -51,6 +51,24 @@ fn roundtrip_simple_def() {
 }
 
 #[test]
+fn roundtrip_property_decl_desugars_to_property_metadata() {
+    let source = r#"
+@property non_negative forall(x: f32) where x >= 0.0:
+  x >= 0.0
+  with samples = 3
+"#;
+    let decls = surf_parse(source).expect("property parses");
+    let deep_exprs = desugar_program(&decls);
+    let deep_text = print_canonical(&deep_exprs);
+    assert!(deep_text.contains("chelis_role: \"property\""));
+    assert!(deep_text.contains("property_source_kind: \"user\""));
+    assert!(deep_text.contains("property_quantifiers: (params {}"));
+    assert!(deep_text.contains("property_preconditions: (tuple {}"));
+    assert!(deep_text.contains("property_samples"));
+    deep_parse_strict(&deep_text).expect("property Deep validates");
+}
+
+#[test]
 fn roundtrip_untyped_def() {
     roundtrip(include_str!("fixtures/untyped_def.ch"));
 }

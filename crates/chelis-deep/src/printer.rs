@@ -218,17 +218,19 @@ impl Printer {
             let rendered = self.fmt_expr(value, value_indent);
             let mut value_lines = rendered.lines();
             let first = value_lines.next().unwrap_or("");
-            let mut line = if index == 0 {
+            let line = if index == 0 {
                 format!("{{{}: {}", key, first)
             } else {
                 format!("{}{}: {}", " ".repeat(entry_indent), key, first)
             };
-            if index + 1 != sorted.len() {
-                line.push(',');
-            }
             lines.push(line);
             for continuation in value_lines {
                 lines.push(continuation.to_string());
+            }
+            if index + 1 != sorted.len()
+                && let Some(last) = lines.last_mut()
+            {
+                last.push(',');
             }
         }
         lines.push(format!("{}}}", " ".repeat(indent)));

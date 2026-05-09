@@ -105,7 +105,7 @@ toolset becomes worth building:
   to callers automatically using the compiler's call graph
 - `chelis_rename(symbol, new_name)` — updates every reference, fails on
   collision
-- `chelis_property_check(file, function)` — runs `chelis fuzz` on the
+- `chelis_property_check(file, function)` — runs `chelis prove` on the
   function, requires `@property` upstream first
 - `chelis_view(file, mode="surf"|"deep")` — rendering for human or agent
 - Transactional grouping (`begin/commit/abort`) for multi-step refactors

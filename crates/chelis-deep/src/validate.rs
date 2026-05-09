@@ -181,6 +181,7 @@ fn validate_tag_shape(
     };
 
     match tag {
+        "def" => validate_property_def_metadata(list, offset, warnings),
         "if" | "arm" if child_count != 3 => {
             warn_arity(warnings, "exactly 3 children");
         }
@@ -282,6 +283,72 @@ fn validate_tag_shape(
             warn_arity(warnings, "exactly 1 child");
         }
         _ => {}
+    }
+}
+
+fn validate_property_def_metadata(
+    list: &crate::ast::List,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+        return;
+    };
+    let is_property = meta.entries.iter().any(|(key, value)| {
+        key == "chelis_role"
+            && matches!(value, Expr::Atom(crate::ast::Atom::Str(value), _) if value == "property")
+    });
+    if !is_property {
+        return;
+    }
+    let has_source_kind = meta.entries.iter().any(|(key, value)| {
+        key == "property_source_kind" && matches!(value, Expr::Atom(crate::ast::Atom::Str(_), _))
+    });
+    let has_quantifiers = meta.entries.iter().any(|(key, value)| {
+        key == "property_quantifiers"
+            && matches!(
+                value,
+                Expr::List(params, _)
+                    if matches!(params.elements.first(), Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) if tag == "params")
+                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+            )
+    });
+    let has_preconditions = meta.entries.iter().any(|(key, value)| {
+        key == "property_preconditions"
+            && matches!(
+                value,
+                Expr::List(tuple, _)
+                    if matches!(tuple.elements.first(), Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) if tag == "tuple")
+                        && matches!(tuple.elements.get(1), Some(Expr::Map(_, _)))
+            )
+    });
+    let body_is_fn = matches!(
+        list.elements.get(3),
+        Some(Expr::List(body, _))
+            if matches!(body.elements.first(), Some(Expr::Atom(crate::ast::Atom::Symbol(tag), _)) if tag == "fn")
+    );
+    for (ok, message) in [
+        (
+            has_source_kind,
+            "property def metadata must include string `property_source_kind`",
+        ),
+        (
+            has_quantifiers,
+            "property def metadata must include `(params {} ...)` `property_quantifiers`",
+        ),
+        (
+            has_preconditions,
+            "property def metadata must include `(tuple {} ...)` `property_preconditions`",
+        ),
+        (body_is_fn, "property def body must be a callable `fn`"),
+    ] {
+        if !ok {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: message.to_string(),
+            });
+        }
     }
 }
 

@@ -422,6 +422,19 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
                 entry.range = range_for_span(text, *span);
             }
         }
+        Decl::Property {
+            name, params, span, ..
+        } => {
+            index.defs.insert(
+                name.clone(),
+                TopLevelSymbol {
+                    name: name.clone(),
+                    range: range_for_span(text, *span),
+                    hover: format!("@property {} forall({})", name, format_params(params)),
+                    kind: CompletionItemKind::FUNCTION,
+                },
+            );
+        }
         Decl::LetDef { name, ty, span, .. } => {
             index.defs.insert(
                 name.clone(),
@@ -539,6 +552,79 @@ fn collect_decl_symbols(
                     .map(|symbol| symbol.hover.clone())
                     .unwrap_or_else(|| function_name_from_decl(decl).to_string()),
                 target: DefinitionTarget::CurrentDocument(fun_range),
+            });
+        }
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            span,
+            ..
+        } => {
+            let body_range = range_for_expr(text, body);
+            let start_len = locals.len();
+            for param in params {
+                let def_range = range_for_span(text, param.span);
+                let hover = format!(
+                    "property param {}{}",
+                    param.name,
+                    param
+                        .ty
+                        .as_ref()
+                        .map(|ty| format!(": {}", format_type_expr(ty)))
+                        .unwrap_or_default()
+                );
+                locals.push(LocalBinding {
+                    name: param.name.clone(),
+                    definition: def_range,
+                    visible_in: body_range,
+                    hover: hover.clone(),
+                });
+                definitions.push(Definition {
+                    name: param.name.clone(),
+                    range: def_range,
+                    hover: hover.clone(),
+                    target: DefinitionTarget::CurrentDocument(def_range),
+                });
+                completions.push(VisibleName {
+                    name: param.name.clone(),
+                    detail: hover,
+                    kind: CompletionItemKind::VARIABLE,
+                    visible_in: body_range,
+                });
+            }
+            for precondition in preconditions {
+                collect_expr_symbols(
+                    text,
+                    precondition,
+                    top_level,
+                    locals,
+                    references,
+                    definitions,
+                    completions,
+                );
+            }
+            collect_expr_symbols(
+                text,
+                body,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+            locals.truncate(start_len);
+            let range = range_for_span(text, *span);
+            definitions.push(Definition {
+                name: name.clone(),
+                range,
+                hover: top_level
+                    .defs
+                    .get(name)
+                    .map(|symbol| symbol.hover.clone())
+                    .unwrap_or_else(|| name.clone()),
+                target: DefinitionTarget::CurrentDocument(range),
             });
         }
         Decl::LetDef {
@@ -1139,7 +1225,7 @@ fn module_path(root: &Path, module: &str) -> Option<PathBuf> {
 
 fn function_name_from_decl(decl: &Decl) -> &str {
     match decl {
-        Decl::FunDef { name, .. } => name,
+        Decl::FunDef { name, .. } | Decl::Property { name, .. } => name,
         _ => "",
     }
 }
@@ -1195,6 +1281,7 @@ fn first_decl_range(text: &str, decls: &[Decl]) -> Option<Range> {
         | Decl::TypeDef { span, .. }
         | Decl::TypeAlias { span, .. }
         | Decl::FunDef { span, .. }
+        | Decl::Property { span, .. }
         | Decl::LetDef { span, .. }
         | Decl::Export { span, .. }
         | Decl::MacroDef { span, .. } => range_for_span(text, *span),

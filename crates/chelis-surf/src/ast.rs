@@ -46,6 +46,14 @@ pub enum Decl {
         body: Expr,
         span: Span,
     },
+    Property {
+        name: String,
+        params: Vec<Param>,
+        preconditions: Vec<Expr>,
+        body: Expr,
+        options: Vec<PropertyOption>,
+        span: Span,
+    },
     LetDef {
         name: String,
         ty: Option<TypeExpr>,
@@ -62,6 +70,21 @@ pub enum Decl {
         names: Vec<String>,
         span: Span,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PropertyOption {
+    Tolerance(Expr, Span),
+    Seed(Expr, Span),
+    Samples(Expr, Span),
+}
+
+impl PropertyOption {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Tolerance(_, span) | Self::Seed(_, span) | Self::Samples(_, span) => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -2,8 +2,8 @@ use chelis_shell::{
     PackageId, ShellModule, ShellPackage, ShellSymbol, SymbolKind, read_shell, write_shell,
 };
 use chelis_surf::ast::{
-    Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern, TypeExpr,
-    Variant, VariantFields,
+    Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
+    PropertyOption, TypeExpr, Variant, VariantFields,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4169,6 +4169,7 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
         .iter()
         .filter_map(|decl| match decl {
             Decl::FunDef { name, .. }
+            | Decl::Property { name, .. }
             | Decl::LetDef { name, .. }
             | Decl::TypeDef { name, .. }
             | Decl::TypeAlias { name, .. } => Some(name.clone()),
@@ -4181,7 +4182,10 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
     let mut symbols = BTreeMap::new();
     for decl in decls {
         match decl {
-            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } | Decl::Sig { name, .. } => {
+            Decl::FunDef { name, .. }
+            | Decl::Property { name, .. }
+            | Decl::LetDef { name, .. }
+            | Decl::Sig { name, .. } => {
                 symbols.insert(name.clone(), SymbolKind::Value);
             }
             Decl::TypeDef { name, .. } | Decl::TypeAlias { name, .. } => {
@@ -4705,6 +4709,36 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             value: rewrite_expr(value, resolver, &mut HashSet::new()),
             span: *span,
         },
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            span,
+        } => {
+            let mut locals = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<HashSet<_>>();
+            Decl::Property {
+                name: internal_name(package, module, name),
+                params: params
+                    .iter()
+                    .map(|param| rewrite_param(param, resolver))
+                    .collect(),
+                preconditions: preconditions
+                    .iter()
+                    .map(|expr| rewrite_expr(expr, resolver, &mut locals.clone()))
+                    .collect(),
+                body: rewrite_expr(body, resolver, &mut locals),
+                options: options
+                    .iter()
+                    .map(|option| rewrite_property_option(option, resolver))
+                    .collect(),
+                span: *span,
+            }
+        }
         Decl::Sig {
             name,
             ty,
@@ -4803,6 +4837,36 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             value: rewrite_expr(value, resolver, &mut HashSet::new()),
             span: *span,
         },
+        Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            span,
+        } => {
+            let mut locals = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<HashSet<_>>();
+            Decl::Property {
+                name: name.clone(),
+                params: params
+                    .iter()
+                    .map(|param| rewrite_param(param, resolver))
+                    .collect(),
+                preconditions: preconditions
+                    .iter()
+                    .map(|expr| rewrite_expr(expr, resolver, &mut locals.clone()))
+                    .collect(),
+                body: rewrite_expr(body, resolver, &mut locals),
+                options: options
+                    .iter()
+                    .map(|option| rewrite_property_option(option, resolver))
+                    .collect(),
+                span: *span,
+            }
+        }
         Decl::Sig {
             name,
             ty,
@@ -4855,6 +4919,21 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             span: *span,
         },
         Decl::Export { .. } | Decl::Import { .. } | Decl::Module { .. } => decl.clone(),
+    }
+}
+
+fn rewrite_property_option(option: &PropertyOption, resolver: &NameResolver) -> PropertyOption {
+    let mut locals = HashSet::new();
+    match option {
+        PropertyOption::Tolerance(value, span) => {
+            PropertyOption::Tolerance(rewrite_expr(value, resolver, &mut locals), *span)
+        }
+        PropertyOption::Seed(value, span) => {
+            PropertyOption::Seed(rewrite_expr(value, resolver, &mut locals), *span)
+        }
+        PropertyOption::Samples(value, span) => {
+            PropertyOption::Samples(rewrite_expr(value, resolver, &mut locals), *span)
+        }
     }
 }
 

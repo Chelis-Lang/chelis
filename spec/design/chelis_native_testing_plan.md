@@ -312,14 +312,16 @@ Similar split. Frame construction tests, HAMT tests, filter/sort/groupby on know
 
 ---
 
-## Relationship to `chelis fuzz`
+## Relationship to `chelis prove`
 
-`chelis test` runs deterministic assertion-based tests. `chelis fuzz` (planned, deferred) generates random inputs and checks properties. They're complementary:
+`chelis test` runs deterministic assertion-based tests. `chelis prove` generates
+deterministic random samples and checks first-class properties. They're complementary:
 
 - `chelis test tests/special.ch` — "erf(0) = 0, erf is odd, erf is bounded"
-- `chelis fuzz erf --property "output_in(-1,1)" --trials 10000` — "erf never produces output outside [-1,1] on 10k random inputs"
+- `chelis prove properties/erf.ch --only output_in_range --samples 1000` — "erf never produces output outside [-1,1] on sampled inputs"
 
-`Std.Test` is the foundation. `chelis fuzz` builds on it later. Both use the evaluator, both report pass/fail, both run from the CLI.
+`Std.Test` is the deterministic assertion foundation. `chelis prove` is the property
+runner. Both use the evaluator, both report pass/fail, both run from the CLI.
 
 ---
 

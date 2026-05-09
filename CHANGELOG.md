@@ -6,6 +6,27 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-09
+
+### Added — first-class Surf properties and `chelis prove`
+
+Chelis now supports Level 2 executable properties with canonical Surf syntax:
+`@property NAME forall(params...) where ...: expr`. Properties desugar to
+ordinary Deep `defsig` plus `def` forms and carry canonical property metadata:
+`chelis_role`, `property_source_kind`, `property_quantifiers`, and
+`property_preconditions`.
+
+The new `chelis prove` subcommand discovers Surf properties and Deep bridge
+witnesses, runs deterministic type-directed sampling, filters false
+preconditions without calling the predicate, and reports stable human or NDJSON
+output. V1 supports scalar binders and fixed-shape numeric tensors; unsupported
+selected properties exit `2`, failures exit `1`, and setup/input errors exit
+`3`.
+
+Deep bridge compatibility accepts legacy `c_earchin_role:
+"property_witness"` metadata while c-earchin moves to the canonical Chelis
+property metadata contract.
+
 ### Added — style gate on `chelis build` / `chelis check` / `chelis validate` / `chelis eval --file`
 
 The four CLI ingestion paths now enforce `chelis fmt --check` and the

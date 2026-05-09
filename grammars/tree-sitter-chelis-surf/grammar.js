@@ -26,6 +26,8 @@ module.exports = grammar({
     [$.let_definition, $.let_in_expression],
     [$.variant_tuple_fields, $.parenthesized_type],
     [$.primary_expression, $.record_expression],
+    [$.infer_type, $.wildcard],
+    [$.primary_expression, $.type_expression],
   ],
 
   rules: {
@@ -37,6 +39,7 @@ module.exports = grammar({
         $.export_declaration,
         $.dim_declaration,
         $.signature_declaration,
+        $.property_declaration,
         $.function_definition,
         $.let_definition,
       ),
@@ -54,6 +57,22 @@ module.exports = grammar({
     export_declaration: ($) => seq("export", "(", commaSep1(choice($.identifier, $.type_identifier)), ")"),
     dim_declaration: ($) => seq("dim", commaSep1($.identifier)),
     signature_declaration: ($) => seq("sig", field("name", $.identifier), ":", field("type", $.type_expression)),
+    property_declaration: ($) =>
+      seq(
+        "@",
+        "property",
+        field("name", $.identifier),
+        "forall",
+        "(",
+        commaSep($.parameter),
+        ")",
+        optional(seq("where", commaSep1(field("precondition", $.expression)))),
+        ":",
+        field("body", $.expression),
+        repeat($.property_option),
+      ),
+    property_option: ($) =>
+      seq("with", choice("tolerance", "seed", "samples"), "=", field("value", $.expression)),
     function_definition: ($) =>
       seq(
         "def",

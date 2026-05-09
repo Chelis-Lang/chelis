@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Domain shells ship `references/` directories containing simple, obviously-correct reference implementations of standard domain models. These are the spec artifact for the spec-correspondence property category. Users verify their optimized implementations (or AI-generated implementations) against the references via `@property fn matches_reference(...)`.
+Domain shells ship `references/` directories containing simple, obviously-correct reference implementations of standard domain models. These are the spec artifact for the spec-correspondence property category. Users verify their optimized implementations (or AI-generated implementations) against the references via `@property matches_reference forall(...)`.
 
 The user does not write reference implementations for standard models. The shell provides them. The user writes references only for proprietary or custom models.
 
@@ -89,24 +89,24 @@ The standard pattern in `properties/` files:
 import Shoals.BlackScholes (call_price)               -- production impl
 import Shoals.References.BlackScholes (call_price_reference)
 
-@property fn matches_textbook_reference(
-  spot: f32, vol: f32, rate: f32, T: f32, strike: f32
-) -> bool =
+@property matches_textbook_reference forall(
+  spot: f32, vol: f32, rate: f32, t: f32, strike: f32
+) where spot > 0.0, vol > 0.0, t > 0.0, strike > 0.0:
   close(
-    call_price(spot, vol, rate, T, strike),
-    call_price_reference(spot, vol, rate, T, strike),
+    call_price(spot, vol, rate, t, strike),
+    call_price_reference(spot, vol, rate, t, strike),
     1e-6)
 ```
 
-`chelis fuzz src/black_scholes.ch` runs this property against 100,000 random inputs from the parameter type ranges and verifies agreement.
+`chelis prove src/black_scholes.ch --samples 1000` runs this property against deterministic random inputs from the binder types and verifies agreement.
 
 ## Customer Workflow
 
 1. Customer installs Shoals.
-2. Customer runs `chelis fuzz src/` on their own pricing code that imports Shoals primitives.
+2. Customer runs `chelis prove src/` on their own pricing code that imports Shoals primitives.
 3. Shoals' canonical properties verify standard invariants (put-call parity, delta bounds, etc.) and reference correspondence (matches_textbook_reference) against Shoals' production implementations.
 4. Customer writes their own properties for proprietary aspects of their models.
 5. Customer writes their own references only for proprietary models that don't have a textbook formula.
-6. CI gate: `chelis fuzz` runs on every commit. Property failures block deployment.
+6. CI gate: `chelis prove` runs on every commit. Property failures block deployment.
 
 The customer's investment in writing references scales with how proprietary their models are. For a shop using mostly standard models with custom calibration, references come from Shoals and the customer writes only properties (which are short and declarative).

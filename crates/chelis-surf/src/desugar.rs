@@ -73,6 +73,10 @@ fn int(n: i64) -> deep::Expr {
     deep::Expr::Atom(deep::Atom::Int(n), sp())
 }
 
+fn string(value: &str) -> deep::Expr {
+    deep::Expr::Atom(deep::Atom::Str(value.to_string()), sp())
+}
+
 fn meta_empty() -> deep::Expr {
     deep::Expr::Map(deep::MetaMap::default(), sp())
 }
@@ -488,7 +492,7 @@ const PRIMITIVES: &[&str] = &[
 
 fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String>>) {
     match decl {
-        Decl::FunDef { name, params, .. } => {
+        Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } => {
             out.insert(
                 name.clone(),
                 params.iter().map(|param| param.name.clone()).collect(),
@@ -537,6 +541,15 @@ impl DesugarCtx {
                 body,
                 ..
             } => self.desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
+
+            Decl::Property {
+                name,
+                params,
+                preconditions,
+                body,
+                options,
+                ..
+            } => self.desugar_property(name, params, preconditions, body, options),
 
             Decl::LetDef {
                 name,
@@ -687,6 +700,72 @@ impl DesugarCtx {
         } else {
             vec![def_node]
         }
+    }
+
+    fn desugar_property(
+        &self,
+        name: &str,
+        params: &[Param],
+        preconditions: &[Expr],
+        body: &Expr,
+        options: &[PropertyOption],
+    ) -> Vec<deep::Expr> {
+        let param_scope = params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
+        let param_nodes = params.iter().map(desugar_param).collect::<Vec<_>>();
+        let params_node = node("params", param_nodes.clone());
+        let precondition_node = node(
+            "tuple",
+            preconditions
+                .iter()
+                .map(|expr| self.desugar_expr_with_scope(expr, &param_scope))
+                .collect(),
+        );
+
+        let mut meta_entries = vec![
+            ("chelis_role".to_string(), string("property")),
+            ("property_source_kind".to_string(), string("user")),
+            ("property_quantifiers".to_string(), params_node.clone()),
+            ("property_preconditions".to_string(), precondition_node),
+        ];
+        for option in options {
+            match option {
+                PropertyOption::Tolerance(value, _) => meta_entries.push((
+                    "property_tolerance".to_string(),
+                    self.desugar_expr_with_scope(value, &param_scope),
+                )),
+                PropertyOption::Seed(value, _) => meta_entries.push((
+                    "property_seed".to_string(),
+                    self.desugar_expr_with_scope(value, &param_scope),
+                )),
+                PropertyOption::Samples(value, _) => meta_entries.push((
+                    "property_samples".to_string(),
+                    self.desugar_expr_with_scope(value, &param_scope),
+                )),
+            }
+        }
+
+        let fn_node = node(
+            "fn",
+            vec![
+                params_node,
+                self.desugar_expr_with_scope(body, &param_scope),
+            ],
+        );
+        let def_node = node_meta(
+            "def",
+            meta_with_entries(meta_entries),
+            vec![sym(name), fn_node],
+        );
+        let mut type_parts = params
+            .iter()
+            .map(|param| desugar_type(param.ty.as_ref().expect("property params are typed")))
+            .collect::<Vec<_>>();
+        type_parts.push(node("t-prim", vec![sym("bool")]));
+        let sig_node = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
+        vec![sig_node, def_node]
     }
 }
 

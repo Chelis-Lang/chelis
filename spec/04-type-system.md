@@ -369,6 +369,19 @@ At call sites, dimension variables are instantiated by unification — no explic
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
 
+### 4.6 Property Definitions
+
+Surf `@property` declarations type-check as ordinary functions whose result
+type is `bool`. Every binder must have an explicit type in v1. The `where`
+preconditions must type-check as `bool` expressions in the binder scope; the
+predicate body must type-check as `bool`.
+
+Desugaring emits a `defsig` with the binder types and `bool` result, plus an
+ordinary `def` carrying the property metadata specified in
+`spec/design/chelis_property_spec.md`. Type checking trusts neither the metadata
+nor the property annotation; it checks the resulting Deep function against the
+signature like any other definition.
+
 ---
 
 ## 5. Precision Type Rules

@@ -287,6 +287,9 @@ impl<'a> IdiomaticDecompiler<'a> {
         if let Expr::List(fn_list, _) = body
             && tag(fn_list) == Some("fn")
         {
+            if is_property_def(list) {
+                return self.render_property_def(name, list, fn_list, sig_expr);
+            }
             return self.render_fn_def(name, fn_list, sig_expr);
         }
 
@@ -309,6 +312,44 @@ impl<'a> IdiomaticDecompiler<'a> {
         let effects = signature.map(|sig| sig.effects).unwrap_or_default();
         let body = self.render_function_body(&fn_kids[1]);
         format!("def {name}({params}){ret_suffix}{effects} = {body}")
+    }
+
+    fn render_property_def(
+        &self,
+        name: &str,
+        def_list: &List,
+        fn_list: &List,
+        sig_expr: Option<&Expr>,
+    ) -> String {
+        let fn_kids = children(fn_list);
+        if fn_kids.len() < 2 {
+            return format!("@property {name} forall():\n  true");
+        }
+        let signature = sig_expr.and_then(extract_fn_signature);
+        let params = self.render_params(&fn_kids[0], signature.as_ref());
+        let mut out = format!("@property {name} forall({params})");
+        if let Some(preconditions) = property_preconditions(def_list)
+            && !preconditions.is_empty()
+        {
+            out.push_str(" where ");
+            out.push_str(
+                &preconditions
+                    .iter()
+                    .map(|expr| self.decompile_expr(expr))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        out.push_str(":\n");
+        out.push_str(&indent_lines(&self.render_function_body(&fn_kids[1]), 2));
+        for (name, value) in property_options(def_list) {
+            out.push('\n');
+            out.push_str("  with ");
+            out.push_str(name);
+            out.push_str(" = ");
+            out.push_str(&self.decompile_expr(value));
+        }
+        out
     }
 
     fn render_params(&self, expr: &Expr, signature: Option<&FnSignature>) -> String {
@@ -862,6 +903,44 @@ fn match_load_binding(expected_name: &str, expr: &Expr) -> Option<LoadBinding> {
         name: expected_name.to_string(),
         ty,
     })
+}
+
+fn is_property_def(list: &List) -> bool {
+    meta(list).is_some_and(|meta| {
+        meta.entries.iter().any(|(key, value)| {
+            key == "chelis_role"
+                && matches!(value, Expr::Atom(Atom::Str(value), _) if value == "property")
+        })
+    })
+}
+
+fn property_preconditions(list: &List) -> Option<Vec<&Expr>> {
+    let value = meta(list)?
+        .entries
+        .iter()
+        .find_map(|(key, value)| (key == "property_preconditions").then_some(value))?;
+    let Expr::List(tuple, _) = value else {
+        return None;
+    };
+    (tag(tuple) == Some("tuple")).then(|| children(tuple).iter().collect())
+}
+
+fn property_options(list: &List) -> Vec<(&'static str, &Expr)> {
+    let Some(meta) = meta(list) else {
+        return Vec::new();
+    };
+    [
+        ("tolerance", "property_tolerance"),
+        ("seed", "property_seed"),
+        ("samples", "property_samples"),
+    ]
+    .into_iter()
+    .filter_map(|(label, key)| {
+        meta.entries
+            .iter()
+            .find_map(|(entry_key, value)| (entry_key == key).then_some((label, value)))
+    })
+    .collect()
 }
 
 fn strip_meta(expr: &Expr) -> &Expr {
@@ -2061,6 +2140,20 @@ mod tests {
         let rendered = surf_to_surf("def f() = with device(\"gpu:0\") { x }");
         assert!(rendered.contains("with device(\"gpu:0\") {"));
         assert!(rendered.contains("\n  x\n}"));
+    }
+
+    #[test]
+    fn decompile_property_metadata_to_property_surface() {
+        let rendered = surf_to_surf(
+            r#"
+@property non_negative forall(x: f32) where x >= 0.0:
+  x >= 0.0
+  with samples = 3
+"#,
+        );
+        assert!(rendered.contains("@property non_negative forall(x: f32) where"));
+        assert!(rendered.contains("with samples = 3"));
+        assert!(!rendered.contains("def non_negative"));
     }
 
     #[test]

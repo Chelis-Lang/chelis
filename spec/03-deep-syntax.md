@@ -42,6 +42,14 @@ portable across Surf and Reef boundaries.
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `span` | string | External-source span identifier (see §1.1.1) |
+| `chelis_role` | string | Declaration role marker; `"property"` marks a `def` as a `chelis prove` property |
+| `property_source_kind` | string | Property producer: `"user"` or `"bridge:c-earchin"` |
+| `property_quantifiers` | `(params {} ...)` | Serialized property binder list; must match the `fn` parameter list |
+| `property_preconditions` | `(tuple {} ...)` | Serialized `where` filters evaluated before the predicate |
+| `property_source_id` | string | Optional producer-local source ID, e.g. an EARS requirement ID |
+| `property_tolerance` | expr | Optional property runner tolerance metadata |
+| `property_seed` | expr | Optional property runner seed metadata |
+| `property_samples` | expr | Optional property runner sample-count metadata |
 
 **Reserved for later phases:**
 

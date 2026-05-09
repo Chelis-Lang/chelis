@@ -177,7 +177,7 @@ fn is_ident_start(b: u8) -> bool {
 }
 
 fn is_ident_continue(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.'
 }
 
 /// Characters valid in operator-like symbols (e.g., `->`, `_`).

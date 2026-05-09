@@ -4,6 +4,9 @@
 [
   "def"
   "sig"
+  "property"
+  "forall"
+  "where"
   "let"
   "in"
   "dim"
@@ -54,6 +57,7 @@
     (type_identifier) @namespace))
 
 (function_definition name: (identifier) @function)
+(property_declaration name: (identifier) @function)
 (signature_declaration name: (identifier) @function)
 (call_expression
   function: (expression

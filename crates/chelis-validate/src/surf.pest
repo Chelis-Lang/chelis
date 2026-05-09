@@ -1,7 +1,7 @@
 program = { SOI ~ module_decl? ~ decl* ~ EOI }
 
 module_decl = { MODULE ~ module_path }
-decl = _{ import_decl | export_decl | dim_decl | type_decl | sig_decl | fun_decl | let_decl }
+decl = _{ import_decl | export_decl | dim_decl | type_decl | sig_decl | property_decl | fun_decl | let_decl }
 
 module_path = { type_ident ~ ("." ~ type_ident)* }
 
@@ -21,6 +21,11 @@ tuple_fields = { "(" ~ type_expr ~ ("," ~ type_expr)* ~ ","? ~ ")" }
 field_decl = { ident ~ ":" ~ type_expr }
 
 sig_decl = { SIG ~ ident ~ ":" ~ type_expr ~ effect_suffix? }
+property_decl = {
+  AT ~ PROPERTY ~ ident ~ FORALL ~ params ~ (WHERE ~ property_where_list)? ~ ":" ~ expr ~ property_option*
+}
+property_where_list = { expr ~ ("," ~ expr)* ~ ","? }
+property_option = { WITH ~ (TOLERANCE | SEED | SAMPLES) ~ "=" ~ expr }
 fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ effect_suffix? ~ "=" ~ expr }
 dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
 params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
@@ -177,6 +182,9 @@ keyword = _{
   | "true" ~ !ident_continue
   | "false" ~ !ident_continue
   | "tensor" ~ !ident_continue
+  | "property" ~ !ident_continue
+  | "forall" ~ !ident_continue
+  | "where" ~ !ident_continue
 }
 ident_continue = _{ ASCII_ALPHANUMERIC | "_" }
 semicolons = _{ ";" }
@@ -201,6 +209,12 @@ CAST = _{ "cast" }
 REALIZE = _{ "realize" }
 COPY = _{ "copy" }
 PAR = _{ "par" }
+PROPERTY = _{ "property" }
+FORALL = _{ "forall" }
+WHERE = _{ "where" }
+TOLERANCE = _{ "tolerance" }
+SEED = _{ "seed" }
+SAMPLES = _{ "samples" }
 AXIS = _{ "axis" }
 TENSOR = _{ "tensor" }
 TRUE = _{ "true" }
