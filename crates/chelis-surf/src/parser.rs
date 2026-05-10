@@ -52,15 +52,16 @@ fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
     let mut property_names = HashSet::new();
     for decl in decls {
         match decl {
-            Decl::Property { name, span, .. } => {
-                if value_names.contains(name) || !property_names.insert(name.clone()) {
-                    return Err(ParseError::Expected {
-                        expected: "unique property name within module value namespace".into(),
-                        found: name.clone(),
-                        offset: span.offset,
-                    });
-                }
+            Decl::Property { name, span, .. }
+                if value_names.contains(name) || !property_names.insert(name.clone()) =>
+            {
+                return Err(ParseError::Expected {
+                    expected: "unique property name within module value namespace".into(),
+                    found: name.clone(),
+                    offset: span.offset,
+                });
             }
+            Decl::Property { .. } => {}
             Decl::FunDef { name, span, .. }
             | Decl::LetDef { name, span, .. }
             | Decl::Sig { name, span, .. } => {
